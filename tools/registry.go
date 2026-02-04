@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/truenas"
@@ -501,12 +502,43 @@ func handleGetSystemMetrics(client *truenas.Client, args map[string]interface{})
 			continue
 		}
 
-		var data interface{}
-		if err := json.Unmarshal(result, &data); err != nil {
+		var fullData []map[string]interface{}
+		if err := json.Unmarshal(result, &fullData); err != nil {
 			response[graph] = map[string]string{"error": fmt.Sprintf("parse error: %v", err)}
 			continue
 		}
-		response[graph] = data
+
+		// Keep aggregations and metadata, but sample data points to reduce size
+		summary := make(map[string]interface{})
+		if len(fullData) > 0 {
+			for key, value := range fullData[0] {
+				if key == "data" {
+					// Include sample of data points: first 10 and last 10
+					if dataArray, ok := value.([]interface{}); ok {
+						summary["data_points_total"] = len(dataArray)
+						sample := make([]interface{}, 0)
+
+						// First 10 points
+						for i := 0; i < 10 && i < len(dataArray); i++ {
+							sample = append(sample, dataArray[i])
+						}
+
+						// Last 10 points (if we have more than 20 total)
+						if len(dataArray) > 20 {
+							for i := len(dataArray) - 10; i < len(dataArray); i++ {
+								sample = append(sample, dataArray[i])
+							}
+						}
+
+						summary["data_sample"] = sample
+					}
+				} else {
+					// Keep all other fields: aggregations, start, end, legend, name, identifier
+					summary[key] = value
+				}
+			}
+		}
+		response[graph] = summary
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -525,22 +557,96 @@ func handleGetNetworkMetrics(client *truenas.Client, args map[string]interface{}
 
 	iface, _ := args["interface"].(string)
 
-	result, err := client.Call("reporting.get_data", []interface{}{
-		map[string]interface{}{
-			"name":       "interface",
-			"identifier": iface,
-		},
-	}, map[string]interface{}{"unit": unit})
-	if err != nil {
-		return "", err
+	// If no interface specified, get all interfaces
+	var interfaces []string
+	if iface != "" {
+		interfaces = []string{iface}
+	} else {
+		// Query for available network interfaces
+		result, err := client.Call("interface.query")
+		if err != nil {
+			return "", fmt.Errorf("failed to query interfaces: %w", err)
+		}
+
+		var ifaceList []map[string]interface{}
+		if err := json.Unmarshal(result, &ifaceList); err != nil {
+			return "", fmt.Errorf("failed to parse interface list: %w", err)
+		}
+
+		// Extract interface names
+		for _, iface := range ifaceList {
+			if name, ok := iface["name"].(string); ok && name != "" {
+				interfaces = append(interfaces, name)
+			}
+		}
+
+		if len(interfaces) == 0 {
+			return `{"error": "no network interfaces found"}`, nil
+		}
 	}
 
-	var data interface{}
-	if err := json.Unmarshal(result, &data); err != nil {
-		return "", fmt.Errorf("failed to parse network metrics: %w", err)
+	// Get metrics for each interface
+	allMetrics := make(map[string]interface{})
+
+	for _, ifaceName := range interfaces {
+		result, err := client.Call("reporting.get_data", []interface{}{
+			map[string]interface{}{
+				"name":       "interface",
+				"identifier": ifaceName,
+			},
+		}, map[string]interface{}{"unit": unit})
+
+		if err != nil {
+			allMetrics[ifaceName] = map[string]string{"error": err.Error()}
+			continue
+		}
+
+		var fullData []map[string]interface{}
+		if err := json.Unmarshal(result, &fullData); err != nil {
+			allMetrics[ifaceName] = map[string]string{"error": fmt.Sprintf("parse error: %v", err)}
+			continue
+		}
+
+		// Keep aggregations and metadata, sample data points to reduce size
+		summaries := make([]map[string]interface{}, 0, len(fullData))
+		for _, item := range fullData {
+			summary := make(map[string]interface{})
+			for key, value := range item {
+				if key == "data" {
+					// Include sample: first 10 and last 10 data points
+					if dataArray, ok := value.([]interface{}); ok {
+						summary["data_points_total"] = len(dataArray)
+						if len(dataArray) > 0 {
+							sample := make([]interface{}, 0)
+
+							for i := 0; i < 10 && i < len(dataArray); i++ {
+								sample = append(sample, dataArray[i])
+							}
+
+							if len(dataArray) > 20 {
+								for i := len(dataArray) - 10; i < len(dataArray); i++ {
+									sample = append(sample, dataArray[i])
+								}
+							}
+
+							summary["data_sample"] = sample
+						}
+					}
+				} else {
+					summary[key] = value
+				}
+			}
+			summaries = append(summaries, summary)
+		}
+
+		if len(summaries) == 1 {
+			allMetrics[ifaceName] = summaries[0]
+		} else {
+			allMetrics[ifaceName] = summaries
+		}
 	}
 
-	formatted, err := json.MarshalIndent(data, "", "  ")
+	formatted, err := json.MarshalIndent(allMetrics, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -554,24 +660,119 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 		unit = u
 	}
 
-	disk, _ := args["disk"].(string)
+	requestedDisk, _ := args["disk"].(string)
 
-	result, err := client.Call("reporting.get_data", []interface{}{
-		map[string]interface{}{
-			"name":       "disk",
-			"identifier": disk,
-		},
-	}, map[string]interface{}{"unit": unit})
+	// First, get available reporting graphs
+	graphsResult, err := client.Call("reporting.graphs")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to query reporting graphs: %w", err)
 	}
 
-	var data interface{}
-	if err := json.Unmarshal(result, &data); err != nil {
-		return "", fmt.Errorf("failed to parse disk metrics: %w", err)
+	var graphs []map[string]interface{}
+	if err := json.Unmarshal(graphsResult, &graphs); err != nil {
+		return "", fmt.Errorf("failed to parse reporting graphs: %w", err)
 	}
 
-	formatted, err := json.MarshalIndent(data, "", "  ")
+	// Find the disk graph and extract identifiers
+	var diskIdentifiers []string
+	for _, graph := range graphs {
+		graphName, nameOk := graph["name"].(string)
+		if nameOk && graphName == "disk" {
+			// Get the identifiers array
+			if identifiersRaw, ok := graph["identifiers"]; ok && identifiersRaw != nil {
+				if identifiersArray, ok := identifiersRaw.([]interface{}); ok {
+					for _, idRaw := range identifiersArray {
+						if idStr, ok := idRaw.(string); ok {
+							// Extract disk name from identifier string (e.g., "sda | Type: SSD...")
+							diskName := idStr
+							if idx := strings.Index(idStr, " |"); idx != -1 {
+								diskName = idStr[:idx]
+							}
+
+							// If specific disk requested, filter by name
+							if requestedDisk == "" || diskName == requestedDisk {
+								diskIdentifiers = append(diskIdentifiers, idStr)
+							}
+						}
+					}
+				}
+			}
+			break
+		}
+	}
+
+	if len(diskIdentifiers) == 0 {
+		return `{"error": "no disk identifiers found in reporting graphs"}`, nil
+	}
+
+	// Get metrics for each disk identifier
+	allMetrics := make(map[string]interface{})
+
+	for _, identifier := range diskIdentifiers {
+		// Extract disk name for the key (e.g., "sda" from "sda | Type: SSD...")
+		diskName := identifier
+		if idx := strings.Index(identifier, " |"); idx != -1 {
+			diskName = identifier[:idx]
+		}
+
+		result, err := client.Call("reporting.get_data", []interface{}{
+			map[string]interface{}{
+				"name":       "disk",
+				"identifier": identifier,
+			},
+		}, map[string]interface{}{"unit": unit})
+
+		if err != nil {
+			allMetrics[diskName] = map[string]string{"error": err.Error()}
+			continue
+		}
+
+		var fullData []map[string]interface{}
+		if err := json.Unmarshal(result, &fullData); err != nil {
+			allMetrics[diskName] = map[string]string{"error": fmt.Sprintf("parse error: %v", err)}
+			continue
+		}
+
+		// Keep aggregations and metadata, sample data points to reduce size
+		summaries := make([]map[string]interface{}, 0, len(fullData))
+		for _, item := range fullData {
+			summary := make(map[string]interface{})
+			for key, value := range item {
+				if key == "data" {
+					// Include sample: first 10 and last 10 data points
+					if dataArray, ok := value.([]interface{}); ok {
+						summary["data_points_total"] = len(dataArray)
+						if len(dataArray) > 0 {
+							sample := make([]interface{}, 0)
+
+							for i := 0; i < 10 && i < len(dataArray); i++ {
+								sample = append(sample, dataArray[i])
+							}
+
+							if len(dataArray) > 20 {
+								for i := len(dataArray) - 10; i < len(dataArray); i++ {
+									sample = append(sample, dataArray[i])
+								}
+							}
+
+							summary["data_sample"] = sample
+						}
+					}
+				} else {
+					summary[key] = value
+				}
+			}
+			summaries = append(summaries, summary)
+		}
+
+		if len(summaries) == 1 {
+			allMetrics[diskName] = summaries[0]
+		} else {
+			allMetrics[diskName] = summaries
+		}
+	}
+
+	formatted, err := json.MarshalIndent(allMetrics, "", "  ")
 	if err != nil {
 		return "", err
 	}
