@@ -11,6 +11,14 @@ Read-only tools for common TrueNAS operations:
 - **query_pools** - Query storage pools with status and capacity
 - **query_datasets** - Query datasets with optional pool filtering
 - **query_shares** - Query SMB and NFS share configurations
+- **get_system_metrics** - Get CPU, memory, and load performance metrics
+- **get_network_metrics** - Get network interface traffic metrics
+- **get_disk_metrics** - Get disk I/O performance metrics
+- **query_apps** - List installed applications with status and available updates
+
+Write operations (requires confirmation):
+
+- **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup
 
 ## Architecture
 
@@ -319,11 +327,24 @@ For more details, see [PROXY.md](PROXY.md).
 
 Once connected via an MCP client:
 
+**System Information:**
 - "What version of TrueNAS is running?"
+- "Are there any system alerts?"
+
+**Storage:**
 - "Show me all storage pools and their health status"
 - "List all datasets in the tank pool"
 - "What SMB shares are configured?"
-- "Are there any system alerts?"
+
+**Performance:**
+- "Show me CPU and memory usage over the past day"
+- "What's the network traffic on the main interface?"
+- "Show me disk I/O metrics for the past week"
+
+**Applications:**
+- "What apps are installed and running?"
+- "Are there any app updates available?"
+- "Upgrade the plex app to the latest version"
 
 ## Development
 

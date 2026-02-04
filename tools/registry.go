@@ -237,6 +237,58 @@ func (r *Registry) registerTools() {
 		},
 		Handler: handleGetDiskMetrics,
 	}
+
+	// Query installed apps
+	r.tools["query_apps"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "query_apps",
+			Description: "Query installed applications with their status, versions, and available updates",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: Filter by specific app name",
+					},
+					"include_config": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Include app configuration details (default: false)",
+						"default":     false,
+					},
+				},
+			},
+		},
+		Handler: handleQueryApps,
+	}
+
+	// Upgrade app
+	r.tools["upgrade_app"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "upgrade_app",
+			Description: "Upgrade an application to a newer version. This is a write operation that modifies the system.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Name of the application to upgrade",
+					},
+					"version": map[string]interface{}{
+						"type":        "string",
+						"description": "Target version to upgrade to (default: 'latest')",
+						"default":     "latest",
+					},
+					"snapshot_hostpaths": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Create snapshots of host volumes before upgrade (default: true for safety)",
+						"default":     true,
+					},
+				},
+				"required": []string{"app_name"},
+			},
+		},
+		Handler: handleUpgradeApp,
+	}
 }
 
 func (r *Registry) ListTools() []mcp.Tool {
@@ -773,6 +825,150 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	formatted, err := json.MarshalIndent(allMetrics, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
+}
+
+func handleQueryApps(client *truenas.Client, args map[string]interface{}) (string, error) {
+	appName, _ := args["app_name"].(string)
+	includeConfig, _ := args["include_config"].(bool)
+
+	// Build query filters and options
+	// Initialize as empty array, not nil (API expects [] not null)
+	filters := []interface{}{}
+	if appName != "" {
+		filters = []interface{}{
+			[]interface{}{"name", "=", appName},
+		}
+	}
+
+	options := map[string]interface{}{
+		"extra": map[string]interface{}{
+			"retrieve_config": includeConfig,
+		},
+	}
+
+	result, err := client.Call("app.query", filters, options)
+	if err != nil {
+		return "", fmt.Errorf("failed to query apps: %w", err)
+	}
+
+	var apps []map[string]interface{}
+	if err := json.Unmarshal(result, &apps); err != nil {
+		return "", fmt.Errorf("failed to parse app list: %w", err)
+	}
+
+	// Simplify the response to show most relevant information
+	simplified := make([]map[string]interface{}, 0, len(apps))
+	for _, app := range apps {
+		summary := map[string]interface{}{
+			"name":              app["name"],
+			"id":                app["id"],
+			"state":             app["state"],
+			"version":           app["human_version"],
+			"upgrade_available": app["upgrade_available"],
+		}
+
+		// Include update info if available
+		if upgradeAvail, ok := app["upgrade_available"].(bool); ok && upgradeAvail {
+			summary["latest_version"] = app["latest_app_version"]
+		}
+
+		// Include portals (web URLs) if available
+		if portals, ok := app["portals"].([]interface{}); ok && len(portals) > 0 {
+			summary["portals"] = portals
+		}
+
+		// Include active workload summary
+		if workloads, ok := app["active_workloads"].(map[string]interface{}); ok {
+			if containers, ok := workloads["containers"].(float64); ok {
+				summary["active_containers"] = int(containers)
+			}
+		}
+
+		// Include config if requested
+		if includeConfig {
+			if config, ok := app["config"]; ok {
+				summary["config"] = config
+			}
+		}
+
+		// Include metadata
+		if metadata, ok := app["metadata"].(map[string]interface{}); ok {
+			summary["app_metadata"] = map[string]interface{}{
+				"train":       metadata["train"],
+				"description": metadata["description"],
+			}
+		}
+
+		simplified = append(simplified, summary)
+	}
+
+	formatted, err := json.MarshalIndent(simplified, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
+}
+
+func handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return "", fmt.Errorf("app_name is required")
+	}
+
+	version := "latest"
+	if v, ok := args["version"].(string); ok && v != "" {
+		version = v
+	}
+
+	snapshotHostpaths := true
+	if s, ok := args["snapshot_hostpaths"].(bool); ok {
+		snapshotHostpaths = s
+	}
+
+	// First, get upgrade summary to show what will be upgraded
+	summaryResult, err := client.Call("app.upgrade_summary", appName, map[string]interface{}{
+		"app_version": version,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get upgrade summary: %w", err)
+	}
+
+	var summary map[string]interface{}
+	if err := json.Unmarshal(summaryResult, &summary); err != nil {
+		return "", fmt.Errorf("failed to parse upgrade summary: %w", err)
+	}
+
+	// Perform the upgrade
+	upgradeOptions := map[string]interface{}{
+		"app_version":        version,
+		"snapshot_hostpaths": snapshotHostpaths,
+	}
+
+	result, err := client.Call("app.upgrade", appName, upgradeOptions)
+	if err != nil {
+		return "", fmt.Errorf("failed to upgrade app: %w", err)
+	}
+
+	// Parse and format the result
+	var upgradeResult map[string]interface{}
+	if err := json.Unmarshal(result, &upgradeResult); err != nil {
+		return "", fmt.Errorf("failed to parse upgrade result: %w", err)
+	}
+
+	response := map[string]interface{}{
+		"app_name":         appName,
+		"upgrade_summary":  summary,
+		"upgrade_result":   upgradeResult,
+		"snapshot_created": snapshotHostpaths,
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
