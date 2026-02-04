@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "truenas-local": {
+      "comment": "Direct SSE connection (local TrueNAS only)",
+      "url": "http://localhost:8080/sse",
+      "headers": {
+        "Authorization": "Bearer your-secure-api-key-here"
+      }
+    },
+    "truenas-remote": {
+      "comment": "Proxy method (recommended for remote TrueNAS)",
+      "command": "truenas-mcp-proxy",
+      "args": [
+        "--server-url", "http://192.168.0.31:8089",
+        "--api-key", "your-secure-key-here"
+      ]
+    },
+    "truenas-remote-secure": {
+      "comment": "Proxy with environment variable for API key (more secure)",
+      "command": "truenas-mcp-proxy",
+      "args": [
+        "--server-url", "http://192.168.0.31:8089"
+      ],
+      "env": {
+        "TRUENAS_MCP_API_KEY": "your-secure-key-here"
+      }
+    }
+  }
+}

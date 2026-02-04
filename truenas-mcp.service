@@ -1,0 +1,30 @@
+[Unit]
+Description=TrueNAS MCP Server
+Documentation=https://github.com/truenas/truenas-mcp
+After=network.target middlewared.service
+Wants=middlewared.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/truenas-mcp -listen 0.0.0.0:8080
+Restart=on-failure
+RestartSec=5s
+
+# Environment
+Environment="TRUENAS_SOCKET=/var/run/middleware/middleware.sock"
+Environment="TRUENAS_MCP_API_KEY=change-me-to-secure-key"
+
+# Security settings
+# Note: May need to adjust User/Group if middleware socket requires specific permissions
+# User=nobody
+# Group=nogroup
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=truenas-mcp
+
+[Install]
+WantedBy=multi-user.target
