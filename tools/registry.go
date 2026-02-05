@@ -1007,7 +1007,7 @@ func handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (stri
 		return "", fmt.Errorf("failed to parse upgrade summary: %w", err)
 	}
 
-	// Perform the upgrade
+	// Perform the upgrade - this returns a job ID since it's a long-running operation
 	upgradeOptions := map[string]interface{}{
 		"app_version":        version,
 		"snapshot_hostpaths": snapshotHostpaths,
@@ -1018,17 +1018,18 @@ func handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (stri
 		return "", fmt.Errorf("failed to upgrade app: %w", err)
 	}
 
-	// Parse and format the result
-	var upgradeResult map[string]interface{}
-	if err := json.Unmarshal(result, &upgradeResult); err != nil {
-		return "", fmt.Errorf("failed to parse upgrade result: %w", err)
+	// Parse the job ID (app.upgrade returns an integer job ID)
+	var jobID int
+	if err := json.Unmarshal(result, &jobID); err != nil {
+		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
 	response := map[string]interface{}{
 		"app_name":         appName,
 		"upgrade_summary":  summary,
-		"upgrade_result":   upgradeResult,
+		"job_id":           jobID,
 		"snapshot_created": snapshotHostpaths,
+		"message":          fmt.Sprintf("Upgrade job started with ID %d. Use query_jobs to track progress.", jobID),
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
