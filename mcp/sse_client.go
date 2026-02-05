@@ -166,7 +166,6 @@ func (c *SSEClient) scheduleReconnect() {
 	}()
 }
 
-
 // SetMessageHandler sets the callback for message events
 func (c *SSEClient) SetMessageHandler(handler func(*Response)) {
 	c.onMessage = handler

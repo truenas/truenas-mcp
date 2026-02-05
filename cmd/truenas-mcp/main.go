@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"crypto/tls"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
+	"sync"
 
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/tools"
@@ -11,53 +16,51 @@ import (
 )
 
 var (
-	listenAddr      = flag.String("listen", "localhost:8080", "Listen address (host:port)")
-	apiKey          = flag.String("api-key", "", "API key for MCP client authentication (required)")
-	truenasAPIKey   = flag.String("truenas-api-key", "", "TrueNAS API key for middleware authentication (required)")
-	version         = flag.Bool("version", false, "Print version and exit")
+	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'ws://10.0.0.1/websocket')")
+	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication")
+	insecure   = flag.Bool("insecure", false, "Skip TLS certificate verification (for self-signed certs)")
+	versionFlg = flag.Bool("version", false, "Print version and exit")
+	debug      = flag.Bool("debug", false, "Enable debug logging")
 )
 
 const (
-	Version = "0.1.0"
+	Version = "0.2.0"
 )
 
 func main() {
 	flag.Parse()
 
-	if *version {
-		log.Printf("truenas-mcp version %s", Version)
+	if *versionFlg {
+		fmt.Printf("truenas-mcp version %s\n", Version)
 		os.Exit(0)
 	}
 
-	// API key is required for security
+	// Get configuration from flags or environment variables
+	if *truenasURL == "" {
+		*truenasURL = os.Getenv("TRUENAS_URL")
+	}
 	if *apiKey == "" {
-		apiKey = new(string)
-		*apiKey = os.Getenv("TRUENAS_MCP_API_KEY")
-		if *apiKey == "" {
-			log.Println("WARNING: No API key specified via -api-key flag or TRUENAS_MCP_API_KEY env var.")
-			log.Println("Authentication is disabled. This is not recommended for production.")
-		}
+		*apiKey = os.Getenv("TRUENAS_API_KEY")
 	}
 
-	// TrueNAS API key is required for middleware authentication
-	if *truenasAPIKey == "" {
-		truenasAPIKey = new(string)
-		*truenasAPIKey = os.Getenv("TRUENAS_API_KEY")
-		if *truenasAPIKey == "" {
-			log.Fatal("TrueNAS API key required via -truenas-api-key flag or TRUENAS_API_KEY env var")
-		}
+	if *truenasURL == "" || *apiKey == "" {
+		log.Fatal("Both --truenas-url and --api-key are required (or set TRUENAS_URL and TRUENAS_API_KEY env vars)")
 	}
 
-	// Initialize TrueNAS client
-	socketPath := os.Getenv("TRUENAS_SOCKET")
-	if socketPath == "" {
-		socketPath = "/var/run/middleware/middlewared.sock"
+	// Configure TLS - accept self-signed certs by default (common for TrueNAS)
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true,
+	}
+	if *insecure {
+		log.Println("TLS certificate verification disabled (self-signed certs accepted)")
 	}
 
-	client, err := truenas.NewClient(socketPath, *truenasAPIKey)
+	// Create TrueNAS client
+	client, err := truenas.NewClient(*truenasURL, *apiKey, tlsConfig)
 	if err != nil {
 		log.Fatalf("Failed to create TrueNAS client: %v", err)
 	}
+	defer client.Close()
 
 	// Authenticate with TrueNAS middleware
 	if err := client.Authenticate(); err != nil {
@@ -65,13 +68,201 @@ func main() {
 	}
 	log.Println("Successfully authenticated with TrueNAS middleware")
 
-	// Initialize tool registry with TrueNAS client
+	// Create tool registry
 	registry := tools.NewRegistry(client)
 
-	// Start SSE server
-	log.Printf("Starting TrueNAS MCP Server v%s on %s...", Version, *listenAddr)
-	server := mcp.NewSSEServer(registry, *listenAddr, *apiKey)
-	if err := server.Run(); err != nil {
-		log.Fatalf("Server error: %v", err)
+	// Start stdio handler
+	handler := NewStdioHandler(registry, *debug)
+	if err := handler.Run(); err != nil {
+		log.Fatalf("Stdio handler error: %v", err)
+	}
+}
+
+// StdioHandler manages stdio communication for MCP protocol
+type StdioHandler struct {
+	registry    mcp.ToolRegistry
+	stdin       *bufio.Scanner
+	stdoutMutex sync.Mutex
+	debug       bool
+}
+
+func NewStdioHandler(registry mcp.ToolRegistry, debug bool) *StdioHandler {
+	return &StdioHandler{
+		registry: registry,
+		stdin:    bufio.NewScanner(os.Stdin),
+		debug:    debug,
+	}
+}
+
+func (h *StdioHandler) Run() error {
+	if h.debug {
+		log.Println("Starting stdio handler...")
+	}
+
+	for h.stdin.Scan() {
+		line := h.stdin.Bytes()
+		if h.debug {
+			log.Printf("[STDIN] %s", string(line))
+		}
+
+		var req mcp.Request
+		if err := json.Unmarshal(line, &req); err != nil {
+			if h.debug {
+				log.Printf("Parse error: %v", err)
+			}
+			h.sendError(nil, -32700, fmt.Sprintf("Parse error: %v", err))
+			continue
+		}
+
+		if h.debug {
+			log.Printf("Handling method: %s (id: %v)", req.Method, req.ID)
+		}
+
+		resp := h.handleRequest(&req)
+		// Only send response if not nil (notifications don't get responses)
+		if resp != nil {
+			if err := h.sendResponse(resp); err != nil {
+				log.Printf("Failed to send response: %v", err)
+			}
+		}
+	}
+
+	if err := h.stdin.Err(); err != nil {
+		return fmt.Errorf("stdin error: %w", err)
+	}
+
+	return nil
+}
+
+func (h *StdioHandler) handleRequest(req *mcp.Request) *mcp.Response {
+	switch req.Method {
+	case "initialize":
+		return h.handleInitialize(req)
+	case "notifications/initialized":
+		// This is a notification from the client after initialization
+		// Notifications don't require a response
+		return nil
+	case "tools/list":
+		return h.handleToolsList(req)
+	case "tools/call":
+		return h.handleToolsCall(req)
+	default:
+		// Only return error if this is a request (has an ID)
+		if req.ID != nil {
+			return h.createErrorResponse(req.ID, -32601, "Method not found")
+		}
+		// For notifications, no response needed
+		return nil
+	}
+}
+
+func (h *StdioHandler) handleInitialize(req *mcp.Request) *mcp.Response {
+	result := mcp.InitializeResult{
+		ProtocolVersion: "2024-11-05",
+		ServerInfo: mcp.ServerInfo{
+			Name:    "truenas-mcp",
+			Version: Version,
+		},
+		Capabilities: mcp.Capabilities{
+			Tools: map[string]interface{}{},
+		},
+	}
+
+	return &mcp.Response{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result:  result,
+	}
+}
+
+func (h *StdioHandler) handleToolsList(req *mcp.Request) *mcp.Response {
+	tools := h.registry.ListTools()
+	result := mcp.ToolsListResult{
+		Tools: tools,
+	}
+
+	return &mcp.Response{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result:  result,
+	}
+}
+
+func (h *StdioHandler) handleToolsCall(req *mcp.Request) *mcp.Response {
+	// Extract tool call parameters
+	var params mcp.ToolCallParams
+	paramsBytes, err := json.Marshal(req.Params)
+	if err != nil {
+		return h.createErrorResponse(req.ID, -32602, fmt.Sprintf("Invalid params: %v", err))
+	}
+
+	if err := json.Unmarshal(paramsBytes, &params); err != nil {
+		return h.createErrorResponse(req.ID, -32602, fmt.Sprintf("Invalid params: %v", err))
+	}
+
+	// Call the tool
+	result, err := h.registry.CallTool(params.Name, params.Arguments)
+	if err != nil {
+		return &mcp.Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: mcp.ToolCallResult{
+				Content: []mcp.ContentBlock{
+					{
+						Type: "text",
+						Text: fmt.Sprintf("Error: %v", err),
+					},
+				},
+				IsError: true,
+			},
+		}
+	}
+
+	return &mcp.Response{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: mcp.ToolCallResult{
+			Content: []mcp.ContentBlock{
+				{
+					Type: "text",
+					Text: result,
+				},
+			},
+		},
+	}
+}
+
+func (h *StdioHandler) createErrorResponse(id interface{}, code int, message string) *mcp.Response {
+	return &mcp.Response{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: &mcp.Error{
+			Code:    code,
+			Message: message,
+		},
+	}
+}
+
+func (h *StdioHandler) sendResponse(resp *mcp.Response) error {
+	h.stdoutMutex.Lock()
+	defer h.stdoutMutex.Unlock()
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("failed to marshal response: %w", err)
+	}
+
+	if h.debug {
+		log.Printf("[STDOUT] %s", string(data))
+	}
+
+	fmt.Printf("%s\n", data)
+	return nil
+}
+
+func (h *StdioHandler) sendError(id interface{}, code int, message string) {
+	resp := h.createErrorResponse(id, code, message)
+	if err := h.sendResponse(resp); err != nil {
+		log.Printf("Failed to send error response: %v", err)
 	}
 }

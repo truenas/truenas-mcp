@@ -1,11 +1,11 @@
 package truenas
 
 import (
-	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -13,11 +13,12 @@ import (
 )
 
 type Client struct {
-	socketPath     string
-	apiKey         string
-	conn           *websocket.Conn
-	requestID      atomic.Uint64
-	authenticated  bool
+	endpoint      string
+	apiKey        string
+	tlsConfig     *tls.Config
+	conn          *websocket.Conn
+	requestID     atomic.Uint64
+	authenticated bool
 }
 
 type ConnectRequest struct {
@@ -51,10 +52,17 @@ type APIError struct {
 	Trace   interface{} `json:"trace,omitempty"` // Can be string or object
 }
 
-func NewClient(socketPath, apiKey string) (*Client, error) {
+func NewClient(endpoint, apiKey string, tlsConfig *tls.Config) (*Client, error) {
+	if endpoint == "" {
+		return nil, fmt.Errorf("endpoint cannot be empty")
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("apiKey cannot be empty")
+	}
 	return &Client{
-		socketPath: socketPath,
-		apiKey:     apiKey,
+		endpoint:  endpoint,
+		apiKey:    apiKey,
+		tlsConfig: tlsConfig,
 	}, nil
 }
 
@@ -63,56 +71,90 @@ func (c *Client) connect() error {
 		return nil
 	}
 
-	// Create dialer for Unix socket
-	dialer := &net.Dialer{
-		Timeout: 10 * time.Second,
-	}
-
-	// Connect WebSocket over Unix socket
-	wsDialer := websocket.Dialer{
-		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.Dial("unix", c.socketPath)
-		},
-		HandshakeTimeout: 10 * time.Second,
-	}
-
-	// TrueNAS middleware WebSocket endpoint
-	conn, _, err := wsDialer.Dial("ws://localhost/websocket", nil)
+	// Build connection URLs - will return error if ws:// is specified
+	urls, err := c.buildConnectionURLs()
 	if err != nil {
-		return fmt.Errorf("failed to connect to websocket: %w", err)
+		return err
 	}
 
-	c.conn = conn
-	c.authenticated = false
-
-	// Send connect message as per TrueNAS WebSocket protocol
-	connectMsg := ConnectRequest{
-		Msg:     "connect",
-		Version: "1",
-		Support: []string{"1"},
+	wsDialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		TLSClientConfig:  c.tlsConfig, // Always use TLS config (only wss:// allowed)
 	}
 
-	log.Printf("Sending connect message: %+v", connectMsg)
-	if err := c.conn.WriteJSON(connectMsg); err != nil {
-		c.conn = nil
-		return fmt.Errorf("failed to send connect message: %w", err)
+	var lastErr error
+	for _, url := range urls {
+		log.Printf("Connecting to %s...", url)
+		conn, _, err := wsDialer.Dial(url, nil)
+		if err != nil {
+			log.Printf("Connection failed: %v", err)
+			lastErr = err
+			continue // Try next URL
+		}
+
+		c.conn = conn
+		c.authenticated = false
+
+		// Send connect message as per TrueNAS WebSocket protocol
+		connectMsg := ConnectRequest{
+			Msg:     "connect",
+			Version: "1",
+			Support: []string{"1"},
+		}
+
+		log.Printf("Sending connect message: %+v", connectMsg)
+		if err := c.conn.WriteJSON(connectMsg); err != nil {
+			c.conn.Close()
+			c.conn = nil
+			lastErr = fmt.Errorf("failed to send connect message: %w", err)
+			continue
+		}
+
+		// Read connect response
+		var connectResp ConnectResponse
+		if err := c.conn.ReadJSON(&connectResp); err != nil {
+			c.conn.Close()
+			c.conn = nil
+			lastErr = fmt.Errorf("failed to read connect response: %w", err)
+			continue
+		}
+
+		log.Printf("Received connect response: %+v", connectResp)
+
+		if connectResp.Msg != "connected" {
+			c.conn.Close()
+			c.conn = nil
+			lastErr = fmt.Errorf("unexpected connect response: %s", connectResp.Msg)
+			continue
+		}
+
+		log.Printf("Successfully connected via %s", url)
+		return nil
 	}
 
-	// Read connect response
-	var connectResp ConnectResponse
-	if err := c.conn.ReadJSON(&connectResp); err != nil {
-		c.conn = nil
-		return fmt.Errorf("failed to read connect response: %w", err)
+	return fmt.Errorf("all connection attempts failed: %w", lastErr)
+}
+
+// buildConnectionURLs returns URLs to try in order
+func (c *Client) buildConnectionURLs() ([]string, error) {
+	// SECURITY: Reject ws:// URLs entirely - TrueNAS will revoke API keys used over unencrypted connections
+	if strings.HasPrefix(c.endpoint, "ws://") {
+		return nil, fmt.Errorf("SECURITY ERROR: ws:// (unencrypted) connections are not allowed. TrueNAS will revoke API keys used over ws://. Use wss:// instead")
 	}
 
-	log.Printf("Received connect response: %+v", connectResp)
-
-	if connectResp.Msg != "connected" {
-		c.conn = nil
-		return fmt.Errorf("unexpected connect response: %s", connectResp.Msg)
+	// If full wss:// URL provided, use it
+	if strings.HasPrefix(c.endpoint, "wss://") {
+		return []string{c.endpoint}, nil
 	}
 
-	return nil
+	// Otherwise, ONLY use wss:// (secure connection required for API key authentication)
+	hostname := c.endpoint
+	// Remove port if specified (we'll add the correct port)
+	if idx := strings.LastIndex(hostname, ":"); idx != -1 {
+		hostname = hostname[:idx]
+	}
+
+	return []string{fmt.Sprintf("wss://%s:443/websocket", hostname)}, nil
 }
 
 func (c *Client) Authenticate() error {
@@ -122,8 +164,8 @@ func (c *Client) Authenticate() error {
 
 	log.Println("Authenticating with TrueNAS middleware...")
 
-	// Call auth.login_with_api_key
-	result, err := c.Call("auth.login_with_api_key", c.apiKey)
+	// Call auth.login_with_api_key using raw call (bypass auth check)
+	result, err := c.callRaw("auth.login_with_api_key", c.apiKey)
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
@@ -144,10 +186,23 @@ func (c *Client) Authenticate() error {
 }
 
 func (c *Client) Call(method string, params ...interface{}) (json.RawMessage, error) {
+	// Ensure we're connected
 	if err := c.connect(); err != nil {
 		return nil, err
 	}
 
+	// Ensure we're authenticated (will re-authenticate if connection was reset)
+	if !c.authenticated {
+		if err := c.Authenticate(); err != nil {
+			return nil, fmt.Errorf("re-authentication failed: %w", err)
+		}
+	}
+
+	return c.callRaw(method, params...)
+}
+
+// callRaw performs the actual API call without authentication check
+func (c *Client) callRaw(method string, params ...interface{}) (json.RawMessage, error) {
 	id := fmt.Sprintf("%d", c.requestID.Add(1))
 
 	req := APIRequest{

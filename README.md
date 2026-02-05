@@ -1,6 +1,6 @@
 # TrueNAS MCP Server
 
-A Model Context Protocol (MCP) server for TrueNAS that enables AI models to interact with the TrueNAS API using natural language queries over HTTP/SSE.
+A Model Context Protocol (MCP) server for TrueNAS that enables AI models to interact with the TrueNAS API using natural language queries.
 
 ## Features
 
@@ -11,6 +11,8 @@ Read-only tools for common TrueNAS operations:
 - **query_pools** - Query storage pools with status and capacity
 - **query_datasets** - Query datasets with optional pool filtering
 - **query_shares** - Query SMB and NFS share configurations
+- **list_alerts** - List system alerts with filtering
+- **dismiss_alert** / **restore_alert** - Manage system alerts
 - **get_system_metrics** - Get CPU, memory, and load performance metrics
 - **get_network_metrics** - Get network interface traffic metrics
 - **get_disk_metrics** - Get disk I/O performance metrics
@@ -22,22 +24,38 @@ Write operations (requires confirmation):
 
 ## Architecture
 
-This project provides two binaries:
+**Single native binary** that runs on your desktop and connects directly to TrueNAS:
 
-1. **truenas-mcp** - Server running on TrueNAS
-   - **Transport**: Server-Sent Events (SSE) over HTTP/HTTPS
-   - **Protocol**: JSON-RPC 2.0 following MCP specification
-   - **TrueNAS Client**: WebSocket over Unix socket to middleware
-   - **Security**: API key authentication, CORS support
+```
+┌──────────────────┐
+│  Claude Desktop  │
+└────────┬─────────┘
+         │ stdio (JSON-RPC)
+┌────────▼───────────────────┐
+│  truenas-mcp               │ (Your Desktop)
+│  - stdio interface         │
+│  - Tool registry           │
+│  - WebSocket client        │
+└────────┬───────────────────┘
+         │ WebSocket (ws:// or wss://)
+         │ + TrueNAS API key auth
+┌────────▼──────────────────┐
+│  TrueNAS Middleware       │
+│  - WebSocket HTTP endpoint │
+│  - Port 80 (ws) or 443 (wss)
+└───────────────────────────┘
+```
 
-2. **truenas-mcp-proxy** - Desktop proxy for Claude Desktop
-   - Bridges stdio (JSON-RPC) to SSE transport
-   - Runs on user's desktop, connects to remote TrueNAS server
-   - No SSH required - uses HTTP/SSE with API key authentication
+**Key Benefits:**
+- ✅ No deployment to TrueNAS required
+- ✅ Runs entirely on your desktop
+- ✅ Secure WebSocket connection (wss://) to TrueNAS middleware
+- ✅ Self-signed certificate support (works with TrueNAS defaults)
+- ✅ Cross-platform support (macOS, Linux, Windows)
+- ✅ Simple configuration with hostname or full WebSocket URL
+- ✅ API key protection (requires encrypted connections)
 
 ## Building
-
-### Server (runs on TrueNAS)
 
 ```bash
 # Download dependencies
@@ -46,109 +64,49 @@ go mod download
 # Build for local platform
 make build
 
-# Cross-compile for Linux x86_64 (TrueNAS)
-make build-linux
-```
-
-### Proxy (runs on desktop)
-
-```bash
-# Build for current platform
-make build-proxy
-
 # Build for all platforms (macOS, Linux, Windows)
-make build-proxy-all
+make build-all
 ```
 
-## Installation & Deployment
+## Installation
 
-### Step 1: Deploy to TrueNAS
-
-#### Build the binary locally
-
-```bash
-# Build the TrueNAS server binary for Linux
-make build-linux
-```
-
-This creates `truenas-mcp` binary compiled for Linux x86_64.
-
-#### Deploy to TrueNAS
-
-```bash
-# Stop the service if already running
-ssh root@your-truenas 'systemctl stop truenas-mcp'
-
-# Copy the binary to TrueNAS
-scp truenas-mcp root@your-truenas:/usr/local/bin/truenas-mcp
-
-# Set executable permissions
-ssh root@your-truenas 'chmod +x /usr/local/bin/truenas-mcp'
-
-# Copy the systemd service file
-scp truenas-mcp.service root@your-truenas:/etc/systemd/system/
-
-# Reload systemd and enable the service
-ssh root@your-truenas 'systemctl daemon-reload'
-ssh root@your-truenas 'systemctl enable truenas-mcp'
-ssh root@your-truenas 'systemctl start truenas-mcp'
-
-# Verify the service is running
-ssh root@your-truenas 'systemctl status truenas-mcp'
-```
-
-#### Configure the service
-
-Edit the service file on TrueNAS to set your API key and listen address:
-
-```bash
-ssh root@your-truenas
-vi /etc/systemd/system/truenas-mcp.service
-```
-
-Update the `ExecStart` line to include your desired configuration:
-
-```ini
-ExecStart=/usr/local/bin/truenas-mcp -listen 0.0.0.0:8089 -api-key your-secure-key-here
-```
-
-Then reload and restart:
-
-```bash
-systemctl daemon-reload
-systemctl restart truenas-mcp
-```
-
-### Step 2: Setup Claude Desktop Proxy
-
-#### Install the proxy binary
+### Step 1: Download or Build Binary
 
 Choose the appropriate binary for your platform:
 
 **macOS (Apple Silicon):**
 ```bash
-sudo cp truenas-mcp-proxy-darwin-arm64 /usr/local/bin/truenas-mcp-proxy
-sudo chmod +x /usr/local/bin/truenas-mcp-proxy
+sudo cp truenas-mcp-darwin-arm64 /usr/local/bin/truenas-mcp
+sudo chmod +x /usr/local/bin/truenas-mcp
 ```
 
 **macOS (Intel):**
 ```bash
-sudo cp truenas-mcp-proxy-darwin-amd64 /usr/local/bin/truenas-mcp-proxy
-sudo chmod +x /usr/local/bin/truenas-mcp-proxy
+sudo cp truenas-mcp-darwin-amd64 /usr/local/bin/truenas-mcp
+sudo chmod +x /usr/local/bin/truenas-mcp
 ```
 
 **Linux:**
 ```bash
-sudo cp truenas-mcp-proxy-linux-amd64 /usr/local/bin/truenas-mcp-proxy
-sudo chmod +x /usr/local/bin/truenas-mcp-proxy
+sudo cp truenas-mcp-linux-amd64 /usr/local/bin/truenas-mcp
+sudo chmod +x /usr/local/bin/truenas-mcp
 ```
 
 **Windows:**
 ```powershell
-copy truenas-mcp-proxy-windows-amd64.exe C:\Windows\System32\truenas-mcp-proxy.exe
+copy truenas-mcp-windows-amd64.exe C:\Windows\System32\truenas-mcp.exe
 ```
 
-#### Configure Claude Desktop
+### Step 2: Get TrueNAS API Key
+
+1. Log into your TrueNAS web interface
+2. Go to **System Settings → API Keys**
+3. Click **Add** to create a new API key
+4. Give it a name (e.g., "Claude Desktop MCP")
+5. Make sure it has appropriate permissions (admin recommended)
+6. **Copy the API key** - you'll need it for configuration
+
+### Step 3: Configure Claude Desktop
 
 Edit your Claude Desktop configuration file:
 
@@ -173,23 +131,54 @@ Add the TrueNAS MCP server configuration:
 {
   "mcpServers": {
     "truenas": {
-      "command": "truenas-mcp-proxy",
+      "command": "truenas-mcp",
       "args": [
-        "--server-url", "http://YOUR-TRUENAS-IP:8089",
-        "--api-key", "your-secure-key-here"
+        "--truenas-url", "truenas.local",
+        "--api-key", "your-api-key-here"
       ]
     }
   }
 }
 ```
 
-Replace `YOUR-TRUENAS-IP` with your TrueNAS IP address and `your-secure-key-here` with the API key you configured in the systemd service.
+**Configuration options:**
 
-#### Restart Claude Desktop
+**Option 1: Hostname (auto-detects wss:// or ws://):**
+```json
+"args": [
+  "--truenas-url", "192.168.0.31",
+  "--api-key", "18-NoKVv1EyfStph6AGaOZPpD8nu3GLsTeEYXrRxCNXEv0oi3aHJgfFeCBgFUxx467P"
+]
+```
 
-Quit Claude Desktop completely and restart it. The MCP server connection will be established automatically.
+**Option 2: Full WebSocket URL (explicit protocol):**
+```json
+"args": [
+  "--truenas-url", "wss://truenas.local/websocket",
+  "--api-key", "your-api-key-here"
+]
+```
 
-### Step 3: Verify the Connection
+**Option 3: Using environment variables:**
+```json
+{
+  "mcpServers": {
+    "truenas": {
+      "command": "truenas-mcp",
+      "env": {
+        "TRUENAS_URL": "192.168.0.31",
+        "TRUENAS_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
+### Step 4: Restart Claude Desktop
+
+Quit Claude Desktop completely and restart it. The MCP connection will be established automatically.
+
+### Step 5: Verify the Connection
 
 In Claude Desktop, you should now be able to ask TrueNAS questions:
 
@@ -197,131 +186,80 @@ In Claude Desktop, you should now be able to ask TrueNAS questions:
 - "Show me all storage pools and their health"
 - "List all datasets"
 - "What shares are configured?"
+- "Show me system metrics for the past hour"
 
-You can verify the server is running on TrueNAS:
-
-```bash
-# Check service status
-ssh root@your-truenas 'systemctl status truenas-mcp'
-
-# View logs
-ssh root@your-truenas 'journalctl -u truenas-mcp -f'
-
-# Test the health endpoint
-curl http://YOUR-TRUENAS-IP:8089/health
-```
-
-## Running
-
-### Command-line options
-
-```bash
-# Start with defaults (localhost:8080, no auth)
-./truenas-mcp
-
-# Specify listen address and API key
-./truenas-mcp -listen 0.0.0.0:8443 -api-key your-secret-key
-
-# Or use environment variables
-TRUENAS_MCP_API_KEY=your-secret-key ./truenas-mcp -listen :8080
-
-# Custom TrueNAS socket path
-TRUENAS_SOCKET=/custom/path/middleware.sock ./truenas-mcp
-```
+## Command-Line Options
 
 ### Flags
 
-- `-listen` - Listen address (default: `localhost:8080`)
-- `-api-key` - API key for authentication (can also use `TRUENAS_MCP_API_KEY` env var)
-- `-version` - Print version and exit
-
-## MCP Client Configuration
-
-### Option 1: Direct SSE Connection (local TrueNAS only)
-
-If TrueNAS is running locally, you can connect directly via SSE:
-
-```json
-{
-  "mcpServers": {
-    "truenas": {
-      "url": "http://localhost:8080/sse",
-      "headers": {
-        "Authorization": "Bearer your-api-key-here"
-      }
-    }
-  }
-}
-```
-
-### Option 2: Proxy Client (recommended for remote TrueNAS)
-
-For remote TrueNAS servers, use the proxy binary:
-
-1. Install the proxy binary:
-   ```bash
-   # macOS (arm64)
-   cp truenas-mcp-proxy-darwin-arm64 /usr/local/bin/truenas-mcp-proxy
-   chmod +x /usr/local/bin/truenas-mcp-proxy
-
-   # macOS (amd64)
-   cp truenas-mcp-proxy-darwin-amd64 /usr/local/bin/truenas-mcp-proxy
-   chmod +x /usr/local/bin/truenas-mcp-proxy
-
-   # Linux
-   cp truenas-mcp-proxy-linux-amd64 /usr/local/bin/truenas-mcp-proxy
-   chmod +x /usr/local/bin/truenas-mcp-proxy
-   ```
-
-2. Configure Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
-   ```json
-   {
-     "mcpServers": {
-       "truenas": {
-         "command": "truenas-mcp-proxy",
-         "args": [
-           "--server-url", "http://192.168.0.31:8089",
-           "--api-key", "your-secure-key-here"
-         ]
-       }
-     }
-   }
-   ```
-
-3. Restart Claude Desktop
-
-### Proxy Configuration Options
-
-The proxy supports these flags:
-- `--server-url` - Remote server URL (required, or use `TRUENAS_MCP_SERVER_URL` env var)
-- `--api-key` - Authentication key (required, or use `TRUENAS_MCP_API_KEY` env var)
-- `--timeout` - Request timeout (default: 30s)
-- `--debug` - Enable verbose logging
-- `--insecure` - Skip TLS verification (for self-signed certs, not recommended)
+- `--truenas-url` - TrueNAS hostname or WebSocket URL (required, or use `TRUENAS_URL` env var)
+  - Hostname: `truenas.local` or `192.168.0.31` (uses `wss://` on port 443)
+  - Full URL: `wss://truenas.local/websocket` (custom port/path)
+  - ⚠️ **Note**: `ws://` (unencrypted) not recommended - will cause API key revocation
+- `--api-key` - TrueNAS API key for authentication (required, or use `TRUENAS_API_KEY` env var)
+- `--insecure` - Skip TLS verification (not needed - self-signed certs accepted by default)
+- `--debug` - Enable debug logging
 - `--version` - Print version and exit
 
-For more details, see [PROXY.md](PROXY.md).
+### Examples
+
+```bash
+# Basic usage with hostname
+./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key
+
+# With full WebSocket URL
+./truenas-mcp --truenas-url wss://truenas.local/websocket --api-key your-api-key
+
+# Using environment variables
+export TRUENAS_URL=192.168.0.31
+export TRUENAS_API_KEY=your-api-key
+./truenas-mcp
+
+# With debug logging
+./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --debug
+```
+
+## Connection Details
+
+### How It Works
+
+The binary connects directly to TrueNAS middleware's WebSocket endpoint:
+
+1. **Uses secure WebSocket (wss://)**: Connects to `wss://your-truenas:443/websocket`
+2. **Self-signed certs accepted**: Works with TrueNAS default self-signed certificates
+3. **Authenticates via API key**: Uses `auth.login_with_api_key` method
+
+### ⚠️ Security Requirement
+
+**IMPORTANT**: TrueNAS **requires** encrypted connections (`wss://`) for API key authentication. Using unencrypted `ws://` will cause your API key to be **revoked** as a security measure. This binary defaults to `wss://` to protect your credentials.
+
+### Troubleshooting
+
+**Connection Issues:**
+- Verify TrueNAS is accessible from your machine
+- Check firewall allows ports 80 (ws) or 443 (wss)
+- Verify API key is valid and has admin permissions
+
+**Authentication Failures:**
+- Generate a new API key in TrueNAS System Settings → API Keys
+- Ensure the key has appropriate permissions
+- Check that the key wasn't accidentally truncated when copying
 
 ## Security
 
-- **Authentication**: Required via API key in `Authorization: Bearer <key>` header
-- **Bind Address**: Default is `localhost:8080` (local-only). Use `0.0.0.0:8080` for network access
-- **TLS**: Not built-in. Use reverse proxy (nginx, caddy) for HTTPS
-- **Read-only**: All current tools are read-only queries
+- **Authentication**: TrueNAS API key required for all operations
+- **TLS/SSL**: Supports both wss:// (encrypted) and ws:// (unencrypted)
+- **Self-signed certificates**: Accepted by default (common for TrueNAS)
+- **Network**: Client-only (no listening ports, all connections outbound)
+- **API Key Storage**: Recommend using environment variables instead of command-line args
 
-### Recommended Production Setup
+### Security Best Practices
 
-1. Run behind reverse proxy with TLS
-2. Use strong API key
-3. Enable firewall rules
-4. Run as non-root user (if middleware socket permits)
-5. Monitor logs via systemd journal
-
-## API Endpoints
-
-- `GET /sse` - SSE stream for server-to-client messages
-- `POST /messages` - Client-to-server messages (JSON-RPC)
-- `GET /health` - Health check endpoint (no auth required)
+1. **Use secure WebSocket (wss://)** when possible
+2. **Generate dedicated API key** for MCP use only
+3. **Use environment variables** for API keys in Claude Desktop config
+4. **Restrict API key permissions** to minimum required
+5. **Rotate API keys periodically**
 
 ## Example Usage
 

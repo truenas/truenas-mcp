@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "truenas": {
+      "command": "/usr/local/bin/truenas-mcp",
+      "args": [
+        "--truenas-url", "192.168.0.31",
+        "--api-key", "19-ZLHNjv0Hu0l8VwB9pXYQldIg2uCoLZzRaNhMyrZ47iYl1pE8RBvIBXs2N5Zdizsw"
+      ]
+    }
+  }
+}
