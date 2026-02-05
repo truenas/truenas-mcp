@@ -7,7 +7,8 @@ A Model Context Protocol (MCP) server for TrueNAS that enables AI models to inte
 Read-only tools for common TrueNAS operations:
 
 - **system_info** - Get system information (version, hostname, platform)
-- **system_health** - Check system health and alerts
+- **system_health** - Check system health including alerts and active jobs
+- **query_jobs** - Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs)
 - **query_pools** - Query storage pools with status and capacity
 - **query_datasets** - Query datasets with optional pool filtering
 - **query_shares** - Query SMB and NFS share configurations
@@ -268,6 +269,13 @@ Once connected via an MCP client:
 **System Information:**
 - "What version of TrueNAS is running?"
 - "Are there any system alerts?"
+- "What's the system health status?"
+- "Are there any active jobs or tasks running?"
+
+**Jobs & Tasks:**
+- "Show me all running jobs"
+- "Are there any replications in progress?"
+- "What tasks have completed recently?"
 
 **Storage:**
 - "Show me all storage pools and their health status"

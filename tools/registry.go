@@ -289,6 +289,31 @@ func (r *Registry) registerTools() {
 		},
 		Handler: handleUpgradeApp,
 	}
+
+	// Query jobs
+	r.tools["query_jobs"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "query_jobs",
+			Description: "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, etc.)",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"state": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"RUNNING", "WAITING", "SUCCESS", "FAILED", "ABORTED", "all"},
+						"description": "Filter by job state (default: RUNNING)",
+						"default":     "RUNNING",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum number of jobs to return (default: 50)",
+						"default":     50,
+					},
+				},
+			},
+		},
+		Handler: handleQueryJobs,
+	}
 }
 
 func (r *Registry) ListTools() []mcp.Tool {
@@ -341,14 +366,52 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 		return "", fmt.Errorf("failed to parse alerts: %w", err)
 	}
 
+	// Get active jobs
+	jobsResult, err := client.Call("core.get_jobs", []interface{}{
+		[]interface{}{"state", "=", "RUNNING"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get jobs: %w", err)
+	}
+
+	var jobs []map[string]interface{}
+	if err := json.Unmarshal(jobsResult, &jobs); err != nil {
+		return "", fmt.Errorf("failed to parse jobs: %w", err)
+	}
+
+	// Create summary of active jobs
+	activeTasks := make([]map[string]interface{}, 0)
+	for _, job := range jobs {
+		taskSummary := map[string]interface{}{
+			"id":          job["id"],
+			"method":      job["method"],
+			"state":       job["state"],
+			"description": job["description"],
+		}
+		if progress, ok := job["progress"]; ok {
+			taskSummary["progress"] = progress
+		}
+		activeTasks = append(activeTasks, taskSummary)
+	}
+
 	response := map[string]interface{}{
 		"alerts":       alerts,
 		"alert_count":  len(alerts),
+		"active_jobs":  activeTasks,
+		"job_count":    len(activeTasks),
 		"health_check": "OK",
 	}
 
 	if len(alerts) > 0 {
 		response["health_check"] = "ALERTS_PRESENT"
+	}
+
+	if len(activeTasks) > 0 {
+		if response["health_check"] == "OK" {
+			response["health_check"] = "ACTIVE_TASKS"
+		} else {
+			response["health_check"] = "ALERTS_AND_ACTIVE_TASKS"
+		}
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -966,6 +1029,93 @@ func handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (stri
 		"upgrade_summary":  summary,
 		"upgrade_result":   upgradeResult,
 		"snapshot_created": snapshotHostpaths,
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
+}
+
+func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (string, error) {
+	state := "RUNNING"
+	if s, ok := args["state"].(string); ok && s != "" {
+		state = s
+	}
+
+	limit := 50
+	if l, ok := args["limit"].(float64); ok {
+		limit = int(l)
+	}
+
+	// Build query filters based on state
+	var filters []interface{}
+	if state != "all" {
+		filters = []interface{}{
+			[]interface{}{"state", "=", state},
+		}
+	} else {
+		filters = []interface{}{}
+	}
+
+	// Build options
+	options := map[string]interface{}{
+		"limit":    limit,
+		"order_by": []string{"-time_started"}, // Most recent first
+	}
+
+	result, err := client.Call("core.get_jobs", filters, options)
+	if err != nil {
+		return "", fmt.Errorf("failed to query jobs: %w", err)
+	}
+
+	var jobs []map[string]interface{}
+	if err := json.Unmarshal(result, &jobs); err != nil {
+		return "", fmt.Errorf("failed to parse jobs: %w", err)
+	}
+
+	// Create simplified response with relevant fields
+	simplified := make([]map[string]interface{}, 0, len(jobs))
+	for _, job := range jobs {
+		jobInfo := map[string]interface{}{
+			"id":          job["id"],
+			"method":      job["method"],
+			"state":       job["state"],
+			"description": job["description"],
+		}
+
+		// Add optional fields if present
+		if progress, ok := job["progress"]; ok && progress != nil {
+			jobInfo["progress"] = progress
+		}
+		if timeStarted, ok := job["time_started"]; ok && timeStarted != nil {
+			jobInfo["time_started"] = timeStarted
+		}
+		if timeFinished, ok := job["time_finished"]; ok && timeFinished != nil {
+			jobInfo["time_finished"] = timeFinished
+		}
+		if result, ok := job["result"]; ok && result != nil {
+			jobInfo["result"] = result
+		}
+		if errorMsg, ok := job["error"]; ok && errorMsg != nil {
+			jobInfo["error"] = errorMsg
+		}
+		if exception, ok := job["exception"]; ok && exception != nil {
+			jobInfo["exception"] = exception
+		}
+		if abortable, ok := job["abortable"]; ok {
+			jobInfo["abortable"] = abortable
+		}
+
+		simplified = append(simplified, jobInfo)
+	}
+
+	response := map[string]interface{}{
+		"jobs":         simplified,
+		"job_count":    len(simplified),
+		"state_filter": state,
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
