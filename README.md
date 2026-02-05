@@ -38,12 +38,12 @@ Write operations (requires confirmation):
 │  - Tool registry           │
 │  - WebSocket client        │
 └────────┬───────────────────┘
-         │ WebSocket (ws:// or wss://)
+         │ Secure WebSocket (wss://)
          │ + TrueNAS API key auth
 ┌────────▼──────────────────┐
 │  TrueNAS Middleware       │
-│  - WebSocket HTTP endpoint │
-│  - Port 80 (ws) or 443 (wss)
+│  - WebSocket HTTPS endpoint│
+│  - Port 443 (wss)          │
 └───────────────────────────┘
 ```
 
@@ -144,7 +144,7 @@ Add the TrueNAS MCP server configuration:
 
 **Configuration options:**
 
-**Option 1: Hostname (auto-detects wss:// or ws://):**
+**Option 1: Hostname (automatically uses wss://):**
 ```json
 "args": [
   "--truenas-url", "192.168.0.31",
@@ -196,7 +196,7 @@ In Claude Desktop, you should now be able to ask TrueNAS questions:
 - `--truenas-url` - TrueNAS hostname or WebSocket URL (required, or use `TRUENAS_URL` env var)
   - Hostname: `truenas.local` or `192.168.0.31` (uses `wss://` on port 443)
   - Full URL: `wss://truenas.local/websocket` (custom port/path)
-  - ⚠️ **Note**: `ws://` (unencrypted) not recommended - will cause API key revocation
+  - ⚠️ **Note**: `ws://` (unencrypted) is **not allowed** - TrueNAS will revoke API keys used over unencrypted connections
 - `--api-key` - TrueNAS API key for authentication (required, or use `TRUENAS_API_KEY` env var)
 - `--insecure` - Skip TLS verification (not needed - self-signed certs accepted by default)
 - `--debug` - Enable debug logging
@@ -238,7 +238,7 @@ The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 
 **Connection Issues:**
 - Verify TrueNAS is accessible from your machine
-- Check firewall allows ports 80 (ws) or 443 (wss)
+- Check firewall allows port 443 (wss)
 - Verify API key is valid and has admin permissions
 
 **Authentication Failures:**
@@ -249,14 +249,14 @@ The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 ## Security
 
 - **Authentication**: TrueNAS API key required for all operations
-- **TLS/SSL**: Supports both wss:// (encrypted) and ws:// (unencrypted)
+- **TLS/SSL**: Only supports wss:// (encrypted) - ws:// is rejected for security
 - **Self-signed certificates**: Accepted by default (common for TrueNAS)
 - **Network**: Client-only (no listening ports, all connections outbound)
 - **API Key Storage**: Recommend using environment variables instead of command-line args
 
 ### Security Best Practices
 
-1. **Use secure WebSocket (wss://)** when possible
+1. **Always use secure WebSocket (wss://)** - enforced by default, ws:// is rejected
 2. **Generate dedicated API key** for MCP use only
 3. **Use environment variables** for API keys in Claude Desktop config
 4. **Restrict API key permissions** to minimum required
