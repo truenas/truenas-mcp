@@ -202,51 +202,99 @@ func (c *Client) Call(method string, params ...interface{}) (json.RawMessage, er
 }
 
 // callRaw performs the actual API call without authentication check
+// Automatically retries once on connection errors
 func (c *Client) callRaw(method string, params ...interface{}) (json.RawMessage, error) {
-	id := fmt.Sprintf("%d", c.requestID.Add(1))
+	var lastErr error
 
-	req := APIRequest{
-		ID:     id,
-		Msg:    "method",
-		Method: method,
-		Params: params,
-	}
+	// Try up to 2 times (initial attempt + 1 retry on connection error)
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			log.Printf("Retrying request after connection error (attempt %d/2)...", attempt+1)
+			// Reconnect and re-authenticate before retry
+			if err := c.connect(); err != nil {
+				return nil, fmt.Errorf("reconnection failed: %w", err)
+			}
+			if !c.authenticated {
+				if err := c.Authenticate(); err != nil {
+					return nil, fmt.Errorf("re-authentication failed: %w", err)
+				}
+			}
+		}
 
-	reqJSON, _ := json.Marshal(req)
-	log.Printf("Sending request: %s", string(reqJSON))
+		id := fmt.Sprintf("%d", c.requestID.Add(1))
 
-	if err := c.conn.WriteJSON(req); err != nil {
-		c.conn = nil // Reset connection on error
-		c.authenticated = false
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
+		req := APIRequest{
+			ID:     id,
+			Msg:    "method",
+			Method: method,
+			Params: params,
+		}
 
-	// Read response
-	var resp APIResponse
-	if err := c.conn.ReadJSON(&resp); err != nil {
-		c.conn = nil // Reset connection on error
-		c.authenticated = false
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
+		reqJSON, _ := json.Marshal(req)
+		log.Printf("Sending request: %s", string(reqJSON))
 
-	respJSON, _ := json.Marshal(resp)
-	log.Printf("Received response: %s", string(respJSON))
+		if err := c.conn.WriteJSON(req); err != nil {
+			c.conn = nil // Reset connection on error
+			c.authenticated = false
+			lastErr = fmt.Errorf("failed to send request: %w", err)
 
-	// Check for explicit failure message
-	if resp.Msg == "failed" {
+			// Only retry if this looks like a connection error
+			if isConnectionError(err) && attempt == 0 {
+				continue // Retry
+			}
+			return nil, lastErr
+		}
+
+		// Read response
+		var resp APIResponse
+		if err := c.conn.ReadJSON(&resp); err != nil {
+			c.conn = nil // Reset connection on error
+			c.authenticated = false
+			lastErr = fmt.Errorf("failed to read response: %w", err)
+
+			// Only retry if this looks like a connection error
+			if isConnectionError(err) && attempt == 0 {
+				continue // Retry
+			}
+			return nil, lastErr
+		}
+
+		respJSON, _ := json.Marshal(resp)
+		log.Printf("Received response: %s", string(respJSON))
+
+		// Check for explicit failure message
+		if resp.Msg == "failed" {
+			if resp.Error != nil {
+				return nil, formatAPIError(resp.Error)
+			}
+			return nil, fmt.Errorf("API call failed with no error details")
+		}
+
 		if resp.Error != nil {
 			return nil, formatAPIError(resp.Error)
 		}
-		return nil, fmt.Errorf("API call failed with no error details")
+
+		log.Printf("Result length: %d bytes", len(resp.Result))
+
+		return resp.Result, nil
 	}
 
-	if resp.Error != nil {
-		return nil, formatAPIError(resp.Error)
+	return nil, lastErr
+}
+
+// isConnectionError checks if an error is a connection-related error that should trigger a retry
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
 	}
-
-	log.Printf("Result length: %d bytes", len(resp.Result))
-
-	return resp.Result, nil
+	errStr := err.Error()
+	// Check for common connection errors
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "i/o timeout")
 }
 
 func (c *Client) Close() error {
