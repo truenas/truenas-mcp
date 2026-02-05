@@ -1,8 +1,6 @@
 # Binaries (root directory only)
 /truenas-mcp
 /truenas-mcp-*
-/truenas-mcp-proxy
-/truenas-mcp-proxy-*
 *.exe
 *.dll
 *.so
