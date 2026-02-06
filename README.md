@@ -7,7 +7,7 @@ A Model Context Protocol (MCP) server for TrueNAS that enables AI models to inte
 Read-only tools for common TrueNAS operations:
 
 - **system_info** - Get system information (version, hostname, platform)
-- **system_health** - Check system health including alerts and active jobs
+- **system_health** - Check system health including alerts, active jobs, and capacity warnings
 - **query_jobs** - Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs)
 - **query_pools** - Query storage pools with status and capacity
 - **query_datasets** - Query datasets with optional pool filtering
@@ -18,6 +18,24 @@ Read-only tools for common TrueNAS operations:
 - **get_network_metrics** - Get network interface traffic metrics
 - **get_disk_metrics** - Get disk I/O performance metrics
 - **query_apps** - List installed applications with status and available updates
+
+Capacity planning and analysis tools:
+
+- **analyze_capacity** - Comprehensive capacity analysis with historical trends and projections
+  - CPU, memory, network, and disk I/O utilization analysis
+  - Current, average, and peak utilization percentages
+  - Trend detection (increasing/stable/decreasing)
+  - Capacity status warnings (healthy/warning/critical at 70%/85% thresholds)
+  - Growth projections when metrics are trending upward
+  - Time ranges: HOUR, DAY, WEEK, MONTH, YEAR
+  - Overall recommendations based on all metrics
+
+- **get_pool_capacity_details** - Detailed pool and dataset capacity information
+  - Current pool capacity (total, used, available bytes)
+  - Utilization percentages for each pool
+  - Per-dataset breakdown with capacity metrics
+  - Capacity status warnings (healthy/warning/critical)
+  - Note: Historical pool capacity trends not available in TrueNAS API (limitation documented)
 
 Write operations (requires confirmation):
 
@@ -287,10 +305,34 @@ Once connected via an MCP client:
 - "What's the network traffic on the main interface?"
 - "Show me disk I/O metrics for the past week"
 
+**Capacity Planning:**
+- "How near to CPU capacity is my TrueNAS?"
+- "Analyze system capacity over the past 90 days"
+- "What's my current storage pool utilization?"
+- "Show me detailed capacity information for the tank pool"
+- "Are there any capacity warnings I should be aware of?"
+- "Based on current trends, when should I plan to expand?"
+
 **Applications:**
 - "What apps are installed and running?"
 - "Are there any app updates available?"
 - "Upgrade the plex app to the latest version"
+
+## Limitations
+
+### Pool Capacity Historical Data
+
+The TrueNAS API (as of v26.04) does not expose historical pool capacity metrics through the reporting endpoints, despite the Netdata backend collecting this data. This means:
+
+- ✅ **Available**: Current pool capacity snapshots
+- ✅ **Available**: CPU, memory, network, disk I/O historical trends
+- ❌ **Not Available**: Historical pool capacity over time
+- ❌ **Not Available**: Storage growth rate calculations
+- ❌ **Not Available**: Pool capacity trend projections
+
+**Workaround**: Query `get_pool_capacity_details` periodically and track results externally to build your own trend data.
+
+**Future**: This may be resolved in future TrueNAS releases if the `usage` chart is added to the reporting API schema.
 
 ## Development
 
