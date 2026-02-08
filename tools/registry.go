@@ -479,6 +479,82 @@ func (r *Registry) registerTools() {
 		Handler: handleCreateSMBShare,
 	}
 
+	// NFS share creation (write operation)
+	r.tools["create_nfs_share"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "create_nfs_share",
+			Description: "Create an NFS (Network File System) share for Unix/Linux file sharing. This makes a ZFS dataset accessible over the network via the NFS protocol.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create NFS shares, follow this conversation flow:\n\n**1. Dataset Selection:**\n- Ask: \"Do you want to create a new dataset or use an existing ZFS dataset?\"\n- If NEW: Use create_dataset tool first (with share_type=NFS, acltype=POSIX)\n- If EXISTING: \n  * Query available datasets first with query_datasets\n  * Present options to user (NEVER suggest pool root like 'tank' or 'flash')\n  * Use the dataset's mountpoint as the path\n  * Warn: \"Never share a pool root - always use a child dataset\"\n- After dataset creation, use its mountpoint as the path\n\n**2. Access Control:**\n- Ask: \"Read-only or read-write?\" (default: read-write)\n- Ask: \"Restrict to specific networks?\" (CIDR notation: 192.168.1.0/24)\n- Ask: \"Restrict to specific hosts?\" (IP addresses or hostnames)\n- Recommend: At least one restriction (network or host) for security\n\n**3. User Mapping (Important for Security):**\n- Ask: \"How should root access be handled?\"\n  * **maproot_user**: Map root clients to specific user (recommended: 'nobody')\n  * **maproot_group**: Map root clients to specific group (recommended: 'nogroup')\n  * Warn if not set: \"Root clients will have full root access (security risk)\"\n- Ask: \"Map all users to a specific user?\" (optional, for anonymous access)\n  * **mapall_user**: Maps all clients to one user\n  * **mapall_group**: Maps all client groups to one group\n\n**4. Security Level (Optional):**\n- Default: SYS (system authentication)\n- Advanced: KRB5, KRB5I, KRB5P (Kerberos, requires setup)\n- Usually skip unless user specifically needs Kerberos\n\n**IMPORTANT RECOMMENDATIONS:**\n- For NFS shares: share_type=NFS, acltype=POSIX (in dataset creation)\n- Compression: LZ4 recommended for balanced performance\n- Always set maproot_user='nobody' to prevent root access\n- Use network/host restrictions to limit access\n- Read-only for shared data that shouldn't be modified\n\n**SECURITY WARNINGS TO DISPLAY:**\n- If no network/host restrictions: \"Share accessible from any host\"\n- If no maproot_user: \"Root clients will have full root access\"\n- If read-write + no restrictions: \"Any host can modify/delete files\"\n- Remind: \"Ensure NFS service is running and firewall allows NFS traffic (port 2049)\"\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display complete summary including:\n   - Local path\n   - Access type (read-only/read-write)\n   - Network/host restrictions\n   - User mapping settings\n   - Security warnings if applicable\n3. Get explicit user confirmation: \"Shall I create this NFS share?\"\n4. Warn: \"This is a WRITE operation that exposes data over your network\"\n5. After creation: Provide mount command example\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview including security warnings, then ask for confirmation.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "ZFS dataset mountpoint starting with /mnt/ (e.g., /mnt/tank/shares/data, NOT /mnt/tank)",
+					},
+					"enabled": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Enable share for network access (default: true)",
+						"default":     true,
+					},
+					"comment": map[string]interface{}{
+						"type":        "string",
+						"description": "Description for the share (optional)",
+					},
+					"ro": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Read-only export (default: false for read-write)",
+						"default":     false,
+					},
+					"networks": map[string]interface{}{
+						"type":        "array",
+						"description": "Authorized networks in CIDR notation (e.g., ['192.168.1.0/24']). Empty = allow all networks.",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"hosts": map[string]interface{}{
+						"type":        "array",
+						"description": "Authorized IP addresses or hostnames (e.g., ['192.168.1.10', 'client.local']). No quotes or spaces. Empty = allow all hosts.",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"maproot_user": map[string]interface{}{
+						"type":        "string",
+						"description": "Map root clients to this user (recommended: 'nobody' for security)",
+					},
+					"maproot_group": map[string]interface{}{
+						"type":        "string",
+						"description": "Map root clients to this group (recommended: 'nogroup' for security)",
+					},
+					"mapall_user": map[string]interface{}{
+						"type":        "string",
+						"description": "Map all clients to this user (optional, for anonymous access)",
+					},
+					"mapall_group": map[string]interface{}{
+						"type":        "string",
+						"description": "Map all client groups to this group (optional, for anonymous access)",
+					},
+					"security": map[string]interface{}{
+						"type":        "array",
+						"description": "Security mechanisms: ['SYS'] (default), ['KRB5'], ['KRB5I'], ['KRB5P']",
+						"items": map[string]interface{}{
+							"type": "string",
+							"enum": []string{"SYS", "KRB5", "KRB5I", "KRB5P"},
+						},
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview what will be created without executing (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+		Handler: handleCreateNFSShare,
+	}
+
 	// Alert list with filtering
 	r.tools["list_alerts"] = Tool{
 		Definition: mcp.Tool{

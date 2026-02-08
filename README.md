@@ -75,6 +75,15 @@ Write operations (requires confirmation):
   - Security warnings for public shares
   - Dry-run mode to preview with security analysis
 
+- **create_nfs_share** - Create NFS shares for Unix/Linux file sharing
+  - Interactive wizard walks through NFS configuration
+  - Network/host access restrictions (CIDR notation, IP/hostname lists)
+  - User mapping for security (maproot, mapall)
+  - Read-only or read-write access
+  - Security level selection (SYS, Kerberos)
+  - Security warnings for unrestricted access
+  - Dry-run mode to preview with mount examples
+
 - **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations
@@ -397,6 +406,13 @@ Once connected via an MCP client:
 - "I want to share my photos with Windows clients"
 - "Set up an encrypted SMB share with access restrictions"
 - "Create a share that's only accessible from my local network"
+
+**NFS Share Creation:**
+- "Create an NFS share for my Linux servers"
+- "Set up a read-only NFS export for backups"
+- "I need an NFS share restricted to my 192.168.1.0/24 network"
+- "Create an NFS share with root squashing for security"
+- "Share my data directory with specific hosts only"
 
 **Task Management:**
 - "Show me all active tasks"
