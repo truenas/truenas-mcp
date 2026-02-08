@@ -2716,8 +2716,9 @@ func (a *applyUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[strin
 
 // handleSystemReboot reboots the TrueNAS system
 func handleSystemReboot(client *truenas.Client, args map[string]interface{}) (string, error) {
-	// Call system.reboot (no parameters)
-	result, err := client.Call("system.reboot")
+	// Call system.reboot with reason parameter
+	reason := "System reboot requested via MCP"
+	result, err := client.Call("system.reboot", reason)
 	if err != nil {
 		return "", fmt.Errorf("failed to initiate system reboot: %w", err)
 	}
