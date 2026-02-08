@@ -24,3 +24,5 @@ vendor/
 
 # OS
 .DS_Store
+coverage.out
+coverage.txt

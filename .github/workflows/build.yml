@@ -39,6 +39,26 @@ jobs:
     - name: Run tests
       run: make test
 
+    - name: Run tests with coverage
+      run: go test -coverprofile=coverage.out -covermode=atomic ./...
+
+    - name: Generate coverage report
+      run: |
+        go tool cover -func=coverage.out -o=coverage.txt
+        echo "## Test Coverage" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        go tool cover -func=coverage.out | tail -1 >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+    - name: Upload coverage to artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: |
+          coverage.out
+          coverage.txt
+        retention-days: 30
+
     - name: Build for macOS ARM64
       run: GOOS=darwin GOARCH=arm64 go build -o truenas-mcp-darwin-arm64 ./cmd/truenas-mcp
 
