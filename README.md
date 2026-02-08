@@ -1,5 +1,8 @@
 # TrueNAS MCP Server
 
+> **⚠️ Research Preview**
+> This project is in active development and released as a research preview. APIs and features may change. Not recommended for production use.
+
 A Model Context Protocol (MCP) server for TrueNAS that enables AI models to interact with the TrueNAS API using natural language queries.
 
 ## Features
