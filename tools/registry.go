@@ -125,6 +125,19 @@ func (r *Registry) registerTools() {
 		Handler: handleUpdateStatus,
 	}
 
+	// System reboot tool
+	r.tools["system_reboot"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "system_reboot",
+			Description: "Reboot the TrueNAS system. This will disconnect all active sessions and services. Use after applying system updates.",
+			InputSchema: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+		Handler: handleSystemReboot,
+	}
+
 	// Storage pools query
 	r.tools["query_pools"] = Tool{
 		Definition: mcp.Tool{
@@ -2699,4 +2712,32 @@ func (a *applyUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[strin
 	}
 
 	return result, nil
+}
+
+// handleSystemReboot reboots the TrueNAS system
+func handleSystemReboot(client *truenas.Client, args map[string]interface{}) (string, error) {
+	// Call system.reboot (no parameters)
+	result, err := client.Call("system.reboot")
+	if err != nil {
+		return "", fmt.Errorf("failed to initiate system reboot: %w", err)
+	}
+
+	// system.reboot typically returns nothing or a simple acknowledgment
+	var response map[string]interface{}
+	if len(result) > 0 {
+		_ = json.Unmarshal(result, &response)
+	}
+
+	returnMsg := map[string]interface{}{
+		"status":  "reboot_initiated",
+		"message": "System reboot initiated. All connections will be lost.",
+		"warning": "TrueNAS system is rebooting. Wait approximately 2-3 minutes before reconnecting.",
+	}
+
+	formatted, err := json.MarshalIndent(returnMsg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
 }
