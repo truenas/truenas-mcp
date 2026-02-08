@@ -274,6 +274,211 @@ func (r *Registry) registerTools() {
 		Handler: handleQueryVMs,
 	}
 
+	// Dataset creation (write operation)
+	r.tools["create_dataset"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "create_dataset",
+			Description: "Create a ZFS dataset (filesystem or volume) for storage. This tool is reusable for SMB shares, NFS exports, iSCSI LUNs, and application storage. Supports encryption, compression, quotas, and advanced ZFS features.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create datasets, ask these questions in order:\n\n1. **Pool Selection**: Query available pools first, ask which pool to use\n2. **Dataset Name**: Suggest format 'pool/shares/name' or 'pool/apps/name'\n3. **Dataset Type**: FILESYSTEM (default, for files) or VOLUME (for block storage/VMs)\n4. **Share Type Optimization** (if for sharing):\n   - SMB: Windows/Mac file shares (recommend for SMB shares)\n   - NFS: Unix/Linux file shares\n   - MULTIPROTOCOL: Both SMB and NFS access\n   - APPS: Application storage\n   - GENERIC: General purpose (default)\n5. **Encryption** (recommend for sensitive data):\n   - Ask: \"Is this for sensitive data?\"\n   - If yes: Recommend generate_key=true for simplicity\n   - If user wants passphrase: min 8 characters\n   - Algorithm: AES-256-GCM recommended\n6. **Compression**: LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF\n7. **Space Quota** (optional): Ask if they want to limit size\n8. **ACL Type** (for SMB): NFSV4 (recommended for SMB/Windows), POSIX (Unix)\n9. **Advanced** (usually skip unless user asks):\n   - Deduplication: Warn about RAM overhead, recommend OFF\n   - Checksum, snapdir, atime, readonly\n\n**IMPORTANT RECOMMENDATIONS:**\n- For SMB shares: share_type=SMB, acltype=NFSV4, compression=LZ4\n- For NFS exports: share_type=NFS, acltype=POSIX, compression=LZ4\n- For multi-protocol: share_type=MULTIPROTOCOL, acltype=NFSV4\n- For apps: share_type=APPS, compression=LZ4 or ZSTD\n- Always recommend compression=LZ4 unless user has specific needs\n- Warn: Deduplication uses ~5GB RAM per TB, not recommended for most users\n- Warn: Encryption cannot be removed later, only option is to copy data elsewhere\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display summary showing: name, type, optimization, compression, encryption, quota, mountpoint\n3. Get explicit user confirmation with \"Shall I proceed?\"\n4. Warn: This is a WRITE operation creating permanent storage\n5. If encryption enabled, remind user to back up the key after creation\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview, then ask for confirmation to proceed.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name": map[string]interface{}{
+						"type":        "string",
+						"description": "Dataset path including pool (e.g., 'tank/shares/documents' or 'pool/apps/immich')",
+					},
+					"type": map[string]interface{}{
+						"type":        "string",
+						"description": "FILESYSTEM (default, for files/directories) or VOLUME (for block storage/iSCSI/VMs)",
+						"enum":        []string{"FILESYSTEM", "VOLUME"},
+						"default":     "FILESYSTEM",
+					},
+					"volsize": map[string]interface{}{
+						"type":        "integer",
+						"description": "Required for VOLUME type: size in bytes (e.g., 1099511627776 for 1TB)",
+					},
+					"share_type": map[string]interface{}{
+						"type":        "string",
+						"description": "Optimization hint: GENERIC (default), SMB, NFS, MULTIPROTOCOL, APPS",
+						"enum":        []string{"GENERIC", "SMB", "NFS", "MULTIPROTOCOL", "APPS"},
+					},
+					"compression": map[string]interface{}{
+						"type":        "string",
+						"description": "LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF, or INHERIT (default)",
+						"enum":        []string{"LZ4", "ZSTD", "GZIP", "GZIP-1", "GZIP-9", "OFF", "INHERIT"},
+					},
+					"acltype": map[string]interface{}{
+						"type":        "string",
+						"description": "NFSV4 (recommended for SMB/Windows ACLs) or POSIX (Unix permissions)",
+						"enum":        []string{"NFSV4", "POSIX", "INHERIT"},
+					},
+					"encryption_options": map[string]interface{}{
+						"type":        "object",
+						"description": "Encryption configuration (cannot be removed later)",
+						"properties": map[string]interface{}{
+							"generate_key": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Auto-generate encryption key (recommended for simplicity)",
+							},
+							"passphrase": map[string]interface{}{
+								"type":        "string",
+								"description": "User passphrase (min 8 chars) - alternative to generate_key",
+							},
+							"algorithm": map[string]interface{}{
+								"type":        "string",
+								"description": "Encryption algorithm (default: AES-256-GCM recommended)",
+								"enum":        []string{"AES-128-CCM", "AES-192-CCM", "AES-256-CCM", "AES-128-GCM", "AES-192-GCM", "AES-256-GCM"},
+							},
+						},
+					},
+					"quota": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum space for dataset + children in bytes (e.g., 1099511627776 for 1TB)",
+					},
+					"refquota": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum space for dataset only (excluding children) in bytes",
+					},
+					"create_ancestors": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Auto-create missing parent datasets (default: false)",
+						"default":     false,
+					},
+					"readonly": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Make dataset read-only (default: false)",
+						"default":     false,
+					},
+					"deduplication": map[string]interface{}{
+						"type":        "string",
+						"description": "OFF (recommended), ON, or VERIFY. Warning: Uses ~5GB RAM per TB of storage",
+						"enum":        []string{"OFF", "ON", "VERIFY", "INHERIT"},
+					},
+					"checksum": map[string]interface{}{
+						"type":        "string",
+						"description": "Data integrity algorithm: SHA256 (default), BLAKE3, SHA512, etc.",
+					},
+					"snapdir": map[string]interface{}{
+						"type":        "string",
+						"description": "Snapshot directory visibility: VISIBLE or HIDDEN",
+						"enum":        []string{"VISIBLE", "HIDDEN", "INHERIT"},
+					},
+					"atime": map[string]interface{}{
+						"type":        "string",
+						"description": "File access time tracking: ON or OFF (OFF improves performance)",
+						"enum":        []string{"ON", "OFF", "INHERIT"},
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview what will be created without executing (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"name"},
+			},
+		},
+		Handler: handleCreateDataset,
+	}
+
+	// SMB share creation (write operation)
+	r.tools["create_smb_share"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "create_smb_share",
+			Description: "Create an SMB (Windows/macOS file sharing) share. This makes a directory accessible over the network via the SMB/CIFS protocol.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create SMB shares, follow this conversation flow:\n\n**1. Path Selection:**\n- Ask: \"Do you want to create a new dataset or use an existing directory?\"\n- If NEW: Use create_dataset tool first (with share_type=SMB, acltype=NFSV4)\n- If EXISTING: Ask for the full path (must start with /mnt/)\n- After dataset creation, use its mountpoint as the path\n\n**2. Share Name:**\n- Ask: \"What name should appear when browsing the network?\"\n- Rules: Max 80 chars, no \\ / [ ] : | < > + = ; , * ? \"\n- Cannot use: global, printers, homes\n- Suggest: Use a friendly, descriptive name like \"TeamDocs\" or \"PhotoArchive\"\n\n**3. Description:**\n- Ask: \"Add a description?\" (optional, shown when browsing shares)\n\n**4. Purpose Selection:**\n- Ask: \"What's this share for?\"\n- Options:\n  * DEFAULT_SHARE: Standard file sharing (most common)\n  * TIMEMACHINE_SHARE: macOS Time Machine backups\n  * MULTIPROTOCOL_SHARE: Both SMB and NFS access (complex permissions)\n  * PRIVATE_DATASETS_SHARE: User home directories\n  * VEEAM_REPOSITORY_SHARE: Veeam backup storage\n- Recommend DEFAULT_SHARE unless specific use case\n\n**5. Access Control:**\n- Ask: \"Read-only or read-write?\" (default: read-write)\n- Ask: \"Should it be visible when browsing?\" (default: yes)\n- Ask: \"Restrict to specific IP addresses?\" (optional, for hostsallow)\n- Ask: \"Hide from unauthorized users?\" (access_based_share_enumeration)\n\n**6. Purpose-Specific Questions:**\n\nFor TIMEMACHINE_SHARE:\n- Ask: \"What's the backup size limit?\" (recommend 2-3x Mac's disk size)\n- Set time_machine_quota in options\n\nFor MULTIPROTOCOL_SHARE:\n- Warn: \"Multi-protocol shares have complex permission interactions\"\n- Recommend: \"Use either SMB OR NFS, not both, unless you understand the implications\"\n\nFor PRIVATE_DATASETS_SHARE:\n- Suggest: \"Create separate datasets per user for isolation\"\n- Recommend: \"Use access_based_share_enumeration=true\"\n\n**7. Auditing (Optional):**\n- Ask: \"Enable access auditing?\" (tracks who accesses files)\n- If yes: Ask which groups to audit (empty = audit all)\n\n**IMPORTANT RECOMMENDATIONS:**\n- Default: enabled=true, browsable=true, readonly=false\n- For sensitive data: Set access_based_share_enumeration=true\n- For public shares: Use hostsdeny to block unwanted networks\n- For Time Machine: Set appropriate quota to prevent filling pool\n- For multi-protocol: Strongly recommend against unless necessary\n\n**SECURITY WARNINGS TO DISPLAY:**\n- If browsable=true + no hostsallow: \"Share visible and accessible from any network\"\n- If readonly=false: \"Users can modify, delete, and create files\"\n- If no access restrictions: \"Anyone on your network can access this share\"\n- Remind: \"Configure share permissions in TrueNAS UI after creation\"\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display complete summary including:\n   - Share name and network path (\\\\truenas\\sharename)\n   - Local path\n   - Purpose and access settings\n   - Security warnings if applicable\n3. Get explicit user confirmation: \"Shall I create this share?\"\n4. Warn: \"This is a WRITE operation that exposes data over your network\"\n5. After creation: Remind user to configure permissions via TrueNAS UI\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview including security warnings, then ask for confirmation.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name": map[string]interface{}{
+						"type":        "string",
+						"description": "Share name visible to clients (max 80 chars, case-insensitive, must be unique)",
+					},
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Local path starting with /mnt/ (or 'EXTERNAL' for DFS proxy shares)",
+					},
+					"purpose": map[string]interface{}{
+						"type":        "string",
+						"description": "Share purpose: DEFAULT_SHARE (standard), TIMEMACHINE_SHARE (macOS backups), MULTIPROTOCOL_SHARE (SMB+NFS), PRIVATE_DATASETS_SHARE (home dirs)",
+						"enum":        []string{"DEFAULT_SHARE", "LEGACY_SHARE", "TIMEMACHINE_SHARE", "MULTIPROTOCOL_SHARE", "TIME_LOCKED_SHARE", "PRIVATE_DATASETS_SHARE", "EXTERNAL_SHARE", "VEEAM_REPOSITORY_SHARE", "FCP_SHARE"},
+						"default":     "DEFAULT_SHARE",
+					},
+					"enabled": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Enable share for network access (default: true)",
+						"default":     true,
+					},
+					"comment": map[string]interface{}{
+						"type":        "string",
+						"description": "Description shown when clients list shares (optional)",
+					},
+					"readonly": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Prevent clients from creating/modifying files (default: false)",
+						"default":     false,
+					},
+					"browsable": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Show share in network browse lists (default: true)",
+						"default":     true,
+					},
+					"access_based_share_enumeration": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Hide share from users without filesystem ACL access (default: false)",
+						"default":     false,
+					},
+					"hostsallow": map[string]interface{}{
+						"type":        "array",
+						"description": "IP addresses/networks allowed to access (empty = allow all)",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"hostsdeny": map[string]interface{}{
+						"type":        "array",
+						"description": "IP addresses/networks denied access (empty = deny none)",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"audit": map[string]interface{}{
+						"type":        "object",
+						"description": "Audit configuration for tracking file access",
+						"properties": map[string]interface{}{
+							"enable": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Enable audit logging",
+							},
+							"watch_list": map[string]interface{}{
+								"type":        "array",
+								"description": "Groups to audit (empty = audit all)",
+								"items": map[string]interface{}{
+									"type": "string",
+								},
+							},
+							"ignore_list": map[string]interface{}{
+								"type":        "array",
+								"description": "Groups to exclude from auditing",
+								"items": map[string]interface{}{
+									"type": "string",
+								},
+							},
+						},
+					},
+					"options": map[string]interface{}{
+						"type":        "object",
+						"description": "Purpose-specific options (varies by purpose)",
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview what will be created without executing (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"name", "path"},
+			},
+		},
+		Handler: handleCreateSMBShare,
+	}
+
 	// Alert list with filtering
 	r.tools["list_alerts"] = Tool{
 		Definition: mcp.Tool{

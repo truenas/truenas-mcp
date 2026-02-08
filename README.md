@@ -59,6 +59,22 @@ Capacity planning and analysis tools:
 
 Write operations (requires confirmation):
 
+- **create_dataset** - Create ZFS datasets for storage (reusable for all protocols)
+  - Create filesystems or volumes (for iSCSI/VMs)
+  - Share type optimization (SMB, NFS, MULTIPROTOCOL, APPS)
+  - Encryption with auto-generated keys or passphrases
+  - Compression (LZ4, ZSTD, GZIP), quotas, and ACL configuration
+  - Dry-run mode to preview before creating
+  - Wizard-style guidance for SMB/NFS/iSCSI setup
+
+- **create_smb_share** - Create SMB shares for Windows/macOS file sharing
+  - Interactive wizard walks through share configuration
+  - Purpose-based setup (standard, Time Machine, multi-protocol, home dirs)
+  - Access control (IP restrictions, read-only, browsability)
+  - Audit logging for compliance
+  - Security warnings for public shares
+  - Dry-run mode to preview with security analysis
+
 - **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations
@@ -366,6 +382,21 @@ Once connected via an MCP client:
 - "What apps are installed and running?"
 - "Are there any app updates available?"
 - "Upgrade the plex app to the latest version"
+
+**Dataset Creation:**
+- "Create a new dataset for file sharing"
+- "Create an encrypted dataset with a 500GB quota"
+- "Set up a dataset optimized for SMB shares"
+- "Create a dataset in the tank pool for my documents"
+- "I need a dataset with LZ4 compression for app storage"
+
+**SMB Share Creation:**
+- "Create a new SMB share for my team"
+- "Set up a Time Machine share for macOS backups"
+- "Create a read-only share for archives"
+- "I want to share my photos with Windows clients"
+- "Set up an encrypted SMB share with access restrictions"
+- "Create a share that's only accessible from my local network"
 
 **Task Management:**
 - "Show me all active tasks"
