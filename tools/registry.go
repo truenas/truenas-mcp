@@ -183,6 +183,41 @@ func (r *Registry) registerTools() {
 		Handler: handleQueryDatasets,
 	}
 
+	// Snapshots query
+	r.tools["query_snapshots"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "query_snapshots",
+			Description: "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, dataset, and holds status. Use 'limit' to control result size, 'order_by' to sort.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"dataset": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: Filter snapshots by parent dataset name",
+					},
+					"pool": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: Filter snapshots by pool name",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional: Maximum number of snapshots to return (default: 50 for manageable response size)",
+					},
+					"order_by": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: Sort by 'name' (snapshot name, default descending), 'dataset' (parent dataset), or 'created' (parsed from name if available)",
+						"enum":        []string{"name", "dataset", "created"},
+					},
+					"holds_only": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Optional: Return only snapshots with holds that prevent deletion (default: false)",
+					},
+				},
+			},
+		},
+		Handler: handleQuerySnapshots,
+	}
+
 	// Shares query
 	r.tools["query_shares"] = Tool{
 		Definition: mcp.Tool{
@@ -985,6 +1020,217 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 	}
 
 	return string(formatted), nil
+}
+
+func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (string, error) {
+	// Build query filters - initialize as empty array, not nil (API expects [] not null)
+	filters := []interface{}{}
+	if dataset, ok := args["dataset"].(string); ok && dataset != "" {
+		filters = append(filters, []interface{}{"dataset", "=", dataset})
+	}
+	if pool, ok := args["pool"].(string); ok && pool != "" {
+		filters = append(filters, []interface{}{"pool", "=", pool})
+	}
+
+	// Options parameter (required by API even if empty)
+	options := map[string]interface{}{}
+
+	result, err := client.Call("pool.snapshot.query", filters, options)
+	if err != nil {
+		return "", err
+	}
+
+	var snapshots []map[string]interface{}
+	if err := json.Unmarshal(result, &snapshots); err != nil {
+		return "", fmt.Errorf("failed to parse snapshots: %w", err)
+	}
+
+	// Simplify response
+	simplified := make([]map[string]interface{}, 0, len(snapshots))
+	for _, snap := range snapshots {
+		summary := simplifySnapshot(snap)
+		simplified = append(simplified, summary)
+	}
+
+	// Filter by holds_only if requested
+	if holdsOnly, ok := args["holds_only"].(bool); ok && holdsOnly {
+		filtered := make([]map[string]interface{}, 0)
+		for _, snap := range simplified {
+			if holdsCount, ok := snap["holds_count"].(int); ok && holdsCount > 0 {
+				filtered = append(filtered, snap)
+			}
+		}
+		simplified = filtered
+	}
+
+	// Sort snapshots
+	orderBy := "name" // default to sorting by snapshot name descending
+	if order, ok := args["order_by"].(string); ok && order != "" {
+		orderBy = order
+	}
+	sortSnapshots(simplified, orderBy)
+
+	// Apply limit (default to 50 for manageable response size)
+	limit := 50
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	totalSnapshots := len(simplified)
+	if len(simplified) > limit {
+		simplified = simplified[:limit]
+	}
+
+	// Add metadata wrapper
+	response := map[string]interface{}{
+		"snapshots":       simplified,
+		"snapshot_count":  len(simplified),
+		"total_snapshots": totalSnapshots,
+	}
+	if dataset, ok := args["dataset"].(string); ok && dataset != "" {
+		response["dataset_filter"] = dataset
+	}
+	if pool, ok := args["pool"].(string); ok && pool != "" {
+		response["pool_filter"] = pool
+	}
+	if holdsOnly, ok := args["holds_only"].(bool); ok && holdsOnly {
+		response["holds_filter"] = "only snapshots with holds"
+	}
+	if len(simplified) < totalSnapshots {
+		response["note"] = fmt.Sprintf("Showing %d of %d snapshots (limited)", len(simplified), totalSnapshots)
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
+}
+
+// simplifySnapshot extracts the most relevant fields from a raw snapshot object
+func simplifySnapshot(snap map[string]interface{}) map[string]interface{} {
+	summary := map[string]interface{}{
+		"snapshot_name": snap["snapshot_name"],
+		"dataset":       snap["dataset"],
+		"pool":          snap["pool"],
+	}
+
+	// Parse creation date from snapshot name if it matches pattern
+	if snapName, ok := snap["snapshot_name"].(string); ok {
+		if parsedDate := parseSnapshotDate(snapName); parsedDate != "" {
+			summary["created_date"] = parsedDate
+		}
+	}
+
+	// Add createtxg for reference
+	if txg, ok := snap["createtxg"].(string); ok {
+		summary["createtxg"] = txg
+	}
+
+	// Count holds and extract names
+	if holds, ok := snap["holds"].(map[string]interface{}); ok {
+		if len(holds) > 0 {
+			summary["holds_count"] = len(holds)
+			holdNames := make([]string, 0, len(holds))
+			for name := range holds {
+				holdNames = append(holdNames, name)
+			}
+			summary["holds"] = holdNames
+		}
+	}
+
+	// Include full snapshot ID for reference
+	if id, ok := snap["id"].(string); ok {
+		summary["full_name"] = id
+	}
+
+	return summary
+}
+
+// parseSnapshotDate attempts to extract date information from snapshot names
+func parseSnapshotDate(name string) string {
+	// Common patterns used by automatic snapshot tasks
+	patterns := []struct {
+		layout string
+		prefix string
+	}{
+		{"2006-01-02_15-04", "auto-"},    // auto-YYYY-MM-DD_HH-MM
+		{"2006-01-02", "auto-"},          // auto-YYYY-MM-DD
+		{"2006-01-02_15-04", ""},         // YYYY-MM-DD_HH-MM
+		{"2006-01-02", ""},               // YYYY-MM-DD
+		{"20060102-1504", "auto-"},       // auto-YYYYMMDD-HHMM
+		{"20060102", "auto-"},            // auto-YYYYMMDD
+		{"2006-01-02_15-04-05", "auto-"}, // auto-YYYY-MM-DD_HH-MM-SS
+		{"2006-01-02_1504", ""},          // YYYY-MM-DD_HHMM
+	}
+
+	for _, p := range patterns {
+		// Try to extract date substring
+		dateStr := name
+		if p.prefix != "" && strings.HasPrefix(name, p.prefix) {
+			dateStr = strings.TrimPrefix(name, p.prefix)
+		}
+
+		// Try parsing with this layout
+		if t, err := time.Parse(p.layout, dateStr); err == nil {
+			return t.Format("2006-01-02 15:04")
+		}
+
+		// Also try just the first part before any underscore
+		if idx := strings.Index(dateStr, "_"); idx > 0 {
+			if t, err := time.Parse("2006-01-02", dateStr[:idx]); err == nil {
+				return t.Format("2006-01-02")
+			}
+		}
+	}
+
+	return "" // No date found
+}
+
+// sortSnapshots sorts a slice of simplified snapshots by the specified field
+func sortSnapshots(snapshots []map[string]interface{}, orderBy string) {
+	sort.Slice(snapshots, func(i, j int) bool {
+		switch orderBy {
+		case "name":
+			// Sort by snapshot_name descending (newest automatic snapshots first)
+			iName, iOk := snapshots[i]["snapshot_name"].(string)
+			jName, jOk := snapshots[j]["snapshot_name"].(string)
+			if iOk && jOk {
+				return iName > jName // Descending
+			}
+			return false
+		case "dataset":
+			// Sort by dataset path alphabetically ascending
+			iDataset, iOk := snapshots[i]["dataset"].(string)
+			jDataset, jOk := snapshots[j]["dataset"].(string)
+			if iOk && jOk {
+				return iDataset < jDataset
+			}
+			return false
+		case "created":
+			// Sort by parsed created_date descending, fallback to name
+			iCreated, iOk := snapshots[i]["created_date"].(string)
+			jCreated, jOk := snapshots[j]["created_date"].(string)
+			if iOk && jOk {
+				return iCreated > jCreated
+			}
+			// Fallback to name comparison
+			iName, iOk := snapshots[i]["snapshot_name"].(string)
+			jName, jOk := snapshots[j]["snapshot_name"].(string)
+			if iOk && jOk {
+				return iName > jName
+			}
+			return false
+		default:
+			// Default to name descending
+			iName, iOk := snapshots[i]["snapshot_name"].(string)
+			jName, jOk := snapshots[j]["snapshot_name"].(string)
+			if iOk && jOk {
+				return iName > jName
+			}
+			return false
+		}
+	})
 }
 
 // Alert management handlers

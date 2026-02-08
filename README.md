@@ -17,6 +17,13 @@ Read-only tools for common TrueNAS operations:
   - Limit results for manageable responses (default: 50, configurable)
   - Shows capacity (used/available), compression ratios, encryption status, usage breakdown
   - Perfect for questions like "what datasets use the most space?" or "show me encrypted datasets"
+- **query_snapshots** - Query ZFS snapshots with intelligent filtering and sorting
+  - Returns simplified snapshot information with creation date, dataset, and holds status
+  - Filter by dataset name, pool name, or holds presence
+  - Sort by snapshot name (default, newest first), dataset, or parsed creation date
+  - Limit results for manageable responses (default: 50, configurable)
+  - Shows snapshot names, parent datasets, creation dates (parsed from names), and holds
+  - Perfect for questions like "what recent snapshots exist?" or "show snapshots with holds"
 - **query_shares** - Query SMB and NFS share configurations
 - **list_alerts** - List system alerts with filtering
 - **dismiss_alert** / **restore_alert** - Manage system alerts
@@ -318,6 +325,14 @@ Once connected via an MCP client:
 - "List datasets sorted by available space"
 - "What's taking up space in my replications dataset?"
 - "What SMB shares are configured?"
+
+**Snapshots:**
+- "Show me all snapshots in the tank pool"
+- "What are the 20 most recent snapshots?"
+- "List snapshots for the tank/shares/data dataset"
+- "Show me snapshots that have holds"
+- "What snapshots exist for my important datasets?"
+- "List snapshots created by automatic snapshot tasks"
 
 **Performance:**
 - "Show me CPU and memory usage over the past day"
