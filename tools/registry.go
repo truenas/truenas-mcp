@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -155,13 +156,26 @@ func (r *Registry) registerTools() {
 	r.tools["query_datasets"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_datasets",
-			Description: "Query datasets with optional filtering. Provide 'pool' parameter to filter by pool name.",
+			Description: "Query datasets with optional filtering and sorting. Returns simplified dataset information with capacity, encryption status, and usage details. Use 'limit' to control result size, 'order_by' to sort by size, and 'encrypted_only' to filter.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"pool": map[string]interface{}{
 						"type":        "string",
 						"description": "Optional: Filter datasets by pool name",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional: Maximum number of datasets to return (default: 50 for manageable response size)",
+					},
+					"order_by": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: Sort by 'used' (space usage), 'available', or 'name' (default: used descending)",
+						"enum":        []string{"used", "available", "name"},
+					},
+					"encrypted_only": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Optional: Return only encrypted datasets (default: false)",
 					},
 				},
 			},
@@ -712,13 +726,18 @@ func handleQueryPools(client *truenas.Client, args map[string]interface{}) (stri
 }
 
 func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (string, error) {
-	// Build query filters
-	var filters []interface{}
+	// Build query filters - initialize as empty array, not nil (API expects [] not null)
+	filters := []interface{}{}
 	if pool, ok := args["pool"].(string); ok && pool != "" {
-		filters = append(filters, []interface{}{"name", "^", pool})
+		filters = []interface{}{
+			[]interface{}{"name", "^", pool},
+		}
 	}
 
-	result, err := client.Call("pool.dataset.query", filters)
+	// Options parameter (required by API even if empty)
+	options := map[string]interface{}{}
+
+	result, err := client.Call("pool.dataset.query", filters, options)
 	if err != nil {
 		return "", err
 	}
@@ -728,12 +747,200 @@ func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (s
 		return "", fmt.Errorf("failed to parse datasets: %w", err)
 	}
 
-	formatted, err := json.MarshalIndent(datasets, "", "  ")
+	// Simplify response
+	simplified := make([]map[string]interface{}, 0, len(datasets))
+	for _, ds := range datasets {
+		summary := simplifyDataset(ds)
+		simplified = append(simplified, summary)
+	}
+
+	// Filter by encryption status if requested
+	if encryptedOnly, ok := args["encrypted_only"].(bool); ok && encryptedOnly {
+		filtered := make([]map[string]interface{}, 0)
+		for _, ds := range simplified {
+			if encrypted, ok := ds["encrypted"].(bool); ok && encrypted {
+				filtered = append(filtered, ds)
+			}
+		}
+		simplified = filtered
+	}
+
+	// Sort datasets
+	orderBy := "used" // default to sorting by space usage
+	if order, ok := args["order_by"].(string); ok && order != "" {
+		orderBy = order
+	}
+	sortDatasets(simplified, orderBy)
+
+	// Apply limit (default to 50 for manageable response size)
+	limit := 50
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	if len(simplified) > limit {
+		simplified = simplified[:limit]
+	}
+
+	// Add metadata wrapper
+	response := map[string]interface{}{
+		"datasets":       simplified,
+		"dataset_count":  len(simplified),
+		"total_datasets": len(datasets),
+	}
+	if pool, ok := args["pool"].(string); ok && pool != "" {
+		response["pool_filter"] = pool
+	}
+	if len(simplified) < len(datasets) {
+		response["note"] = fmt.Sprintf("Showing %d of %d datasets (limited)", len(simplified), len(datasets))
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
 
 	return string(formatted), nil
+}
+
+// simplifyDataset extracts the most relevant fields from a raw dataset object
+func simplifyDataset(ds map[string]interface{}) map[string]interface{} {
+	summary := map[string]interface{}{
+		"name": ds["name"],
+		"type": ds["type"],
+		"pool": ds["pool"],
+	}
+
+	// Helper to extract parsed value from property object
+	getParsed := func(prop interface{}) interface{} {
+		if propMap, ok := prop.(map[string]interface{}); ok {
+			return propMap["parsed"]
+		}
+		return nil
+	}
+
+	// Helper to extract human-readable value from property object
+	getValue := func(prop interface{}) interface{} {
+		if propMap, ok := prop.(map[string]interface{}); ok {
+			if val := propMap["value"]; val != nil {
+				return val
+			}
+			return propMap["parsed"]
+		}
+		return nil
+	}
+
+	// Mountpoint (direct field, not nested)
+	if mp, ok := ds["mountpoint"].(string); ok && mp != "" {
+		summary["mountpoint"] = mp
+	}
+
+	// Capacity fields (CRITICAL for user queries)
+	if used := getParsed(ds["used"]); used != nil {
+		summary["used_bytes"] = used
+		summary["used"] = getValue(ds["used"]) // Human readable like "1008.3 GiB"
+	}
+	if avail := getParsed(ds["available"]); avail != nil {
+		summary["available_bytes"] = avail
+		summary["available"] = getValue(ds["available"]) // Human readable like "5.87 TiB"
+	}
+
+	// Usage breakdown (useful for understanding where space goes)
+	if snapUsed := getParsed(ds["usedbysnapshots"]); snapUsed != nil {
+		if bytes, ok := snapUsed.(float64); ok && bytes > 0 {
+			summary["used_by_snapshots"] = getValue(ds["usedbysnapshots"])
+		}
+	}
+	if dsUsed := getParsed(ds["usedbydataset"]); dsUsed != nil {
+		summary["used_by_dataset"] = getValue(ds["usedbydataset"])
+	}
+	if childUsed := getParsed(ds["usedbychildren"]); childUsed != nil {
+		if bytes, ok := childUsed.(float64); ok && bytes > 0 {
+			summary["used_by_children"] = getValue(ds["usedbychildren"])
+		}
+	}
+
+	// Compression
+	if comp := getParsed(ds["compression"]); comp != nil {
+		summary["compression"] = comp
+		if ratio := getParsed(ds["compressratio"]); ratio != nil {
+			summary["compression_ratio"] = ratio
+		}
+	}
+
+	// Deduplication (only if enabled)
+	if dedup := getParsed(ds["deduplication"]); dedup != nil {
+		if dedupStr, ok := dedup.(string); ok && dedupStr != "off" {
+			summary["deduplication"] = dedup
+		}
+	}
+
+	// Quotas (only if set)
+	if quota := getParsed(ds["quota"]); quota != nil {
+		summary["quota"] = getValue(ds["quota"])
+	}
+	if refquota := getParsed(ds["refquota"]); refquota != nil {
+		summary["refquota"] = getValue(ds["refquota"])
+	}
+
+	// Encryption
+	if encrypted, ok := ds["encrypted"].(bool); ok {
+		summary["encrypted"] = encrypted
+		if encrypted {
+			if locked, ok := ds["locked"].(bool); ok {
+				summary["locked"] = locked
+			}
+			if keyLoaded, ok := ds["key_loaded"].(bool); ok && keyLoaded {
+				summary["key_loaded"] = keyLoaded
+			}
+		}
+	}
+
+	// Children count (useful for understanding hierarchy)
+	if children, ok := ds["children"].([]interface{}); ok {
+		summary["children_count"] = len(children)
+	}
+
+	return summary
+}
+
+// sortDatasets sorts a slice of simplified datasets by the specified field
+func sortDatasets(datasets []map[string]interface{}, orderBy string) {
+	sort.Slice(datasets, func(i, j int) bool {
+		switch orderBy {
+		case "used":
+			// Sort by used_bytes descending (largest first)
+			iUsed, iOk := datasets[i]["used_bytes"].(float64)
+			jUsed, jOk := datasets[j]["used_bytes"].(float64)
+			if iOk && jOk {
+				return iUsed > jUsed
+			}
+			return false
+		case "available":
+			// Sort by available_bytes descending (most available first)
+			iAvail, iOk := datasets[i]["available_bytes"].(float64)
+			jAvail, jOk := datasets[j]["available_bytes"].(float64)
+			if iOk && jOk {
+				return iAvail > jAvail
+			}
+			return false
+		case "name":
+			// Sort by name alphabetically
+			iName, iOk := datasets[i]["name"].(string)
+			jName, jOk := datasets[j]["name"].(string)
+			if iOk && jOk {
+				return iName < jName
+			}
+			return false
+		default:
+			// Default to name
+			iName, iOk := datasets[i]["name"].(string)
+			jName, jOk := datasets[j]["name"].(string)
+			if iOk && jOk {
+				return iName < jName
+			}
+			return false
+		}
+	})
 }
 
 func handleQueryShares(client *truenas.Client, args map[string]interface{}) (string, error) {

@@ -10,7 +10,13 @@ Read-only tools for common TrueNAS operations:
 - **system_health** - Check system health including alerts, active jobs, and capacity warnings
 - **query_jobs** - Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs)
 - **query_pools** - Query storage pools with status and capacity
-- **query_datasets** - Query datasets with optional pool filtering
+- **query_datasets** - Query datasets with intelligent filtering and sorting
+  - Returns simplified, human-readable dataset information (~15 fields instead of 40+)
+  - Filter by pool name, encryption status
+  - Sort by space usage (default), available space, or name
+  - Limit results for manageable responses (default: 50, configurable)
+  - Shows capacity (used/available), compression ratios, encryption status, usage breakdown
+  - Perfect for questions like "what datasets use the most space?" or "show me encrypted datasets"
 - **query_shares** - Query SMB and NFS share configurations
 - **list_alerts** - List system alerts with filtering
 - **dismiss_alert** / **restore_alert** - Manage system alerts
@@ -306,7 +312,11 @@ Once connected via an MCP client:
 
 **Storage:**
 - "Show me all storage pools and their health status"
-- "List all datasets in the tank pool"
+- "What are the top 10 datasets using the most space?"
+- "Which datasets are encrypted?"
+- "Show me datasets in the tank pool"
+- "List datasets sorted by available space"
+- "What's taking up space in my replications dataset?"
 - "What SMB shares are configured?"
 
 **Performance:**
