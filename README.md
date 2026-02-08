@@ -91,6 +91,37 @@ Write operations (requires confirmation):
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations
 
+System update and maintenance operations:
+
+- **check_updates** - Check for available TrueNAS system updates
+  - Queries TrueNAS update servers for new versions
+  - Shows available update details and release notes
+  - No system changes, safe to run anytime
+
+- **download_update** - Download TrueNAS system update files
+  - Downloads update files to the system
+  - Supports dry-run mode to preview what will be downloaded
+  - Returns a task ID for tracking download progress
+  - Does not apply the update (use apply_update after download completes)
+
+- **apply_update** - Apply downloaded TrueNAS system update
+  - Applies previously downloaded system update
+  - Optional automatic reboot after update (default: false for safety)
+  - Supports dry-run mode to preview update actions
+  - Returns a task ID for tracking update progress
+  - **WARNING**: This will update your TrueNAS system - ensure backups are current
+
+- **update_status** - Get current system update status and progress
+  - Shows download/apply progress for in-progress updates
+  - Displays current system version and available updates
+  - Useful for monitoring long-running update operations
+
+- **system_reboot** - Reboot the TrueNAS system
+  - Performs a clean system reboot
+  - Disconnects all active sessions and services
+  - Use after applying system updates that require a reboot
+  - **WARNING**: This will interrupt all services and disconnect clients
+
 Task management tools (for long-running operations):
 
 - **tasks_list** - List all active and recent tasks
@@ -394,6 +425,15 @@ Once connected via an MCP client:
 - "What apps are installed and running?"
 - "Are there any app updates available?"
 - "Upgrade the plex app to the latest version"
+
+**System Updates:**
+- "Check if there are any TrueNAS system updates available"
+- "What version of TrueNAS am I running?"
+- "Download the latest TrueNAS system update"
+- "What's the status of my system update?"
+- "Apply the downloaded system update"
+- "Apply the update and reboot the system"
+- "Reboot the TrueNAS system"
 
 **Dataset Creation:**
 - "Create a new dataset for file sharing"
