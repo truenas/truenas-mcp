@@ -4,14 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/truenas/truenas-mcp/mcp"
+	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
 type Registry struct {
-	client *truenas.Client
-	tools  map[string]Tool
+	client      *truenas.Client
+	taskManager *tasks.Manager
+	tools       map[string]Tool
 }
 
 type Tool struct {
@@ -19,10 +22,11 @@ type Tool struct {
 	Handler    func(*truenas.Client, map[string]interface{}) (string, error)
 }
 
-func NewRegistry(client *truenas.Client) *Registry {
+func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
 	r := &Registry{
-		client: client,
-		tools:  make(map[string]Tool),
+		client:      client,
+		taskManager: taskManager,
+		tools:       make(map[string]Tool),
 	}
 	r.registerTools()
 	return r
@@ -265,7 +269,7 @@ func (r *Registry) registerTools() {
 	r.tools["upgrade_app"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "upgrade_app",
-			Description: "Upgrade an application to a newer version. This is a write operation that modifies the system.",
+			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress. This is a write operation that modifies the system.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -283,11 +287,16 @@ func (r *Registry) registerTools() {
 						"description": "Create snapshots of host volumes before upgrade (default: true for safety)",
 						"default":     true,
 					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview changes without executing (default: false)",
+						"default":     false,
+					},
 				},
 				"required": []string{"app_name"},
 			},
 		},
-		Handler: handleUpgradeApp,
+		Handler: r.handleUpgradeAppWithDryRun,
 	}
 
 	// Query jobs
@@ -359,6 +368,47 @@ func (r *Registry) registerTools() {
 			},
 		},
 		Handler: handleGetPoolCapacityDetails,
+	}
+
+	// Task management tools
+	r.tools["tasks_list"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "tasks_list",
+			Description: "List all active and recent tasks. Tasks represent long-running operations like app upgrades.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"cursor": map[string]interface{}{
+						"type":        "string",
+						"description": "Pagination cursor from previous response",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum number of tasks to return (default: 50)",
+						"default":     50,
+					},
+				},
+			},
+		},
+		Handler: r.handleTasksList,
+	}
+
+	r.tools["tasks_get"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "tasks_get",
+			Description: "Get detailed status of a specific task by ID. Use this to track progress of long-running operations.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Task ID to retrieve",
+					},
+				},
+				"required": []string{"task_id"},
+			},
+		},
+		Handler: r.handleTasksGet,
 	}
 }
 
@@ -1119,7 +1169,7 @@ func handleQueryApps(client *truenas.Client, args map[string]interface{}) (strin
 	return string(formatted), nil
 }
 
-func handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (string, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return "", fmt.Errorf("app_name is required")
@@ -1143,7 +1193,8 @@ func handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (stri
 		return "", fmt.Errorf("failed to get upgrade summary: %w", err)
 	}
 
-	var summary map[string]interface{}
+	// Parse summary - can be either object or array depending on TrueNAS version/app
+	var summary interface{}
 	if err := json.Unmarshal(summaryResult, &summary); err != nil {
 		return "", fmt.Errorf("failed to parse upgrade summary: %w", err)
 	}
@@ -1165,12 +1216,26 @@ func handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (stri
 		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
+	// Create task to track upgrade progress
+	task, err := r.taskManager.CreateJobTask(
+		"upgrade_app",
+		args,
+		jobID,
+		1*time.Hour, // 1 hour TTL
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
+	}
+
 	response := map[string]interface{}{
 		"app_name":         appName,
 		"upgrade_summary":  summary,
+		"task_id":          task.TaskID,
+		"task_status":      task.Status,
+		"poll_interval":    task.PollInterval,
 		"job_id":           jobID,
 		"snapshot_created": snapshotHostpaths,
-		"message":          fmt.Sprintf("Upgrade job started with ID %d. Use query_jobs to track progress.", jobID),
+		"message":          fmt.Sprintf("Upgrade started. Track progress with tasks_get using task_id: %s", task.TaskID),
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -1179,6 +1244,113 @@ func handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (stri
 	}
 
 	return string(formatted), nil
+}
+
+// handleUpgradeAppWithDryRun wraps the upgrade handler with dry-run support
+func (r *Registry) handleUpgradeAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(client, args, &upgradeAppDryRun{}, r.handleUpgradeApp)
+}
+
+// upgradeAppDryRun implements dry-run preview for app upgrades
+type upgradeAppDryRun struct{}
+
+func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return nil, fmt.Errorf("app_name is required")
+	}
+
+	version := "latest"
+	if v, ok := args["version"].(string); ok && v != "" {
+		version = v
+	}
+
+	snapshotHostpaths := true
+	if s, ok := args["snapshot_hostpaths"].(bool); ok {
+		snapshotHostpaths = s
+	}
+
+	// Get current app state
+	currentResult, err := client.Call("app.query", []interface{}{
+		[]interface{}{"name", "=", appName},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query app: %w", err)
+	}
+
+	var apps []map[string]interface{}
+	if err := json.Unmarshal(currentResult, &apps); err != nil {
+		return nil, fmt.Errorf("failed to parse app query: %w", err)
+	}
+
+	if len(apps) == 0 {
+		return nil, fmt.Errorf("app %s not found", appName)
+	}
+	currentApp := apps[0]
+
+	// Get upgrade summary
+	summaryResult, err := client.Call("app.upgrade_summary", appName, map[string]interface{}{
+		"app_version": version,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get upgrade summary: %w", err)
+	}
+
+	// Parse summary - can be either object or array depending on TrueNAS version/app
+	var summary interface{}
+	if err := json.Unmarshal(summaryResult, &summary); err != nil {
+		return nil, fmt.Errorf("failed to parse upgrade summary: %w", err)
+	}
+
+	// Build current state
+	currentState := map[string]interface{}{
+		"name":    currentApp["name"],
+		"version": currentApp["human_version"],
+		"state":   currentApp["state"],
+	}
+
+	// Build planned actions
+	actions := []PlannedAction{
+		{
+			Step:        1,
+			Description: "Stop application containers",
+			Operation:   "stop",
+			Target:      appName,
+		},
+		{
+			Step:        2,
+			Description: fmt.Sprintf("Upgrade from %v to %v", currentApp["human_version"], version),
+			Operation:   "upgrade",
+			Target:      appName,
+			Details:     summary,
+		},
+		{
+			Step:        3,
+			Description: "Start application with new version",
+			Operation:   "start",
+			Target:      appName,
+		},
+	}
+
+	result := &DryRunResult{
+		Tool:           "upgrade_app",
+		CurrentState:   currentState,
+		PlannedActions: actions,
+		EstimatedTime: &EstimatedTime{
+			MinSeconds: 30,
+			MaxSeconds: 300,
+			Note:       "Time varies based on image size and network speed",
+		},
+	}
+
+	// Add warnings if no snapshot
+	if !snapshotHostpaths {
+		result.Warnings = []string{
+			"WARNING: snapshot_hostpaths is disabled. No backup will be created before upgrade.",
+		}
+	}
+
+	return result, nil
 }
 
 func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (string, error) {
@@ -2078,4 +2250,48 @@ func analyzeDatasetCapacity(datasets []map[string]interface{}) []map[string]inte
 	}
 
 	return analysis
+}
+
+// handleTasksList lists all active and recent tasks
+func (r *Registry) handleTasksList(client *truenas.Client, args map[string]interface{}) (string, error) {
+	cursor := ""
+	if c, ok := args["cursor"].(string); ok {
+		cursor = c
+	}
+
+	limit := 50
+	if l, ok := args["limit"].(float64); ok {
+		limit = int(l)
+	}
+
+	taskList, nextCursor, err := r.taskManager.List(cursor, limit)
+	if err != nil {
+		return "", fmt.Errorf("failed to list tasks: %w", err)
+	}
+
+	response := map[string]interface{}{
+		"tasks": taskList,
+	}
+	if nextCursor != "" {
+		response["next_cursor"] = nextCursor
+	}
+
+	formatted, _ := json.MarshalIndent(response, "", "  ")
+	return string(formatted), nil
+}
+
+// handleTasksGet retrieves a specific task by ID
+func (r *Registry) handleTasksGet(client *truenas.Client, args map[string]interface{}) (string, error) {
+	taskID, ok := args["task_id"].(string)
+	if !ok || taskID == "" {
+		return "", fmt.Errorf("task_id is required")
+	}
+
+	task, err := r.taskManager.Get(taskID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get task: %w", err)
+	}
+
+	formatted, _ := json.MarshalIndent(task, "", "  ")
+	return string(formatted), nil
 }

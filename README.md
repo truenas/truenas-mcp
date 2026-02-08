@@ -40,6 +40,15 @@ Capacity planning and analysis tools:
 Write operations (requires confirmation):
 
 - **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup
+  - Supports dry-run mode to preview changes before execution
+  - Returns a task ID for tracking long-running operations
+
+Task management tools (for long-running operations):
+
+- **tasks_list** - List all active and recent tasks
+- **tasks_get** - Get detailed status of a specific task by ID
+  - Automatic background polling of TrueNAS job status
+  - Tasks update automatically without manual polling
 
 ## Architecture
 
@@ -317,6 +326,97 @@ Once connected via an MCP client:
 - "What apps are installed and running?"
 - "Are there any app updates available?"
 - "Upgrade the plex app to the latest version"
+
+**Task Management:**
+- "Show me all active tasks"
+- "What's the status of task abc123?"
+- "Check the progress of my app upgrade"
+
+**Dry-Run Mode:**
+- "Show me what would happen if I upgrade the plex app"
+- "Preview the changes before upgrading nextcloud"
+
+## Advanced Features
+
+### MCP Tasks for Long-Running Operations
+
+The server implements MCP Tasks specification for operations that take time to complete (like app upgrades):
+
+**How it works:**
+1. Write operations (like `upgrade_app`) return a `task_id` instead of blocking
+2. Tasks are automatically tracked in the background
+3. Use `tasks_get` with the task ID to check progress
+4. Tasks update automatically - no manual polling needed
+
+**Example:**
+```
+User: "Upgrade the plex app"
+→ Returns: {"task_id": "abc-123", "status": "working", ...}
+
+User: "Check task abc-123"
+→ Returns: {"status": "completed", "result": {...}}
+```
+
+**Task States:**
+- `working` - Operation in progress
+- `completed` - Operation finished successfully
+- `failed` - Operation encountered an error
+- `cancelled` - Operation was cancelled
+
+### Dry-Run Mode for Write Operations
+
+Write operations support previewing changes before execution:
+
+**How to use:**
+Add `"dry_run": true` to any write operation to preview what would happen without making changes.
+
+**Example:**
+```
+Tool: upgrade_app
+Args: {"app_name": "plex", "dry_run": true}
+
+Returns:
+{
+  "tool": "upgrade_app",
+  "current_state": {
+    "name": "plex",
+    "version": "1.32.5.7349",
+    "state": "RUNNING"
+  },
+  "planned_actions": [
+    {
+      "step": 1,
+      "description": "Stop application containers",
+      "operation": "stop",
+      "target": "plex"
+    },
+    {
+      "step": 2,
+      "description": "Upgrade from 1.32.5.7349 to latest",
+      "operation": "upgrade",
+      "target": "plex"
+    },
+    {
+      "step": 3,
+      "description": "Start application with new version",
+      "operation": "start",
+      "target": "plex"
+    }
+  ],
+  "warnings": [],
+  "estimated_time": {
+    "min_seconds": 30,
+    "max_seconds": 300,
+    "note": "Time varies based on image size and network speed"
+  }
+}
+```
+
+**Benefits:**
+- See exactly what will change before committing
+- Understand prerequisites and warnings
+- Get time estimates for operations
+- Build confidence before making changes
 
 ## Limitations
 

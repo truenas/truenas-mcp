@@ -95,6 +95,10 @@ func (c *Client) connect() error {
 		c.conn = conn
 		c.authenticated = false
 
+		// Set read limit to handle large responses (e.g., large upgrade summaries)
+		// Default is 512KB, set to 10MB to handle large responses from TrueNAS
+		c.conn.SetReadLimit(10 * 1024 * 1024) // 10MB
+
 		// Send connect message as per TrueNAS WebSocket protocol
 		connectMsg := ConnectRequest{
 			Msg:     "connect",

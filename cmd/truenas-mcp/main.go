@@ -9,8 +9,10 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/truenas/truenas-mcp/mcp"
+	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/tools"
 	"github.com/truenas/truenas-mcp/truenas"
 )
@@ -68,8 +70,18 @@ func main() {
 	}
 	log.Println("Successfully authenticated with TrueNAS middleware")
 
+	// Create task manager
+	taskConfig := tasks.PollerConfig{
+		PollInterval:    5 * time.Second,
+		MaxPollAttempts: 0, // Unlimited
+		CleanupInterval: 1 * time.Minute,
+	}
+	taskManager := tasks.NewManager(client, taskConfig)
+	taskManager.Start()
+	defer taskManager.Shutdown()
+
 	// Create tool registry
-	registry := tools.NewRegistry(client)
+	registry := tools.NewRegistry(client, taskManager)
 
 	// Start stdio handler
 	handler := NewStdioHandler(registry, *debug)
@@ -164,7 +176,9 @@ func (h *StdioHandler) handleInitialize(req *mcp.Request) *mcp.Response {
 			Version: Version,
 		},
 		Capabilities: mcp.Capabilities{
-			Tools: map[string]interface{}{},
+			Tools: map[string]interface{}{
+				"listChanged": false,
+			},
 		},
 	}
 
