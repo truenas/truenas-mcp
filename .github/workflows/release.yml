@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run linters
+      run: make lint
+
+    - name: Run tests
+      run: make test
+
+    - name: Build for macOS ARM64
+      run: GOOS=darwin GOARCH=arm64 go build -o truenas-mcp-darwin-arm64 ./cmd/truenas-mcp
+
+    - name: Build for Windows AMD64
+      run: GOOS=windows GOARCH=amd64 go build -o truenas-mcp-windows-amd64.exe ./cmd/truenas-mcp
+
+    - name: Build for Linux AMD64
+      run: GOOS=linux GOARCH=amd64 go build -o truenas-mcp-linux-amd64 ./cmd/truenas-mcp
+
+    - name: Package binaries
+      run: |
+        tar -czf truenas-mcp-darwin-arm64.tar.gz truenas-mcp-darwin-arm64
+        tar -czf truenas-mcp-linux-amd64.tar.gz truenas-mcp-linux-amd64
+        zip truenas-mcp-windows-amd64.zip truenas-mcp-windows-amd64.exe
+
+    - name: Generate checksums
+      run: |
+        sha256sum truenas-mcp-darwin-arm64.tar.gz > checksums.txt
+        sha256sum truenas-mcp-linux-amd64.tar.gz >> checksums.txt
+        sha256sum truenas-mcp-windows-amd64.zip >> checksums.txt
+
+    - name: Extract release notes
+      id: release_notes
+      run: |
+        TAG_NAME=${GITHUB_REF#refs/tags/}
+        echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+        echo "Release $TAG_NAME" > release_notes.md
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ steps.release_notes.outputs.tag_name }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: false
+        files: |
+          truenas-mcp-darwin-arm64.tar.gz
+          truenas-mcp-linux-amd64.tar.gz
+          truenas-mcp-windows-amd64.zip
+          checksums.txt
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
