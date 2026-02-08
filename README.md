@@ -24,6 +24,13 @@ Read-only tools for common TrueNAS operations:
   - Limit results for manageable responses (default: 50, configurable)
   - Shows snapshot names, parent datasets, creation dates (parsed from names), and holds
   - Perfect for questions like "what recent snapshots exist?" or "show snapshots with holds"
+- **query_vms** - Query virtual machines with intelligent filtering and sorting
+  - Returns simplified VM information with resource allocation, status, and device summary
+  - Filter by VM name (partial match), state (RUNNING/STOPPED), or autostart setting
+  - Sort by name (default, alphabetical), memory usage, or status (running first)
+  - Shows CPU/memory config, bootloader, devices (disks, NICs, displays), and current state
+  - Automatically excludes sensitive data like display passwords for security
+  - Perfect for questions like "what VMs are running?" or "show VMs with autostart enabled"
 - **query_shares** - Query SMB and NFS share configurations
 - **list_alerts** - List system alerts with filtering
 - **dismiss_alert** / **restore_alert** - Manage system alerts
@@ -333,6 +340,14 @@ Once connected via an MCP client:
 - "Show me snapshots that have holds"
 - "What snapshots exist for my important datasets?"
 - "List snapshots created by automatic snapshot tasks"
+
+**Virtual Machines:**
+- "What VMs are currently running?"
+- "Show me all virtual machines"
+- "List VMs that are set to autostart"
+- "What's the memory allocation for my VMs?"
+- "Show me details for the homeassistant VM"
+- "Which VMs are stopped?"
 
 **Performance:**
 - "Show me CPU and memory usage over the past day"
