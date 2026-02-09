@@ -117,6 +117,33 @@ Write operations (requires confirmation):
 
 System update and maintenance operations:
 
+**Recommended System Update Workflow**:
+
+1. **Before Update**: Check current state
+   - Check for TrueNAS system updates (`check_updates`)
+   - Check current boot environment (`get_current_boot_environment`)
+   - List boot environments to know baseline (`query_boot_environments`)
+
+2. **Download Update**: Get update files
+   - Download update (dry run first for preview: `download_update` with `dry_run: true`)
+   - Monitor progress with `update_status`
+
+3. **Apply Update**: Install and reboot
+   - Apply update (dry run first: `apply_update` with `dry_run: true`)
+   - Apply update with reboot (`apply_update` with `reboot: true`)
+
+4. **After Update**: Verify new system
+   - Check system health (`system_health`)
+   - List boot environments (verify new one exists: `query_boot_environments`)
+   - Test system functionality
+
+5. **Cleanup** (optional, after verifying system works):
+   - List deletable boot environments (`query_boot_environments` with `show_deletable_only: true`)
+   - Delete old boot environments (dry run first: `delete_boot_environment` with `dry_run: true`)
+   - Keep at least 2-3 boot environments for recovery
+
+**Available Tools**:
+
 - **check_updates** - Check for available TrueNAS system updates
   - Queries TrueNAS update servers for new versions
   - Shows available update details and release notes
@@ -133,6 +160,7 @@ System update and maintenance operations:
   - Optional automatic reboot after update (default: false for safety)
   - Supports dry-run mode to preview update actions
   - Returns a task ID for tracking update progress
+  - Creates a new boot environment automatically
   - **WARNING**: This will update your TrueNAS system - ensure backups are current
 
 - **update_status** - Get current system update status and progress
@@ -145,6 +173,25 @@ System update and maintenance operations:
   - Disconnects all active sessions and services
   - Use after applying system updates that require a reboot
   - **WARNING**: This will interrupt all services and disconnect clients
+
+Boot environment management:
+
+- **query_boot_environments** - Query TrueNAS boot environments
+  - Filter by name, show only protected or deletable environments
+  - Sort by name, creation date (default), or size
+  - Shows which are active/activated/protected/deletable
+  - Displays deletion blockers and storage summary
+  - Perfect for "what old boot environments can I clean up?"
+
+- **delete_boot_environment** - Delete a boot environment
+  - Dry-run mode shows what will be deleted and space freed
+  - Safety checks prevent deleting active/activated/protected
+  - Recommends keeping 2-3 boot environments for recovery
+  - **WARNING**: Permanent and irreversible
+
+- **get_current_boot_environment** - Quick reference
+  - Shows currently running boot environment
+  - Shows which will boot on next restart
 
 Task management tools (for long-running operations):
 
@@ -491,6 +538,16 @@ Once connected via an MCP client:
 - "Apply the downloaded system update"
 - "Apply the update and reboot the system"
 - "Reboot the TrueNAS system"
+
+**Managing Boot Environments:**
+- "Which boot environments do I have?"
+- "What boot environment am I currently running?"
+- "Show me boot environments that are safe to delete"
+- "How much space are boot environments using?"
+- "Delete boot environment '23.10-MASTER-20231015-120000' (dry run first)"
+- "Delete boot environment '23.10-MASTER-20231015-120000'"
+- "Show me the 10 oldest boot environments"
+- "Which boot environments are protected?"
 
 **Dataset Creation:**
 - "Create a new dataset for file sharing"
