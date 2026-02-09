@@ -193,6 +193,41 @@ Boot environment management:
   - Shows currently running boot environment
   - Shows which will boot on next restart
 
+Pool scrub management:
+
+- **query_scrub_schedules** - List all scrub schedules
+  - Filter by pool name or enabled status
+  - Shows schedule details and next run time
+  - View all scheduled maintenance at a glance
+  - Human-readable cron schedule descriptions
+
+- **get_scrub_status** - Comprehensive scrub status
+  - Shows current scrub progress if running
+  - Displays last scrub date and results
+  - Lists next scheduled scrub times
+  - Combines schedule and runtime info in one view
+  - Perfect for "when was tank last scrubbed?"
+
+- **create_scrub_schedule** - Schedule automatic scrubs
+  - Weekly, monthly, or custom cron schedules
+  - Dry-run mode to preview configuration
+  - Validates pool exists and schedule is valid
+  - Recommends optimal timing (off-peak hours)
+  - Best practices: Weekly for production, monthly for home use
+
+- **run_scrub** - Manually start a scrub
+  - Returns task ID for progress tracking
+  - Safety checks prevent double-scrubbing
+  - Dry-run shows estimated duration and impact
+  - Integrates with task manager for monitoring
+  - Use before backups or after hardware changes
+
+- **delete_scrub_schedule** - Remove scrub schedule
+  - Dry-run shows what will be removed
+  - Warns about loss of automatic scrubbing
+  - Recommends manual scrub frequency
+  - **WARNING**: Pool will no longer auto-scrub
+
 Task management tools (for long-running operations):
 
 - **tasks_list** - List all active and recent tasks
@@ -549,6 +584,19 @@ Once connected via an MCP client:
 - "Show me the 10 oldest boot environments"
 - "Which boot environments are protected?"
 
+**Managing Pool Scrubs:**
+- "What's the scrub status of my pools?"
+- "When was tank last scrubbed?"
+- "Show me all scrub schedules"
+- "Is there a scrub running on tank?"
+- "Create a weekly scrub schedule for tank on Sunday at 2am"
+- "Create a monthly scrub for flash on the 1st at 3am"
+- "Start a scrub on tank"
+- "Check progress of my scrub"
+- "Delete the scrub schedule for flash"
+- "How often should I scrub my pools?"
+- "What's the recommended scrub frequency for home use?"
+
 **Dataset Creation:**
 - "Create a new dataset for file sharing"
 - "Create an encrypted dataset with a 500GB quota"
@@ -579,6 +627,74 @@ Once connected via an MCP client:
 **Dry-Run Mode:**
 - "Show me what would happen if I upgrade the plex app"
 - "Preview the changes before upgrading nextcloud"
+
+## Storage Maintenance Best Practices
+
+### Understanding ZFS Scrubs
+
+ZFS scrubs are critical maintenance operations that verify data integrity by reading all blocks and checking checksums. They detect and repair silent corruption (bit rot) before it causes data loss. Scrubs are essential for long-term data integrity, especially for archival data.
+
+**What Scrubs Do:**
+- Read all data blocks on the pool
+- Verify checksums match the data
+- Automatically repair any corruption found
+- Detect and report hardware issues early
+- Maintain ZFS's self-healing capabilities
+
+### Scheduling Recommendations
+
+**Frequency Guidelines:**
+- **Home/personal use**: Monthly scrubs are adequate
+- **Production/business**: Weekly or bi-weekly scrubs
+- **Archival/cold storage**: Monthly minimum
+- **Active development**: Weekly recommended
+- **Timing**: Schedule during off-peak hours (2-4am typical)
+
+**Why Frequency Matters:**
+- Regular scrubs catch corruption early
+- Prevents cascading failures
+- Verifies redundancy is working
+- Essential for detecting failing drives
+
+### Performance Impact
+
+**During Scrubs:**
+- Scrubs add background I/O load but don't block operations
+- Performance impact is typically 10-30% depending on pool activity
+- Can be safely paused and resumed
+- Multiple pools can scrub simultaneously (each will be slower)
+- No data loss risk from interrupting a scrub
+
+**Scrub Duration:**
+- Varies by pool size, data amount, and hardware
+- Typical speeds: 100-500 MB/s depending on disk type
+- 10 TiB pool: 6-28 hours on modern hardware
+- Large pools (50+ TiB): Can take 2-5 days
+
+### When to Run Manual Scrubs
+
+**Before Critical Operations:**
+- Before major system upgrades or migrations
+- Before critical backups
+- After recovering from degraded pool state
+
+**After Events:**
+- After hardware changes or repairs
+- When alerts suggest possible corruption
+- If scheduled scrub was missed (system powered off)
+- After extended power outage
+
+**Regular Maintenance:**
+- If you delete automated schedule, run manual scrubs monthly
+- Test your backup restoration process
+
+### Best Practices
+
+1. **Always have a schedule**: Use `create_scrub_schedule` for automated maintenance
+2. **Monitor results**: Check `get_scrub_status` after scrubs complete
+3. **Address errors immediately**: Scrub errors indicate hardware problems
+4. **Keep systems powered**: Ensure TrueNAS is on when scrubs are scheduled
+5. **Don't skip scrubs**: Regular scrubs are insurance against data loss
 
 ## Advanced Features
 
