@@ -313,17 +313,12 @@ Claude Code uses the `claude mcp` command to configure MCP servers:
 
 **Add TrueNAS MCP server with hostname:**
 ```bash
-claude mcp add -e TRUENAS_URL=192.168.0.31 -e TRUENAS_API_KEY=your-api-key-here truenas -- truenas-mcp
-```
-
-**Or using command-line arguments:**
-```bash
 claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key-here
 ```
 
 **Add with full WebSocket URL:**
 ```bash
-claude mcp add -e TRUENAS_URL=wss://truenas.local/websocket -e TRUENAS_API_KEY=your-api-key-here truenas -- truenas-mcp
+claude mcp add truenas -- truenas-mcp --truenas-url wss://truenas.local/websocket --api-key your-api-key-here
 ```
 
 **Verify the configuration:**
@@ -338,7 +333,7 @@ claude mcp get truenas
 claude mcp remove truenas
 
 # Re-add with updated configuration
-claude mcp add -e TRUENAS_URL=192.168.0.31 -e TRUENAS_API_KEY=new-api-key truenas -- truenas-mcp
+claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key new-api-key
 ```
 
 ### Step 4: Restart Your MCP Client
