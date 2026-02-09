@@ -5,6 +5,30 @@
 
 A Model Context Protocol (MCP) server for TrueNAS that enables AI models to interact with the TrueNAS API using natural language queries.
 
+## Table of Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Building](#building)
+- [Installation](#installation)
+  - [Step 1: Download or Build Binary](#step-1-download-or-build-binary)
+  - [Step 2: Get TrueNAS API Key](#step-2-get-truenas-api-key)
+  - [Step 3: Configure Your MCP Client](#step-3-configure-your-mcp-client)
+    - [Claude Desktop](#claude-desktop)
+    - [Claude Code](#claude-code)
+  - [Step 4: Restart Your MCP Client](#step-4-restart-your-mcp-client)
+  - [Step 5: Verify the Connection](#step-5-verify-the-connection)
+- [Command-Line Options](#command-line-options)
+- [Connection Details](#connection-details)
+- [Security](#security)
+- [Example Usage](#example-usage)
+- [Advanced Features](#advanced-features)
+  - [MCP Tasks for Long-Running Operations](#mcp-tasks-for-long-running-operations)
+  - [Dry-Run Mode for Write Operations](#dry-run-mode-for-write-operations)
+- [Limitations](#limitations)
+- [Development](#development)
+- [Next Steps](#next-steps)
+
 ## Features
 
 Read-only tools for common TrueNAS operations:
@@ -213,7 +237,9 @@ copy truenas-mcp-windows-amd64.exe C:\Windows\System32\truenas-mcp.exe
 5. Make sure it has appropriate permissions (admin recommended)
 6. **Copy the API key** - you'll need it for configuration
 
-### Step 3: Configure Claude Desktop
+### Step 3: Configure Your MCP Client
+
+#### Claude Desktop
 
 Edit your Claude Desktop configuration file:
 
@@ -254,7 +280,7 @@ Add the TrueNAS MCP server configuration:
 ```json
 "args": [
   "--truenas-url", "192.168.0.31",
-  "--api-key", "18-NoKVv1EyfStph6AGaOZPpD8nu3GLsTeEYXrRxCNXEv0oi3aHJgfFeCBgFUxx467P"
+  "--api-key", "your-api-key-here"
 ]
 ```
 
@@ -281,13 +307,49 @@ Add the TrueNAS MCP server configuration:
 }
 ```
 
-### Step 4: Restart Claude Desktop
+#### Claude Code
 
-Quit Claude Desktop completely and restart it. The MCP connection will be established automatically.
+Claude Code uses the `claude mcp` command to configure MCP servers:
+
+**Add TrueNAS MCP server with hostname:**
+```bash
+claude mcp add -e TRUENAS_URL=192.168.0.31 -e TRUENAS_API_KEY=your-api-key-here truenas -- truenas-mcp
+```
+
+**Or using command-line arguments:**
+```bash
+claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key-here
+```
+
+**Add with full WebSocket URL:**
+```bash
+claude mcp add -e TRUENAS_URL=wss://truenas.local/websocket -e TRUENAS_API_KEY=your-api-key-here truenas -- truenas-mcp
+```
+
+**Verify the configuration:**
+```bash
+claude mcp list
+claude mcp get truenas
+```
+
+**Manage the server:**
+```bash
+# Remove the server
+claude mcp remove truenas
+
+# Re-add with updated configuration
+claude mcp add -e TRUENAS_URL=192.168.0.31 -e TRUENAS_API_KEY=new-api-key truenas -- truenas-mcp
+```
+
+### Step 4: Restart Your MCP Client
+
+**Claude Desktop:** Quit Claude Desktop completely and restart it.
+
+**Claude Code:** The MCP server will be loaded automatically when you use Claude Code.
 
 ### Step 5: Verify the Connection
 
-In Claude Desktop, you should now be able to ask TrueNAS questions:
+You should now be able to ask TrueNAS questions:
 
 - "What version of TrueNAS is running?"
 - "Show me all storage pools and their health"
