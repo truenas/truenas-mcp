@@ -4049,7 +4049,11 @@ func handleDeleteBootEnvironment(client *truenas.Client, args map[string]interfa
 	sizeBytes := int64(usedBytes)
 
 	// Perform deletion
-	_, err = client.Call("boot.environment.destroy", id)
+	// TrueNAS API expects parameters as a map
+	params := map[string]interface{}{
+		"id": id,
+	}
+	_, err = client.Call("boot.environment.destroy", params)
 	if err != nil {
 		return "", fmt.Errorf("failed to delete boot environment: %w", err)
 	}
