@@ -94,7 +94,7 @@ func (r *Registry) registerTools() {
 	r.tools["apply_update"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "apply_update",
-			Description: "Apply downloaded TrueNAS system update. System will reboot if reboot parameter is true. Supports dry-run mode to preview changes. Returns a task ID for tracking progress. This is a write operation.",
+			Description: "Apply downloaded TrueNAS system update. System will reboot if reboot parameter is true. Supports dry-run mode to preview changes. Returns a task ID for tracking progress. This is a write operation. **Best Practice**: After successful update and reboot, use query_boot_environments to check for old boot environments that can be safely pruned with delete_boot_environment. Recommend keeping 2-3 recent boot environments for rollback safety.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
