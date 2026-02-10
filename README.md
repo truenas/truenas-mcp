@@ -35,6 +35,7 @@ TrueNAS MCP provides comprehensive management capabilities through natural langu
 - 📊 **Monitoring** - System info, health, alerts, performance metrics
 - 💾 **Storage** - Pools, datasets, snapshots, shares (SMB/NFS)
 - 🖥️ **Virtualization** - VM management and status
+- 🔐 **Directory Services** - Active Directory, LDAP, FreeIPA integration and health monitoring
 - 📈 **Capacity Planning** - Utilization analysis and trend projections
 - 🔄 **Maintenance** - System updates, boot environments, pool scrubs
 - 📦 **Applications** - App status and upgrades

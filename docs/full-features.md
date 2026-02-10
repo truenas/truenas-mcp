@@ -104,6 +104,134 @@ This document provides a comprehensive list of all available MCP tools for TrueN
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations
 
+## Directory Services
+
+### Read-Only Tools
+- **get_directory_service_status** - Quick health check for directory service
+  - Returns service type (ACTIVEDIRECTORY, IPA, LDAP)
+  - Returns status (DISABLED, HEALTHY, FAULTED, JOINING, LEAVING)
+  - Shows error messages if service is faulted
+  - Use for fast health verification
+
+- **query_directory_services** - Get full directory service configuration
+  - Returns service type and enabled status
+  - Shows credential types (all passwords/keytabs masked for security)
+  - Displays service-specific configuration (domain, hostname, etc.)
+  - Shows account caching, DNS updates, timeout settings
+  - Perfect for understanding current directory service setup
+
+- **list_directory_certificates** - List certificates for LDAP MTLS authentication
+  - Returns available certificate IDs and names
+  - Use when configuring LDAP with mutual TLS authentication
+
+- **refresh_directory_cache** - Refresh cached user and group data
+  - Refreshes cached information from directory service
+  - Use after making changes in Active Directory, LDAP, or IPA
+  - Quick operation, no task tracking needed
+
+### Write Operations
+- **configure_directory_service** - Configure and join directory service
+  - Supports Active Directory, LDAP, and FreeIPA/IPA
+  - Multiple credential types:
+    - **Active Directory**: KERBEROS_USER (username/password) or KERBEROS_PRINCIPAL (principal/keytab)
+    - **LDAP**: LDAP_PLAIN (binddn/password), LDAP_ANONYMOUS, LDAP_MTLS (certificate), KERBEROS_USER, KERBEROS_PRINCIPAL
+    - **IPA**: KERBEROS_USER or KERBEROS_PRINCIPAL
+  - Configurable options:
+    - Account caching (default: enabled)
+    - DNS updates (default: enabled)
+    - Query timeout (5-60 seconds, default: 10)
+    - Kerberos realm (optional)
+    - Service-specific configuration (domain, hostname, etc.)
+  - Security features:
+    - All passwords/keytabs masked in output
+    - Validation of credential types and required fields
+    - Warnings about credential storage
+    - Recommendations to use keytabs instead of passwords
+  - Dry-run mode shows:
+    - Planned actions (5 steps: validate, create account, register DNS, join domain, cache data)
+    - Network and DNS requirements
+    - Security warnings and recommendations
+    - Estimated time (1-10 minutes typical)
+  - Returns task_id for tracking long-running domain join operation
+  - Automatic domain join when enable=true
+  - Use enable=false to disable without leaving domain
+
+- **leave_directory_service** - Disconnect from directory service
+  - Removes TrueNAS from the domain
+  - Deletes computer account from directory (if possible)
+  - Removes DNS records
+  - Clears all cached user/group data
+  - **WARNING**: All domain authentication will stop working
+  - **WARNING**: SMB/NFS shares using domain accounts become inaccessible
+  - Dry-run mode (STRONGLY RECOMMENDED first) shows:
+    - Current service type and status
+    - Planned disconnection steps
+    - Critical impact warnings
+    - Alternative suggestion (use enable=false for temporary disable)
+    - Estimated time (30 seconds to 5 minutes typical)
+  - Returns task_id for tracking leave operation
+  - Consider using configure_directory_service with enable=false instead for temporary disable
+
+### Integration with Other Tools
+- **system_health** - Now includes directory service status
+  - Automatically checks directory service health
+  - Shows service type and status in response
+  - Generates critical warnings if service is FAULTED
+  - Reports ongoing operations (JOINING/LEAVING)
+
+- **create_smb_share** and **create_nfs_share** - Directory service awareness
+  - Dry-run mode shows warnings when directory service is enabled
+  - Reminds users that domain accounts will be used for permissions
+  - Warns if directory service is FAULTED (authentication may not work)
+  - Helps prevent configuration mistakes
+
+### Security Notes
+- **Credential Storage**: Credentials are stored in TrueNAS configuration
+- **Masking**: All passwords and keytabs are masked in tool outputs
+- **Recommendations**:
+  - Use Kerberos principals with keytabs instead of passwords for production
+  - Ensure DNS is properly configured before joining
+  - Verify network connectivity to directory service
+  - Test with dry-run mode before executing operations
+- **Requirements**:
+  - DNS resolution must work for the domain
+  - Network access to directory service (ports 389/636 for LDAP, 88/464 for Kerberos)
+  - Time synchronization between TrueNAS and directory service
+
+### Credential Type Reference
+
+**Active Directory Credentials:**
+```json
+// Username and password (simpler but less secure)
+{"type": "KERBEROS_USER", "username": "admin@CORP.EXAMPLE.COM", "password": "********"}
+
+// Principal with keytab (more secure, recommended for production)
+{"type": "KERBEROS_PRINCIPAL", "principal": "host/truenas.corp.example.com", "keytab": "[masked]"}
+```
+
+**LDAP Credentials:**
+```json
+// Plain authentication with bind DN
+{"type": "LDAP_PLAIN", "binddn": "cn=admin,dc=example,dc=com", "bindpw": "********"}
+
+// Anonymous (no credentials)
+{"type": "LDAP_ANONYMOUS"}
+
+// Mutual TLS with client certificate
+{"type": "LDAP_MTLS", "certificate_id": 123}
+
+// Kerberos authentication (same as Active Directory)
+{"type": "KERBEROS_USER", "username": "admin", "password": "********"}
+{"type": "KERBEROS_PRINCIPAL", "principal": "host/truenas", "keytab": "[masked]"}
+```
+
+**IPA/FreeIPA Credentials:**
+```json
+// Same as Active Directory Kerberos options
+{"type": "KERBEROS_USER", "username": "admin", "password": "********"}
+{"type": "KERBEROS_PRINCIPAL", "principal": "host/truenas", "keytab": "[masked]"}
+```
+
 ## System Update and Maintenance
 
 ### Recommended System Update Workflow

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -112,6 +113,13 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 		}
 		if readonly, ok := payload["readonly"].(bool); ok && !readonly {
 			warnings = append(warnings, "Share allows read-write access")
+		}
+
+		// Add directory service warnings if applicable
+		ctx := context.Background()
+		if tnClient, err := GetTrueNASClient(); err == nil {
+			dirWarnings := checkDirectoryServiceForShareWarnings(ctx, tnClient)
+			warnings = append(warnings, dirWarnings...)
 		}
 
 		if len(warnings) > 0 {

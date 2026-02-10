@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -112,6 +113,13 @@ func handleCreateNFSShare(client *truenas.Client, args map[string]interface{}) (
 		}
 		if maprootUser, ok := payload["maproot_user"]; !ok || maprootUser == nil {
 			warnings = append(warnings, "No maproot_user configured - root clients will have root access (security risk)")
+		}
+
+		// Add directory service warnings if applicable
+		ctx := context.Background()
+		if tnClient, err := GetTrueNASClient(); err == nil {
+			dirWarnings := checkDirectoryServiceForShareWarnings(ctx, tnClient)
+			warnings = append(warnings, dirWarnings...)
 		}
 
 		if len(warnings) > 0 {

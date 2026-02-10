@@ -64,6 +64,20 @@ This document provides example natural language queries you can use with TrueNAS
 - "Are there any app updates available?"
 - "Upgrade the plex app to the latest version"
 
+## Directory Services
+
+- "Is Active Directory configured?"
+- "What's the directory service status?"
+- "Show me the directory service configuration"
+- "Join the domain corp.example.com with username admin"
+- "Configure LDAP at ldap.example.com with bind DN cn=admin,dc=example,dc=com"
+- "Set up FreeIPA integration for ipa.example.com"
+- "Leave the current directory service domain (dry run first)"
+- "Disable the directory service without leaving the domain"
+- "Refresh the user and group cache from Active Directory"
+- "What certificates are available for LDAP authentication?"
+- "Is my Active Directory connection healthy?"
+
 ## System Updates
 
 - "Check if there are any TrueNAS system updates available"
