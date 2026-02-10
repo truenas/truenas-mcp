@@ -25,7 +25,6 @@ A Model Context Protocol (MCP) server for TrueNAS that enables AI models to inte
 - [Advanced Features](#advanced-features)
   - [MCP Tasks for Long-Running Operations](#mcp-tasks-for-long-running-operations)
   - [Dry-Run Mode for Write Operations](#dry-run-mode-for-write-operations)
-- [Limitations](#limitations)
 - [Development](#development)
 
 ## Features
@@ -181,15 +180,7 @@ Add the TrueNAS MCP server configuration:
 ]
 ```
 
-**Option 2: Full WebSocket URL (explicit protocol):**
-```json
-"args": [
-  "--truenas-url", "wss://truenas.local/websocket",
-  "--api-key", "your-api-key-here"
-]
-```
-
-**Option 3: Using environment variables:**
+**Option 2: Using environment variables:**
 ```json
 {
   "mcpServers": {
@@ -208,14 +199,9 @@ Add the TrueNAS MCP server configuration:
 
 Claude Code uses the `claude mcp` command to configure MCP servers:
 
-**Add TrueNAS MCP server with hostname:**
+**Add TrueNAS MCP server:**
 ```bash
 claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key-here
-```
-
-**Add with full WebSocket URL:**
-```bash
-claude mcp add truenas -- truenas-mcp --truenas-url wss://truenas.local/websocket --api-key your-api-key-here
 ```
 
 **Verify the configuration:**
@@ -253,9 +239,8 @@ You should now be able to ask TrueNAS questions:
 
 ### Flags
 
-- `--truenas-url` - TrueNAS hostname or WebSocket URL (required, or use `TRUENAS_URL` env var)
-  - Hostname: `truenas.local` or `192.168.0.31` (uses `wss://` on port 443)
-  - Full URL: `wss://truenas.local/websocket` (custom port/path)
+- `--truenas-url` - TrueNAS hostname (required, or use `TRUENAS_URL` env var)
+  - Examples: `truenas.local` or `192.168.0.31` (automatically uses `wss://` on port 443)
   - ⚠️ **Note**: `ws://` (unencrypted) is **not allowed** - TrueNAS will revoke API keys used over unencrypted connections
 - `--api-key` - TrueNAS API key for authentication (required, or use `TRUENAS_API_KEY` env var)
 - `--insecure` - Skip TLS verification (not needed - self-signed certs accepted by default)
@@ -265,11 +250,8 @@ You should now be able to ask TrueNAS questions:
 ### Examples
 
 ```bash
-# Basic usage with hostname
+# Basic usage
 ./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key
-
-# With full WebSocket URL
-./truenas-mcp --truenas-url wss://truenas.local/websocket --api-key your-api-key
 
 # Using environment variables
 export TRUENAS_URL=192.168.0.31
@@ -431,22 +413,6 @@ Returns:
 - Understand prerequisites and warnings
 - Get time estimates for operations
 - Build confidence before making changes
-
-## Limitations
-
-### Pool Capacity Historical Data
-
-The TrueNAS API (as of v26.04) does not expose historical pool capacity metrics through the reporting endpoints, despite the Netdata backend collecting this data. This means:
-
-- ✅ **Available**: Current pool capacity snapshots
-- ✅ **Available**: CPU, memory, network, disk I/O historical trends
-- ❌ **Not Available**: Historical pool capacity over time
-- ❌ **Not Available**: Storage growth rate calculations
-- ❌ **Not Available**: Pool capacity trend projections
-
-**Workaround**: Query `get_pool_capacity_details` periodically and track results externally to build your own trend data.
-
-**Future**: This may be resolved in future TrueNAS releases if the `usage` chart is added to the reporting API schema.
 
 ## Development
 
