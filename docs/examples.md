@@ -60,9 +60,31 @@ This document provides example natural language queries you can use with TrueNAS
 
 ## Applications
 
+### Installed Apps
 - "What apps are installed and running?"
 - "Are there any app updates available?"
 - "Upgrade the plex app to the latest version"
+- "Delete the jellyfin app (show me what will happen first)"
+- "Remove the plex app and its container images"
+
+### App Catalog & Installation
+- "Search for media server apps in the catalog"
+- "What apps are available for home automation?"
+- "Tell me about the Plex app"
+- "Show me details about Nextcloud"
+- "What storage does Jellyfin need?"
+- "Install Plex on my system"
+  - *This will trigger a multi-step guided wizard that:*
+    - *Searches catalog for the app*
+    - *Gets app details and storage requirements*
+    - *Queries available pools*
+    - *Proposes dataset structure (e.g., tank/apps/plex/config, tank/apps/plex/data)*
+    - *Creates missing datasets with appropriate quotas*
+    - *Validates configuration*
+    - *Previews installation with dry-run*
+    - *Executes installation and tracks progress*
+- "Set up Nextcloud with 1TB storage on my tank pool"
+- "Install Jellyfin using my existing media dataset"
 
 ## Directory Services
 

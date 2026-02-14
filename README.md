@@ -38,7 +38,7 @@ TrueNAS MCP provides comprehensive management capabilities through natural langu
 - 🔐 **Directory Services** - Active Directory, LDAP, FreeIPA integration and health monitoring
 - 📈 **Capacity Planning** - Utilization analysis and trend projections
 - 🔄 **Maintenance** - System updates, boot environments, pool scrubs
-- 📦 **Applications** - App status and upgrades
+- 📦 **Applications** - Catalog search, guided installation with storage setup, app management and upgrades
 - ⚙️ **Tasks** - Long-running operation tracking
 
 ### Key Capabilities

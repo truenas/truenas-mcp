@@ -49,6 +49,15 @@ This document provides a comprehensive list of all available MCP tools for TrueN
 
 ### Applications
 - **query_apps** - List installed applications with status and available updates
+- **search_app_catalog** - Search TrueNAS app catalog by name, category, or keyword
+  - Search across all catalog trains (stable, enterprise, community)
+  - Filter by category (media, productivity, database, etc.)
+  - Returns app information with versions and installation status
+- **get_app_catalog_details** - Get detailed information about a specific app
+  - Returns README documentation and setup instructions
+  - Shows version info, categories, and maintainers
+  - Provides storage volume hints (detected from README)
+  - Recommends dataset layout: /mnt/<pool>/apps/<appname>/<volume>
 
 ## Capacity Planning and Analysis
 
@@ -100,6 +109,31 @@ This document provides a comprehensive list of all available MCP tools for TrueN
   - Dry-run mode to preview with mount examples
 
 ### Application Management
+- **install_app** - Install applications from the catalog with guided storage setup
+  - Multi-step wizard guides through app installation process
+  - ALWAYS uses host-path volumes (NEVER ix-volumes)
+  - Enforces structured dataset layout: /mnt/<pool>/apps/<appname>/<volume>
+  - Validates app instance names (lowercase, alphanumeric, hyphens)
+  - Verifies datasets exist before installation
+  - Supports dry-run mode to preview installation
+  - Returns task ID for tracking installation progress
+  - Includes comprehensive wizard guidance:
+    - Step 1: Search and select app from catalog
+    - Step 2: Understand app storage requirements
+    - Step 3: Plan storage layout with pool selection
+    - Step 4: Create missing datasets
+    - Step 5: Validate app instance name
+    - Step 6: Build storage configuration
+    - Step 7: Preview with dry-run
+    - Step 8: Execute installation
+
+- **delete_app** - Remove installed applications
+  - IMPORTANT: Host-path datasets are NOT deleted (preserved for data safety)
+  - Data remains in original locations for manual cleanup
+  - Optional removal of container images
+  - Supports dry-run mode to preview deletion
+  - Returns task ID for tracking deletion progress
+
 - **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations
