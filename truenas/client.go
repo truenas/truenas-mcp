@@ -269,13 +269,13 @@ func (c *Client) callRaw(method string, params ...interface{}) (json.RawMessage,
 		// Check for explicit failure message
 		if resp.Msg == "failed" {
 			if resp.Error != nil {
-				return nil, formatAPIError(resp.Error)
+				return nil, formatAPIErrorWithContext(resp.Error, method, params)
 			}
 			return nil, fmt.Errorf("API call failed with no error details")
 		}
 
 		if resp.Error != nil {
-			return nil, formatAPIError(resp.Error)
+			return nil, formatAPIErrorWithContext(resp.Error, method, params)
 		}
 
 		log.Printf("Result length: %d bytes", len(resp.Result))
@@ -313,10 +313,45 @@ func (c *Client) Close() error {
 func formatAPIError(apiErr *APIError) error {
 	errMsg := fmt.Sprintf("API error: %s (code %d)", apiErr.Message, apiErr.Code)
 	if apiErr.Trace != nil {
-		// Try to format trace if it's available
+		// Try to format trace - can be string or object
 		if traceStr, ok := apiErr.Trace.(string); ok && traceStr != "" {
 			errMsg = fmt.Sprintf("%s\nTrace: %s", errMsg, traceStr)
+		} else {
+			// If it's not a string, marshal it as JSON
+			if traceJSON, err := json.MarshalIndent(apiErr.Trace, "", "  "); err == nil {
+				errMsg = fmt.Sprintf("%s\nTrace: %s", errMsg, string(traceJSON))
+			}
 		}
 	}
+	return fmt.Errorf("%s", errMsg)
+}
+
+// formatAPIErrorWithContext formats API error with request context for debugging
+func formatAPIErrorWithContext(apiErr *APIError, method string, params []interface{}) error {
+	errMsg := fmt.Sprintf("API error: %s (code %d)", apiErr.Message, apiErr.Code)
+
+	// Add request context for debugging
+	errMsg = fmt.Sprintf("%s\n\nRequest:\n  Method: %s", errMsg, method)
+
+	// Format params (usually just one element - the actual payload)
+	if len(params) > 0 {
+		if paramsJSON, err := json.MarshalIndent(params, "  ", "  "); err == nil {
+			errMsg = fmt.Sprintf("%s\n  Params: %s", errMsg, string(paramsJSON))
+		}
+	}
+
+	// Add trace if available
+	if apiErr.Trace != nil {
+		// Try to format trace - can be string or object
+		if traceStr, ok := apiErr.Trace.(string); ok && traceStr != "" {
+			errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, traceStr)
+		} else {
+			// If it's not a string, marshal it as JSON
+			if traceJSON, err := json.MarshalIndent(apiErr.Trace, "", "  "); err == nil {
+				errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, string(traceJSON))
+			}
+		}
+	}
+
 	return fmt.Errorf("%s", errMsg)
 }

@@ -74,9 +74,12 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 		payload["refquota"] = int64(refquota)
 	}
 
-	// Boolean parameters
+	// Boolean parameters - create_ancestors defaults to true
 	if createAncestors, ok := args["create_ancestors"].(bool); ok {
 		payload["create_ancestors"] = createAncestors
+	} else {
+		// Default to true to auto-create parent datasets
+		payload["create_ancestors"] = true
 	}
 
 	if readonly, ok := args["readonly"].(bool); ok {
@@ -136,7 +139,7 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 		return string(formatted), nil
 	}
 
-	// Call the API
+	// Call the API (error will include payload automatically)
 	result, err := client.Call("pool.dataset.create", payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to create dataset: %w", err)

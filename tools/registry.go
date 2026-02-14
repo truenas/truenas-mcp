@@ -728,8 +728,8 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 					},
 					"create_ancestors": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Auto-create missing parent datasets (default: false)",
-						"default":     false,
+						"description": "Auto-create missing parent datasets (default: true)",
+						"default":     true,
 					},
 					"readonly": map[string]interface{}{
 						"type":        "boolean",
@@ -1130,6 +1130,362 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 			},
 		},
 		Handler: r.handleUpgradeAppWithDryRun,
+	}
+
+	// Search app catalog
+	r.tools["search_app_catalog"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "search_app_catalog",
+			Description: "Search TrueNAS app catalog by name, category, or keyword. Returns available applications from the catalog with their versions, categories, and installation status.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{
+						"type":        "string",
+						"description": "Search query (partial match on name or description)",
+					},
+					"train": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"stable", "enterprise", "community", "all"},
+						"description": "Filter by catalog train (default: stable)",
+						"default":     "stable",
+					},
+					"category": map[string]interface{}{
+						"type":        "string",
+						"description": "Filter by category (e.g., 'media', 'productivity', 'database')",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum results to return (default: 20)",
+						"default":     20,
+					},
+				},
+			},
+		},
+		Handler: handleSearchAppCatalog,
+	}
+
+	// Get app catalog details
+	r.tools["get_app_catalog_details"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "get_app_catalog_details",
+			Description: "Get detailed information about a specific app from the catalog including README, screenshots, version info, and storage volume hints. Use this after searching to understand an app's requirements before installation.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "App name from catalog (from search results)",
+					},
+					"train": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"stable", "enterprise", "community"},
+						"description": "Catalog train (default: stable)",
+						"default":     "stable",
+					},
+				},
+				"required": []string{"app_name"},
+			},
+		},
+		Handler: handleGetAppCatalogDetails,
+	}
+
+	// Install app
+	r.tools["install_app"] = Tool{
+		Definition: mcp.Tool{
+			Name: "install_app",
+			Description: `Install a TrueNAS application using schema-driven configuration.
+
+**IMPORTANT: ALL TRUENAS APPS ARE COMPLEX**
+Every app requires configuration across multiple groups (currently 6, but may vary):
+1. App Configuration (timezone, app-specific settings)
+2. User and Group Configuration (run_as user/group IDs)
+3. Network Configuration (ports and networking)
+4. Storage Configuration (volumes and datasets)
+5. Labels Configuration (metadata labels)
+6. Resources Configuration (CPU, memory, GPU)
+
+**UNIVERSAL WIZARD - SECTION-BY-SECTION CONFIGURATION:**
+
+**STEP 1: Get App Schema**
+1. Call get_app_catalog_details(app_name, train)
+2. Review schema.groups array (iterate through ALL groups, don't assume count)
+3. Check schema.group_count to know how many groups to configure
+4. Review schema.questions_by_group (shows questions for each group)
+5. Review wizard_guidance for common patterns
+
+**STEP 2: Understand Common Patterns**
+
+All apps follow these patterns:
+
+• **Timezone** (Group 1):
+  - Variable: TZ
+  - Type: enum with 600+ timezones
+  - Recommendation: Use "Etc/UTC" or user's timezone
+
+• **User/Group** (Group 2):
+  - Variable: run_as
+  - Structure: {user: <uid>, group: <gid>}
+  - Default: {user: 568, group: 568} (apps user/group)
+
+• **Network** (Group 3):
+  - Variable: network
+  - Ports: {bind_mode: "published", port_number: <port>, host_ips: []}
+  - Common ports: web_port, api_port, sync_port, etc.
+  - bind_mode: "published" (external) or "exposed" (internal) or "" (none)
+
+• **Storage** (Group 4) - CRITICAL:
+  - Variable: storage
+  - ALWAYS use: {"type": "host_path", "host_path_config": {"path": "/mnt/...", "acl_enable": false}}
+  - NEVER use: {"type": "ix_volume", ...}
+  - Common volumes: config, cache, data, transcodes
+  - Pattern: /mnt/<pool>/apps/<appname>/<volume>
+
+• **Labels** (Group 5):
+  - Variable: labels
+  - Structure: [{key: "name", value: "value"}]
+  - Usually optional (empty array)
+
+• **Resources** (Group 6):
+  - Variable: resources
+  - Structure: {limits: {cpus: 2, memory: 4096}, gpus: {...}}
+  - Defaults: 2 CPUs, 4096 MB RAM
+
+**STEP 3: Plan Storage (CRITICAL - Do This First)**
+
+1. Identify storage volumes from schema:
+   - Look in schema.questions_by_group["Storage Configuration"]
+   - Find variables like: config, cache, data, transcodes, additional_storage
+   - Each has type enum: ["host_path", "ix_volume", ...]
+
+2. Call query_pools() to find available pools
+
+3. Recommend dataset structure:
+   - Format: <pool>/apps/<appname>/<volume>
+   - Example: tank/apps/jellyfin/config
+
+4. Present plan to user:
+   "I'll create the following datasets for Jellyfin:
+    - tank/apps/jellyfin/config (10GB)
+    - tank/apps/jellyfin/cache (50GB)
+    - tank/apps/jellyfin/transcodes (temporary, no dataset needed)"
+
+**STEP 4: Create Datasets**
+
+For each permanent storage volume (not temporary/tmpfs):
+1. Call create_dataset with:
+   - name: "<pool>/apps/<appname>/<volume>"
+   - type: "FILESYSTEM"
+   - share_type: "APPS"
+   - compression: "LZ4"
+   - quota: <size_in_bytes> (optional)
+2. Confirm creation
+3. Recommended quotas:
+   - config: 10GB (10737418240)
+   - cache: 50GB (53687091200)
+   - data: 1TB+ (varies by app)
+
+**STEP 5: Build Configuration by Group**
+
+Go through each group and build configuration:
+
+**Group 1 - App Configuration:**
+{
+  "TZ": "Etc/UTC",
+  "<appname>": {
+    // App-specific settings from schema
+    "additional_envs": []
+  }
+}
+
+**Group 2 - User/Group:**
+{
+  "run_as": {
+    "user": 568,
+    "group": 568
+  }
+}
+
+**Group 3 - Network:**
+{
+  "network": {
+    "web_port": {
+      "bind_mode": "published",
+      "port_number": 30013,
+      "host_ips": []
+    },
+    "host_network": false
+  }
+}
+
+**Group 4 - Storage (CRITICAL):**
+{
+  "storage": {
+    "config": {
+      "type": "host_path",
+      "host_path_config": {
+        "path": "/mnt/tank/apps/jellyfin/config",
+        "acl_enable": false
+      }
+    },
+    "cache": {
+      "type": "host_path",
+      "host_path_config": {
+        "path": "/mnt/tank/apps/jellyfin/cache",
+        "acl_enable": false
+      }
+    },
+    "transcodes": {
+      "type": "temporary"
+    },
+    "additional_storage": []
+  }
+}
+
+**Group 5 - Labels:**
+{
+  "labels": []
+}
+
+**Group 6 - Resources:**
+{
+  "resources": {
+    "limits": {
+      "cpus": 2,
+      "memory": 4096
+    },
+    "gpus": {}
+  }
+}
+
+**STEP 6: Assemble Complete Values Object**
+
+Combine all groups into single values object:
+{
+  "TZ": "Etc/UTC",
+  "jellyfin": {...},
+  "run_as": {...},
+  "network": {...},
+  "storage": {...},
+  "labels": [...],
+  "resources": {...}
+}
+
+**STEP 7: Validate Configuration**
+
+1. All storage volumes use type="host_path"
+2. All paths start with /mnt/
+3. All required groups present
+4. Port numbers in valid range (1-65535)
+5. User/group IDs are valid (>= 0)
+
+**STEP 8: Dry-Run Preview**
+
+Call install_app with dry_run=true:
+install_app(
+  app_name="jellyfin",
+  catalog_app="jellyfin",
+  train="community",
+  values={...complete config...},
+  dry_run=true
+)
+
+Review:
+- Datasets exist?
+- Configuration valid?
+- Warnings or errors?
+
+**STEP 9: Execute Installation**
+
+If dry-run successful, call with dry_run=false:
+install_app(
+  app_name="jellyfin",
+  catalog_app="jellyfin",
+  train="community",
+  values={...complete config...},
+  dry_run=false
+)
+
+Returns task_id for tracking progress with tasks_get.
+
+**CRITICAL SAFETY RULES:**
+- ALWAYS use "type": "host_path" for storage
+- NEVER use "type": "ix_volume"
+- ALWAYS create datasets before installation
+- ALWAYS validate paths start with /mnt/
+- ALWAYS use dry-run before final installation
+
+**ERROR RECOVERY:**
+- Missing datasets: Create with create_dataset
+- ix_volume detected: Convert to host_path format
+- Invalid structure: Review schema and rebuild section
+- Validation failed: Check error message for exact location`,
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Unique app instance name (lowercase, alphanumeric, hyphens, 1-40 chars). Pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$",
+						"pattern":     "^[a-z]([-a-z0-9]*[a-z0-9])?$",
+					},
+					"catalog_app": map[string]interface{}{
+						"type":        "string",
+						"description": "Catalog app name (from search results)",
+					},
+					"train": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"stable", "enterprise", "community"},
+						"description": "Catalog train (default: stable)",
+						"default":     "stable",
+					},
+					"version": map[string]interface{}{
+						"type":        "string",
+						"description": "App version (default: latest)",
+						"default":     "latest",
+					},
+					"values": map[string]interface{}{
+						"type":        "object",
+						"description": "Complete app configuration assembled from schema groups. Includes TZ, run_as, network, storage (host_path only), labels, and resources. Build this by iterating through schema groups from get_app_catalog_details.",
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview installation without executing (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"app_name", "catalog_app", "values"},
+			},
+		},
+		Handler: r.handleInstallAppWithDryRun,
+	}
+
+	// Delete app
+	r.tools["delete_app"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "delete_app",
+			Description: "Remove an installed application. IMPORTANT: Host-path datasets are NOT deleted and must be manually removed after app deletion. Data will be preserved in original locations. Use dry-run mode to preview what will be deleted.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Installed app instance name to delete",
+					},
+					"remove_images": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Remove container images (default: false)",
+						"default":     false,
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview deletion without executing (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"app_name"},
+			},
+		},
+		Handler: r.handleDeleteAppWithDryRun,
 	}
 
 	// Query jobs
