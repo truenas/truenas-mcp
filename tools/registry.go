@@ -3128,10 +3128,19 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 		return "", fmt.Errorf("failed to upgrade app: %w", err)
 	}
 
-	// Parse the job ID (app.upgrade returns an integer job ID)
+	// Parse the job ID (app.upgrade may return an array [job_id] or just job_id)
 	var jobID int
+	// First try to parse as an integer
 	if err := json.Unmarshal(result, &jobID); err != nil {
-		return "", fmt.Errorf("failed to parse job ID: %w", err)
+		// If that fails, try parsing as an array and extract the first element
+		var jobIDArray []int
+		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
+			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
+		}
+		if len(jobIDArray) == 0 {
+			return "", fmt.Errorf("app.upgrade returned empty job ID array")
+		}
+		jobID = jobIDArray[0]
 	}
 
 	// Create task to track upgrade progress

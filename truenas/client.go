@@ -80,6 +80,8 @@ func (c *Client) connect() error {
 	wsDialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:  c.tlsConfig, // Always use TLS config (only wss:// allowed)
+		ReadBufferSize:   65536,       // 64KB read buffer to handle large messages
+		WriteBufferSize:  65536,       // 64KB write buffer to handle large messages
 	}
 
 	var lastErr error

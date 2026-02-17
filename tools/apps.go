@@ -517,10 +517,19 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 		return "", fmt.Errorf("failed to install app: %v", err)
 	}
 
-	// Parse job ID
+	// Parse job ID (app.create may return an array [job_id] or just job_id)
 	var jobID int
+	// First try to parse as an integer
 	if err := json.Unmarshal(result, &jobID); err != nil {
-		return "", fmt.Errorf("failed to parse job ID: %v", err)
+		// If that fails, try parsing as an array and extract the first element
+		var jobIDArray []int
+		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
+			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
+		}
+		if len(jobIDArray) == 0 {
+			return "", fmt.Errorf("app.create returned empty job ID array")
+		}
+		jobID = jobIDArray[0]
 	}
 
 	// Create task for tracking
@@ -728,10 +737,19 @@ func handleDeleteApp(client *truenas.Client, args map[string]interface{}, taskMa
 		return "", fmt.Errorf("failed to delete app: %v", err)
 	}
 
-	// Parse job ID
+	// Parse job ID (app.delete may return an array [job_id] or just job_id)
 	var jobID int
+	// First try to parse as an integer
 	if err := json.Unmarshal(result, &jobID); err != nil {
-		return "", fmt.Errorf("failed to parse job ID: %v", err)
+		// If that fails, try parsing as an array and extract the first element
+		var jobIDArray []int
+		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
+			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
+		}
+		if len(jobIDArray) == 0 {
+			return "", fmt.Errorf("app.delete returned empty job ID array")
+		}
+		jobID = jobIDArray[0]
 	}
 
 	// Create task for tracking
