@@ -1132,6 +1132,54 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 		Handler: r.handleUpgradeAppWithDryRun,
 	}
 
+	// Start app
+	r.tools["start_app"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "start_app",
+			Description: "Start a stopped TrueNAS application. Job-based; use tasks_get with returned task_id to track progress. Supports dry_run to preview the action without executing it.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Name of the application to start",
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview the action without executing it (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"app_name"},
+			},
+		},
+		Handler: r.handleStartAppWithDryRun,
+	}
+
+	// Stop app
+	r.tools["stop_app"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "stop_app",
+			Description: "Stop a running TrueNAS application. Job-based; use tasks_get with returned task_id to track progress. Supports dry_run to preview the action without executing it.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"app_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Name of the application to stop",
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview the action without executing it (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"app_name"},
+			},
+		},
+		Handler: r.handleStopAppWithDryRun,
+	}
+
 	// Search app catalog
 	r.tools["search_app_catalog"] = Tool{
 		Definition: mcp.Tool{
@@ -3278,6 +3326,188 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	}
 
 	return result, nil
+}
+
+func (r *Registry) handleStartApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return "", fmt.Errorf("app_name is required")
+	}
+
+	result, err := client.Call("app.start", appName)
+	if err != nil {
+		return "", fmt.Errorf("failed to start app: %w", err)
+	}
+
+	var jobID int
+	if err := json.Unmarshal(result, &jobID); err != nil {
+		var jobIDArray []int
+		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
+			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
+		}
+		if len(jobIDArray) == 0 {
+			return "", fmt.Errorf("app.start returned empty job ID array")
+		}
+		jobID = jobIDArray[0]
+	}
+
+	task, err := r.taskManager.CreateJobTask("start_app", args, jobID, 10*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
+	}
+
+	response := map[string]interface{}{
+		"app_name":      appName,
+		"task_id":       task.TaskID,
+		"task_status":   task.Status,
+		"poll_interval": task.PollInterval,
+		"job_id":        jobID,
+		"message":       fmt.Sprintf("App start initiated. Track progress with tasks_get using task_id: %s", task.TaskID),
+	}
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to format response: %w", err)
+	}
+	return string(formatted), nil
+}
+
+func (r *Registry) handleStartAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(client, args, &startAppDryRun{}, r.handleStartApp)
+}
+
+type startAppDryRun struct{}
+
+func (s *startAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return nil, fmt.Errorf("app_name is required")
+	}
+
+	currentResult, err := client.Call("app.query", []interface{}{
+		[]interface{}{"name", "=", appName},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query app: %w", err)
+	}
+
+	var apps []map[string]interface{}
+	if err := json.Unmarshal(currentResult, &apps); err != nil || len(apps) == 0 {
+		return nil, fmt.Errorf("app not found: %s", appName)
+	}
+
+	currentState := apps[0]["state"]
+
+	return &DryRunResult{
+		Tool: "start_app",
+		CurrentState: map[string]interface{}{
+			"app_name": appName,
+			"state":    currentState,
+		},
+		PlannedActions: []PlannedAction{
+			{
+				Step:        1,
+				Description: "Start application containers",
+				Operation:   "start",
+				Target:      "app.start",
+				Details:     map[string]interface{}{"app_name": appName},
+			},
+		},
+		Warnings: []string{
+			fmt.Sprintf("App is currently in state: %v. App must be STOPPED to start.", currentState),
+		},
+		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 120, Note: "Depends on app startup time"},
+	}, nil
+}
+
+func (r *Registry) handleStopApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return "", fmt.Errorf("app_name is required")
+	}
+
+	result, err := client.Call("app.stop", appName)
+	if err != nil {
+		return "", fmt.Errorf("failed to stop app: %w", err)
+	}
+
+	var jobID int
+	if err := json.Unmarshal(result, &jobID); err != nil {
+		var jobIDArray []int
+		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
+			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
+		}
+		if len(jobIDArray) == 0 {
+			return "", fmt.Errorf("app.stop returned empty job ID array")
+		}
+		jobID = jobIDArray[0]
+	}
+
+	task, err := r.taskManager.CreateJobTask("stop_app", args, jobID, 5*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
+	}
+
+	response := map[string]interface{}{
+		"app_name":      appName,
+		"task_id":       task.TaskID,
+		"task_status":   task.Status,
+		"poll_interval": task.PollInterval,
+		"job_id":        jobID,
+		"message":       fmt.Sprintf("App stop initiated. Track progress with tasks_get using task_id: %s", task.TaskID),
+	}
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to format response: %w", err)
+	}
+	return string(formatted), nil
+}
+
+func (r *Registry) handleStopAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(client, args, &stopAppDryRun{}, r.handleStopApp)
+}
+
+type stopAppDryRun struct{}
+
+func (s *stopAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return nil, fmt.Errorf("app_name is required")
+	}
+
+	currentResult, err := client.Call("app.query", []interface{}{
+		[]interface{}{"name", "=", appName},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query app: %w", err)
+	}
+
+	var apps []map[string]interface{}
+	if err := json.Unmarshal(currentResult, &apps); err != nil || len(apps) == 0 {
+		return nil, fmt.Errorf("app not found: %s", appName)
+	}
+
+	currentState := apps[0]["state"]
+
+	return &DryRunResult{
+		Tool: "stop_app",
+		CurrentState: map[string]interface{}{
+			"app_name": appName,
+			"state":    currentState,
+		},
+		PlannedActions: []PlannedAction{
+			{
+				Step:        1,
+				Description: "Stop application containers",
+				Operation:   "stop",
+				Target:      "app.stop",
+				Details:     map[string]interface{}{"app_name": appName},
+			},
+		},
+		Warnings: []string{
+			fmt.Sprintf("App '%s' (currently %v) will become unavailable after stopping.", appName, currentState),
+		},
+		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 60, Note: "Depends on app shutdown time"},
+	}, nil
 }
 
 func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (string, error) {
