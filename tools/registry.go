@@ -1003,7 +1003,7 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 	r.tools["get_system_metrics"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "get_system_metrics",
-			Description: "Get system performance metrics (CPU, memory, load average)",
+			Description: "Get system performance metrics (CPU, memory, load average, CPU temperature, uptime)",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1011,9 +1011,9 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 						"type": "array",
 						"items": map[string]interface{}{
 							"type": "string",
-							"enum": []string{"cpu", "memory", "load"},
+							"enum": []string{"cpu", "cputemp", "memory", "load", "uptime"},
 						},
-						"description": "Metrics to retrieve (default: all)",
+						"description": "Metrics to retrieve (default: cpu, memory, load)",
 					},
 					"unit": map[string]interface{}{
 						"type":        "string",
@@ -1055,13 +1055,19 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 	r.tools["get_disk_metrics"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "get_disk_metrics",
-			Description: "Get disk I/O performance metrics",
+			Description: "Get disk performance metrics (I/O or temperature)",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"disk": map[string]interface{}{
 						"type":        "string",
 						"description": "Disk name (e.g., 'sda'). If omitted, returns all disks.",
+					},
+					"type": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"disk", "disktemp"},
+						"description": "Metric type: disk I/O or disk temperature (default: disk)",
+						"default":     "disk",
 					},
 					"unit": map[string]interface{}{
 						"type":        "string",
@@ -1073,6 +1079,73 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 			},
 		},
 		Handler: handleGetDiskMetrics,
+	}
+
+	// ZFS ARC reporting metrics
+	r.tools["get_arc_metrics"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "get_arc_metrics",
+			Description: "Get ZFS ARC (Adaptive Replacement Cache) performance metrics including cache size, demand hit/miss rates, and L2ARC statistics.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"graphs": map[string]interface{}{
+						"type": "array",
+						"items": map[string]interface{}{
+							"type": "string",
+							"enum": []string{
+								"arcfreememory", "arcavailablememory", "arcsize",
+								"demandaccessespersecond", "demanddataaccessespersecond", "demandmetadataaccessespersecond",
+								"demanddatahitspersecond", "demanddataiohitspersecond", "demanddatamissespersecond",
+								"demanddatahitpercentage", "demanddataiohitpercentage", "demanddatamisspercentage",
+								"demandmetadatahitspersecond", "demandmetadataiohitspersecond", "demandmetadatamissespersecond",
+								"demandmetadatahitpercentage", "demandmetadataiohitpercentage", "demandmetadatamisspercentage",
+								"l2archhitspersecond", "l2arcmissespersecond", "totall2arcaccessespersecond",
+								"l2architpercentage", "l2arcmisspercentage",
+								"l2arcbytesreadpersecond", "l2arcbyteswrittenpersecond",
+							},
+						},
+						"description": "ARC metrics to retrieve (default: arcfreememory, arcavailablememory, arcsize)",
+					},
+					"unit": map[string]interface{}{
+						"type":    "string",
+						"enum":    []string{"HOUR", "DAY", "WEEK", "MONTH", "YEAR"},
+						"default": "HOUR",
+					},
+				},
+			},
+		},
+		Handler: handleGetArcMetrics,
+	}
+
+	// UPS reporting metrics
+	r.tools["get_ups_metrics"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "get_ups_metrics",
+			Description: "Get UPS (Uninterruptible Power Supply) metrics. For upsvoltage, returns battery, input, and output voltage. Requires a UPS configured in TrueNAS.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"graphs": map[string]interface{}{
+						"type": "array",
+						"items": map[string]interface{}{
+							"type": "string",
+							"enum": []string{
+								"upscharge", "upsruntime", "upsvoltage",
+								"upscurrent", "upsfrequency", "upsload", "upstemperature",
+							},
+						},
+						"description": "UPS metrics to retrieve (default: all)",
+					},
+					"unit": map[string]interface{}{
+						"type":    "string",
+						"enum":    []string{"HOUR", "DAY", "WEEK", "MONTH", "YEAR"},
+						"default": "HOUR",
+					},
+				},
+			},
+		},
+		Handler: handleGetUpsMetrics,
 	}
 
 	// Query installed apps
@@ -2755,10 +2828,14 @@ func handleGetSystemMetrics(client *truenas.Client, args map[string]interface{})
 		switch graph {
 		case "cpu":
 			apiGraph = "cpu"
+		case "cputemp":
+			apiGraph = "cputemp"
 		case "memory":
 			apiGraph = "memory"
 		case "load":
 			apiGraph = "load"
+		case "uptime":
+			apiGraph = "uptime"
 		default:
 			continue
 		}
@@ -2934,6 +3011,11 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 
 	requestedDisk, _ := args["disk"].(string)
 
+	graphType := "disk"
+	if t, ok := args["type"].(string); ok && t != "" {
+		graphType = t
+	}
+
 	// First, get available reporting graphs
 	graphsResult, err := client.Call("reporting.graphs")
 	if err != nil {
@@ -2945,11 +3027,11 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 		return "", fmt.Errorf("failed to parse reporting graphs: %w", err)
 	}
 
-	// Find the disk graph and extract identifiers
+	// Find the requested graph type and extract identifiers
 	var diskIdentifiers []string
 	for _, graph := range graphs {
 		graphName, nameOk := graph["name"].(string)
-		if nameOk && graphName == "disk" {
+		if nameOk && graphName == graphType {
 			// Get the identifiers array
 			if identifiersRaw, ok := graph["identifiers"]; ok && identifiersRaw != nil {
 				if identifiersArray, ok := identifiersRaw.([]interface{}); ok {
@@ -2974,7 +3056,7 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	if len(diskIdentifiers) == 0 {
-		return `{"error": "no disk identifiers found in reporting graphs"}`, nil
+		return fmt.Sprintf(`{"error": "no disk identifiers found for graph type %q"}`, graphType), nil
 	}
 
 	// Get metrics for each disk identifier
@@ -2989,7 +3071,7 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 
 		result, err := client.Call("reporting.get_data", []interface{}{
 			map[string]interface{}{
-				"name":       "disk",
+				"name":       graphType,
 				"identifier": identifier,
 			},
 		}, map[string]interface{}{"unit": unit})
@@ -3045,6 +3127,246 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	formatted, err := json.MarshalIndent(allMetrics, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
+}
+
+func handleGetArcMetrics(client *truenas.Client, args map[string]interface{}) (string, error) {
+	unit := "HOUR"
+	if u, ok := args["unit"].(string); ok && u != "" {
+		unit = u
+	}
+
+	// Default graphs if not specified
+	graphs := []string{"arcfreememory", "arcavailablememory", "arcsize"}
+	if g, ok := args["graphs"].([]interface{}); ok && len(g) > 0 {
+		graphs = make([]string, len(g))
+		for i, v := range g {
+			if s, ok := v.(string); ok {
+				graphs[i] = s
+			}
+		}
+	}
+
+	response := make(map[string]interface{})
+
+	for _, graph := range graphs {
+		result, err := client.Call("reporting.get_data", []interface{}{
+			map[string]interface{}{
+				"name":       graph,
+				"identifier": nil,
+			},
+		}, map[string]interface{}{"unit": unit})
+		if err != nil {
+			response[graph] = map[string]string{"error": err.Error()}
+			continue
+		}
+
+		var fullData []map[string]interface{}
+		if err := json.Unmarshal(result, &fullData); err != nil {
+			response[graph] = map[string]string{"error": fmt.Sprintf("parse error: %v", err)}
+			continue
+		}
+
+		summary := make(map[string]interface{})
+		if len(fullData) > 0 {
+			for key, value := range fullData[0] {
+				if key == "data" {
+					if dataArray, ok := value.([]interface{}); ok {
+						summary["data_points_total"] = len(dataArray)
+						sample := make([]interface{}, 0)
+
+						for i := 0; i < 10 && i < len(dataArray); i++ {
+							sample = append(sample, dataArray[i])
+						}
+
+						if len(dataArray) > 20 {
+							for i := len(dataArray) - 10; i < len(dataArray); i++ {
+								sample = append(sample, dataArray[i])
+							}
+						}
+
+						summary["data_sample"] = sample
+					}
+				} else {
+					summary[key] = value
+				}
+			}
+		}
+		response[graph] = summary
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
+}
+
+func handleGetUpsMetrics(client *truenas.Client, args map[string]interface{}) (string, error) {
+	unit := "HOUR"
+	if u, ok := args["unit"].(string); ok && u != "" {
+		unit = u
+	}
+
+	// Default to all UPS graphs
+	graphs := []string{"upscharge", "upsruntime", "upsvoltage", "upscurrent", "upsfrequency", "upsload", "upstemperature"}
+	if g, ok := args["graphs"].([]interface{}); ok && len(g) > 0 {
+		graphs = make([]string, len(g))
+		for i, v := range g {
+			if s, ok := v.(string); ok {
+				graphs[i] = s
+			}
+		}
+	}
+
+	response := make(map[string]interface{})
+
+	for _, graph := range graphs {
+		if graph == "upsvoltage" {
+			// upsvoltage has per-identifier data (battery, input, output)
+			// Discover identifiers from reporting.graphs
+			graphsResult, err := client.Call("reporting.graphs")
+			if err != nil {
+				response[graph] = map[string]string{"error": fmt.Sprintf("failed to query reporting graphs: %v", err)}
+				continue
+			}
+
+			var reportingGraphs []map[string]interface{}
+			if err := json.Unmarshal(graphsResult, &reportingGraphs); err != nil {
+				response[graph] = map[string]string{"error": fmt.Sprintf("failed to parse reporting graphs: %v", err)}
+				continue
+			}
+
+			var voltageIdentifiers []string
+			for _, rg := range reportingGraphs {
+				if name, ok := rg["name"].(string); ok && name == "upsvoltage" {
+					if identifiersRaw, ok := rg["identifiers"]; ok && identifiersRaw != nil {
+						if identifiersArray, ok := identifiersRaw.([]interface{}); ok {
+							for _, idRaw := range identifiersArray {
+								if idStr, ok := idRaw.(string); ok {
+									voltageIdentifiers = append(voltageIdentifiers, idStr)
+								}
+							}
+						}
+					}
+					break
+				}
+			}
+
+			if len(voltageIdentifiers) == 0 {
+				// No identifiers found — try nil identifier
+				voltageIdentifiers = []string{""}
+			}
+
+			voltageData := make(map[string]interface{})
+			for _, identifier := range voltageIdentifiers {
+				var callIdentifier interface{}
+				if identifier != "" {
+					callIdentifier = identifier
+				}
+				result, err := client.Call("reporting.get_data", []interface{}{
+					map[string]interface{}{
+						"name":       "upsvoltage",
+						"identifier": callIdentifier,
+					},
+				}, map[string]interface{}{"unit": unit})
+				if err != nil {
+					voltageData[identifier] = map[string]string{"error": err.Error()}
+					continue
+				}
+
+				var fullData []map[string]interface{}
+				if err := json.Unmarshal(result, &fullData); err != nil {
+					voltageData[identifier] = map[string]string{"error": fmt.Sprintf("parse error: %v", err)}
+					continue
+				}
+
+				summary := make(map[string]interface{})
+				if len(fullData) > 0 {
+					for key, value := range fullData[0] {
+						if key == "data" {
+							if dataArray, ok := value.([]interface{}); ok {
+								summary["data_points_total"] = len(dataArray)
+								sample := make([]interface{}, 0)
+
+								for i := 0; i < 10 && i < len(dataArray); i++ {
+									sample = append(sample, dataArray[i])
+								}
+
+								if len(dataArray) > 20 {
+									for i := len(dataArray) - 10; i < len(dataArray); i++ {
+										sample = append(sample, dataArray[i])
+									}
+								}
+
+								summary["data_sample"] = sample
+							}
+						} else {
+							summary[key] = value
+						}
+					}
+				}
+				key := identifier
+				if key == "" {
+					key = "default"
+				}
+				voltageData[key] = summary
+			}
+			response[graph] = voltageData
+		} else {
+			// All other UPS graphs use nil identifier
+			result, err := client.Call("reporting.get_data", []interface{}{
+				map[string]interface{}{
+					"name":       graph,
+					"identifier": nil,
+				},
+			}, map[string]interface{}{"unit": unit})
+			if err != nil {
+				response[graph] = map[string]string{"error": err.Error()}
+				continue
+			}
+
+			var fullData []map[string]interface{}
+			if err := json.Unmarshal(result, &fullData); err != nil {
+				response[graph] = map[string]string{"error": fmt.Sprintf("parse error: %v", err)}
+				continue
+			}
+
+			summary := make(map[string]interface{})
+			if len(fullData) > 0 {
+				for key, value := range fullData[0] {
+					if key == "data" {
+						if dataArray, ok := value.([]interface{}); ok {
+							summary["data_points_total"] = len(dataArray)
+							sample := make([]interface{}, 0)
+
+							for i := 0; i < 10 && i < len(dataArray); i++ {
+								sample = append(sample, dataArray[i])
+							}
+
+							if len(dataArray) > 20 {
+								for i := len(dataArray) - 10; i < len(dataArray); i++ {
+									sample = append(sample, dataArray[i])
+								}
+							}
+
+							summary["data_sample"] = sample
+						}
+					} else {
+						summary[key] = value
+					}
+				}
+			}
+			response[graph] = summary
+		}
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
