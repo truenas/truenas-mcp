@@ -263,9 +263,11 @@ You should now be able to ask TrueNAS questions:
 ### Flags
 
 - `--truenas-url` - TrueNAS hostname (required, or use `TRUENAS_URL` env var)
-  - Examples: `truenas.local` or `192.168.0.31` (automatically uses `wss://` on port 443)
+  - Examples: `truenas.local` or `192.168.0.31` (automatically uses `wss://<host>:443/api/current`), or a full `wss://host[:port]/api/current` URL
+  - A `wss://` URL ending in the legacy `/websocket` path is upgraded to `/api/current` with a warning
   - ⚠️ **Note**: `ws://` (unencrypted) is **not allowed** - TrueNAS will revoke API keys used over unencrypted connections
 - `--api-key` - TrueNAS API key for authentication (required, or use `TRUENAS_API_KEY` env var)
+- `--api-user` - The user that owns the API key, sent to `auth.login_ex` (default `root`, or use `TRUENAS_API_USER`). Installs where the admin is `truenas_admin` need `--api-user truenas_admin`
 - `--tls-ca` - Path to a PEM certificate to trust, e.g. the TrueNAS self-signed certificate (or use `TRUENAS_TLS_CA` env var)
 - `--insecure` - Disable TLS certificate verification entirely (or set `TRUENAS_INSECURE=1`) - **unsafe**: allows man-in-the-middle attacks; prefer `--tls-ca`
 - `--debug` - Enable debug logging (or set `TRUENAS_MCP_DEBUG=1`)
@@ -303,9 +305,9 @@ export TRUENAS_API_KEY=your-api-key
 
 The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 
-1. **Uses secure WebSocket (wss://)**: Connects to `wss://your-truenas:443/websocket`
+1. **Uses secure WebSocket (wss://)**: Connects to the JSON-RPC 2.0 endpoint `wss://your-truenas:443/api/current` (TrueNAS 25.04 or later)
 2. **Verifies certificates by default**: trust the TrueNAS self-signed certificate with `--tls-ca` (see [TLS with a self-signed certificate](#step-3-configure-your-mcp-client))
-3. **Authenticates via API key**: Uses `auth.login_with_api_key` method
+3. **Authenticates via API key**: Logs in with `auth.login_ex` (`API_KEY_PLAIN` mechanism, user from `--api-user`)
 
 ### ⚠️ Security Requirement
 

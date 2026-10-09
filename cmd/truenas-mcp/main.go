@@ -18,7 +18,8 @@ import (
 )
 
 var (
-	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'ws://10.0.0.1/websocket')")
+	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'wss://10.0.0.1/api/current')")
+	apiUser    = flag.String("api-user", "", "User that owns the API key, sent to auth.login_ex (default root; env TRUENAS_API_USER)")
 	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication")
 	insecure   = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks)")
 	tlsCA      = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
@@ -44,6 +45,9 @@ func main() {
 	}
 	if *apiKey == "" {
 		*apiKey = os.Getenv("TRUENAS_API_KEY")
+	}
+	if *apiUser == "" {
+		*apiUser = os.Getenv("TRUENAS_API_USER")
 	}
 
 	if *truenasURL == "" || *apiKey == "" {
@@ -80,7 +84,9 @@ func main() {
 	}
 
 	// Create TrueNAS client
-	client, err := truenas.NewClient(*truenasURL, *apiKey, tlsConfig)
+	client, err := truenas.NewClientWithOptions(*truenasURL, *apiKey, tlsConfig, truenas.Options{
+		APIUser: *apiUser,
+	})
 	if err != nil {
 		log.Fatalf("Failed to create TrueNAS client: %v", err)
 	}
