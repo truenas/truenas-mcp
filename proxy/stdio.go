@@ -55,7 +55,7 @@ func (h *StdioHandler) WriteResponse(resp *mcp.Response) error {
 	h.stdoutMutex.Lock()
 	defer h.stdoutMutex.Unlock()
 
-	data, err := json.Marshal(resp)
+	data, err := json.Marshal(redactResponse(resp))
 	if err != nil {
 		return fmt.Errorf("failed to marshal response: %w", err)
 	}
