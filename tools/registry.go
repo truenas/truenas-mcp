@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -9,6 +10,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1952,10 +1954,12 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 				if dataPoints, err := extractAvailableMemory(memData[0]); err == nil {
 					// The "memory" graph reports available bytes, not used.
 					// The ZFS ARC is reclaimable, so exclude it when known.
+					// Only the latest ARC size is known, so it is compared with
+					// the latest available sample, not the hourly average.
 					avgAvailable := calculateAverage(dataPoints)
 					label, suffix := "Memory utilization", " (may include ZFS ARC cache)"
 					if arcBytes, err := currentArcBytes(client); err == nil {
-						avgAvailable += arcBytes
+						avgAvailable = dataPoints[len(dataPoints)-1] + arcBytes
 						label, suffix = "Memory utilization excluding ZFS ARC", ""
 					}
 					avgMemPct := memoryUsedPct(totalMemory, avgAvailable)
@@ -2031,7 +2035,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 			continue
 		}
 		activeAlerts++
-		switch level, _ := alert["level"].(string); level {
+		switch level, _ := alert["level"].(string); strings.ToUpper(level) {
 		case "CRITICAL", "ALERT", "EMERGENCY":
 			criticalAlerts++
 		}
@@ -3263,26 +3267,53 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 // 27.0; other ARC graphs vary between releases.
 var fallbackArcGraphs = []string{"arcsize"}
 
-// arcGraphCache holds the discovered ARC graphs per client connection.
-var arcGraphCache sync.Map // *truenas.Client -> []string
+// arcGraphCache holds a successful ARC graph discovery per client, tagged
+// with the session generation it was made on so a reconnect or new login
+// discovers again (the server may have been upgraded meanwhile).
+var arcGraphCache sync.Map // *truenas.Client -> arcGraphEntry
+
+type arcGraphEntry struct {
+	gen    uint64
+	graphs []string
+}
+
+// discoveryTimeout bounds each discovery call; both run concurrently, so
+// discovery adds at most this much to the first get_arc_metrics call.
+var discoveryTimeout = 10 * time.Second
 
 // supportedArcGraphs returns the ARC graphs (names starting with "arc")
-// that reporting.get_data accepts on this server, discovered once per
-// client. reporting.graphs lists the graph plugins the server has, but on
-// 27.0 it lists plugins that reporting.get_data's schema rejects, so the
-// accepted names from core.get_methods are intersected with it.
+// that reporting.get_data accepts on this server. reporting.graphs lists
+// the graph plugins the server has, but on 27.0 it lists plugins that
+// reporting.get_data's schema rejects, so the accepted names from
+// core.get_methods are intersected with it. Only a complete discovery is
+// cached (per session); a failed or partial one is retried next call.
 func supportedArcGraphs(client *truenas.Client) []string {
-	if cached, ok := arcGraphCache.Load(client); ok {
-		return cached.([]string)
+	gen, err := client.SessionGeneration()
+	if err != nil {
+		return fallbackArcGraphs
 	}
-	graphs := discoverArcGraphs(client)
-	arcGraphCache.Store(client, graphs)
+	if cached, ok := arcGraphCache.Load(client); ok {
+		if e := cached.(arcGraphEntry); e.gen == gen {
+			return e.graphs
+		}
+	}
+	graphs, complete := discoverArcGraphs(client)
+	if complete {
+		arcGraphCache.Store(client, arcGraphEntry{gen: gen, graphs: graphs})
+	}
 	return graphs
 }
 
-func discoverArcGraphs(client *truenas.Client) []string {
-	accepted := getDataAcceptedGraphs(client)
-	offered := reportingGraphNames(client)
+// discoverArcGraphs returns the supported ARC graphs and whether discovery
+// was complete (both sources answered and at least one ARC graph matched).
+func discoverArcGraphs(client *truenas.Client) ([]string, bool) {
+	var accepted, offered []string
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); accepted = getDataAcceptedGraphs(client) }()
+	go func() { defer wg.Done(); offered = reportingGraphNames(client) }()
+	wg.Wait()
+
 	var names []string
 	switch {
 	case accepted != nil && offered != nil:
@@ -3292,10 +3323,11 @@ func discoverArcGraphs(client *truenas.Client) []string {
 			}
 		}
 	case accepted != nil:
+		// The schema alone is authoritative for what get_data accepts.
 		names = accepted
-	case offered != nil:
-		names = offered
 	}
+	// reporting.graphs alone is not used: on 27.0 it lists ARC graphs that
+	// reporting.get_data rejects.
 	arc := make([]string, 0, len(names))
 	for _, n := range names {
 		if strings.HasPrefix(n, "arc") && !slices.Contains(arc, n) {
@@ -3303,15 +3335,15 @@ func discoverArcGraphs(client *truenas.Client) []string {
 		}
 	}
 	if len(arc) == 0 {
-		return fallbackArcGraphs
+		return fallbackArcGraphs, false
 	}
 	sort.Strings(arc)
-	return arc
+	return arc, accepted != nil && offered != nil
 }
 
 // reportingGraphNames returns the names from reporting.graphs, or nil.
 func reportingGraphNames(client *truenas.Client) []string {
-	result, err := client.Call("reporting.graphs")
+	result, err := client.CallWithTimeout(discoveryTimeout, "reporting.graphs")
 	if err != nil {
 		return nil
 	}
@@ -3337,7 +3369,7 @@ func reportingGraphNames(client *truenas.Client) []string {
 // reporting.get_data argument schema (graphs[].name enum) as published by
 // core.get_methods, or nil if unavailable.
 func getDataAcceptedGraphs(client *truenas.Client) []string {
-	result, err := client.Call("core.get_methods", "reporting")
+	result, err := client.CallWithTimeout(discoveryTimeout, "core.get_methods", "reporting")
 	if err != nil {
 		return nil
 	}
@@ -3351,31 +3383,55 @@ func getDataAcceptedGraphs(client *truenas.Client) []string {
 	if !ok {
 		return nil
 	}
-	var accepts interface{}
-	if err := json.Unmarshal(method.Accepts, &accepts); err != nil {
+	var accepts []interface{}
+	if err := json.Unmarshal(method.Accepts, &accepts); err != nil || len(accepts) == 0 {
 		return nil
 	}
-	return findNameEnum(accepts)
+	// accepts is one JSON schema per argument; the first is graphs, an
+	// array of {name, identifier}. Read accepts[0].items.properties.name
+	// and only walk the schema if that path is absent.
+	if graphs, ok := accepts[0].(map[string]interface{}); ok {
+		if items, ok := graphs["items"].(map[string]interface{}); ok {
+			if out := nameEnum(items); out != nil {
+				return out
+			}
+		}
+	}
+	return findNameEnum(accepts[0])
+}
+
+// nameEnum returns schema.properties.name.enum as strings, or nil.
+func nameEnum(schema map[string]interface{}) []string {
+	props, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	name, ok := props["name"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	enum, ok := name["enum"].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(enum))
+	for _, e := range enum {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // findNameEnum walks a JSON schema for the first properties.name.enum list.
 func findNameEnum(node interface{}) []string {
 	switch v := node.(type) {
 	case map[string]interface{}:
-		if props, ok := v["properties"].(map[string]interface{}); ok {
-			if name, ok := props["name"].(map[string]interface{}); ok {
-				if enum, ok := name["enum"].([]interface{}); ok {
-					out := make([]string, 0, len(enum))
-					for _, e := range enum {
-						if s, ok := e.(string); ok {
-							out = append(out, s)
-						}
-					}
-					if len(out) > 0 {
-						return out
-					}
-				}
-			}
+		if out := nameEnum(v); out != nil {
+			return out
 		}
 		keys := make([]string, 0, len(v))
 		for k := range v {
@@ -4550,28 +4606,41 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 	}
 
 	// The ZFS ARC is reclaimable cache that the available figure does not
-	// count, so status is based on memory used excluding the ARC.
+	// count, so status is based on memory used excluding the ARC. Only the
+	// latest ARC size is known, so it is compared with the latest available
+	// sample rather than an average over the range.
 	statusPct := current
-	if arcBytes, err := currentArcBytes(client); err == nil {
-		usedExclArc := math.Max(0, currentUsed-arcBytes)
+	arcBytes, arcErr := currentArcBytes(client)
+	if arcErr == nil {
+		latestUsed := math.Max(0, totalMemory-availablePoints[len(availablePoints)-1])
+		usedExclArc := latestUsed - arcBytes
+		if usedExclArc < 0 {
+			usedExclArc = 0
+			analysis["arc_clamped"] = true
+			analysis["clamp_note"] = "ZFS ARC size exceeds memory used, so used_excluding_arc_bytes was clamped to 0; the ARC and memory samples may be from different times."
+		}
 		statusPct = usedExclArc / totalMemory * 100
 		analysis["arc_bytes"] = int64(arcBytes)
 		analysis["used_excluding_arc_bytes"] = int64(usedExclArc)
 		analysis["utilization_excluding_arc_pct"] = fmt.Sprintf("%.2f", statusPct)
-		analysis["utilization_basis"] = "used = total_memory_bytes - available (reporting graph 'memory'); capacity_status uses used minus the current ZFS ARC size (arcsize), which is reclaimable cache. current/average/peak/trend include the ARC."
+		analysis["utilization_basis"] = "used = total_memory_bytes - available (reporting graph 'memory'); capacity_status uses the latest used sample minus the latest ZFS ARC size (arcsize), which is reclaimable cache. current/average/peak/trend include the ARC."
+		// Only the latest ARC size is known, not its history, so a trend
+		// excluding the ARC can't be computed. Projecting the ARC-inclusive
+		// trend would report ARC growth as a threshold risk, so none is given.
+		if trend == "increasing" {
+			analysis["projection_note"] = "No threshold projection: the trend includes the ZFS ARC, which grows as the cache warms, while capacity_status excludes it."
+		}
 	} else {
 		analysis["utilization_basis"] = "used = total_memory_bytes - available (reporting graph 'memory' reports available memory)"
-		analysis["note"] = "ZFS ARC size unavailable; utilization may include the ZFS ARC cache, which is reclaimable."
-	}
-	analysis["capacity_status"] = determineCapacityStatus(statusPct, 70.0, 85.0)
-
-	// Add projections if trending up
-	if trend == "increasing" {
-		projections := calculateProjections(dataPointsPct, statusPct, 70.0, 85.0)
-		if len(projections) > 0 {
-			analysis["projections"] = projections
+		analysis["note"] = arcUnavailableNote(arcErr)
+		// Status and trend are both ARC-inclusive here, so projecting is consistent.
+		if trend == "increasing" {
+			if projections := calculateProjections(dataPointsPct, statusPct, 70.0, 85.0); len(projections) > 0 {
+				analysis["projections"] = projections
+			}
 		}
 	}
+	analysis["capacity_status"] = determineCapacityStatus(statusPct, 70.0, 85.0)
 
 	return analysis, nil
 }
@@ -4596,8 +4665,15 @@ func extractAvailableMemory(metric map[string]interface{}) ([]float64, error) {
 	return valid, nil
 }
 
+// arcMaxAge is how old the latest arcsize sample may be before it is
+// treated as unavailable rather than compared with current memory figures.
+const arcMaxAge = 15 * time.Minute
+
+// errArcStale reports that the latest arcsize sample is older than arcMaxAge.
+var errArcStale = errors.New("latest ZFS ARC sample is stale")
+
 // currentArcBytes returns the latest ZFS ARC size from the "arcsize"
-// reporting graph.
+// reporting graph. A sample older than arcMaxAge yields errArcStale.
 func currentArcBytes(client *truenas.Client) (float64, error) {
 	result, err := client.Call("reporting.get_data", []interface{}{
 		map[string]interface{}{"name": "arcsize", "identifier": nil},
@@ -4612,16 +4688,30 @@ func currentArcBytes(client *truenas.Client) (float64, error) {
 	if len(data) == 0 {
 		return 0, fmt.Errorf("no arcsize data")
 	}
-	points, err := extractDataPoints(data[0])
-	if err != nil {
-		return 0, err
-	}
-	for i := len(points) - 1; i >= 0; i-- {
-		if points[i] > 0 {
-			return points[i], nil
+	rows, _ := data[0]["data"].([]interface{})
+	for i := len(rows) - 1; i >= 0; i-- {
+		row, ok := rows[i].([]interface{})
+		if !ok || len(row) < 2 {
+			continue
 		}
+		val, ok := row[1].(float64)
+		if !ok || math.IsNaN(val) || math.IsInf(val, 0) || val <= 0 {
+			continue // gap
+		}
+		if ts, ok := row[0].(float64); ok && time.Since(time.Unix(int64(ts), 0)) > arcMaxAge {
+			return 0, errArcStale
+		}
+		return val, nil
 	}
 	return 0, fmt.Errorf("no arcsize data")
+}
+
+// arcUnavailableNote explains why memory figures may include the ARC.
+func arcUnavailableNote(err error) string {
+	if errors.Is(err, errArcStale) {
+		return "Latest ZFS ARC sample is older than 15 minutes, so it was not subtracted; utilization may include the ZFS ARC cache, which is reclaimable."
+	}
+	return "ZFS ARC size unavailable; utilization may include the ZFS ARC cache, which is reclaimable."
 }
 
 // memoryUsedPct converts an available-memory sample into percent used,
@@ -5948,39 +6038,65 @@ func simplifyBootEnvironment(env map[string]interface{}) map[string]interface{} 
 	return simplified
 }
 
-// parseBootEnvCreated parses boot.environment.query's "created" field and
+// parseBootEnvCreated normalizes a boot environment's "created" value and
 // returns it as an ISO-8601 UTC string plus Unix seconds. TrueNAS 25.04+
 // sends a datetime as {"$date": <ms since epoch>}; plain strings and numbers
-// are accepted too. Unparseable values yield ("", 0).
+// are accepted too. Numbers below 1e12 are seconds, larger ones
+// milliseconds. An unparseable string is returned unchanged with
+// timestamp 0; other unparseable values yield ("", 0).
 func parseBootEnvCreated(v interface{}) (string, int64) {
 	var t time.Time
 	switch c := v.(type) {
 	case map[string]interface{}:
-		ms, ok := c["$date"].(float64)
-		if !ok {
+		var ok bool
+		if t, ok = parseEpochOrRFC3339(c["$date"]); !ok {
 			return "", 0
 		}
-		t = time.UnixMilli(int64(ms))
 	case float64:
-		// Milliseconds if it is too large to be seconds.
-		if c > 1e11 {
-			t = time.UnixMilli(int64(c))
-		} else {
-			t = time.Unix(int64(c), 0)
-		}
+		t = epochTime(c)
 	case string:
-		var err error
-		if t, err = time.Parse(time.RFC3339, c); err != nil {
-			// Naive timestamps are UTC (the middleware uses utcfromtimestamp).
-			if t, err = time.Parse("2006-01-02T15:04:05", c); err != nil {
-				return "", 0
-			}
+		var ok bool
+		if t, ok = parseEpochOrRFC3339(c); !ok {
+			// Keep the raw value, as before $date support.
+			return c, 0
 		}
 	default:
 		return "", 0
 	}
 	t = t.UTC()
 	return t.Format(time.RFC3339), t.Unix()
+}
+
+// epochTime converts seconds (below 1e12) or milliseconds since the epoch.
+func epochTime(n float64) time.Time {
+	if math.Abs(n) < 1e12 {
+		return time.Unix(int64(n), 0)
+	}
+	return time.UnixMilli(int64(n))
+}
+
+// parseEpochOrRFC3339 parses a number, a numeric string, an RFC 3339 string
+// or a naive "2006-01-02T15:04:05" string (UTC, as the middleware uses
+// utcfromtimestamp).
+func parseEpochOrRFC3339(v interface{}) (time.Time, bool) {
+	switch c := v.(type) {
+	case float64:
+		if math.IsNaN(c) || math.IsInf(c, 0) {
+			return time.Time{}, false
+		}
+		return epochTime(c), true
+	case string:
+		if n, err := strconv.ParseFloat(c, 64); err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) {
+			return epochTime(n), true
+		}
+		if t, err := time.Parse(time.RFC3339, c); err == nil {
+			return t, true
+		}
+		if t, err := time.Parse("2006-01-02T15:04:05", c); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func sortBootEnvironments(envs []map[string]interface{}, orderBy string) {

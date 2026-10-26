@@ -543,6 +543,14 @@ func (c *Client) Authenticate() error {
 	return err
 }
 
+// SessionGeneration connects and logs in if needed, then returns the login
+// generation of the current session. It changes on every reconnect or new
+// login, so callers can key per-session caches by it.
+func (c *Client) SessionGeneration() (uint64, error) {
+	_, gen, err := c.session(false)
+	return gen, err
+}
+
 // authedSession returns the current connection and its login generation if
 // it is logged in.
 func (c *Client) authedSession() (*websocket.Conn, uint64) {
@@ -658,6 +666,12 @@ func (c *Client) login(conn *websocket.Conn) error {
 // it never reached the socket, or the server refused it as not
 // authenticated (then after logging in again). Safe for concurrent use.
 func (c *Client) Call(method string, params ...interface{}) (json.RawMessage, error) {
+	return c.CallWithTimeout(callTimeout, method, params...)
+}
+
+// CallWithTimeout is Call with a per-request response timeout instead of
+// the default.
+func (c *Client) CallWithTimeout(timeout time.Duration, method string, params ...interface{}) (json.RawMessage, error) {
 	if params == nil {
 		params = []interface{}{} // JSON-RPC: always send params as an array
 	}
@@ -668,7 +682,7 @@ func (c *Client) Call(method string, params ...interface{}) (json.RawMessage, er
 			return nil, err
 		}
 
-		resp, err := c.roundTrip(conn, method, params, callTimeout)
+		resp, err := c.roundTrip(conn, method, params, timeout)
 		if err != nil {
 			if retry && errors.Is(err, errNotSent) {
 				log.Printf("Retrying %s on a new connection: %v", method, err)

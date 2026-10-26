@@ -4,26 +4,35 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Fixtures below mimic TrueNAS 25.04+/27.0 middleware shapes with fake values.
 
 const gib = float64(1 << 30)
 
-// reportingGraph is one reporting.get_data result entry (netdata export).
+// reportingGraph is one reporting.get_data result entry (netdata export)
+// with 10 s samples ending now.
 func reportingGraph(name, legend string, values ...float64) map[string]interface{} {
+	return reportingGraphEnding(time.Now(), name, legend, values...)
+}
+
+// reportingGraphEnding is reportingGraph with the last sample at end.
+func reportingGraphEnding(end time.Time, name, legend string, values ...float64) map[string]interface{} {
+	start := end.Unix() - int64(10*(len(values)-1))
 	data := make([]interface{}, len(values))
 	for i, v := range values {
-		data[i] = []interface{}{float64(1700000000 + i*10), v}
+		data[i] = []interface{}{float64(start + int64(i*10)), v}
 	}
 	return map[string]interface{}{
 		"name":         name,
 		"identifier":   nil,
 		"data":         data,
 		"aggregations": map[string]interface{}{"min": values[0], "mean": values[0], "max": values[0]},
-		"start":        1700000000,
-		"end":          1700003600,
+		"start":        start,
+		"end":          end.Unix(),
 		"legend":       []interface{}{"time", legend},
 	}
 }
@@ -127,7 +136,10 @@ func TestGetArcMetricsPartialFailure(t *testing.T) {
 		"arcsize": reportingGraph("arcsize", "size", 4*gib, 4.5*gib),
 	}
 	// Discovery offers both graphs but the server fails one of them.
-	results := map[string]interface{}{"reporting.graphs": reportingGraphsResult("arcfreememory", "arcsize")}
+	results := map[string]interface{}{
+		"core.get_methods": coreGetMethodsResult([]string{"memory", "arcfreememory", "arcsize"}),
+		"reporting.graphs": reportingGraphsResult("arcfreememory", "arcsize"),
+	}
 	fake := reportingFake(t, graphs, results, func(name string) map[string]interface{} {
 		return middlewareError("ENOENT", "'"+name+"' is not a valid graph plugin.")
 	})
@@ -245,10 +257,10 @@ func TestGetArcMetricsDefault27OnlySupportedGraphs(t *testing.T) {
 		}
 	}
 	if n := len(fake.called("core.get_methods")); n != 1 {
-		t.Errorf("discovery should be cached per connection, core.get_methods called %d times", n)
+		t.Errorf("discovery should be cached per session, core.get_methods called %d times", n)
 	}
 	if n := len(fake.called("reporting.graphs")); n != 1 {
-		t.Errorf("discovery should be cached per connection, reporting.graphs called %d times", n)
+		t.Errorf("discovery should be cached per session, reporting.graphs called %d times", n)
 	}
 
 	// A graph the 27.0 schema rejects gets a clean error, not a call.
@@ -290,6 +302,114 @@ func TestSupportedArcGraphsFallback(t *testing.T) {
 	client2, _ := newFakeClient(t)
 	if got := supportedArcGraphs(client2); strings.Join(got, ",") != "arcsize" {
 		t.Errorf("fallback with null results = %v, want [arcsize]", got)
+	}
+}
+
+func TestSupportedArcGraphsPartialDiscoveryNotCached(t *testing.T) {
+	// reporting.graphs alone is not trusted (27.0 over-reports), and a
+	// result from only one source is not cached.
+	results := map[string]interface{}{"reporting.graphs": reportingGraphsResult(pluginNames27...)}
+	client, fake := newFakeClientFrom(t, reportingFake(t, nil, results, nil))
+	for i := 0; i < 2; i++ {
+		if got := supportedArcGraphs(client); strings.Join(got, ",") != "arcsize" {
+			t.Errorf("reporting.graphs only = %v, want [arcsize]", got)
+		}
+	}
+	if n := len(fake.called("core.get_methods")); n != 2 {
+		t.Errorf("partial discovery must not be cached: core.get_methods called %d times, want 2", n)
+	}
+}
+
+func TestSupportedArcGraphsRecoversAndRediscoversAfterReconnect(t *testing.T) {
+	// phase 0: discovery fails; 1: it works; 2: the server now offers a
+	// different set (e.g. upgraded), seen after a reconnect.
+	var phase atomic.Int32
+	sets := [][]string{nil, {"arcavailablememory", "arcfreememory", "arcsize"}, {"arcfreememory", "arcsize"}}
+	graphs := map[string]map[string]interface{}{
+		"arcfreememory": reportingGraph("arcfreememory", "free", 2*gib, 2*gib),
+	}
+	fake := reportingFake(t, graphs, nil, nil)
+	inner := fake.handle
+	fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		set := sets[phase.Load()]
+		switch method {
+		case "core.get_methods", "reporting.graphs":
+			if set == nil {
+				return nil, middlewareError("EFAULT", "Middleware is starting"), true
+			}
+			if method == "core.get_methods" {
+				return coreGetMethodsResult(append([]string{"cpu", "memory"}, set...)), nil, true
+			}
+			return reportingGraphsResult(set...), nil, true
+		}
+		return inner(method, params)
+	}
+	client, fake := newFakeClientFrom(t, fake)
+
+	if got := supportedArcGraphs(client); strings.Join(got, ",") != "arcsize" {
+		t.Fatalf("failed discovery = %v, want fallback [arcsize]", got)
+	}
+
+	phase.Store(1)
+	if got := supportedArcGraphs(client); strings.Join(got, ",") != strings.Join(sets[1], ",") {
+		t.Fatalf("after recovery = %v, want %v (fallback must not be cached)", got, sets[1])
+	}
+	if _, err := handleGetArcMetrics(client, map[string]interface{}{"graphs": []interface{}{"arcfreememory"}}); err != nil {
+		t.Errorf("arcfreememory should be accepted after recovery: %v", err)
+	}
+	before := len(fake.called("core.get_methods"))
+	supportedArcGraphs(client)
+	if n := len(fake.called("core.get_methods")); n != before {
+		t.Errorf("successful discovery should be cached within a session (%d -> %d calls)", before, n)
+	}
+
+	phase.Store(2)
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := supportedArcGraphs(client); strings.Join(got, ",") != strings.Join(sets[2], ",") {
+		t.Errorf("after reconnect = %v, want %v (re-discovered)", got, sets[2])
+	}
+	if n := len(fake.called("auth.login_ex")); n != 2 {
+		t.Errorf("auth.login_ex called %d times, want 2 (reconnect)", n)
+	}
+	if n := len(fake.called("core.get_methods")); n != before+1 {
+		t.Errorf("core.get_methods called %d times after reconnect, want %d", n, before+1)
+	}
+}
+
+func TestSupportedArcGraphsDiscoveryTimeout(t *testing.T) {
+	old := discoveryTimeout
+	discoveryTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { discoveryTimeout = old })
+
+	fake := &fakeMiddleware{handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if method == "core.get_methods" || method == "reporting.graphs" {
+			time.Sleep(300 * time.Millisecond) // the server never answers in time
+			return nil, nil, true
+		}
+		return nil, nil, false
+	}}
+	client, _ := newFakeClientFrom(t, fake)
+	start := time.Now()
+	if got := supportedArcGraphs(client); strings.Join(got, ",") != "arcsize" {
+		t.Errorf("timed-out discovery = %v, want fallback [arcsize]", got)
+	}
+	// Both calls run concurrently, each bounded by discoveryTimeout.
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("discovery took %v; it should be bounded by discoveryTimeout", d)
+	}
+}
+
+func TestGetDataAcceptedGraphsAnchoredToGraphsArg(t *testing.T) {
+	// A later argument that also has a properties.name.enum must not be
+	// picked up: only accepts[0].items.properties.name counts.
+	res := coreGetMethodsResult([]string{"memory", "arcsize"})
+	accepts := res["reporting.get_data"].(map[string]interface{})["accepts"].([]interface{})
+	accepts[1].(map[string]interface{})["properties"].(map[string]interface{})["name"] = map[string]interface{}{"enum": []interface{}{"arcbogus"}}
+	client, _ := newFakeClientWith(t, map[string]interface{}{"core.get_methods": res}, nil)
+	if got := getDataAcceptedGraphs(client); strings.Join(got, ",") != "memory,arcsize" {
+		t.Errorf("getDataAcceptedGraphs = %v, want [memory arcsize]", got)
 	}
 }
 
@@ -369,6 +489,105 @@ func TestAnalyzeMemoryCapacityExcludesArc(t *testing.T) {
 	recs := generateCapacityRecommendations(map[string]interface{}{"memory": analysis})
 	if b, _ := json.Marshal(recs); strings.Contains(string(b), "RAM") {
 		t.Errorf("no RAM recommendation expected when non-ARC usage is low: %s", b)
+	}
+}
+
+func TestAnalyzeMemoryCapacityNoProjectionFromArcWarmup(t *testing.T) {
+	// 100 GiB total; available falls 60 -> 22 GiB over 20 samples as the
+	// ARC warms up to 70 GiB. Used excluding ARC is 8 GiB: healthy, and no
+	// threshold projection may be derived from the ARC-inclusive trend.
+	avail := make([]float64, 20)
+	for i := range avail {
+		avail[i] = (60 - 2*float64(i)) * gib
+	}
+	graphs := map[string]map[string]interface{}{
+		"memory":  reportingGraph("memory", "available", avail...),
+		"arcsize": reportingGraph("arcsize", "size", 69*gib, 70*gib),
+	}
+	results := map[string]interface{}{
+		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 100 * gib},
+	}
+	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
+
+	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis["capacity_status"] != "healthy" || analysis["utilization_excluding_arc_pct"] != "8.00" {
+		t.Errorf("status = %v at %v%%, want healthy at 8.00%%", analysis["capacity_status"], analysis["utilization_excluding_arc_pct"])
+	}
+	if analysis["trend"] != "increasing" {
+		t.Errorf("trend = %v, want increasing", analysis["trend"])
+	}
+	if p, ok := analysis["projections"]; ok {
+		t.Errorf("no projection expected while reporting healthy, got %v", p)
+	}
+	if note, _ := analysis["projection_note"].(string); !strings.Contains(note, "ARC") {
+		t.Errorf("projection_note = %q, want an explanation", note)
+	}
+}
+
+func TestAnalyzeMemoryCapacityProjectsWithoutArc(t *testing.T) {
+	// Without ARC data status and trend share a basis, so projections stay.
+	avail := make([]float64, 20)
+	for i := range avail {
+		avail[i] = (60 - 2*float64(i)) * gib
+	}
+	graphs := map[string]map[string]interface{}{"memory": reportingGraph("memory", "available", avail...)}
+	results := map[string]interface{}{
+		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 100 * gib},
+	}
+	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
+	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := analysis["projections"]; !ok {
+		t.Errorf("expected projections without ARC data: %v", analysis)
+	}
+}
+
+func TestAnalyzeMemoryCapacityArcClampNote(t *testing.T) {
+	// 16 GiB total, 12 GiB available (4 GiB used), ARC 8 GiB: clamped to 0.
+	graphs := map[string]map[string]interface{}{
+		"memory":  reportingGraph("memory", "available", 12*gib, 12*gib),
+		"arcsize": reportingGraph("arcsize", "size", 8*gib),
+	}
+	results := map[string]interface{}{
+		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 16 * gib},
+	}
+	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
+	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis["used_excluding_arc_bytes"] != int64(0) || analysis["arc_clamped"] != true {
+		t.Errorf("want clamped to 0 with arc_clamped, got %v / %v", analysis["used_excluding_arc_bytes"], analysis["arc_clamped"])
+	}
+	if note, _ := analysis["clamp_note"].(string); !strings.Contains(note, "clamped") {
+		t.Errorf("clamp_note = %q", note)
+	}
+}
+
+func TestAnalyzeMemoryCapacityStaleArcIgnored(t *testing.T) {
+	// The latest ARC sample is an hour old: don't subtract it.
+	graphs := map[string]map[string]interface{}{
+		"memory":  reportingGraph("memory", "available", 11*gib, 11*gib),
+		"arcsize": reportingGraphEnding(time.Now().Add(-time.Hour), "arcsize", "size", 72*gib),
+	}
+	results := map[string]interface{}{
+		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 100 * gib},
+	}
+	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
+	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := analysis["arc_bytes"]; ok {
+		t.Errorf("stale ARC sample should not be used: %v", analysis)
+	}
+	if note, _ := analysis["note"].(string); !strings.Contains(note, "older than 15 minutes") {
+		t.Errorf("note = %q, want stale ARC explanation", note)
 	}
 }
 
@@ -454,6 +673,7 @@ func TestSystemHealthExcludesDismissedAlerts(t *testing.T) {
 		fakeAlert("00000000-0000-0000-0000-000000000002", "WARNING", false),
 		fakeAlert("00000000-0000-0000-0000-000000000003", "CRITICAL", false),
 		fakeAlert("00000000-0000-0000-0000-000000000004", "ERROR", true),
+		fakeAlert("00000000-0000-0000-0000-000000000005", "emergency", false), // level matched case-insensitively
 	}
 	client, _ := newFakeClientFrom(t, systemHealthFake(t, alerts, 12*gib))
 
@@ -465,11 +685,11 @@ func TestSystemHealthExcludesDismissedAlerts(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp["alert_count"] != float64(2) {
-		t.Errorf("alert_count = %v, want 2 (dismissed excluded)", resp["alert_count"])
+	if resp["alert_count"] != float64(3) {
+		t.Errorf("alert_count = %v, want 3 (dismissed excluded)", resp["alert_count"])
 	}
-	if resp["critical_alert_count"] != float64(1) {
-		t.Errorf("critical_alert_count = %v, want 1", resp["critical_alert_count"])
+	if resp["critical_alert_count"] != float64(2) {
+		t.Errorf("critical_alert_count = %v, want 2", resp["critical_alert_count"])
 	}
 	if resp["dismissed_alert_count"] != float64(2) {
 		t.Errorf("dismissed_alert_count = %v, want 2", resp["dismissed_alert_count"])
@@ -554,7 +774,12 @@ func TestParseBootEnvCreated(t *testing.T) {
 		{"epoch seconds", float64(1736038861), "2025-01-05T01:01:01Z", 1736038861},
 		{"epoch ms", float64(1736038861000), "2025-01-05T01:01:01Z", 1736038861},
 		{"missing", nil, "", 0},
-		{"garbage", "not a date", "", 0},
+		{"$date seconds", map[string]interface{}{"$date": float64(1736038861)}, "2025-01-05T01:01:01Z", 1736038861},
+		{"$date ms string", map[string]interface{}{"$date": "1736038861000"}, "2025-01-05T01:01:01Z", 1736038861},
+		{"$date RFC3339 string", map[string]interface{}{"$date": "2025-01-05T01:01:01Z"}, "2025-01-05T01:01:01Z", 1736038861},
+		{"$date garbage", map[string]interface{}{"$date": "soon"}, "", 0},
+		{"garbage passes through", "not a date", "not a date", 0},
+		{"space separator passes through", "2025-01-05 01:01:01", "2025-01-05 01:01:01", 0},
 		{"bad map", map[string]interface{}{"$time": "01:01:01"}, "", 0},
 	}
 	for _, c := range cases {
