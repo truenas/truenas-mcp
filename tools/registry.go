@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/truenas/truenas-mcp/mcp"
@@ -1124,7 +1125,7 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 	r.tools["get_arc_metrics"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "get_arc_metrics",
-			Description: "Get ZFS ARC (Adaptive Replacement Cache) performance metrics including cache size, demand hit/miss rates, and L2ARC statistics.",
+			Description: "Get ZFS ARC (Adaptive Replacement Cache) reporting metrics such as ARC size. Which ARC graphs exist depends on the TrueNAS version; the supported set is discovered from the server.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1132,9 +1133,8 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 						"type": "array",
 						"items": map[string]interface{}{
 							"type": "string",
-							"enum": arcGraphs,
 						},
-						"description": "ARC metrics to retrieve (default: arcfreememory, arcavailablememory, arcsize)",
+						"description": "ARC graphs to retrieve, e.g. 'arcsize'. Other ARC graphs are accepted when the server supports them. Default: every ARC graph the server supports.",
 					},
 					"unit": map[string]interface{}{
 						"type":    "string",
@@ -1949,15 +1949,22 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 		if err == nil {
 			var memData []map[string]interface{}
 			if err := json.Unmarshal(memResult, &memData); err == nil && len(memData) > 0 {
-				if dataPoints, err := extractDataPoints(memData[0]); err == nil {
+				if dataPoints, err := extractAvailableMemory(memData[0]); err == nil {
 					// The "memory" graph reports available bytes, not used.
-					avgMemPct := memoryUsedPct(totalMemory, calculateAverage(dataPoints))
+					// The ZFS ARC is reclaimable, so exclude it when known.
+					avgAvailable := calculateAverage(dataPoints)
+					label, suffix := "Memory utilization", " (may include ZFS ARC cache)"
+					if arcBytes, err := currentArcBytes(client); err == nil {
+						avgAvailable += arcBytes
+						label, suffix = "Memory utilization excluding ZFS ARC", ""
+					}
+					avgMemPct := memoryUsedPct(totalMemory, avgAvailable)
 					if avgMemPct > 85 {
 						capacityWarnings = append(capacityWarnings,
-							fmt.Sprintf("Memory utilization critical: %.1f%%", avgMemPct))
+							fmt.Sprintf("%s critical: %.1f%%%s", label, avgMemPct, suffix))
 					} else if avgMemPct > 70 {
 						capacityWarnings = append(capacityWarnings,
-							fmt.Sprintf("Memory utilization elevated: %.1f%%", avgMemPct))
+							fmt.Sprintf("%s elevated: %.1f%%%s", label, avgMemPct, suffix))
 					}
 				}
 			}
@@ -3251,19 +3258,143 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 	return string(formatted), nil
 }
 
-// arcGraphs are the ZFS ARC graph names served by reporting.get_data on
-// TrueNAS 25.04+ (the netdata graph plugins in the middleware). Older
-// collectd-era names such as "arcrate" and "arcresult" no longer exist.
-var arcGraphs = []string{
-	"arcfreememory", "arcavailablememory", "arcsize",
-	"demandaccessespersecond", "demanddataaccessespersecond", "demandmetadataaccessespersecond",
-	"demanddatahitspersecond", "demanddataiohitspersecond", "demanddatamissespersecond",
-	"demanddatahitpercentage", "demanddataiohitpercentage", "demanddatamisspercentage",
-	"demandmetadatahitspersecond", "demandmetadataiohitspersecond", "demandmetadatamissespersecond",
-	"demandmetadatahitpercentage", "demandmetadataiohitpercentage", "demandmetadatamisspercentage",
-	"l2archhitspersecond", "l2arcmissespersecond", "totall2arcaccessespersecond",
-	"l2architpercentage", "l2arcmisspercentage",
-	"l2arcbytesreadpersecond", "l2arcbyteswrittenpersecond",
+// fallbackArcGraphs is used when the server's supported graphs cannot be
+// discovered. 'arcsize' is accepted by reporting.get_data on 25.04 through
+// 27.0; other ARC graphs vary between releases.
+var fallbackArcGraphs = []string{"arcsize"}
+
+// arcGraphCache holds the discovered ARC graphs per client connection.
+var arcGraphCache sync.Map // *truenas.Client -> []string
+
+// supportedArcGraphs returns the ARC graphs (names starting with "arc")
+// that reporting.get_data accepts on this server, discovered once per
+// client. reporting.graphs lists the graph plugins the server has, but on
+// 27.0 it lists plugins that reporting.get_data's schema rejects, so the
+// accepted names from core.get_methods are intersected with it.
+func supportedArcGraphs(client *truenas.Client) []string {
+	if cached, ok := arcGraphCache.Load(client); ok {
+		return cached.([]string)
+	}
+	graphs := discoverArcGraphs(client)
+	arcGraphCache.Store(client, graphs)
+	return graphs
+}
+
+func discoverArcGraphs(client *truenas.Client) []string {
+	accepted := getDataAcceptedGraphs(client)
+	offered := reportingGraphNames(client)
+	var names []string
+	switch {
+	case accepted != nil && offered != nil:
+		for _, n := range offered {
+			if slices.Contains(accepted, n) {
+				names = append(names, n)
+			}
+		}
+	case accepted != nil:
+		names = accepted
+	case offered != nil:
+		names = offered
+	}
+	arc := make([]string, 0, len(names))
+	for _, n := range names {
+		if strings.HasPrefix(n, "arc") && !slices.Contains(arc, n) {
+			arc = append(arc, n)
+		}
+	}
+	if len(arc) == 0 {
+		return fallbackArcGraphs
+	}
+	sort.Strings(arc)
+	return arc
+}
+
+// reportingGraphNames returns the names from reporting.graphs, or nil.
+func reportingGraphNames(client *truenas.Client) []string {
+	result, err := client.Call("reporting.graphs")
+	if err != nil {
+		return nil
+	}
+	var items []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(result, &items); err != nil || len(items) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(items))
+	for _, it := range items {
+		if it.Name != "" {
+			names = append(names, it.Name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+// getDataAcceptedGraphs returns the graph names allowed by the
+// reporting.get_data argument schema (graphs[].name enum) as published by
+// core.get_methods, or nil if unavailable.
+func getDataAcceptedGraphs(client *truenas.Client) []string {
+	result, err := client.Call("core.get_methods", "reporting")
+	if err != nil {
+		return nil
+	}
+	var methods map[string]struct {
+		Accepts json.RawMessage `json:"accepts"`
+	}
+	if err := json.Unmarshal(result, &methods); err != nil {
+		return nil
+	}
+	method, ok := methods["reporting.get_data"]
+	if !ok {
+		return nil
+	}
+	var accepts interface{}
+	if err := json.Unmarshal(method.Accepts, &accepts); err != nil {
+		return nil
+	}
+	return findNameEnum(accepts)
+}
+
+// findNameEnum walks a JSON schema for the first properties.name.enum list.
+func findNameEnum(node interface{}) []string {
+	switch v := node.(type) {
+	case map[string]interface{}:
+		if props, ok := v["properties"].(map[string]interface{}); ok {
+			if name, ok := props["name"].(map[string]interface{}); ok {
+				if enum, ok := name["enum"].([]interface{}); ok {
+					out := make([]string, 0, len(enum))
+					for _, e := range enum {
+						if s, ok := e.(string); ok {
+							out = append(out, s)
+						}
+					}
+					if len(out) > 0 {
+						return out
+					}
+				}
+			}
+		}
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if out := findNameEnum(v[k]); out != nil {
+				return out
+			}
+		}
+	case []interface{}:
+		for _, e := range v {
+			if out := findNameEnum(e); out != nil {
+				return out
+			}
+		}
+	}
+	return nil
 }
 
 // conciseError returns the first line of err's message, dropping the
@@ -3282,14 +3413,15 @@ func handleGetArcMetrics(client *truenas.Client, args map[string]interface{}) (s
 		unit = u
 	}
 
-	// Default graphs if not specified
-	graphs := []string{"arcfreememory", "arcavailablememory", "arcsize"}
+	// Default to every ARC graph the server supports.
+	supported := supportedArcGraphs(client)
+	graphs := supported
 	if g, ok := args["graphs"].([]interface{}); ok && len(g) > 0 {
 		graphs = make([]string, 0, len(g))
 		for _, v := range g {
 			s, _ := v.(string)
-			if !slices.Contains(arcGraphs, s) {
-				return "", fmt.Errorf("unknown ARC graph %q; valid graphs: %s", s, strings.Join(arcGraphs, ", "))
+			if !slices.Contains(supported, s) {
+				return "", fmt.Errorf("unknown or unsupported ARC graph %q; supported graphs on this server: %s", s, strings.Join(supported, ", "))
 			}
 			graphs = append(graphs, s)
 		}
@@ -4385,7 +4517,7 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 
 	// Extract data points: the "memory" graph (truenas_meminfo.available)
 	// reports AVAILABLE bytes, so used = total - available.
-	availablePoints, err := extractDataPoints(metricsData[0])
+	availablePoints, err := extractAvailableMemory(metricsData[0])
 	if err != nil {
 		return nil, err
 	}
@@ -4396,17 +4528,13 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 		dataPointsPct[i] = memoryUsedPct(totalMemory, avail)
 	}
 	currentAvailable := calculateRecentAverage(availablePoints, 5)
-	currentUsed := totalMemory - currentAvailable
-	if currentUsed < 0 {
-		currentUsed = 0
-	}
+	currentUsed := math.Max(0, totalMemory-currentAvailable)
 
 	// Calculate statistics
 	current := calculateRecentAverage(dataPointsPct, 5)
 	average := calculateAverage(dataPointsPct)
 	peak := calculateMax(dataPointsPct)
 	trend := calculateTrendDirection(dataPointsPct)
-	status := determineCapacityStatus(current, 70.0, 85.0)
 
 	analysis := map[string]interface{}{
 		"metric":                  "Memory",
@@ -4415,22 +4543,85 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 		"average_utilization_pct": fmt.Sprintf("%.2f", average),
 		"peak_utilization_pct":    fmt.Sprintf("%.2f", peak),
 		"trend":                   trend,
-		"capacity_status":         status,
 		"total_memory_bytes":      int64(totalMemory),
 		"current_available_bytes": int64(currentAvailable),
 		"current_used_bytes":      int64(currentUsed),
-		"utilization_basis":       "used = total_memory_bytes - available (reporting graph 'memory' reports available memory)",
+		"samples_used":            len(availablePoints),
 	}
+
+	// The ZFS ARC is reclaimable cache that the available figure does not
+	// count, so status is based on memory used excluding the ARC.
+	statusPct := current
+	if arcBytes, err := currentArcBytes(client); err == nil {
+		usedExclArc := math.Max(0, currentUsed-arcBytes)
+		statusPct = usedExclArc / totalMemory * 100
+		analysis["arc_bytes"] = int64(arcBytes)
+		analysis["used_excluding_arc_bytes"] = int64(usedExclArc)
+		analysis["utilization_excluding_arc_pct"] = fmt.Sprintf("%.2f", statusPct)
+		analysis["utilization_basis"] = "used = total_memory_bytes - available (reporting graph 'memory'); capacity_status uses used minus the current ZFS ARC size (arcsize), which is reclaimable cache. current/average/peak/trend include the ARC."
+	} else {
+		analysis["utilization_basis"] = "used = total_memory_bytes - available (reporting graph 'memory' reports available memory)"
+		analysis["note"] = "ZFS ARC size unavailable; utilization may include the ZFS ARC cache, which is reclaimable."
+	}
+	analysis["capacity_status"] = determineCapacityStatus(statusPct, 70.0, 85.0)
 
 	// Add projections if trending up
 	if trend == "increasing" {
-		projections := calculateProjections(dataPointsPct, current, 70.0, 85.0)
+		projections := calculateProjections(dataPointsPct, statusPct, 70.0, 85.0)
 		if len(projections) > 0 {
 			analysis["projections"] = projections
 		}
 	}
 
 	return analysis, nil
+}
+
+// extractAvailableMemory returns the available-memory samples of a
+// "memory" graph, skipping gaps: null, non-finite and non-positive values
+// (a running system never has zero available memory).
+func extractAvailableMemory(metric map[string]interface{}) ([]float64, error) {
+	points, err := extractDataPoints(metric)
+	if err != nil {
+		return nil, err
+	}
+	valid := points[:0]
+	for _, v := range points {
+		if v > 0 {
+			valid = append(valid, v)
+		}
+	}
+	if len(valid) == 0 {
+		return nil, fmt.Errorf("no valid data points")
+	}
+	return valid, nil
+}
+
+// currentArcBytes returns the latest ZFS ARC size from the "arcsize"
+// reporting graph.
+func currentArcBytes(client *truenas.Client) (float64, error) {
+	result, err := client.Call("reporting.get_data", []interface{}{
+		map[string]interface{}{"name": "arcsize", "identifier": nil},
+	}, map[string]interface{}{"unit": "HOUR"})
+	if err != nil {
+		return 0, err
+	}
+	var data []map[string]interface{}
+	if err := json.Unmarshal(result, &data); err != nil {
+		return 0, err
+	}
+	if len(data) == 0 {
+		return 0, fmt.Errorf("no arcsize data")
+	}
+	points, err := extractDataPoints(data[0])
+	if err != nil {
+		return 0, err
+	}
+	for i := len(points) - 1; i >= 0; i-- {
+		if points[i] > 0 {
+			return points[i], nil
+		}
+	}
+	return 0, fmt.Errorf("no arcsize data")
 }
 
 // memoryUsedPct converts an available-memory sample into percent used,
@@ -4714,7 +4905,8 @@ func extractDataPoints(metric map[string]interface{}) ([]float64, error) {
 	dataPoints := make([]float64, 0, len(dataRaw))
 	for _, pointRaw := range dataRaw {
 		if point, ok := pointRaw.([]interface{}); ok && len(point) >= 2 {
-			if val, ok := point[1].(float64); ok {
+			// Skip null (gap) and non-finite samples.
+			if val, ok := point[1].(float64); ok && !math.IsNaN(val) && !math.IsInf(val, 0) {
 				dataPoints = append(dataPoints, val)
 			}
 		}
@@ -4885,10 +5077,10 @@ func generateCapacityRecommendations(analysis map[string]interface{}) map[string
 			overallStatuses = append(overallStatuses, status)
 			if status == "warning" {
 				recommendations = append(recommendations,
-					"Memory utilization is elevated (>70%). Consider adding more RAM or optimizing memory usage.")
+					"Memory utilization (excluding ZFS ARC cache when known) is elevated (>70%). Consider adding more RAM or optimizing memory usage.")
 			} else if status == "critical" {
 				recommendations = append(recommendations,
-					"Memory utilization is critical (>85%). Immediate action recommended: add more RAM or reduce workload.")
+					"Memory utilization (excluding ZFS ARC cache when known) is critical (>85%). Immediate action recommended: add more RAM or reduce workload.")
 			}
 		}
 	}
