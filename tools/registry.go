@@ -16,6 +16,11 @@ type Registry struct {
 	client      *truenas.Client
 	taskManager *tasks.Manager
 	tools       map[string]Tool
+
+	// Safety policy, set by SetPolicy (tools/safety.go)
+	readOnly bool
+	allow    map[string]bool
+	deny     map[string]bool
 }
 
 type Tool struct {
@@ -30,6 +35,7 @@ func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
 		tools:       make(map[string]Tool),
 	}
 	r.registerTools()
+	r.applySafety()
 	return r
 }
 
@@ -130,13 +136,24 @@ func (r *Registry) registerTools() {
 	r.tools["system_reboot"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "system_reboot",
-			Description: "Reboot the TrueNAS system. This will disconnect all active sessions and services. Use after applying system updates.",
+			Description: "Reboot the TrueNAS system. This will disconnect all active sessions and services. Use after applying system updates. Supports dry-run mode and an optional delay.",
 			InputSchema: map[string]interface{}{
-				"type":       "object",
-				"properties": map[string]interface{}{},
+				"type": "object",
+				"properties": map[string]interface{}{
+					"delay": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional: seconds to wait before rebooting (default: reboot immediately)",
+						"minimum":     0,
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview the reboot without executing (default: false)",
+						"default":     false,
+					},
+				},
 			},
 		},
-		Handler: handleSystemReboot,
+		Handler: handleSystemRebootWithDryRun,
 	}
 
 	// Boot environment management tools
@@ -402,13 +419,19 @@ func (r *Registry) registerTools() {
 	r.tools["refresh_directory_cache"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "refresh_directory_cache",
-			Description: "Refresh cached user and group data from the directory service. Use after making changes in Active Directory, LDAP, or IPA that need to be reflected immediately in TrueNAS.",
+			Description: "Refresh cached user and group data from the directory service. Use after making changes in Active Directory, LDAP, or IPA that need to be reflected immediately in TrueNAS. Supports dry-run mode.",
 			InputSchema: map[string]interface{}{
-				"type":       "object",
-				"properties": map[string]interface{}{},
+				"type": "object",
+				"properties": map[string]interface{}{
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview without refreshing (default: false)",
+						"default":     false,
+					},
+				},
 			},
 		},
-		Handler: handleRefreshDirectoryCache,
+		Handler: handleRefreshDirectoryCacheWithDryRun,
 	}
 
 	r.tools["configure_directory_service"] = Tool{
@@ -973,11 +996,16 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 						"type":        "string",
 						"description": "UUID of the alert to dismiss",
 					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview without changing the alert (default: false)",
+						"default":     false,
+					},
 				},
 				"required": []string{"uuid"},
 			},
 		},
-		Handler: handleDismissAlert,
+		Handler: handleDismissAlertWithDryRun,
 	}
 
 	// Restore alert
@@ -992,11 +1020,16 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 						"type":        "string",
 						"description": "UUID of the alert to restore",
 					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview without changing the alert (default: false)",
+						"default":     false,
+					},
 				},
 				"required": []string{"uuid"},
 			},
 		},
-		Handler: handleRestoreAlert,
+		Handler: handleRestoreAlertWithDryRun,
 	}
 
 	// System reporting metrics
@@ -1771,9 +1804,12 @@ Returns task_id for tracking progress with tasks_get.
 
 func (r *Registry) ListTools() []mcp.Tool {
 	tools := make([]mcp.Tool, 0, len(r.tools))
-	for _, tool := range r.tools {
-		tools = append(tools, tool.Definition)
+	for name, tool := range r.tools {
+		if r.checkPolicy(name) == nil {
+			tools = append(tools, tool.Definition)
+		}
 	}
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
 }
 
@@ -1781,6 +1817,14 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (string, e
 	tool, exists := r.tools[name]
 	if !exists {
 		return "", fmt.Errorf("unknown tool: %s", name)
+	}
+	// Enforce the policy here, not only in ListTools: clients may call tools
+	// they were never shown.
+	if err := r.checkPolicy(name); err != nil {
+		return "", err
+	}
+	if safetyOf(name).Access == Destructive && requiresConfirmation(args) {
+		return r.confirmationRequired(name, tool, args)
 	}
 
 	return tool.Handler(r.client, args)
@@ -5301,7 +5345,15 @@ func (a *applyUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[strin
 func handleSystemReboot(client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Call system.reboot with reason parameter
 	reason := "System reboot requested via MCP"
-	result, err := client.Call("system.reboot", reason)
+	params := []interface{}{reason}
+	delay, err := rebootDelay(args)
+	if err != nil {
+		return "", err
+	}
+	if delay > 0 {
+		params = append(params, map[string]interface{}{"delay": delay})
+	}
+	result, err := client.Call("system.reboot", params...)
 	if err != nil {
 		return "", fmt.Errorf("failed to initiate system reboot: %w", err)
 	}
@@ -5316,6 +5368,10 @@ func handleSystemReboot(client *truenas.Client, args map[string]interface{}) (st
 		"status":  "reboot_initiated",
 		"message": "System reboot initiated. All connections will be lost.",
 		"warning": "TrueNAS system is rebooting. Wait approximately 2-3 minutes before reconnecting.",
+	}
+	if delay > 0 {
+		returnMsg["delay_seconds"] = delay
+		returnMsg["message"] = fmt.Sprintf("System reboot scheduled in %d seconds. All connections will be lost.", delay)
 	}
 
 	formatted, err := json.MarshalIndent(returnMsg, "", "  ")

@@ -25,6 +25,9 @@ var (
 	tlsCA      = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
 	versionFlg = flag.Bool("version", false, "Print version and exit")
 	debug      = flag.Bool("debug", false, "Enable debug logging")
+	readOnly   = flag.Bool("read-only", false, "Hide and refuse every tool that changes the system (env TRUENAS_MCP_READ_ONLY)")
+	allowTools = flag.String("allow-tools", "", "Comma-separated list of the only tools to expose (env TRUENAS_MCP_ALLOW_TOOLS)")
+	denyTools  = flag.String("deny-tools", "", "Comma-separated list of tools to hide and refuse (env TRUENAS_MCP_DENY_TOOLS)")
 )
 
 // Version is the release version, injected at build time via
@@ -47,6 +50,31 @@ func checkRequired(truenasURL, apiKey, apiUser string) error {
 		return fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// truthy reports whether an environment value enables a boolean setting.
+func truthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+// safetyPolicy combines the safety flags with their environment variables;
+// a flag that is set wins over its variable.
+func safetyPolicy(readOnly bool, allow, deny string, getenv func(string) string) tools.Policy {
+	if allow == "" {
+		allow = getenv("TRUENAS_MCP_ALLOW_TOOLS")
+	}
+	if deny == "" {
+		deny = getenv("TRUENAS_MCP_DENY_TOOLS")
+	}
+	return tools.Policy{
+		ReadOnly: readOnly || truthy(getenv("TRUENAS_MCP_READ_ONLY")),
+		Allow:    tools.ParseToolList(allow),
+		Deny:     tools.ParseToolList(deny),
+	}
 }
 
 func main() {
@@ -128,6 +156,13 @@ func main() {
 
 	// Create tool registry
 	registry := tools.NewRegistry(client, taskManager)
+	policy := safetyPolicy(*readOnly, *allowTools, *denyTools, os.Getenv)
+	if err := registry.SetPolicy(policy); err != nil {
+		log.Fatalf("Invalid tool safety settings: %v", err)
+	}
+	if policy.ReadOnly {
+		log.Println("Read-only mode: tools that change the system are disabled")
+	}
 
 	// Start stdio handler
 	handler := NewStdioHandler(registry, *debug)
