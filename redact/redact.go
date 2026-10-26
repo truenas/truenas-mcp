@@ -192,11 +192,17 @@ func keepsNumbers(key string) bool {
 var pemPrivateKey = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----(?s:.*?)(?:-----END [A-Z0-9 ]*PRIVATE KEY[A-Z ]*-----|\z)`)
 
 var (
-	// urlUserinfo matches scheme://user:password@ in URLs and DSNs.
-	urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://[^\s:/@'"]*:)([^\s@/'"]+)@`)
+	// urlUserinfo matches scheme://user:password@ in URLs and DSNs. The
+	// password is greedy up to the last '@' before the host, so a raw '@'
+	// in the password ("u:p@ss@host") is redacted with the rest of it; it
+	// cannot contain whitespace, quotes, '/', '?' or '#', so it never runs
+	// into the path, query or a following URL. The user name cannot contain
+	// ':' or '@', so forms without a password (ssh://root@host) never match.
+	urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://[^\s:/@'"]*:)([^\s/?#'"]+)@`)
 	// envPair matches a whole string of the form NAME=VALUE (compose
-	// environment lists, env files).
-	envPair = regexp.MustCompile(`^(\s*[A-Za-z_][A-Za-z0-9_.-]{0,127}\s*=)(?s:(.+))$`)
+	// environment lists, env files). It is limited to a single line and
+	// to unquoted values; quoted and multi-line text is left to barePair.
+	envPair = regexp.MustCompile(`^([ \t]*[A-Za-z_][A-Za-z0-9_.-]{0,127}[ \t]*=)([^"'\r\n][^\r\n]*)$`)
 	// authHeader matches an Authorization header value with its scheme.
 	authHeader = regexp.MustCompile(`(?i)((?:proxy-)?authorization["']?\s*[:=]\s*["']?)(bearer|basic|digest|token|negotiate)\s+([^\s'",;]+)`)
 	// bearerToken matches "Bearer <token>" anywhere.
@@ -208,10 +214,15 @@ var (
 	// escapedPair matches \"key\": \"value\", JSON that was itself
 	// embedded in a JSON string.
 	escapedPair = regexp.MustCompile(`(\\"([^"\\\n]{1,64})\\"\s*:\s*)\\"((?:[^"\\]|\\[^"])*)\\"`)
-	// barePair matches key=value / key: value with an unquoted key; the
-	// value may be quoted (Python kwargs: password='x') or bare up to the
-	// next delimiter.
-	barePair  = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_.-]{0,63})(\s*[=:]\s*)(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^\s,;&'"(){}\[\]<>]+))`)
+	// barePair matches key=value / key: value with an unquoted key on one
+	// line. A value that opens with a quote ends at the matching closing
+	// quote (Python kwargs: password='x'); any other value runs to the end
+	// of the line (see redactBarePairs). Neither the separator nor the value
+	// may cross a newline.
+	barePair = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_.-]{0,63})([ \t]*[=:][ \t]*)(?:"((?:[^"\\\r\n]|\\[^\r\n])*)"|'((?:[^'\\\r\n]|\\[^\r\n])*)'|([^\r\n]+))`)
+	// queryNext matches the start of the next query-string parameter
+	// (&name=), where an unquoted value inside a URL ends.
+	queryNext = regexp.MustCompile(`&[A-Za-z_][A-Za-z0-9_.-]*=`)
 	quotedKey = regexp.MustCompile(`^["']([^"'\\\n]{1,64})["']`)
 )
 
@@ -264,6 +275,22 @@ func Text(s string) string {
 // redactBarePairs redacts the values of key=value / key: value pairs with a
 // sensitive, unquoted key. Matches are scanned one at a time so that a
 // non-sensitive key ("failed: password=x") does not swallow the next pair.
+//
+// Value extent:
+//   - A value that opens with ' or " ends at the matching closing quote on
+//     the same line; the rest of the line is scanned again.
+//   - Any other value runs to the end of the line, trailing whitespace
+//     excluded. ',', ';', '}' and ')' do not end it: they also occur inside
+//     secrets and error text ("Invalid value, got 'X'"), so the rest of the
+//     line is redacted instead. This can over-redact later pairs on the same
+//     line, which is preferred to leaking.
+//   - The one exception is a URL query string: the value ends before
+//     "&name=", so later parameters are checked on their own.
+//   - A value never crosses a newline, so following lines stay visible.
+//
+// An auth scheme word at the start of the value is kept
+// ("Authorization: Bearer [REDACTED]"), and a key directly after "://" (the
+// user name of a URL) is skipped so the host stays visible.
 func redactBarePairs(s string) string {
 	var b strings.Builder
 	pos := 0
@@ -272,33 +299,56 @@ func redactBarePairs(s string) string {
 		if m == nil {
 			break
 		}
-		key := s[pos+m[2] : pos+m[3]]
+		keyStart := pos + m[2]
+		key := s[keyStart : pos+m[3]]
 		valStart := pos + m[5] // end of the separator
-		if !IsSensitiveKey(key) {
+		if !IsSensitiveKey(key) || strings.HasSuffix(s[:keyStart], "://") {
 			b.WriteString(s[pos:valStart])
 			pos = valStart
 			continue
 		}
 		b.WriteString(s[pos:valStart])
 		end := pos + m[1]
-		var val, quote string
 		switch {
 		case m[6] >= 0:
-			val, quote = s[pos+m[6]:pos+m[7]], `"`
+			b.WriteString(redactQuoted(s[valStart:end], s[pos+m[6]:pos+m[7]], `"`))
 		case m[8] >= 0:
-			val, quote = s[pos+m[8]:pos+m[9]], `'`
+			b.WriteString(redactQuoted(s[valStart:end], s[pos+m[8]:pos+m[9]], `'`))
 		default:
-			val = s[pos+m[10] : pos+m[11]]
-		}
-		if !isRedactable(val) || (quote == "" && authSchemes[strings.ToLower(val)]) {
-			b.WriteString(s[valStart:end])
-		} else {
-			b.WriteString(quote + Marker + quote)
+			val := s[valStart:end]
+			if loc := queryNext.FindStringIndex(val); loc != nil {
+				val = val[:loc[0]]
+			}
+			val = strings.TrimRight(val, " \t")
+			end = valStart + len(val)
+			b.WriteString(redactUnquoted(val))
 		}
 		pos = end
 	}
 	b.WriteString(s[pos:])
 	return b.String()
+}
+
+func redactQuoted(orig, val, quote string) string {
+	if !isRedactable(val) {
+		return orig
+	}
+	return quote + Marker + quote
+}
+
+func redactUnquoted(val string) string {
+	scheme, rest, _ := strings.Cut(val, " ")
+	if authSchemes[strings.ToLower(scheme)] {
+		rest = strings.TrimLeft(rest, " ")
+		if !isRedactable(rest) {
+			return val
+		}
+		return scheme + " " + Marker
+	}
+	if !isRedactable(val) {
+		return val
+	}
+	return Marker
 }
 
 // Value returns a deep copy of v with secrets redacted. The input is never

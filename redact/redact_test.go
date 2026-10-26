@@ -324,7 +324,7 @@ func TestToolOutputText(t *testing.T) {
 func TestText(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{fakePEM, Marker + "\n"},
-		{"key: " + fakeSSH + " done", "key: " + Marker + " done"},
+		{"key: " + fakeSSH + " done", "key: " + Marker}, // rest of the line goes too
 		{"truncated -----BEGIN EC PRIVATE KEY-----\nAAAAfakefakefake", "truncated " + Marker},
 		{"-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAAfakefakefake\n-----END ENCRYPTED PRIVATE KEY-----", Marker},
 		{"-----BEGIN PGP PRIVATE KEY BLOCK-----\nAAAAfakefakefake\n-----END PGP PRIVATE KEY BLOCK-----", Marker},
@@ -521,9 +521,9 @@ func TestContextualNames(t *testing.T) {
 
 func TestTextStyles(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"login failed: password=fake-user-pw user=bob", "login failed: password=" + Marker + " user=bob"},
+		{"login failed: password=fake-user-pw user=bob", "login failed: password=" + Marker},
 		{"api key: fake-api-key-0000", "api key: " + Marker},
-		{"key: fake-hex-key-0000, keyboard: us", "key: " + Marker + ", keyboard: us"},
+		{"key: fake-hex-key-0000, keyboard: us", "key: " + Marker},
 		{"DB_PASS=fake-db-pw", "DB_PASS=" + Marker},
 		{"MYSQL_ROOT_PASSWORD=fake db pw with spaces", "MYSQL_ROOT_PASSWORD=" + Marker},
 		{"TZ=Etc/UTC", "TZ=Etc/UTC"},
@@ -576,5 +576,73 @@ func TestValueTypedInputs(t *testing.T) {
 	top, err := json.Marshal(Value(creds{User: "bob", Password: "fake-user-pw"}))
 	if err != nil || strings.Contains(string(top), "fake-user-pw") {
 		t.Errorf("typed top-level value not redacted: %s", top)
+	}
+}
+
+func TestTextURLPasswords(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"scheme://user:p@ss@host/path", "scheme://user:" + Marker + "@host/path"},
+		{"scheme://user:p@ss@w0rd@host:443", "scheme://user:" + Marker + "@host:443"},
+		{"postgres://u:p@ss@fake-db-pw.host/db", "postgres://u:" + Marker + "@fake-db-pw.host/db"},
+		{"a postgres://app:fake-db-pw@192.0.2.5/db and redis://:p@fake-db-pw@192.0.2.6:6379/0 end",
+			"a postgres://app:" + Marker + "@192.0.2.5/db and redis://:" + Marker + "@192.0.2.6:6379/0 end"},
+		{"src=https://u:a@b@192.0.2.7/x,dst=https://v:c@d@192.0.2.8/y",
+			"src=https://u:" + Marker + "@192.0.2.7/x,dst=https://v:" + Marker + "@192.0.2.8/y"},
+		{"ftp://pass:fake-ftp-pw@192.0.2.9/", "ftp://pass:" + Marker + "@192.0.2.9/"},
+		// No password: untouched.
+		{"ssh://root@host", "ssh://root@host"},
+		{"ssh://root@host:22/path", "ssh://root@host:22/path"},
+		{"git@github.com:org/repo", "git@github.com:org/repo"},
+		{"mail user@example.com about it", "mail user@example.com about it"},
+		{"https://192.0.2.1:8443/x@y", "https://192.0.2.1:8443/x@y"},
+		{"http://[2001:db8::1]:8080/a@b", "http://[2001:db8::1]:8080/a@b"},
+	}
+	for _, c := range cases {
+		got := Text(c.in)
+		if got != c.want {
+			t.Errorf("Text(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+		if again := Text(got); again != got {
+			t.Errorf("Text not idempotent on %q: %q", got, again)
+		}
+		for _, leak := range []string{"ss@", "w0rd", "fake-ftp-pw", "app:fake"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("Text(%q) leaks %q: %q", c.in, leak, got)
+			}
+		}
+	}
+}
+
+func TestTextBareValueExtent(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"reviewer repro", "secret_access_key: Invalid value 'fake-secret-access-key'",
+			"secret_access_key: " + Marker},
+		{"multi-word value", "password: correct horse battery staple", "password: " + Marker},
+		{"quotes inside unquoted value", `password: it's "fake-user-pw" ok`, "password: " + Marker},
+		{"quoted value ends at closing quote", `password='fake-user-pw' user=bob`, "password='" + Marker + "' user=bob"},
+		{"double-quoted with escaped quote", `token="a\"fake-oauth-token" next`, `token="` + Marker + `" next`},
+		{"unterminated quote runs to end of line", "password='fake-user-pw and more\nnext line", "password=" + Marker + "\nnext line"},
+		{"several pairs on separate lines",
+			"password: fake-user-pw x\nTZ: UTC\napi_key = fake-api-key-0000 y\r\nuser: bob\n  DB_PASS: fake-db-pw",
+			"password: " + Marker + "\nTZ: UTC\napi_key = " + Marker + "\r\nuser: bob\n  DB_PASS: " + Marker},
+		{"prose on the next line stays", "bindpw: fake-bind-pw trailing\nThe bind failed, retrying in 5 seconds.",
+			"bindpw: " + Marker + "\nThe bind failed, retrying in 5 seconds."},
+		{"separator does not cross lines", "password:\nfake is not on this line", "password:\nfake is not on this line"},
+		{"delimiters inside the value", "secret: a,b;c}d)e, user: bob", "secret: " + Marker},
+		{"trailing whitespace kept", "token: fake-oauth-token  \nok", "token: " + Marker + "  \nok"},
+		{"query string stops at next param", "GET /api?token=fake-oauth-token&page=2 HTTP/1.1", "GET /api?token=" + Marker + "&page=2 HTTP/1.1"},
+		{"auth scheme kept", "Authorization: Bearer fake-oauth-token extra", "Authorization: Bearer " + Marker},
+		{"cli flag", "--password=fake-user-pw --verbose", "--password=" + Marker},
+		{"no sensitive key", "pool: tank, state: ONLINE\nscan: none requested", "pool: tank, state: ONLINE\nscan: none requested"},
+	}
+	for _, c := range cases {
+		got := Text(c.in)
+		if got != c.want {
+			t.Errorf("%s: Text(%q)\n got %q\nwant %q", c.name, c.in, got, c.want)
+		}
+		if again := Text(got); again != got {
+			t.Errorf("%s: not idempotent: %q", c.name, again)
+		}
+		assertNoSecrets(t, got)
 	}
 }
