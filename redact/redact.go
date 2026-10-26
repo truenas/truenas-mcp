@@ -214,12 +214,16 @@ var (
 	// escapedPair matches \"key\": \"value\", JSON that was itself
 	// embedded in a JSON string.
 	escapedPair = regexp.MustCompile(`(\\"([^"\\\n]{1,64})\\"\s*:\s*)\\"((?:[^"\\]|\\[^"])*)\\"`)
-	// barePair matches key=value / key: value with an unquoted key on one
-	// line. A value that opens with a quote ends at the matching closing
-	// quote (Python kwargs: password='x'); any other value runs to the end
-	// of the line (see redactBarePairs). Neither the separator nor the value
-	// may cross a newline.
-	barePair = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_.-]{0,63})([ \t]*[=:][ \t]*)(?:"((?:[^"\\\r\n]|\\[^\r\n])*)"|'((?:[^'\\\r\n]|\\[^\r\n])*)'|([^\r\n]+))`)
+	// barePair matches the key and separator of key=value / key: value with
+	// an unquoted key on one line. Where the value ends is worked out in
+	// redactBarePairs, and only for sensitive keys, so that a long line of
+	// non-sensitive pairs is scanned once. The separator may not cross a
+	// newline.
+	barePair = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_.-]{0,63})([ \t]*[=:][ \t]*)`)
+	// nextPair matches the start of the next key=value / key: value pair on
+	// a line (whitespace, ',', ';' or '(' before the key). A quoted value
+	// ends at the last suitable closing quote before it.
+	nextPair = regexp.MustCompile(`[\s,;(]+[A-Za-z_][A-Za-z0-9_.-]{0,63}[ \t]*[=:]`)
 	// queryNext matches the start of the next query-string parameter
 	// (&name=), where an unquoted value inside a URL ends.
 	queryNext = regexp.MustCompile(`&[A-Za-z_][A-Za-z0-9_.-]*=`)
@@ -277,8 +281,12 @@ func Text(s string) string {
 // non-sensitive key ("failed: password=x") does not swallow the next pair.
 //
 // Value extent:
-//   - A value that opens with ' or " ends at the matching closing quote on
-//     the same line; the rest of the line is scanned again.
+//   - A value that opens with ' or " ends at the last matching, unescaped
+//     quote before the next key=value / key: value pair on the line (or
+//     before the end of the line) that is followed by whitespace, ',', ';',
+//     ')', '}', ']' or the end of the line. A quote inside the value
+//     ("it's") therefore does not end it early. If there is no such quote,
+//     the value runs to the end of the line.
 //   - Any other value runs to the end of the line, trailing whitespace
 //     excluded. ',', ';', '}' and ')' do not end it: they also occur inside
 //     secrets and error text ("Invalid value, got 'X'"), so the rest of the
@@ -291,9 +299,15 @@ func Text(s string) string {
 // An auth scheme word at the start of the value is kept
 // ("Authorization: Bearer [REDACTED]"), and a key directly after "://" (the
 // user name of a URL) is skipped so the host stays visible.
+//
+// The work is linear in len(s): a non-sensitive key costs nothing past its
+// separator, the end of the line is found once per line, and the text
+// scanned for a quoted value's extent is either consumed or scanned at most
+// once more.
 func redactBarePairs(s string) string {
 	var b strings.Builder
 	pos := 0
+	lineEnd := -1 // cached end of the line holding pos
 	for pos < len(s) {
 		m := barePair.FindStringSubmatchIndex(s[pos:])
 		if m == nil {
@@ -302,31 +316,75 @@ func redactBarePairs(s string) string {
 		keyStart := pos + m[2]
 		key := s[keyStart : pos+m[3]]
 		valStart := pos + m[5] // end of the separator
+		b.WriteString(s[pos:valStart])
+		pos = valStart
 		if !IsSensitiveKey(key) || strings.HasSuffix(s[:keyStart], "://") {
-			b.WriteString(s[pos:valStart])
-			pos = valStart
 			continue
 		}
-		b.WriteString(s[pos:valStart])
-		end := pos + m[1]
-		switch {
-		case m[6] >= 0:
-			b.WriteString(redactQuoted(s[valStart:end], s[pos+m[6]:pos+m[7]], `"`))
-		case m[8] >= 0:
-			b.WriteString(redactQuoted(s[valStart:end], s[pos+m[8]:pos+m[9]], `'`))
-		default:
-			val := s[valStart:end]
-			if loc := queryNext.FindStringIndex(val); loc != nil {
-				val = val[:loc[0]]
+		if lineEnd < valStart {
+			lineEnd = len(s)
+			if i := strings.IndexAny(s[valStart:], "\r\n"); i >= 0 {
+				lineEnd = valStart + i
 			}
-			val = strings.TrimRight(val, " \t")
-			end = valStart + len(val)
-			b.WriteString(redactUnquoted(val))
 		}
-		pos = end
+		if valStart < lineEnd && (s[valStart] == '"' || s[valStart] == '\'') {
+			if close := closingQuote(s, valStart, lineEnd); close >= 0 {
+				end := close + 1
+				q := s[valStart : valStart+1]
+				b.WriteString(redactQuoted(s[valStart:end], s[valStart+1:close], q))
+				pos = end
+				continue
+			}
+		}
+		val := s[valStart:lineEnd]
+		if loc := queryNext.FindStringIndex(val); loc != nil {
+			val = val[:loc[0]]
+		}
+		val = strings.TrimRight(val, " \t")
+		b.WriteString(redactUnquoted(val))
+		pos = valStart + len(val)
 	}
 	b.WriteString(s[pos:])
 	return b.String()
+}
+
+// closingQuote returns the index of the quote that closes the value opening
+// with the quote at s[open], or -1 if there is none on the line (which ends
+// at lineEnd). It is the last unescaped matching quote before the next
+// key=value pair (or the end of the line) that is followed by whitespace,
+// ',', ';', ')', '}', ']' or the end of the line.
+func closingQuote(s string, open, lineEnd int) int {
+	q := s[open]
+	limit := lineEnd
+	if loc := nextPair.FindStringIndex(s[open+1 : lineEnd]); loc != nil {
+		limit = open + 1 + loc[0]
+	}
+	for i := limit - 1; i > open; i-- {
+		if s[i] != q || !quoteEnds(s, i+1, lineEnd) {
+			continue
+		}
+		bs := 0
+		for j := i - 1; j > open && s[j] == '\\'; j-- {
+			bs++
+		}
+		if bs%2 == 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// quoteEnds reports whether a closing quote just before s[i] can end a
+// value: it is followed by the end of the line or a delimiter.
+func quoteEnds(s string, i, lineEnd int) bool {
+	if i >= lineEnd {
+		return true
+	}
+	switch s[i] {
+	case ' ', '\t', ',', ';', ')', '}', ']':
+		return true
+	}
+	return false
 }
 
 func redactQuoted(orig, val, quote string) string {

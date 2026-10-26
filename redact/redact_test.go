@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Obviously fake secrets. Every test asserts none of them survive.
@@ -634,6 +635,11 @@ func TestTextBareValueExtent(t *testing.T) {
 		{"auth scheme kept", "Authorization: Bearer fake-oauth-token extra", "Authorization: Bearer " + Marker},
 		{"cli flag", "--password=fake-user-pw --verbose", "--password=" + Marker},
 		{"no sensitive key", "pool: tank, state: ONLINE\nscan: none requested", "pool: tank, state: ONLINE\nscan: none requested"},
+		{"unescaped quote inside quoted value", `password='it's fake-user-pw'`, "password='" + Marker + "'"},
+		{"unescaped quote, later pair kept", `password='it's fake-user-pw' user=bob`, "password='" + Marker + "' user=bob"},
+		{"quote and space inside quoted value", `password='it' fake-user-pw' rest=ok`, "password='" + Marker + "' rest=ok"},
+		{"unescaped quote, closing quote then prose", `password="say "hi" fake-user-pw" (expected str)`, `password="` + Marker + `" (expected str)`},
+		{"no usable closing quote runs to end of line", "password='it's a: fake-user-pw'.\nnext", "password=" + Marker + "\nnext"},
 	}
 	for _, c := range cases {
 		got := Text(c.in)
@@ -644,5 +650,54 @@ func TestTextBareValueExtent(t *testing.T) {
 			t.Errorf("%s: not idempotent: %q", c.name, again)
 		}
 		assertNoSecrets(t, got)
+	}
+}
+
+// TestTextLongLinesLinear guards against redaction that is quadratic in the
+// length of a line: each input is a single 1 MB line, which takes well under
+// a second when the work is linear and minutes to hours when it is not. The
+// time budget is deliberately generous so that it is not flaky on slow or
+// instrumented (-race, coverage) runs.
+func TestTextLongLinesLinear(t *testing.T) {
+	size, budget := 1<<20, 2*time.Second
+	if raceEnabled {
+		// The race detector slows this down about 15x; a quarter of the size
+		// would still take minutes if the work were quadratic.
+		size, budget = 1<<18, 10*time.Second
+	}
+	line := func(prefix, unit string) string {
+		return prefix + strings.Repeat(unit, (size-len(prefix))/len(unit))
+	}
+	cases := []struct {
+		name, in string
+		want     func(string) bool
+	}{
+		{"a=1 pairs", line("", "a=1 "), nil},
+		{"x: y pairs", line("", "x: y "), nil},
+		{"URL query", line("https://h/?", "a=1&"), nil},
+		{"URL query with token params", line("https://h/?", "token=abc&"),
+			func(out string) bool {
+				return !strings.Contains(out, "=abc") && strings.Count(out, "token="+Marker) == (size-11)/10
+			}},
+		{"repeated a://u:", line("", "a://u:"), nil},
+		{"repeated sensitive quoted pairs", line("", "pw='x' "),
+			func(out string) bool { return strings.Count(out, "pw='"+Marker+"' ") == size/7 }},
+		{"repeated open quotes", line("", "pw='"),
+			func(out string) bool { return out == "pw='"+Marker+"'" }},
+		{"Python repr with URLs", line("Error(", "http://x: y, "), nil},
+	}
+	for _, c := range cases {
+		start := time.Now()
+		out := Text(c.in)
+		if d := time.Since(start); d > budget {
+			t.Errorf("%s: Text on a %d-byte line took %v (budget %v)", c.name, len(c.in), d, budget)
+		}
+		if c.want == nil {
+			if out != c.in {
+				t.Errorf("%s: text without secrets changed", c.name)
+			}
+		} else if !c.want(out) {
+			t.Errorf("%s: unexpected output (first 200 bytes): %q", c.name, out[:200])
+		}
 	}
 }
