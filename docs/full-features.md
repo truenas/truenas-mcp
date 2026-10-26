@@ -2,6 +2,8 @@
 
 This document provides a comprehensive list of all available MCP tools for TrueNAS management.
 
+Tools are classified as read, write or destructive (`tools/safety.go`). Write and destructive tools are hidden and refused in `--read-only` mode, and `--allow-tools` / `--deny-tools` restrict the exposed set. Destructive tools (marked below) require `confirm: true` to execute; without it they return a `confirmation_required` result with their dry-run preview. **Breaking change:** callers that used these nine tools without `confirm` now get the preview instead. See [Safety Controls](../README.md#safety-controls).
+
 ## Read-Only Monitoring Tools
 
 ### System Information
@@ -40,7 +42,7 @@ This document provides a comprehensive list of all available MCP tools for TrueN
 
 ### Alerts
 - **list_alerts** - List system alerts with filtering
-- **dismiss_alert** / **restore_alert** - Manage system alerts
+- **dismiss_alert** / **restore_alert** - Manage system alerts (write operations; support dry-run mode)
 
 ### Performance Metrics
 - **get_system_metrics** - Get CPU, memory, and load performance metrics
@@ -127,16 +129,29 @@ This document provides a comprehensive list of all available MCP tools for TrueN
     - Step 7: Preview with dry-run
     - Step 8: Execute installation
 
-- **delete_app** - Remove installed applications
+- **delete_app** - Remove installed applications (**destructive**)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - IMPORTANT: Host-path datasets are NOT deleted (preserved for data safety)
   - Data remains in original locations for manual cleanup
   - Optional removal of container images
   - Supports dry-run mode to preview deletion
   - Returns task ID for tracking deletion progress
 
-- **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup
+- **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup (**destructive**: the app goes offline and migrations may be one-way)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations
+
+- **update_app** - Change an installed application's configuration
+  - Write operation (no confirm needed), but advertises `destructiveHint: true` because it replaces the configuration in place
+  - Supports dry-run mode
+
+- **start_app** - Start a stopped application
+  - Supports dry-run mode; returns a task ID for tracking
+
+- **stop_app** - Stop a running application (**destructive**: the service goes offline)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - Supports dry-run mode; returns a task ID for tracking
 
 ## Directory Services
 
@@ -159,12 +174,15 @@ This document provides a comprehensive list of all available MCP tools for TrueN
   - Use when configuring LDAP with mutual TLS authentication
 
 - **refresh_directory_cache** - Refresh cached user and group data
+  - Write operation: hidden and refused in read-only mode
   - Refreshes cached information from directory service
   - Use after making changes in Active Directory, LDAP, or IPA
+  - Supports dry-run mode to show the current directory service status first
   - Quick operation, no task tracking needed
 
 ### Write Operations
-- **configure_directory_service** - Configure and join directory service
+- **configure_directory_service** - Configure and join directory service (**destructive**: disabling or re-pointing a joined service cuts off domain users)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Supports Active Directory, LDAP, and FreeIPA/IPA
   - Multiple credential types:
     - **Active Directory**: KERBEROS_USER (username/password) or KERBEROS_PRINCIPAL (principal/keytab)
@@ -190,7 +208,8 @@ This document provides a comprehensive list of all available MCP tools for TrueN
   - Automatic domain join when enable=true
   - Use enable=false to disable without leaving domain
 
-- **leave_directory_service** - Disconnect from directory service
+- **leave_directory_service** - Disconnect from directory service (**destructive**)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Removes TrueNAS from the domain
   - Deletes computer account from directory (if possible)
   - Removes DNS records
@@ -306,7 +325,8 @@ This document provides a comprehensive list of all available MCP tools for TrueN
   - Returns a task ID for tracking download progress
   - Does not apply the update (use apply_update after download completes)
 
-- **apply_update** - Apply downloaded TrueNAS system update
+- **apply_update** - Apply downloaded TrueNAS system update (**destructive**)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Applies previously downloaded system update
   - Optional automatic reboot after update (default: false for safety)
   - Supports dry-run mode to preview update actions
@@ -320,7 +340,10 @@ This document provides a comprehensive list of all available MCP tools for TrueN
   - Displays current system version and available updates
   - Useful for monitoring long-running update operations
 
-- **system_reboot** - Reboot the TrueNAS system
+- **system_reboot** - Reboot the TrueNAS system (**destructive**)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - Supports dry-run mode showing hostname, version and uptime
+  - Optional `delay` in seconds before rebooting, 0-86400 (default: immediately); a pending reboot cannot be cancelled through this server
   - Performs a clean system reboot
   - Disconnects all active sessions and services
   - Use after applying system updates that require a reboot
@@ -335,7 +358,8 @@ This document provides a comprehensive list of all available MCP tools for TrueN
   - Displays deletion blockers and storage summary
   - Perfect for "what old boot environments can I clean up?"
 
-- **delete_boot_environment** - Delete a boot environment
+- **delete_boot_environment** - Delete a boot environment (**destructive**)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Dry-run mode shows what will be deleted and space freed
   - Safety checks prevent deleting active/activated/protected
   - Recommends keeping 2-3 boot environments for recovery
@@ -374,7 +398,8 @@ This document provides a comprehensive list of all available MCP tools for TrueN
   - Integrates with task manager for monitoring
   - Use before backups or after hardware changes
 
-- **delete_scrub_schedule** - Remove scrub schedule
+- **delete_scrub_schedule** - Remove scrub schedule (**destructive**)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Dry-run shows what will be removed
   - Warns about loss of automatic scrubbing
   - Recommends manual scrub frequency

@@ -567,9 +567,14 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 type installAppDryRun struct{}
 
 func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	// Extract parameters
-	appName := args["app_name"].(string)
-	catalogApp := args["catalog_app"].(string)
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return nil, fmt.Errorf("app_name is required")
+	}
+	catalogApp, ok := args["catalog_app"].(string)
+	if !ok || catalogApp == "" {
+		return nil, fmt.Errorf("catalog_app is required")
+	}
 	train := "stable"
 	if t, ok := args["train"].(string); ok && t != "" {
 		train = t
@@ -785,8 +790,10 @@ func handleDeleteApp(client *truenas.Client, args map[string]interface{}, taskMa
 type deleteAppDryRun struct{}
 
 func (d *deleteAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	// Extract parameters
-	appName := args["app_name"].(string)
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return nil, fmt.Errorf("app_name is required")
+	}
 
 	// Query app details
 	result, err := client.Call("app.query",
@@ -808,7 +815,10 @@ func (d *deleteAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 		return nil, fmt.Errorf("app not found: %s", appName)
 	}
 
-	app := apps[0].(map[string]interface{})
+	app, ok := apps[0].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected app.query result for %s", appName)
+	}
 
 	// Extract storage paths if available
 	storagePaths := []string{}

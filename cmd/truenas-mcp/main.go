@@ -26,6 +26,9 @@ var (
 	proxyURL   = flag.String("proxy", "", "Proxy for the TrueNAS connection: http://, socks5:// or socks5h://host:port, or none to ignore proxy env vars (env TRUENAS_PROXY; overrides HTTPS_PROXY and ALL_PROXY)")
 	versionFlg = flag.Bool("version", false, "Print version and exit")
 	debug      = flag.Bool("debug", false, "Enable debug logging")
+	readOnly   = flag.Bool("read-only", false, "Hide and refuse every tool that changes the system (env TRUENAS_MCP_READ_ONLY)")
+	allowTools = flag.String("allow-tools", "", "Comma-separated list of the only tools to expose (env TRUENAS_MCP_ALLOW_TOOLS)")
+	denyTools  = flag.String("deny-tools", "", "Comma-separated list of tools to hide and refuse (env TRUENAS_MCP_DENY_TOOLS)")
 )
 
 // Version is the release version, injected at build time via
@@ -48,6 +51,40 @@ func checkRequired(truenasURL, apiKey, apiUser string) error {
 		return fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// truthy reports whether an environment value enables a boolean setting.
+func truthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+// safetyPolicy combines the safety flags with their environment variables.
+// setFlags holds the flags passed on the command line; a passed flag wins
+// over its variable. An allow list that is set but names no tools is an
+// error rather than "allow everything".
+func safetyPolicy(readOnly bool, setFlags map[string]string, lookupEnv func(string) (string, bool)) (tools.Policy, error) {
+	setting := func(flagName, envName string) (string, bool) {
+		if v, ok := setFlags[flagName]; ok {
+			return v, true
+		}
+		return lookupEnv(envName)
+	}
+	roEnv, _ := lookupEnv("TRUENAS_MCP_READ_ONLY")
+	allow, allowSet := setting("allow-tools", "TRUENAS_MCP_ALLOW_TOOLS")
+	deny, _ := setting("deny-tools", "TRUENAS_MCP_DENY_TOOLS")
+	p := tools.Policy{
+		ReadOnly: readOnly || truthy(roEnv),
+		Allow:    tools.ParseToolList(allow),
+		Deny:     tools.ParseToolList(deny),
+	}
+	if allowSet && len(p.Allow) == 0 {
+		return p, fmt.Errorf("--allow-tools / TRUENAS_MCP_ALLOW_TOOLS is set but names no tools; unset it to expose all tools")
+	}
+	return p, nil
 }
 
 func main() {
@@ -133,6 +170,18 @@ func main() {
 
 	// Create tool registry
 	registry := tools.NewRegistry(client, taskManager)
+	setFlags := map[string]string{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = f.Value.String() })
+	policy, err := safetyPolicy(*readOnly, setFlags, os.LookupEnv)
+	if err != nil {
+		log.Fatalf("Invalid tool safety settings: %v", err)
+	}
+	if err := registry.SetPolicy(policy); err != nil {
+		log.Fatalf("Invalid tool safety settings: %v", err)
+	}
+	if policy.ReadOnly {
+		log.Println("Read-only mode: tools that change the system are disabled")
+	}
 
 	// Start stdio handler
 	handler := NewStdioHandler(registry, *debug)

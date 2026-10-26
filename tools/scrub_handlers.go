@@ -153,7 +153,7 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 				enabled, _ := schedule["enabled"].(bool)
 				threshold, _ := schedule["threshold"].(float64)
 
-				schedObj := schedule["schedule"].(map[string]interface{})
+				schedObj, _ := schedule["schedule"].(map[string]interface{})
 				scheduleHuman := formatCronSchedule(schedObj)
 				nextRun := calculateNextRun(schedObj, time.Now())
 
@@ -797,7 +797,7 @@ func (d *deleteScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 
 	schedule := schedules[0]
 	poolName, _ := schedule["pool_name"].(string)
-	schedObj := schedule["schedule"].(map[string]interface{})
+	schedObj, _ := schedule["schedule"].(map[string]interface{})
 
 	simplified := map[string]interface{}{
 		"id":             id,
