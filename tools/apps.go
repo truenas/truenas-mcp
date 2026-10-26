@@ -426,12 +426,12 @@ func generateWizardGuidance(schema map[string]interface{}) map[string]interface{
 			"10. Execute installation with values parameter",
 		},
 		"common_patterns": map[string]interface{}{
-			"timezone":      "Use system timezone or user preference",
-			"run_as":        "Default: user=568, group=568 (apps user)",
-			"storage_type":  "ALWAYS use 'host_path', NEVER 'ix_volume'",
-			"storage_paths": "Use query_pools to get available pools, then create datasets before installation",
+			"timezone":       "Use system timezone or user preference",
+			"run_as":         "Default: user=568, group=568 (apps user)",
+			"storage_type":   "ALWAYS use 'host_path', NEVER 'ix_volume'",
+			"storage_paths":  "Use query_pools to get available pools, then create datasets before installation",
 			"port_bind_mode": "published (external access) or exposed (internal only)",
-			"resources":     "Default: 2 CPUs, 4096 MB RAM",
+			"resources":      "Default: 2 CPUs, 4096 MB RAM",
 		},
 		"storage_workflow": map[string]interface{}{
 			"step1": "Call query_pools to get available storage pools",
