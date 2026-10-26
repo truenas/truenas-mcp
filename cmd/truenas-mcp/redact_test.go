@@ -34,7 +34,7 @@ func callText(t *testing.T, reg mcp.ToolRegistry) mcp.ToolCallResult {
 }
 
 func TestToolsCallRedactsResult(t *testing.T) {
-	res := callText(t, secretRegistry{result: "{\n  \"credential\": {\n    \"bindpw\": \"fake-bind-pw\",\n    \"binddn\": \"cn=admin\"\n  }\n}"})
+	res := callText(t, secretRegistry{result: "{\n  \"bindpw\": \"fake-bind-pw\",\n  \"binddn\": \"cn=admin\"\n}"})
 	text := res.Content[0].Text
 	if strings.Contains(text, "fake-bind-pw") || !strings.Contains(text, redact.Marker) || !strings.Contains(text, "cn=admin") {
 		t.Errorf("result not redacted as expected:\n%s", text)

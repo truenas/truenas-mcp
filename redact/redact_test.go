@@ -127,8 +127,8 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 			input: `[{"id": 7, "path": "/mnt/tank/data", "credentials": {"id": 4, "name": "ftp",
 				"provider": {"type": "FTP", "host": "192.0.2.10", "user": "backup", "pass": "fake-ftp-pw"}}}]`,
 			checks: []check{
-				redacted(0, "credentials", "provider", "pass"), kept("backup", 0, "credentials", "provider", "user"),
-				kept("192.0.2.10", 0, "credentials", "provider", "host"), kept(json.Number("4"), 0, "credentials", "id"),
+				// An object under a sensitive key is redacted wholesale.
+				redacted(0, "credentials"), kept("/mnt/tank/data", 0, "path"), kept(json.Number("7"), 0, "id"),
 			},
 		},
 		{
@@ -149,8 +149,7 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 				"type": "SSH_CREDENTIALS", "attributes": {"host": "192.0.2.20", "username": "root",
 				"private_key": 1, "password": "fake-ssh-pw"}}}]`,
 			checks: []check{
-				redacted(0, "ssh_credentials", "attributes", "password"),
-				kept("repl-conn", 0, "ssh_credentials", "name"), kept("SSH", 0, "transport"),
+				redacted(0, "ssh_credentials"), kept("SSH", 0, "transport"), kept("tank->backup", 0, "name"),
 			},
 		},
 		{
@@ -169,6 +168,7 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 				"twofactor_auth_configured": false}]`,
 			checks: []check{
 				redacted(0, "password"), kept(false, 0, "password_disabled"), kept("alice", 0, "username"),
+				redacted(0, "unixhash"), redacted(0, "smbhash"), kept("ssh-rsa AAAAfakepub alice", 0, "sshpubkey"),
 			},
 		},
 		{
@@ -190,7 +190,7 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 				{"id": 43, "method": "pool.dataset.export_key", "state": "SUCCESS", "result": "fake-hex-key-0000"},
 				{"id": 44, "method": "pool.dataset.query", "result": [{"name": "tank/secure"}]}]`,
 			checks: []check{
-				redacted(0, "result", "tank/secure"), redacted(1, "result"), kept("SUCCESS", 0, "state"),
+				redacted(0, "result"), redacted(1, "result"), kept("SUCCESS", 0, "state"),
 				kept("tank/secure", 2, "result", 0, "name"),
 			},
 		},
@@ -200,8 +200,8 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 				"binddn": "cn=admin,dc=example,dc=com", "bindpw": "fake-bind-pw"},
 				"configuration": {"server_urls": ["ldaps://ldap.example.com"], "kerberos_keytab": "fake-keytab-b64"}}`,
 			checks: []check{
-				redacted("credential", "bindpw"), kept("LDAP_PLAIN", "credential", "credential_type"),
-				kept("cn=admin,dc=example,dc=com", "credential", "binddn"), redacted("configuration", "kerberos_keytab"),
+				redacted("credential"), kept("LDAP", "service_type"), kept(true, "enable"),
+				kept("ldaps://ldap.example.com", "configuration", "server_urls", 0), redacted("configuration", "kerberos_keytab"),
 			},
 		},
 		{
@@ -210,7 +210,7 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 				{"credential_type": "KERBEROS_USER", "username": "admin", "password": "fake-bind-pw"}}]},
 				{"id": 10, "method": "user.create", "arguments": [{"username": "bob", "password": "fake-user-pw"}]}]`,
 			checks: []check{
-				redacted(0, "arguments", 0, "credential", "password"), kept("admin", 0, "arguments", 0, "credential", "username"),
+				redacted(0, "arguments", 0, "credential"), kept("directoryservices.update", 0, "method"),
 				redacted(1, "arguments", 0, "password"), kept("bob", 1, "arguments", 0, "username"),
 			},
 		},
@@ -230,7 +230,8 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 			checks: []check{
 				redacted("postgres", "password"), redacted("additional_envs", 0, "value"),
 				kept("POSTGRES_PASSWORD", "additional_envs", 0, "name"), kept("debug", "additional_envs", 1, "value"),
-				redacted("additional_envs", 2, "value"), redacted("secret_key_base"), kept("Etc/UTC", "TZ"),
+				redacted("additional_envs", 2, "value"), kept("API_TOKEN", "additional_envs", 2, "key"),
+				redacted("secret_key_base"), kept("Etc/UTC", "TZ"),
 			},
 		},
 		{
@@ -356,8 +357,8 @@ func TestValueDoesNotModifyInput(t *testing.T) {
 }
 
 func TestSensitiveArrayAndMarkerIdempotent(t *testing.T) {
-	out := ToolOutput(`{"tokens": ["fake-oauth-token", ""], "password": "` + Marker + `"}`)
-	if out != `{"tokens":["`+Marker+`",""],"password":"`+Marker+`"}` && out != `{"password":"`+Marker+`","tokens":["`+Marker+`",""]}` {
+	out := ToolOutput(`{"tokens": ["fake-oauth-token", ""], "password": "` + Marker + `", "secrets": [], "token": {}}`)
+	if out != `{"password":"`+Marker+`","secrets":[],"token":{},"tokens":"`+Marker+`"}` {
 		t.Errorf("got %s", out)
 	}
 	if again := ToolOutput(out); again != out {
@@ -378,5 +379,202 @@ func TestJSON(t *testing.T) {
 	}
 	if got := string(JSON([]byte(`not json "secret": "fake-client-secret"`))); strings.Contains(got, "fake-client-secret") {
 		t.Errorf("non-JSON text not redacted: %s", got)
+	}
+}
+
+func TestIsSensitiveKeySegments(t *testing.T) {
+	sensitive := []string{
+		// pass / pw / pwd as name segments or run-together suffixes.
+		"DB_PASS", "REDIS_PASS", "SMTP_PASS", "smtp_pass", "dbPass", "adminPwd", "DB_PWD",
+		"monpwd", "dbpass", "rootpw", "ROOT_PW", "pass-word", "MYSQL_ROOT_PASSWORD", "user.pass",
+		// Narrowed exemptions.
+		"public_key_secret", "secret_type", "password_type", "passwordtype", "secrettype", "passwordType",
+		// Additional names.
+		"session", "session_id", "sessionToken", "cookie", "Set-Cookie", "authorization",
+		"Proxy-Authorization", "otp", "otp_code", "pin", "sim_pin", "PIN", "pinCode", "community",
+		"snmp_community", "unixhash", "smbhash", "pwhash", "password_hash", "keytab_file",
+	}
+	for _, k := range sensitive {
+		if !IsSensitiveKey(k) {
+			t.Errorf("IsSensitiveKey(%q) = false, want true", k)
+		}
+	}
+	harmless := []string{
+		"passthrough", "bypass", "compass", "passive", "pwm", "pwr", "pwm_fan", "PASSIVE_MODE",
+		"pinned", "spinning", "spindown", "sessions",
+		"hash", "checksum", "credential_type", "token_type", "credentialType", "key_type",
+		"public_key", "sshpubkey", "ssh_public_key", "peer_public_key", "communities",
+		"opinion", "options", "keyboard_layout", "pass_count", "session_timeout", "password_length",
+		"token_ttl", "otp_enabled", "secret_expiry", "password_changed", "minPasswordLength",
+	}
+	for _, k := range harmless {
+		if IsSensitiveKey(k) {
+			t.Errorf("IsSensitiveKey(%q) = true, want false", k)
+		}
+	}
+}
+
+func TestSegments(t *testing.T) {
+	cases := map[string][]string{
+		"dbPass":              {"db", "pass"},
+		"APIKey":              {"api", "key"},
+		"MYSQL_ROOT_PASSWORD": {"mysql", "root", "password"},
+		"dataset key":         {"dataset", "key"},
+		"host_ed25519_key":    {"host", "ed25519", "key"},
+		"Set-Cookie":          {"set", "cookie"},
+	}
+	for in, want := range cases {
+		if got := segments(in); !reflect.DeepEqual(got, want) {
+			t.Errorf("segments(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestReviewRepros covers app environment shapes and free text inside JSON
+// results.
+func TestReviewRepros(t *testing.T) {
+	cases := []struct {
+		in     string
+		checks []check
+	}{
+		{`{"services":{"db":{"environment":["MYSQL_ROOT_PASSWORD=fake-db-pw","POSTGRES_PASSWORD=fake-db-pw","TZ=Etc/UTC"]}}}`,
+			[]check{
+				kept("MYSQL_ROOT_PASSWORD="+Marker, "services", "db", "environment", 0),
+				kept("POSTGRES_PASSWORD="+Marker, "services", "db", "environment", 1),
+				kept("TZ=Etc/UTC", "services", "db", "environment", 2),
+			}},
+		{`{"additional_envs":[{"name":"DB_PASS","value":"fake-db-pw"},{"name":"DB_USER","value":"app"}]}`,
+			[]check{
+				kept("DB_PASS", "additional_envs", 0, "name"), redacted("additional_envs", 0, "value"),
+				kept("app", "additional_envs", 1, "value"),
+			}},
+		{`{"envs":[{"key":"DB_PWD","value":"fake-db-pw"},{"key":"color","value":"blue"}]}`,
+			[]check{
+				kept("DB_PWD", "envs", 0, "key"), redacted("envs", 0, "value"),
+				kept("color", "envs", 1, "key"), kept("blue", "envs", 1, "value"),
+			}},
+		{`{"environment":{"DB_PASS":"fake-db-pw","REDIS_PASS":"fake-db-pw","DB_HOST":"db"}}`,
+			[]check{redacted("environment", "DB_PASS"), redacted("environment", "REDIS_PASS"), kept("db", "environment", "DB_HOST")}},
+		{`{"dbPass":"fake-db-pw","adminPwd":"fake-db-pw","smtp_pass":"fake-db-pw","bypass":"on","compass":"N"}`,
+			[]check{redacted("dbPass"), redacted("adminPwd"), redacted("smtp_pass"), kept("on", "bypass"), kept("N", "compass")}},
+		{`{"jobs":[{"method":"directoryservices.update","error":"[EFAULT] failed {'bindpw': 'fake-bind-pw'}"}]}`,
+			[]check{kept("[EFAULT] failed {'bindpw': '"+Marker+"'}", "jobs", 0, "error")}},
+		{`{"description":"{\"password\": \"fake-user-pw\", \"name\": \"x\"}"}`,
+			[]check{kept(`{"name":"x","password":"`+Marker+`"}`, "description")}},
+		{`{"exception":"Traceback ...\nCredentials(password='fake-user-pw', user='bob')"}`,
+			[]check{kept("Traceback ...\nCredentials(password='"+Marker+"', user='bob')", "exception")}},
+	}
+	for _, tc := range cases {
+		out := ToolOutput(tc.in)
+		got := decodeJSONNumber(t, out)
+		for _, c := range tc.checks {
+			if v := get(t, got, c.path...); !reflect.DeepEqual(v, c.want) {
+				t.Errorf("%s: %v = %#v, want %#v", tc.in, c.path, v, c.want)
+			}
+		}
+		assertNoSecrets(t, out)
+	}
+}
+
+func TestSensitiveSubtreesAndNumbers(t *testing.T) {
+	in := `{"secrets":{"db":"fake-db-pw"},"token":{"value":"fake-oauth-token"},"credentials":["a"],
+		"password":123456,"pin":1234,"secret":1.5,"private_key":1,"privatekey":2,"credentials_id":3,
+		"ssh_credentials_id":"fake-ssh-pw","id":4,"password_disabled":true,"bindpw":null,"passphrase":"",
+		"otp":false,"public_key_secret":"fake-client-secret"}`
+	got := decodeJSONNumber(t, ToolOutput(in))
+	for _, c := range []check{
+		redacted("secrets"), redacted("token"), redacted("credentials"),
+		redacted("password"), redacted("pin"), redacted("secret"),
+		kept(json.Number("1"), "private_key"), kept(json.Number("2"), "privatekey"),
+		kept(json.Number("3"), "credentials_id"), redacted("ssh_credentials_id"), kept(json.Number("4"), "id"),
+		kept(true, "password_disabled"), kept(nil, "bindpw"), kept("", "passphrase"), kept(false, "otp"),
+		redacted("public_key_secret"),
+	} {
+		if v := get(t, got, c.path...); !reflect.DeepEqual(v, c.want) {
+			t.Errorf("%v = %#v, want %#v", c.path, v, c.want)
+		}
+	}
+}
+
+func TestContextualNames(t *testing.T) {
+	in := `{"jobs":[{"id":1,"method":"kerberos.keytab.create","arguments":[{"name":"AD_MACHINE_ACCOUNT","file":"fake-keytab-b64"}]}],
+		"kerberos":{"keytab":{"file":"fake-keytab-b64"}},"upload":{"file":"report.csv"},"kerberos_realm":{"realm":"EXAMPLE.COM","file":"fake-keytab-b64"},
+		"users":[{"username":"bob","uid":1001,"hash":"$6$fake-user-pw"}],"snapshot":{"hash":"abc123"},
+		"snmp":{"community":"fake-client-secret","location":"rack 1"},
+		"twofactor":{"otp":"123456"},"http":{"cookie":"sid=fake-oauth-token","session":"fake-oauth-token"}}`
+	out := ToolOutput(in)
+	got := decodeJSONNumber(t, out)
+	for _, c := range []check{
+		redacted("jobs", 0, "arguments", 0, "file"), kept("AD_MACHINE_ACCOUNT", "jobs", 0, "arguments", 0, "name"),
+		redacted("kerberos", "keytab"), kept("report.csv", "upload", "file"),
+		redacted("kerberos_realm", "file"), kept("EXAMPLE.COM", "kerberos_realm", "realm"),
+		redacted("users", 0, "hash"), kept("bob", "users", 0, "username"), kept("abc123", "snapshot", "hash"),
+		redacted("snmp", "community"), kept("rack 1", "snmp", "location"), redacted("twofactor", "otp"),
+		redacted("http", "cookie"), redacted("http", "session"),
+	} {
+		if v := get(t, got, c.path...); !reflect.DeepEqual(v, c.want) {
+			t.Errorf("%v = %#v, want %#v", c.path, v, c.want)
+		}
+	}
+	assertNoSecrets(t, out)
+}
+
+func TestTextStyles(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"login failed: password=fake-user-pw user=bob", "login failed: password=" + Marker + " user=bob"},
+		{"api key: fake-api-key-0000", "api key: " + Marker},
+		{"key: fake-hex-key-0000, keyboard: us", "key: " + Marker + ", keyboard: us"},
+		{"DB_PASS=fake-db-pw", "DB_PASS=" + Marker},
+		{"MYSQL_ROOT_PASSWORD=fake db pw with spaces", "MYSQL_ROOT_PASSWORD=" + Marker},
+		{"TZ=Etc/UTC", "TZ=Etc/UTC"},
+		{"Authorization: Bearer fake-oauth-token", "Authorization: Bearer " + Marker},
+		{"Authorization: Basic ZmFrZTpmYWtl", "Authorization: Basic " + Marker},
+		{"sent header 'Authorization': 'Bearer fake-oauth-token'", "sent header 'Authorization': '" + Marker + "'"},
+		{"using bearer eyJfake.fake-oauth-token.sig now", "using bearer " + Marker + " now"},
+		{`{\"password\": \"fake-user-pw\", \"name\": \"x\"}`, `{\"password\": \"` + Marker + `\", \"name\": \"x\"}`},
+		{`{'password': "it's fake-user-pw"}`, `{'password': "` + Marker + `"}`},
+		{"Credentials(password='fake-user-pw')", "Credentials(password='" + Marker + "')"},
+		{"connect postgres://app:fake-db-pw@192.0.2.5:5432/db failed", "connect postgres://app:" + Marker + "@192.0.2.5:5432/db failed"},
+		{"https://192.0.2.1:8443/api?token=fake-oauth-token&x=1", "https://192.0.2.1:8443/api?token=" + Marker + "&x=1"},
+		{"see https://example.com:443/path and passthrough: on", "see https://example.com:443/path and passthrough: on"},
+		{"Basic configuration saved", "Basic configuration saved"},
+		{"pool: tank, state: ONLINE", "pool: tank, state: ONLINE"},
+	}
+	for _, c := range cases {
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+		if again := Text(c.want); again != c.want {
+			t.Errorf("Text not idempotent on %q: %q", c.want, again)
+		}
+	}
+}
+
+func TestValueTypedInputs(t *testing.T) {
+	type creds struct {
+		User     string `json:"user"`
+		Password string `json:"password"`
+	}
+	in := map[string]interface{}{
+		"env":   map[string]string{"DB_PASS": "fake-db-pw", "TZ": "UTC"},
+		"list":  []map[string]interface{}{{"token": "fake-oauth-token", "n": 1}},
+		"creds": creds{User: "bob", Password: "fake-user-pw"},
+		"ptr":   &creds{User: "amy", Password: "fake-user-pw"},
+		"count": 3,
+	}
+	raw, err := json.Marshal(Value(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(raw)
+	assertNoSecrets(t, out)
+	for _, want := range []string{`"TZ":"UTC"`, `"user":"bob"`, `"user":"amy"`, `"count":3`, `"n":1`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in %s", want, out)
+		}
+	}
+	top, err := json.Marshal(Value(creds{User: "bob", Password: "fake-user-pw"}))
+	if err != nil || strings.Contains(string(top), "fake-user-pw") {
+		t.Errorf("typed top-level value not redacted: %s", top)
 	}
 }
