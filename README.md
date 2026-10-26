@@ -20,6 +20,7 @@ A Model Context Protocol (MCP) server for TrueNAS that enables AI models to inte
   - [Step 5: Verify the Connection](#step-5-verify-the-connection)
 - [Command-Line Options](#command-line-options)
 - [Connection Details](#connection-details)
+  - [Proxies](#proxies)
 - [Security](#security)
 - [Example Usage](#example-usage)
 - [Advanced Features](#advanced-features)
@@ -283,6 +284,7 @@ You should now be able to ask TrueNAS questions:
 - `--api-user` - The user that owns the API key, sent to `auth.login_ex` (required, or use `TRUENAS_API_USER`), e.g. `truenas_admin`. There is no default; the server exits at startup if it is missing
 - `--tls-ca` - Path to a PEM certificate to trust, e.g. the TrueNAS self-signed certificate (or use `TRUENAS_TLS_CA` env var)
 - `--insecure` - Disable TLS certificate verification entirely (or set `TRUENAS_INSECURE=1`) - **unsafe**: allows man-in-the-middle attacks; prefer `--tls-ca`
+- `--proxy` - Proxy for the TrueNAS connection, overriding `HTTPS_PROXY` and `ALL_PROXY` (or use `TRUENAS_PROXY` env var); see [Proxies](#proxies)
 - `--debug` - Enable debug logging (or set `TRUENAS_MCP_DEBUG=1`)
 - `--version` - Print version and exit
 
@@ -326,6 +328,48 @@ The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 ### ⚠️ Security Requirement
 
 **IMPORTANT**: TrueNAS **requires** encrypted connections (`wss://`) for API key authentication. Using unencrypted `ws://` will cause your API key to be **revoked** as a security measure. This binary defaults to `wss://` to protect your credentials.
+
+### Proxies
+
+The connection to TrueNAS honours the standard proxy environment variables,
+so the server works behind an HTTP or SOCKS proxy, for example when TrueNAS is
+only reachable through userspace-networking Tailscale (`tailscaled
+--tun=userspace-networking --socks5-server=localhost:1055
+--outbound-http-proxy-listen=localhost:1056`).
+
+The proxy is chosen in this order:
+
+1. `--proxy` / `TRUENAS_PROXY`
+2. `HTTPS_PROXY` / `https_proxy`
+3. `ALL_PROXY` / `all_proxy`
+
+`HTTP_PROXY` is not used: the connection is `wss://`, which is HTTPS traffic.
+`NO_PROXY` / `no_proxy` (comma-separated hosts, domains such as
+`.example.com`, IPs, CIDRs, or `*`) applies to all of them, and `localhost` and
+loopback addresses are always reached directly.
+
+Supported proxy URLs:
+
+- `http://host:port` - HTTP `CONNECT` tunnel (a URL without a scheme is treated as `http://`)
+- `socks5h://host:port` or `socks5://host:port` - SOCKS5; with either, host names are resolved by the proxy, so names such as Tailscale MagicDNS names work
+- Credentials may be included (`http://user:pass@host:port`); they are never logged, and errors never echo the proxy URL
+
+`https://` proxy URLs are not supported.
+
+TLS runs end to end inside the tunnel: the proxy only sees encrypted traffic,
+and the TrueNAS certificate is verified as usual (`--tls-ca` / `--insecure`
+behave the same with or without a proxy).
+
+```bash
+# Through a SOCKS5 proxy, e.g. userspace Tailscale
+ALL_PROXY=socks5h://localhost:1055 ./truenas-mcp --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
+
+# Through an HTTP proxy, bypassing it for the local network
+HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.168.0.0/16 ./truenas-mcp --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
+
+# Or set it explicitly, overriding the environment
+./truenas-mcp --proxy socks5h://localhost:1055 --truenas-url 100.64.0.10 --api-key your-api-key --api-user your-api-user
+```
 
 ### Troubleshooting
 

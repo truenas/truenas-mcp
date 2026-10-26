@@ -44,6 +44,7 @@ type Client struct {
 	endpoint  string
 	apiKey    string
 	apiUser   string
+	proxy     string
 	tlsConfig *tls.Config
 
 	// authMu serializes connecting and logging in, so concurrent callers
@@ -199,6 +200,9 @@ type Options struct {
 	// APIUser is the user that owns the API key, sent to auth.login_ex.
 	// Required.
 	APIUser string
+	// Proxy overrides HTTPS_PROXY and ALL_PROXY for the TrueNAS
+	// connection (NO_PROXY still applies). Optional.
+	Proxy string
 }
 
 func NewClientWithOptions(endpoint, apiKey string, tlsConfig *tls.Config, opts Options) (*Client, error) {
@@ -215,6 +219,7 @@ func NewClientWithOptions(endpoint, apiKey string, tlsConfig *tls.Config, opts O
 		endpoint:  endpoint,
 		apiKey:    apiKey,
 		apiUser:   opts.APIUser,
+		proxy:     strings.TrimSpace(opts.Proxy),
 		tlsConfig: tlsConfig,
 		pending:   make(map[string]*pendingCall),
 
@@ -241,8 +246,18 @@ func (c *Client) connect() error {
 		ReadBufferSize:   65536,       // 64KB read buffer to handle large messages
 		WriteBufferSize:  65536,       // 64KB write buffer to handle large messages
 	}
+	proxyURL, err := c.proxyFor(u)
+	if err != nil {
+		return err
+	}
+	via := ""
+	if proxyURL != nil {
+		// TLS still runs end to end inside the proxy tunnel.
+		wsDialer.Proxy = http.ProxyURL(dialerProxy(proxyURL))
+		via = " via proxy " + redactProxy(proxyURL)
+	}
 
-	log.Printf("Connecting to %s...", u.Redacted())
+	log.Printf("Connecting to %s%s...", u.Redacted(), via)
 	conn, resp, err := wsDialer.Dial(u.String(), nil)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
@@ -278,7 +293,7 @@ func (c *Client) connect() error {
 	// Start the read loop to multiplex concurrent responses
 	go c.readLoop(conn, done)
 
-	log.Printf("Successfully connected via %s", u.Redacted())
+	log.Printf("Successfully connected to %s%s", u.Redacted(), via)
 	return nil
 }
 
