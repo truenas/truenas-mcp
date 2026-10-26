@@ -20,10 +20,10 @@ import (
 // authWithTLSConfig runs connect+authenticate against srv using cfg.
 func authWithTLSConfig(t *testing.T, srv *httptest.Server, cfg *tls.Config) error {
 	t.Helper()
-	endpoint := "wss://" + strings.TrimPrefix(srv.URL, "https://") + "/websocket"
-	client, err := NewClient(endpoint, testAPIKey, cfg)
+	endpoint := "wss://" + strings.TrimPrefix(srv.URL, "https://") + apiPath
+	client, err := NewClientWithOptions(endpoint, testAPIKey, cfg, Options{APIUser: testAPIUser})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("NewClientWithOptions: %v", err)
 	}
 	defer client.Close()
 	return client.Authenticate()

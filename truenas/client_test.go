@@ -5,19 +5,19 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"log"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/gorilla/websocket"
 )
 
-const testAPIKey = "1-verysecretapikey"
+const (
+	testAPIKey  = "1-verysecretapikey"
+	testAPIUser = "svc-mcp"
+)
 
 func TestRedactParamsAuthMethods(t *testing.T) {
-	methods := []string{"auth.login_with_api_key", "auth.login", "auth.login_with_token"}
+	methods := []string{"auth.login_ex", "auth.login_with_api_key", "auth.login"}
 	for _, method := range methods {
 		redacted := redactParams(method, []interface{}{"1-supersecretapikey"})
 		out, _ := json.Marshal(redacted)
@@ -90,57 +90,6 @@ func TestRedactJSONForLog(t *testing.T) {
 	}
 }
 
-// startFakeTrueNAS runs a TLS WebSocket server speaking just enough of the
-// TrueNAS protocol to drive connect, auth, and one follow-up call. If
-// echoKeyInError is true, auth fails with an error message and trace that
-// echo the submitted API key (simulating a server-side echo).
-func startFakeTrueNAS(t *testing.T, echoKeyInError bool) *httptest.Server {
-	t.Helper()
-	upgrader := websocket.Upgrader{}
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		var connectReq map[string]interface{}
-		if err := conn.ReadJSON(&connectReq); err != nil {
-			return
-		}
-		conn.WriteJSON(map[string]string{"msg": "connected", "session": "test"})
-
-		for {
-			var req APIRequest
-			if err := conn.ReadJSON(&req); err != nil {
-				return
-			}
-			switch {
-			case req.Method == "auth.login_with_api_key" && echoKeyInError:
-				conn.WriteJSON(map[string]interface{}{
-					"id": req.ID, "msg": "failed",
-					"error": map[string]interface{}{
-						"code":    401,
-						"message": "invalid API key: " + testAPIKey,
-						"trace":   "Traceback: ValidationError('" + testAPIKey + "')",
-					},
-				})
-			case req.Method == "auth.login_with_api_key":
-				conn.WriteJSON(map[string]interface{}{"id": req.ID, "msg": "result", "result": true})
-			default:
-				// Any other call returns a result carrying a secret-bearing
-				// field, like core.get_jobs job arguments do
-				conn.WriteJSON(map[string]interface{}{
-					"id": req.ID, "msg": "result",
-					"result": map[string]interface{}{"bindpw": "responsesecret9", "domain": "example.com"},
-				})
-			}
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
 // runClientSession authenticates, makes one call, and returns everything the
 // client logged plus the auth error (if any).
 func runClientSession(t *testing.T, srv *httptest.Server) (string, error) {
@@ -150,10 +99,10 @@ func runClientSession(t *testing.T, srv *httptest.Server) (string, error) {
 	log.SetOutput(&logBuf)
 	defer log.SetOutput(os.Stderr)
 
-	endpoint := "wss://" + strings.TrimPrefix(srv.URL, "https://") + "/websocket"
-	client, err := NewClient(endpoint, testAPIKey, &tls.Config{InsecureSkipVerify: true})
+	endpoint := "wss://" + strings.TrimPrefix(srv.URL, "https://") + apiPath
+	client, err := NewClientWithOptions(endpoint, testAPIKey, &tls.Config{InsecureSkipVerify: true}, Options{APIUser: testAPIUser})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("NewClientWithOptions: %v", err)
 	}
 	defer client.Close()
 
@@ -183,7 +132,7 @@ func TestLoggingDefaultModeOmitsBodies(t *testing.T) {
 	if strings.Contains(logs, "params") {
 		t.Errorf("request body logged outside debug mode:\n%s", logs)
 	}
-	if !strings.Contains(logs, "method=auth.login_with_api_key") {
+	if !strings.Contains(logs, "method=auth.login_ex") {
 		t.Errorf("expected request metadata line in log output:\n%s", logs)
 	}
 	if !strings.Contains(logs, "result=") {

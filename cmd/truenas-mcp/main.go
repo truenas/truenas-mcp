@@ -18,7 +18,8 @@ import (
 )
 
 var (
-	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'ws://10.0.0.1/websocket')")
+	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'wss://10.0.0.1/api/current')")
+	apiUser    = flag.String("api-user", "", "User that owns the API key, sent to auth.login_ex (required; env TRUENAS_API_USER)")
 	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication")
 	insecure   = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks)")
 	tlsCA      = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
@@ -29,6 +30,24 @@ var (
 // Version is the release version, injected at build time via
 // -ldflags "-X main.Version=...". Builds without injection report "dev".
 var Version = "dev"
+
+// checkRequired reports any required setting that is missing.
+func checkRequired(truenasURL, apiKey, apiUser string) error {
+	var missing []string
+	if truenasURL == "" {
+		missing = append(missing, "--truenas-url (TRUENAS_URL)")
+	}
+	if apiKey == "" {
+		missing = append(missing, "--api-key (TRUENAS_API_KEY)")
+	}
+	if apiUser == "" {
+		missing = append(missing, "--api-user (TRUENAS_API_USER, the user that owns the API key)")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
 
 func main() {
 	flag.Parse()
@@ -45,9 +64,12 @@ func main() {
 	if *apiKey == "" {
 		*apiKey = os.Getenv("TRUENAS_API_KEY")
 	}
+	if *apiUser == "" {
+		*apiUser = os.Getenv("TRUENAS_API_USER")
+	}
 
-	if *truenasURL == "" || *apiKey == "" {
-		log.Fatal("Both --truenas-url and --api-key are required (or set TRUENAS_URL and TRUENAS_API_KEY env vars)")
+	if err := checkRequired(*truenasURL, *apiKey, *apiUser); err != nil {
+		log.Fatal(err)
 	}
 
 	// TRUENAS_MCP_DEBUG=1 is equivalent to --debug; either enables verbose
@@ -80,7 +102,9 @@ func main() {
 	}
 
 	// Create TrueNAS client
-	client, err := truenas.NewClient(*truenasURL, *apiKey, tlsConfig)
+	client, err := truenas.NewClientWithOptions(*truenasURL, *apiKey, tlsConfig, truenas.Options{
+		APIUser: *apiUser,
+	})
 	if err != nil {
 		log.Fatalf("Failed to create TrueNAS client: %v", err)
 	}
