@@ -2,6 +2,7 @@ package truenas
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -200,8 +201,9 @@ type Options struct {
 	// APIUser is the user that owns the API key, sent to auth.login_ex.
 	// Required.
 	APIUser string
-	// Proxy overrides HTTPS_PROXY and ALL_PROXY for the TrueNAS
-	// connection (NO_PROXY still applies). Optional.
+	// Proxy overrides TRUENAS_PROXY, HTTPS_PROXY and ALL_PROXY for the
+	// TrueNAS connection (NO_PROXY still applies); "none" disables
+	// proxying. Optional.
 	Proxy string
 }
 
@@ -228,6 +230,23 @@ func NewClientWithOptions(endpoint, apiKey string, tlsConfig *tls.Config, opts O
 	}, nil
 }
 
+// tlsHint suggests a fix for a certificate verification failure, or returns
+// "" if err is not one.
+func tlsHint(err error, host string) string {
+	var hostErr x509.HostnameError
+	if errors.As(err, &hostErr) {
+		fix := "connect using a host name listed in the certificate, or install a TrueNAS certificate whose subject alternative names include " + host
+		if net.ParseIP(host) != nil {
+			fix = "connect using a host name listed in the certificate instead of the IP address, or install a TrueNAS certificate with IP " + host + " in its subject alternative names"
+		}
+		return "the TrueNAS certificate is not valid for " + host + ": " + fix + "; --tls-ca cannot fix a name mismatch, and --insecure (which disables verification at the cost of man-in-the-middle protection) is the last resort"
+	}
+	if strings.Contains(err.Error(), "x509:") || strings.Contains(err.Error(), "certificate") {
+		return "TrueNAS uses a self-signed certificate by default: pass --tls-ca <cert.pem> to trust it, or --insecure to disable verification at the cost of man-in-the-middle protection"
+	}
+	return ""
+}
+
 // connect establishes the WebSocket connection and starts the read loop.
 // Must be called with connMu held.
 func (c *Client) connect() error {
@@ -246,15 +265,15 @@ func (c *Client) connect() error {
 		ReadBufferSize:   65536,       // 64KB read buffer to handle large messages
 		WriteBufferSize:  65536,       // 64KB write buffer to handle large messages
 	}
-	proxyURL, err := c.proxyFor(u)
+	proxy, err := c.proxyFor(u)
 	if err != nil {
 		return err
 	}
 	via := ""
-	if proxyURL != nil {
+	if proxy != nil {
 		// TLS still runs end to end inside the proxy tunnel.
-		wsDialer.Proxy = http.ProxyURL(dialerProxy(proxyURL))
-		via = " via proxy " + redactProxy(proxyURL)
+		wsDialer.Proxy = http.ProxyURL(dialerProxy(proxy.url))
+		via = " via proxy " + proxy.String()
 	}
 
 	log.Printf("Connecting to %s%s...", u.Redacted(), via)
@@ -266,8 +285,11 @@ func (c *Client) connect() error {
 			} else {
 				err = fmt.Errorf("%w (HTTP 404 for %s: check the path; the JSON-RPC endpoint is %s, and TrueNAS 25.04 or later required)", err, u.Redacted(), apiPath)
 			}
-		} else if strings.Contains(err.Error(), "x509:") || strings.Contains(err.Error(), "certificate") {
-			err = fmt.Errorf("%w (TrueNAS uses a self-signed certificate by default: pass --tls-ca <cert.pem> to trust it, or --insecure to disable verification at the cost of man-in-the-middle protection)", err)
+		} else if hint := tlsHint(err, u.Hostname()); hint != "" {
+			err = fmt.Errorf("%w (%s)", err, hint)
+		} else if opErr := (*net.OpError)(nil); proxy != nil && errors.As(err, &opErr) && opErr.Op == "dial" {
+			// Through a proxy, the only TCP dial is to the proxy itself.
+			err = fmt.Errorf("connecting via proxy %s from %s: proxy unreachable: %w", proxy, proxy.source, err)
 		}
 		log.Printf("Connection failed: %v", err)
 		return fmt.Errorf("connection failed: %w", err)

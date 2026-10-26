@@ -48,13 +48,25 @@ func (p *testProxy) seen() []string {
 	return append([]string(nil), p.targets...)
 }
 
+func (p *testProxy) socksAddrType() byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.addrType
+}
+
 func startProxy(t *testing.T, f *fakeTrueNAS, serve func(*testProxy, net.Conn)) *testProxy {
+	t.Helper()
+	return startProxyAuth(t, f, serve, "proxyuser", "proxysecret7")
+}
+
+// startProxyAuth starts a proxy that requires user and password.
+func startProxyAuth(t *testing.T, f *fakeTrueNAS, serve func(*testProxy, net.Conn), user, password string) *testProxy {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &testProxy{Listener: l, backend: f.Listener.Addr().String(), user: "proxyuser", password: "proxysecret7"}
+	p := &testProxy{Listener: l, backend: f.Listener.Addr().String(), user: user, password: password}
 	t.Cleanup(func() { l.Close() })
 	go func() {
 		for {
@@ -205,7 +217,7 @@ func forwardTo(t *testing.T, addr, backend string) string {
 
 // clearProxyEnv unsets every proxy variable for the test.
 func clearProxyEnv(t *testing.T) {
-	for _, name := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
+	for _, name := range []string{"TRUENAS_PROXY", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
 		t.Setenv(name, "")
 	}
 }
@@ -217,8 +229,13 @@ func proxiedClient(t *testing.T, f *fakeTrueNAS, host string, opts Options) (*Cl
 	t.Helper()
 	pool := x509.NewCertPool()
 	pool.AddCert(f.Certificate())
+	return proxiedClientTLS(t, f, host, opts, &tls.Config{RootCAs: pool})
+}
+
+func proxiedClientTLS(t *testing.T, f *fakeTrueNAS, host string, opts Options, cfg *tls.Config) (*Client, *bytes.Buffer) {
+	t.Helper()
 	opts.APIUser = testAPIUser
-	c, err := NewClientWithOptions(f.wsURL(host), testAPIKey, &tls.Config{RootCAs: pool}, opts)
+	c, err := NewClientWithOptions(f.wsURL(host), testAPIKey, cfg, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +251,9 @@ func proxiedClient(t *testing.T, f *fakeTrueNAS, host string, opts Options) (*Cl
 func assertNoLeak(t *testing.T, p *testProxy, err error, logs *bytes.Buffer) {
 	t.Helper()
 	for _, secret := range []string{p.user, p.password} {
+		if secret == "" {
+			continue
+		}
 		if err != nil && strings.Contains(err.Error(), secret) {
 			t.Errorf("proxy credential %q in error: %v", secret, err)
 		}
@@ -278,8 +298,8 @@ func TestSOCKS5hProxyFromAllProxy(t *testing.T) {
 	if got := p.seen(); len(got) != 1 || !strings.HasPrefix(got[0], "example.com:") {
 		t.Errorf("proxy saw %v, want example.com", got)
 	}
-	if p.addrType != 3 {
-		t.Errorf("SOCKS5 address type %d, want 3 (domain name, resolved by the proxy)", p.addrType)
+	if at := p.socksAddrType(); at != 3 {
+		t.Errorf("SOCKS5 address type %d, want 3 (domain name, resolved by the proxy)", at)
 	}
 	assertNoLeak(t, p, err, logs)
 }
@@ -306,7 +326,6 @@ func TestNoProxyBypassesProxy(t *testing.T) {
 	f := newFakeTrueNAS(t, nil)
 	p := startProxy(t, f, serveHTTPConnect)
 	t.Setenv("HTTPS_PROXY", p.url("http", true))
-	t.Setenv("NO_PROXY", "other.example,.invalid")
 	// Loopback addresses are always reached directly, so serve the fake on
 	// a non-loopback address of this machine to see NO_PROXY at work.
 	ip := nonLoopbackIP(t)
@@ -372,45 +391,182 @@ func TestProxyCredentialsNotLeaked(t *testing.T) {
 
 func TestProxyForSelection(t *testing.T) {
 	target, _ := url.Parse("wss://truenas.example:443/api/current")
+	loopback, _ := url.Parse("wss://127.0.0.1:443/api/current")
 	for _, tc := range []struct {
-		env    map[string]string
-		option string
-		want   string // "" = direct
+		env     map[string]string
+		option  string
+		target  *url.URL // default target
+		want    string   // "" = direct
+		wantErr string   // substring of the error
 	}{
 		{env: nil, want: ""},
 		{env: map[string]string{"HTTPS_PROXY": "http://a:1"}, want: "http://a:1"},
 		{env: map[string]string{"https_proxy": "a:1"}, want: "http://a:1"}, // scheme defaults to http
-		{env: map[string]string{"HTTP_PROXY": "http://a:1"}, want: ""},     // wss is HTTPS traffic
+		{env: map[string]string{"HTTPS_PROXY": "http://a"}, want: "http://a:80"},
+		{env: map[string]string{"HTTP_PROXY": "http://a:1"}, want: ""}, // wss is HTTPS traffic
 		{env: map[string]string{"ALL_PROXY": "socks5h://b:2"}, want: "socks5h://b:2"},
-		{env: map[string]string{"all_proxy": "SOCKS5://b:2"}, want: "socks5://b:2"},
+		{env: map[string]string{"all_proxy": "SOCKS5://b"}, want: "socks5://b:1080"},
 		{env: map[string]string{"HTTPS_PROXY": "http://a:1", "ALL_PROXY": "socks5h://b:2"}, want: "http://a:1"},
+		{env: map[string]string{"HTTPS_PROXY": "http://a:1", "TRUENAS_PROXY": "socks5h://t:4"}, want: "socks5h://t:4"},
+		{env: map[string]string{"HTTPS_PROXY": "http://a:1", "TRUENAS_PROXY": "socks5h://t:4"}, option: "socks5h://c:3", want: "socks5h://c:3"},
 		{env: map[string]string{"HTTPS_PROXY": "http://a:1"}, option: "socks5h://c:3", want: "socks5h://c:3"},
+		{env: map[string]string{"HTTPS_PROXY": "http://a:1"}, option: "none", want: ""},
+		{env: map[string]string{"ALL_PROXY": "https://a:1", "TRUENAS_PROXY": "NONE"}, want: ""},
 		{env: map[string]string{"HTTPS_PROXY": "http://a:1", "NO_PROXY": "truenas.example"}, want: ""},
 		{env: map[string]string{"HTTPS_PROXY": "http://a:1", "no_proxy": ".example"}, want: ""},
 		{env: map[string]string{"HTTPS_PROXY": "http://a:1", "NO_PROXY": "*"}, want: ""},
 		{env: map[string]string{"HTTPS_PROXY": "http://a:1", "NO_PROXY": "other.example"}, want: "http://a:1"},
 		{env: map[string]string{"NO_PROXY": "truenas.example"}, option: "socks5h://c:3", want: ""},
+		{env: map[string]string{"HTTPS_PROXY": "http://u:pw@a:1/x?token=tk#f"}, want: "http://redacted@a:1"},
+		// Unusable settings for hosts that bypass the proxy connect directly.
+		{env: map[string]string{"HTTPS_PROXY": "https://u:pw@corp:3128", "NO_PROXY": "truenas.example"}, want: ""},
+		{env: map[string]string{"ALL_PROXY": "socks4://corp:1080", "NO_PROXY": "*"}, want: ""},
+		{env: map[string]string{"HTTPS_PROXY": "http://u:pw@[bad", "NO_PROXY": ".example"}, want: ""},
+		{env: map[string]string{"HTTPS_PROXY": "https://u:pw@corp:3128"}, target: loopback, want: ""},
+		{option: "socks4://u:pw@corp:1080", target: loopback, want: ""},
+		// ...and fail, naming only the source, when the proxy would be used.
+		{env: map[string]string{"HTTPS_PROXY": "https://u:pw@corp:3128"}, wantErr: "unsupported proxy scheme https in HTTPS_PROXY"},
+		{env: map[string]string{"ALL_PROXY": "socks4://u:pw@corp:1080"}, wantErr: `unsupported proxy scheme "socks4" in ALL_PROXY`},
+		{env: map[string]string{"TRUENAS_PROXY": "http://u:pw@[bad"}, wantErr: "invalid proxy URL in TRUENAS_PROXY"},
+		{option: "socks4://u:pw@corp:1080", wantErr: `unsupported proxy scheme "socks4" in --proxy`},
 	} {
 		clearProxyEnv(t)
 		for k, v := range tc.env {
 			t.Setenv(k, v)
 		}
+		tgt := tc.target
+		if tgt == nil {
+			tgt = target
+		}
 		c := &Client{proxy: tc.option}
-		p, err := c.proxyFor(target)
+		p, err := c.proxyFor(tgt)
 		got := ""
 		if p != nil {
 			got = p.String()
 		}
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("env %v option %q: got %q, %v; want error %q", tc.env, tc.option, got, err, tc.wantErr)
+			} else if strings.Contains(err.Error(), "pw") || strings.Contains(err.Error(), "corp") {
+				t.Errorf("error echoes the proxy URL: %v", err)
+			}
+			continue
+		}
 		if err != nil || got != tc.want {
-			t.Errorf("env %v option %q: got %q, %v; want %q", tc.env, tc.option, got, err, tc.want)
+			t.Errorf("env %v option %q target %s: got %q, %v; want %q", tc.env, tc.option, tgt.Host, got, err, tc.want)
 		}
 	}
+}
 
+func TestValidateProxy(t *testing.T) {
+	for _, tc := range []struct {
+		endpoint string
+		env      map[string]string
+		option   string
+		wantErr  string
+	}{
+		{endpoint: "truenas.example", env: map[string]string{"HTTPS_PROXY": "https://u:pw@corp:3128"}, wantErr: "HTTPS_PROXY"},
+		{endpoint: "truenas.example", env: map[string]string{"TRUENAS_PROXY": "socks4://u:pw@corp:1080"}, wantErr: "TRUENAS_PROXY"},
+		{endpoint: "truenas.example", option: "ftp://u:pw@corp", wantErr: "--proxy"},
+		{endpoint: "192.0.2.10", env: map[string]string{"ALL_PROXY": "http://u:pw@[bad"}, wantErr: "ALL_PROXY"},
+		{endpoint: "truenas.example", env: map[string]string{"HTTPS_PROXY": "https://u:pw@corp:3128", "NO_PROXY": "truenas.example"}},
+		{endpoint: "192.0.2.10", env: map[string]string{"ALL_PROXY": "socks4://corp:1080", "NO_PROXY": "192.0.2.0/24"}},
+		{endpoint: "127.0.0.1", env: map[string]string{"HTTPS_PROXY": "https://u:pw@corp:3128"}},
+		{endpoint: "truenas.example", env: map[string]string{"HTTPS_PROXY": "https://u:pw@corp:3128"}, option: "none"},
+		{endpoint: "truenas.example", env: map[string]string{"HTTPS_PROXY": "socks5h://u:pw@corp:1055"}},
+	} {
+		clearProxyEnv(t)
+		for k, v := range tc.env {
+			t.Setenv(k, v)
+		}
+		c, err := NewClientWithOptions(tc.endpoint, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser, Proxy: tc.option})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = c.ValidateProxy()
+		switch {
+		case tc.wantErr == "" && err != nil:
+			t.Errorf("%s env %v option %q: unexpected error %v", tc.endpoint, tc.env, tc.option, err)
+		case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+			t.Errorf("%s env %v option %q: got %v, want error naming %s", tc.endpoint, tc.env, tc.option, err, tc.wantErr)
+		case err != nil && (strings.Contains(err.Error(), "pw") || strings.Contains(err.Error(), "corp")):
+			t.Errorf("error echoes the proxy URL: %v", err)
+		}
+	}
+}
+
+func TestUnreachableProxyIsNamed(t *testing.T) {
+	f := newFakeTrueNAS(t, nil)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := l.Addr().String()
+	l.Close()
+	for _, tc := range []struct{ env, scheme string }{
+		{"HTTPS_PROXY", "http"},
+		{"ALL_PROXY", "socks5h"},
+	} {
+		clearProxyEnv(t)
+		t.Setenv(tc.env, tc.scheme+"://proxyuser:proxysecret7@"+dead)
+		c, logs := proxiedClient(t, f, "example.com", Options{})
+		err := c.Authenticate()
+		want := "connecting via proxy " + tc.scheme + "://redacted@" + dead + " from " + tc.env + ": proxy unreachable: "
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: got %v, want it to contain %q", tc.env, err, want)
+		}
+		assertNoLeak(t, &testProxy{user: "proxyuser", password: "proxysecret7"}, err, logs)
+	}
+}
+
+func TestHTTPProxyUserWithoutPassword(t *testing.T) {
 	clearProxyEnv(t)
-	t.Setenv("HTTPS_PROXY", "https://u:pw@a:1")
-	if _, err := (&Client{}).proxyFor(target); err == nil || !strings.Contains(err.Error(), "HTTPS_PROXY") {
-		t.Errorf("https proxy: got %v, want a refusal naming HTTPS_PROXY", err)
-	} else if strings.Contains(err.Error(), "pw") {
-		t.Errorf("error leaks the proxy password: %v", err)
+	f := newFakeTrueNAS(t, nil)
+	p := startProxyAuth(t, f, serveHTTPConnect, "proxytoken9", "")
+	c, logs := proxiedClient(t, f, "example.com", Options{Proxy: "http://proxytoken9@" + p.Addr().String()})
+	if _, err := c.Call("system.info"); err != nil {
+		t.Fatalf("Call with a user-only proxy credential: %v", err)
+	}
+	assertNoLeak(t, &testProxy{user: "proxytoken9"}, nil, logs)
+}
+
+// TLS is end to end: the proxies tunnel to the fake whatever host is asked
+// for, so only certificate verification can stop these connections.
+func TestTLSVerifiedThroughProxy(t *testing.T) {
+	clearProxyEnv(t)
+	f := newFakeTrueNAS(t, nil)
+	pool := x509.NewCertPool()
+	pool.AddCert(f.Certificate())
+	for _, px := range []struct {
+		scheme string
+		serve  func(*testProxy, net.Conn)
+	}{
+		{"http", serveHTTPConnect},
+		{"socks5h", serveSOCKS5},
+	} {
+		p := startProxy(t, f, px.serve)
+		for _, tc := range []struct {
+			name, host string
+			cfg        *tls.Config
+			hint       string
+		}{
+			{"untrusted certificate", "example.com", &tls.Config{RootCAs: x509.NewCertPool()}, "--tls-ca <cert.pem>"},
+			{"name mismatch", "truenas.example.net", &tls.Config{RootCAs: pool}, "not valid for truenas.example.net"},
+		} {
+			c, logs := proxiedClientTLS(t, f, tc.host, Options{Proxy: p.url(px.scheme, true)}, tc.cfg)
+			before := len(p.seen())
+			err := c.Authenticate()
+			if err == nil {
+				t.Errorf("%s through %s proxy: connected", tc.name, px.scheme)
+				continue
+			}
+			if len(p.seen()) != before+1 {
+				t.Errorf("%s through %s proxy: proxy not used", tc.name, px.scheme)
+			}
+			if !strings.Contains(err.Error(), tc.hint) {
+				t.Errorf("%s through %s proxy: got %v, want hint %q", tc.name, px.scheme, err, tc.hint)
+			}
+			assertNoLeak(t, p, err, logs)
+		}
 	}
 }

@@ -284,7 +284,7 @@ You should now be able to ask TrueNAS questions:
 - `--api-user` - The user that owns the API key, sent to `auth.login_ex` (required, or use `TRUENAS_API_USER`), e.g. `truenas_admin`. There is no default; the server exits at startup if it is missing
 - `--tls-ca` - Path to a PEM certificate to trust, e.g. the TrueNAS self-signed certificate (or use `TRUENAS_TLS_CA` env var)
 - `--insecure` - Disable TLS certificate verification entirely (or set `TRUENAS_INSECURE=1`) - **unsafe**: allows man-in-the-middle attacks; prefer `--tls-ca`
-- `--proxy` - Proxy for the TrueNAS connection, overriding `HTTPS_PROXY` and `ALL_PROXY` (or use `TRUENAS_PROXY` env var); see [Proxies](#proxies)
+- `--proxy` - Proxy for the TrueNAS connection, overriding `HTTPS_PROXY` and `ALL_PROXY` (or use `TRUENAS_PROXY` env var); `none` ignores proxy environment variables; see [Proxies](#proxies)
 - `--debug` - Enable debug logging (or set `TRUENAS_MCP_DEBUG=1`)
 - `--version` - Print version and exit
 
@@ -345,14 +345,23 @@ The proxy is chosen in this order:
 
 `HTTP_PROXY` is not used: the connection is `wss://`, which is HTTPS traffic.
 `NO_PROXY` / `no_proxy` (comma-separated hosts, domains such as
-`.example.com`, IPs, CIDRs, or `*`) applies to all of them, and `localhost` and
-loopback addresses are always reached directly.
+`.example.com`, IPs, CIDRs, or `*`) applies to all of them, and the host name
+`localhost` and loopback IP addresses are always reached directly.
+
+To ignore inherited proxy variables, pass `--proxy none` (or set
+`TRUENAS_PROXY=none`). An empty `--proxy` / `TRUENAS_PROXY` means "not set",
+so the environment variables still apply.
+
+A proxy setting is only checked when it applies to the TrueNAS host: an
+unusable inherited value (say an `https://` proxy) does not matter if
+`NO_PROXY` covers the host. If it does apply, the server refuses to start
+and names the setting at fault, without echoing its value.
 
 Supported proxy URLs:
 
-- `http://host:port` - HTTP `CONNECT` tunnel (a URL without a scheme is treated as `http://`)
-- `socks5h://host:port` or `socks5://host:port` - SOCKS5; with either, host names are resolved by the proxy, so names such as Tailscale MagicDNS names work
-- Credentials may be included (`http://user:pass@host:port`); they are never logged, and errors never echo the proxy URL
+- `http://host:port` - HTTP `CONNECT` tunnel; the port defaults to 80, and a URL without a scheme is treated as `http://`
+- `socks5h://host:port` or `socks5://host:port` - SOCKS5; the port defaults to 1080; with either, host names are resolved by the proxy, so names such as Tailscale MagicDNS names work
+- Credentials may be included: `http://user:pass@host:port` sends HTTP Basic `Proxy-Authorization` (`http://token@host:port` sends the token with an empty password), and SOCKS5 uses username/password authentication. Logs show the proxy only as `scheme://redacted@host:port`, and errors never echo the proxy URL
 
 `https://` proxy URLs are not supported.
 
@@ -365,10 +374,10 @@ behave the same with or without a proxy).
 ALL_PROXY=socks5h://localhost:1055 ./truenas-mcp --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
 
 # Through an HTTP proxy, bypassing it for the local network
-HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.168.0.0/16 ./truenas-mcp --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
+HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.0.2.0/24 ./truenas-mcp --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
 
 # Or set it explicitly, overriding the environment
-./truenas-mcp --proxy socks5h://localhost:1055 --truenas-url 100.64.0.10 --api-key your-api-key --api-user your-api-user
+./truenas-mcp --proxy socks5h://localhost:1055 --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
 ```
 
 ### Troubleshooting
@@ -378,10 +387,16 @@ HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.168.0.0/16 ./truenas-mcp --truena
 - Check firewall allows port 443 (wss), or the port you configured
 - `HTTP 404` / "TrueNAS 25.04 or later required": the server predates the JSON-RPC API; upgrade TrueNAS
 - Verify API key is valid and has admin permissions
+- "connecting via proxy ... proxy unreachable": the proxy named in the message (and the variable it came from) is not listening; check it, or bypass it with `NO_PROXY` or `--proxy none`
 
 **Certificate Verification Errors** (`x509: certificate signed by unknown authority` or similar):
 - TrueNAS uses a self-signed certificate by default; export it and pass `--tls-ca truenas-cert.pem` (recommended)
 - Or disable verification with `--insecure` / `TRUENAS_INSECURE=1` (unsafe on untrusted networks)
+
+**Name mismatch** (`x509: certificate is valid for ..., not ...` or `doesn't contain any IP SANs`):
+- The certificate does not list the host name or IP address you connected to (e.g. connecting to `192.0.2.10` when the certificate only names `truenas.example`)
+- Connect using a host name listed in the certificate, or install a TrueNAS certificate whose subject alternative names include that name or IP
+- `--tls-ca` cannot fix a name mismatch; `--insecure` is the last resort
 
 **Authentication Failures:**
 - Generate a new API key in TrueNAS System Settings → API Keys

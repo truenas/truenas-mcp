@@ -8,7 +8,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -124,5 +127,77 @@ func TestNewTLSConfigErrors(t *testing.T) {
 	os.WriteFile(junk, []byte("not a certificate"), 0o600)
 	if _, err := NewTLSConfig(false, junk); err == nil {
 		t.Error("expected error for PEM file without certificates")
+	}
+}
+
+// A certificate without IP SANs, reached by IP, gets the name-mismatch hint,
+// not the --tls-ca one.
+func TestTLSHintForIPWithoutIPSANs(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "truenas.example"},
+		DNSNames:              []string{"truenas.example"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(http.NotFoundHandler())
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	err = authWithTLSConfig(t, srv, &tls.Config{RootCAs: pool}) // srv.URL is https://127.0.0.1:port
+	if err == nil {
+		t.Fatal("certificate without IP SANs accepted for an IP address")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"doesn't contain any IP SANs",
+		"connect using a host name listed in the certificate",
+		"with IP 127.0.0.1 in its subject alternative names",
+		"--tls-ca cannot fix a name mismatch",
+		"--insecure",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error lacks %q: %v", want, msg)
+		}
+	}
+	if strings.Contains(msg, "--tls-ca <cert.pem>") {
+		t.Errorf("name mismatch got the unknown-authority hint: %v", msg)
+	}
+}
+
+func TestTLSHint(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		host string
+		want string
+	}{
+		{x509.HostnameError{Certificate: &x509.Certificate{}, Host: "192.0.2.10"}, "192.0.2.10", "with IP 192.0.2.10 in its subject alternative names"},
+		{x509.HostnameError{Certificate: &x509.Certificate{DNSNames: []string{"a.example"}}, Host: "b.example"}, "b.example", "subject alternative names include b.example"},
+		{fmt.Errorf("tls: %w", x509.UnknownAuthorityError{}), "192.0.2.10", "--tls-ca <cert.pem>"},
+		{errors.New("dial tcp 192.0.2.10:443: connection refused"), "192.0.2.10", ""},
+	} {
+		got := tlsHint(tc.err, tc.host)
+		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+			t.Errorf("tlsHint(%v): got %q, want %q", tc.err, got, tc.want)
+		}
 	}
 }
