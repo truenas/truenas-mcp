@@ -6086,41 +6086,78 @@ func simplifyBootEnvironment(env map[string]interface{}) map[string]interface{} 
 	return simplified
 }
 
+// bootEnvMinTime is the earliest "created" time accepted as a real date.
+// TrueNAS boot environments can't predate it, so anything earlier (for
+// example "20250105" read as epoch seconds, i.e. 1970) is a misparse.
+var bootEnvMinTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// bootEnvMaxAhead is how far past now a "created" time may be.
+const bootEnvMaxAhead = 10 * 365 * 24 * time.Hour
+
 // parseBootEnvCreated normalizes a boot environment's "created" value and
 // returns it as an ISO-8601 UTC string plus Unix seconds. TrueNAS 25.04+
 // sends a datetime as {"$date": <ms since epoch>}; plain strings and numbers
 // are accepted too. Numbers below 1e12 are seconds, larger ones
-// milliseconds. An unparseable string is returned unchanged with
-// timestamp 0; other unparseable values yield ("", 0).
+// milliseconds. Only times from 2000-01-01 to 10 years after now are
+// accepted. Anything else (unparseable, out of range or overflowing) is
+// returned raw with timestamp 0: a string as is, the value of $date if
+// present, other values as compact JSON. A missing value yields ("", 0).
 func parseBootEnvCreated(v interface{}) (string, int64) {
-	var t time.Time
-	switch c := v.(type) {
-	case map[string]interface{}:
-		var ok bool
-		if t, ok = parseEpochOrRFC3339(c["$date"]); !ok {
-			return "", 0
+	raw := v
+	if m, ok := v.(map[string]interface{}); ok {
+		if d, ok := m["$date"]; ok {
+			raw = d
 		}
-	case float64:
-		t = epochTime(c)
-	case string:
-		var ok bool
-		if t, ok = parseEpochOrRFC3339(c); !ok {
-			// Keep the raw value, as before $date support.
-			return c, 0
-		}
-	default:
+	}
+	if raw == nil {
 		return "", 0
+	}
+	t, ok := parseEpochOrRFC3339(raw)
+	if !ok || !inBootEnvRange(t) {
+		return rawString(raw), 0
 	}
 	t = t.UTC()
 	return t.Format(time.RFC3339), t.Unix()
 }
 
-// epochTime converts seconds (below 1e12) or milliseconds since the epoch.
-func epochTime(n float64) time.Time {
-	if math.Abs(n) < 1e12 {
-		return time.Unix(int64(n), 0)
+// inBootEnvRange reports whether t is a plausible boot environment time.
+func inBootEnvRange(t time.Time) bool {
+	return !t.Before(bootEnvMinTime) && !t.After(time.Now().Add(bootEnvMaxAhead))
+}
+
+// rawString renders an unparsed value for display: strings unchanged,
+// anything else as compact JSON.
+func rawString(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
 	}
-	return time.UnixMilli(int64(n))
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(b)
+}
+
+// epochTime converts seconds (below 1e12) or milliseconds since the epoch.
+// Values whose time falls outside the boot environment range, including
+// ones that would overflow int64, are rejected before conversion.
+func epochTime(n float64) (time.Time, bool) {
+	if math.IsNaN(n) || math.IsInf(n, 0) {
+		return time.Time{}, false
+	}
+	secs := n
+	if math.Abs(n) >= 1e12 {
+		secs = n / 1000
+	}
+	lo := float64(bootEnvMinTime.Unix())
+	hi := float64(time.Now().Add(bootEnvMaxAhead).Unix())
+	if secs < lo || secs > hi {
+		return time.Time{}, false
+	}
+	if math.Abs(n) < 1e12 {
+		return time.Unix(int64(n), 0), true
+	}
+	return time.UnixMilli(int64(n)), true
 }
 
 // parseEpochOrRFC3339 parses a number, a numeric string, an RFC 3339 string
@@ -6129,13 +6166,10 @@ func epochTime(n float64) time.Time {
 func parseEpochOrRFC3339(v interface{}) (time.Time, bool) {
 	switch c := v.(type) {
 	case float64:
-		if math.IsNaN(c) || math.IsInf(c, 0) {
-			return time.Time{}, false
-		}
-		return epochTime(c), true
+		return epochTime(c)
 	case string:
-		if n, err := strconv.ParseFloat(c, 64); err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) {
-			return epochTime(n), true
+		if n, err := strconv.ParseFloat(c, 64); err == nil {
+			return epochTime(n)
 		}
 		if t, err := time.Parse(time.RFC3339, c); err == nil {
 			return t, true

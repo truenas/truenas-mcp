@@ -362,6 +362,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Sort by name, creation date (default), or size
   - Shows which are active/activated/protected/deletable
   - Displays deletion blockers and storage summary
+  - `created` is ISO-8601 UTC (with `created_timestamp` in Unix seconds) when the server's value parses to a time between 2000-01-01 and 10 years from now; any other value is shown raw with `created_timestamp` 0
   - Perfect for "what old boot environments can I clean up?"
 
 - **delete_boot_environment** - Delete a boot environment (**destructive**)
