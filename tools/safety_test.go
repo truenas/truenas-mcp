@@ -25,6 +25,9 @@ type fakeMiddleware struct {
 	// found in neither (nil means a JSON null result).
 	results  map[string]interface{}
 	fallback interface{}
+	// handle, when set, answers a call first: a non-nil rpcErr is sent as
+	// the JSON-RPC error; ok=false falls through to the tables above.
+	handle func(method string, params json.RawMessage) (result interface{}, rpcErr map[string]interface{}, ok bool)
 }
 
 type fakeCall struct {
@@ -54,7 +57,15 @@ func (f *fakeMiddleware) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		f.calls = append(f.calls, fakeCall{req.Method, req.Params})
-		result, ok := f.results[req.Method]
+		var result interface{}
+		var rpcErr map[string]interface{}
+		ok := false
+		if f.handle != nil {
+			result, rpcErr, ok = f.handle(req.Method, req.Params)
+		}
+		if !ok {
+			result, ok = f.results[req.Method]
+		}
 		if !ok {
 			result, ok = fakeResults[req.Method]
 		}
@@ -62,7 +73,11 @@ func (f *fakeMiddleware) serve(w http.ResponseWriter, r *http.Request) {
 			result = f.fallback
 		}
 		f.mu.Unlock()
-		if err := conn.WriteJSON(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": result}); err != nil {
+		resp := map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": result}
+		if rpcErr != nil {
+			resp = map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "error": rpcErr}
+		}
+		if err := conn.WriteJSON(resp); err != nil {
 			return
 		}
 	}
@@ -86,7 +101,12 @@ func newFakeClient(t *testing.T) (*truenas.Client, *fakeMiddleware) {
 
 func newFakeClientWith(t *testing.T, results map[string]interface{}, fallback interface{}) (*truenas.Client, *fakeMiddleware) {
 	t.Helper()
-	fake := &fakeMiddleware{results: results, fallback: fallback}
+	return newFakeClientFrom(t, &fakeMiddleware{results: results, fallback: fallback})
+}
+
+// newFakeClientFrom serves fake (configured before any call) to a client.
+func newFakeClientFrom(t *testing.T, fake *fakeMiddleware) (*truenas.Client, *fakeMiddleware) {
+	t.Helper()
 	srv := httptest.NewTLSServer(http.HandlerFunc(fake.serve))
 	t.Cleanup(srv.Close)
 	roots := x509.NewCertPool()

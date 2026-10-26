@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -1130,17 +1132,7 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 						"type": "array",
 						"items": map[string]interface{}{
 							"type": "string",
-							"enum": []string{
-								"arcfreememory", "arcavailablememory", "arcsize",
-								"demandaccessespersecond", "demanddataaccessespersecond", "demandmetadataaccessespersecond",
-								"demanddatahitspersecond", "demanddataiohitspersecond", "demanddatamissespersecond",
-								"demanddatahitpercentage", "demanddataiohitpercentage", "demanddatamisspercentage",
-								"demandmetadatahitspersecond", "demandmetadataiohitspersecond", "demandmetadatamissespersecond",
-								"demandmetadatahitpercentage", "demandmetadataiohitpercentage", "demandmetadatamisspercentage",
-								"l2archhitspersecond", "l2arcmissespersecond", "totall2arcaccessespersecond",
-								"l2architpercentage", "l2arcmisspercentage",
-								"l2arcbytesreadpersecond", "l2arcbyteswrittenpersecond",
-							},
+							"enum": arcGraphs,
 						},
 						"description": "ARC metrics to retrieve (default: arcfreememory, arcavailablememory, arcsize)",
 					},
@@ -1958,9 +1950,8 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 			var memData []map[string]interface{}
 			if err := json.Unmarshal(memResult, &memData); err == nil && len(memData) > 0 {
 				if dataPoints, err := extractDataPoints(memData[0]); err == nil {
-					// Convert to percentage
-					avgMemBytes := calculateAverage(dataPoints)
-					avgMemPct := (avgMemBytes / totalMemory) * 100
+					// The "memory" graph reports available bytes, not used.
+					avgMemPct := memoryUsedPct(totalMemory, calculateAverage(dataPoints))
 					if avgMemPct > 85 {
 						capacityWarnings = append(capacityWarnings,
 							fmt.Sprintf("Memory utilization critical: %.1f%%", avgMemPct))
@@ -2024,17 +2015,34 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 		}
 	}
 
-	response := map[string]interface{}{
-		"alerts":            alerts,
-		"alert_count":       len(alerts),
-		"active_jobs":       activeTasks,
-		"job_count":         len(activeTasks),
-		"capacity_warnings": capacityWarnings,
-		"directory_service": directoryServiceStatus,
-		"health_check":      "OK",
+	// Dismissed alerts are acknowledged: keep them in the list but do not
+	// count them as active.
+	activeAlerts, criticalAlerts, dismissedAlerts := 0, 0, 0
+	for _, alert := range alerts {
+		if dismissed, _ := alert["dismissed"].(bool); dismissed {
+			dismissedAlerts++
+			continue
+		}
+		activeAlerts++
+		switch level, _ := alert["level"].(string); level {
+		case "CRITICAL", "ALERT", "EMERGENCY":
+			criticalAlerts++
+		}
 	}
 
-	if len(alerts) > 0 {
+	response := map[string]interface{}{
+		"alerts":                alerts,
+		"alert_count":           activeAlerts,
+		"critical_alert_count":  criticalAlerts,
+		"dismissed_alert_count": dismissedAlerts,
+		"active_jobs":           activeTasks,
+		"job_count":             len(activeTasks),
+		"capacity_warnings":     capacityWarnings,
+		"directory_service":     directoryServiceStatus,
+		"health_check":          "OK",
+	}
+
+	if activeAlerts > 0 {
 		response["health_check"] = "ALERTS_PRESENT"
 	}
 
@@ -3243,6 +3251,31 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 	return string(formatted), nil
 }
 
+// arcGraphs are the ZFS ARC graph names served by reporting.get_data on
+// TrueNAS 25.04+ (the netdata graph plugins in the middleware). Older
+// collectd-era names such as "arcrate" and "arcresult" no longer exist.
+var arcGraphs = []string{
+	"arcfreememory", "arcavailablememory", "arcsize",
+	"demandaccessespersecond", "demanddataaccessespersecond", "demandmetadataaccessespersecond",
+	"demanddatahitspersecond", "demanddataiohitspersecond", "demanddatamissespersecond",
+	"demanddatahitpercentage", "demanddataiohitpercentage", "demanddatamisspercentage",
+	"demandmetadatahitspersecond", "demandmetadataiohitspersecond", "demandmetadatamissespersecond",
+	"demandmetadatahitpercentage", "demandmetadataiohitpercentage", "demandmetadatamisspercentage",
+	"l2archhitspersecond", "l2arcmissespersecond", "totall2arcaccessespersecond",
+	"l2architpercentage", "l2arcmisspercentage",
+	"l2arcbytesreadpersecond", "l2arcbyteswrittenpersecond",
+}
+
+// conciseError returns the first line of err's message, dropping the
+// request context and middleware traceback the client appends after it.
+func conciseError(err error) string {
+	msg := err.Error()
+	if i := strings.Index(msg, "\n"); i >= 0 {
+		msg = msg[:i]
+	}
+	return strings.TrimSpace(msg)
+}
+
 func handleGetArcMetrics(client *truenas.Client, args map[string]interface{}) (string, error) {
 	unit := "HOUR"
 	if u, ok := args["unit"].(string); ok && u != "" {
@@ -3252,15 +3285,18 @@ func handleGetArcMetrics(client *truenas.Client, args map[string]interface{}) (s
 	// Default graphs if not specified
 	graphs := []string{"arcfreememory", "arcavailablememory", "arcsize"}
 	if g, ok := args["graphs"].([]interface{}); ok && len(g) > 0 {
-		graphs = make([]string, len(g))
-		for i, v := range g {
-			if s, ok := v.(string); ok {
-				graphs[i] = s
+		graphs = make([]string, 0, len(g))
+		for _, v := range g {
+			s, _ := v.(string)
+			if !slices.Contains(arcGraphs, s) {
+				return "", fmt.Errorf("unknown ARC graph %q; valid graphs: %s", s, strings.Join(arcGraphs, ", "))
 			}
+			graphs = append(graphs, s)
 		}
 	}
 
 	response := make(map[string]interface{})
+	failures := make(map[string]string)
 
 	for _, graph := range graphs {
 		result, err := client.Call("reporting.get_data", []interface{}{
@@ -3270,42 +3306,58 @@ func handleGetArcMetrics(client *truenas.Client, args map[string]interface{}) (s
 			},
 		}, map[string]interface{}{"unit": unit})
 		if err != nil {
-			response[graph] = map[string]string{"error": err.Error()}
+			failures[graph] = conciseError(err)
 			continue
 		}
 
 		var fullData []map[string]interface{}
 		if err := json.Unmarshal(result, &fullData); err != nil {
-			response[graph] = map[string]string{"error": fmt.Sprintf("parse error: %v", err)}
+			failures[graph] = fmt.Sprintf("unexpected response: %v", err)
+			continue
+		}
+		if len(fullData) == 0 {
+			failures[graph] = "no data returned"
 			continue
 		}
 
 		summary := make(map[string]interface{})
-		if len(fullData) > 0 {
-			for key, value := range fullData[0] {
-				if key == "data" {
-					if dataArray, ok := value.([]interface{}); ok {
-						summary["data_points_total"] = len(dataArray)
-						sample := make([]interface{}, 0)
+		for key, value := range fullData[0] {
+			if key == "data" {
+				if dataArray, ok := value.([]interface{}); ok {
+					summary["data_points_total"] = len(dataArray)
+					sample := make([]interface{}, 0)
 
-						for i := 0; i < 10 && i < len(dataArray); i++ {
+					for i := 0; i < 10 && i < len(dataArray); i++ {
+						sample = append(sample, dataArray[i])
+					}
+
+					if len(dataArray) > 20 {
+						for i := len(dataArray) - 10; i < len(dataArray); i++ {
 							sample = append(sample, dataArray[i])
 						}
-
-						if len(dataArray) > 20 {
-							for i := len(dataArray) - 10; i < len(dataArray); i++ {
-								sample = append(sample, dataArray[i])
-							}
-						}
-
-						summary["data_sample"] = sample
 					}
-				} else {
-					summary[key] = value
+
+					summary["data_sample"] = sample
 				}
+			} else {
+				summary[key] = value
 			}
 		}
 		response[graph] = summary
+	}
+
+	// Every requested graph failed: report a real tool error.
+	if len(response) == 0 && len(failures) > 0 {
+		parts := make([]string, 0, len(graphs))
+		for _, graph := range graphs {
+			if msg, ok := failures[graph]; ok {
+				parts = append(parts, graph+": "+msg)
+			}
+		}
+		return "", fmt.Errorf("failed to get ARC metrics: %s", strings.Join(parts, "; "))
+	}
+	if len(failures) > 0 {
+		response["errors"] = failures
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -4331,16 +4383,22 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 		return nil, fmt.Errorf("no memory metrics data available")
 	}
 
-	// Extract data points (in bytes)
-	dataPoints, err := extractDataPoints(metricsData[0])
+	// Extract data points: the "memory" graph (truenas_meminfo.available)
+	// reports AVAILABLE bytes, so used = total - available.
+	availablePoints, err := extractDataPoints(metricsData[0])
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert to percentages
-	dataPointsPct := make([]float64, len(dataPoints))
-	for i, dp := range dataPoints {
-		dataPointsPct[i] = (dp / totalMemory) * 100
+	// Convert to used percentages
+	dataPointsPct := make([]float64, len(availablePoints))
+	for i, avail := range availablePoints {
+		dataPointsPct[i] = memoryUsedPct(totalMemory, avail)
+	}
+	currentAvailable := calculateRecentAverage(availablePoints, 5)
+	currentUsed := totalMemory - currentAvailable
+	if currentUsed < 0 {
+		currentUsed = 0
 	}
 
 	// Calculate statistics
@@ -4359,6 +4417,9 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 		"trend":                   trend,
 		"capacity_status":         status,
 		"total_memory_bytes":      int64(totalMemory),
+		"current_available_bytes": int64(currentAvailable),
+		"current_used_bytes":      int64(currentUsed),
+		"utilization_basis":       "used = total_memory_bytes - available (reporting graph 'memory' reports available memory)",
 	}
 
 	// Add projections if trending up
@@ -4370,6 +4431,16 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 	}
 
 	return analysis, nil
+}
+
+// memoryUsedPct converts an available-memory sample into percent used,
+// clamped to 0-100.
+func memoryUsedPct(total, available float64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	pct := (total - available) / total * 100
+	return math.Max(0, math.Min(100, pct))
 }
 
 func analyzeNetworkCapacity(client *truenas.Client, timeRange string) (map[string]interface{}, error) {
@@ -5644,7 +5715,7 @@ func handleGetCurrentBootEnvironment(client *truenas.Client, args map[string]int
 
 func simplifyBootEnvironment(env map[string]interface{}) map[string]interface{} {
 	id, _ := env["id"].(string)
-	created, _ := env["created"].(string)
+	created, createdTimestamp := parseBootEnvCreated(env["created"])
 	usedBytes, _ := env["used_bytes"].(float64)
 	active, _ := env["active"].(bool)
 	activated, _ := env["activated"].(bool)
@@ -5652,14 +5723,6 @@ func simplifyBootEnvironment(env map[string]interface{}) map[string]interface{} 
 	canActivate, _ := env["can_activate"].(bool)
 
 	sizeBytes := int64(usedBytes)
-
-	// Parse created timestamp
-	var createdTimestamp int64
-	if created != "" {
-		if t, err := time.Parse(time.RFC3339, created); err == nil {
-			createdTimestamp = t.Unix()
-		}
-	}
 
 	// Determine if deletable
 	deletable := !active && !activated && !keep
@@ -5691,6 +5754,41 @@ func simplifyBootEnvironment(env map[string]interface{}) map[string]interface{} 
 	}
 
 	return simplified
+}
+
+// parseBootEnvCreated parses boot.environment.query's "created" field and
+// returns it as an ISO-8601 UTC string plus Unix seconds. TrueNAS 25.04+
+// sends a datetime as {"$date": <ms since epoch>}; plain strings and numbers
+// are accepted too. Unparseable values yield ("", 0).
+func parseBootEnvCreated(v interface{}) (string, int64) {
+	var t time.Time
+	switch c := v.(type) {
+	case map[string]interface{}:
+		ms, ok := c["$date"].(float64)
+		if !ok {
+			return "", 0
+		}
+		t = time.UnixMilli(int64(ms))
+	case float64:
+		// Milliseconds if it is too large to be seconds.
+		if c > 1e11 {
+			t = time.UnixMilli(int64(c))
+		} else {
+			t = time.Unix(int64(c), 0)
+		}
+	case string:
+		var err error
+		if t, err = time.Parse(time.RFC3339, c); err != nil {
+			// Naive timestamps are UTC (the middleware uses utcfromtimestamp).
+			if t, err = time.Parse("2006-01-02T15:04:05", c); err != nil {
+				return "", 0
+			}
+		}
+	default:
+		return "", 0
+	}
+	t = t.UTC()
+	return t.Format(time.RFC3339), t.Unix()
 }
 
 func sortBootEnvironments(envs []map[string]interface{}, orderBy string) {
