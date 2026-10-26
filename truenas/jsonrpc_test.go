@@ -10,6 +10,9 @@ import (
 
 func insecureClient(t *testing.T, f *fakeTrueNAS, opts Options) *Client {
 	t.Helper()
+	if opts.APIUser == "" {
+		opts.APIUser = testAPIUser
+	}
 	c, err := NewClientWithOptions(f.wsURL("127.0.0.1"), testAPIKey, &tls.Config{InsecureSkipVerify: true}, opts)
 	if err != nil {
 		t.Fatalf("NewClientWithOptions: %v", err)
@@ -44,7 +47,15 @@ func TestEndpointURL(t *testing.T) {
 	ok := map[string]string{
 		"truenas.example":                        "wss://truenas.example:443/api/current",
 		"192.168.0.31":                           "wss://192.168.0.31:443/api/current",
-		"truenas.example:8443":                   "wss://truenas.example:443/api/current", // port ignored, as before
+		"truenas.example:8443":                   "wss://truenas.example:8443/api/current", // explicit port honoured
+		"192.168.0.31:8443":                      "wss://192.168.0.31:8443/api/current",
+		"[::1]:8443":                             "wss://[::1]:8443/api/current",
+		"[::1]":                                  "wss://[::1]:443/api/current",
+		"fe80::1":                                "wss://[fe80::1]:443/api/current",
+		"2001:db8::10":                           "wss://[2001:db8::10]:443/api/current",
+		"wss://[::1]:8443/websocket":             "wss://[::1]:8443/api/current",
+		"wss://truenas.example/websocket/":       "wss://truenas.example/api/current",  // trailing slash too
+		"wss://truenas.example/api/v25.10.0":     "wss://truenas.example/api/v25.10.0", // other paths kept
 		"wss://truenas.example:443/api/current":  "wss://truenas.example:443/api/current",
 		"wss://truenas.example/api/current":      "wss://truenas.example/api/current",
 		"wss://truenas.example:8443/api/current": "wss://truenas.example:8443/api/current",
@@ -64,6 +75,13 @@ func TestEndpointURL(t *testing.T) {
 		"ws://truenas.example/websocket":   "ws://",
 		"https://truenas.example":          "scheme",
 		"wss:///api/current":               "no host",
+		"truenas.example/websocket":        "path",
+		"truenas.example/api/current":      "path",
+		"truenas.example:":                 "port",
+		"truenas.example:https":            "port",
+		"truenas.example:70000":            "port",
+		":8443":                            "no host",
+		"[::1]:":                           "port",
 	}
 	for in, mention := range refused {
 		c := &Client{endpoint: in}
@@ -118,7 +136,7 @@ func TestFramesAreJSONRPC(t *testing.T) {
 }
 
 func TestLoginExPayload(t *testing.T) {
-	for _, tc := range []struct{ user, want string }{{"", "root"}, {"svc-mcp", "svc-mcp"}} {
+	for _, tc := range []struct{ user, want string }{{"svc-mcp", "svc-mcp"}, {"truenas_admin", "truenas_admin"}} {
 		f := newFakeTrueNAS(t, nil)
 		c := insecureClient(t, f, Options{APIUser: tc.user})
 		if err := c.Authenticate(); err != nil {
@@ -257,6 +275,9 @@ func TestReconnectReauthenticates(t *testing.T) {
 		if _, err := c.Call("system.info"); err != nil {
 			t.Fatalf("Call %d: %v", i, err)
 		}
+		// A call written to a socket that then dies is not retried, so let
+		// the client notice the server's close before the next call.
+		waitDisconnected(t, c)
 	}
 	raws, _, conns := f.snapshot()
 	if conns != 2 {

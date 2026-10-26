@@ -27,11 +27,19 @@ type fakeTrueNAS struct {
 	stringIDs  bool                              // echo ids back as JSON strings
 	closeAfter int                               // close the socket after N non-auth replies (0 = never)
 	errors     map[string]map[string]interface{} // method -> JSON-RPC error object
+	dropLogins int                               // close the socket instead of answering the first N logins
+	dropOn     string                            // close the socket instead of answering this method (once)
+	expireOnce bool                              // forget the login after the first non-auth reply (once)
+	nullIDFor  string                            // answer this method with a null-id error
 
-	mu     sync.Mutex
-	frames []string
-	paths  []string
-	conns  int
+	mu         sync.Mutex
+	frames     []string
+	paths      []string
+	conns      int
+	unauthed   int // non-auth calls received on a connection that was not logged in
+	dropped    bool
+	expired    bool
+	loginsSeen int
 }
 
 func newFakeTrueNAS(t *testing.T, configure func(*fakeTrueNAS)) *fakeTrueNAS {
@@ -64,6 +72,7 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	calls := 0
+	authed := false
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
@@ -91,6 +100,24 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
+		f.mu.Lock()
+		dropLogin := false
+		if req.Method == "auth.login_ex" {
+			f.loginsSeen++
+			dropLogin = f.loginsSeen <= f.dropLogins
+		}
+		dropCall := req.Method == f.dropOn && !f.dropped
+		if dropCall {
+			f.dropped = true
+		}
+		if req.Method != "auth.login_ex" && !authed {
+			f.unauthed++
+		}
+		f.mu.Unlock()
+		if dropLogin || dropCall {
+			return
+		}
+
 		reply := map[string]interface{}{"jsonrpc": "2.0", "id": id}
 		switch {
 		case req.Method == "auth.login_ex" && f.echoKey:
@@ -104,6 +131,15 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		case req.Method == "auth.login_ex":
 			reply["result"] = map[string]interface{}{"response_type": f.loginType}
+			authed = f.loginType == "SUCCESS"
+		case !authed:
+			reply["error"] = map[string]interface{}{
+				"code": -32001, "message": "Method call error",
+				"data": map[string]interface{}{"errname": "ENOTAUTHENTICATED", "reason": "Not authenticated"},
+			}
+		case req.Method == f.nullIDFor:
+			reply["id"] = nil
+			reply["error"] = map[string]interface{}{"code": -32600, "message": "Invalid Request"}
 		case f.errors[req.Method] != nil:
 			reply["error"] = f.errors[req.Method]
 		default:
@@ -114,6 +150,11 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 		if err := conn.WriteJSON(reply); err != nil {
 			return
 		}
+		f.mu.Lock()
+		if f.expireOnce && !f.expired && req.Method != "auth.login_ex" && authed {
+			f.expired, authed = true, false
+		}
+		f.mu.Unlock()
 		if f.closeAfter > 0 && req.Method != "auth.login_ex" && calls >= f.closeAfter {
 			return
 		}
@@ -135,6 +176,25 @@ func (f *fakeTrueNAS) sawKey() bool {
 		}
 	}
 	return false
+}
+
+// logins counts the auth.login_ex frames received.
+func (f *fakeTrueNAS) logins(t *testing.T) int {
+	t.Helper()
+	raws, _, _ := f.snapshot()
+	n := 0
+	for _, fr := range parseFrames(t, raws) {
+		if fr.Method == "auth.login_ex" {
+			n++
+		}
+	}
+	return n
+}
+
+func (f *fakeTrueNAS) unauthedCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.unauthed
 }
 
 func (f *fakeTrueNAS) snapshot() ([]string, []string, int) {

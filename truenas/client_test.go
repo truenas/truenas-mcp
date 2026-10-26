@@ -11,7 +11,10 @@ import (
 	"testing"
 )
 
-const testAPIKey = "1-verysecretapikey"
+const (
+	testAPIKey  = "1-verysecretapikey"
+	testAPIUser = "svc-mcp"
+)
 
 func TestRedactParamsAuthMethods(t *testing.T) {
 	methods := []string{"auth.login_ex", "auth.login_with_api_key", "auth.login"}
@@ -97,9 +100,9 @@ func runClientSession(t *testing.T, srv *httptest.Server) (string, error) {
 	defer log.SetOutput(os.Stderr)
 
 	endpoint := "wss://" + strings.TrimPrefix(srv.URL, "https://") + apiPath
-	client, err := NewClient(endpoint, testAPIKey, &tls.Config{InsecureSkipVerify: true})
+	client, err := NewClientWithOptions(endpoint, testAPIKey, &tls.Config{InsecureSkipVerify: true}, Options{APIUser: testAPIUser})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("NewClientWithOptions: %v", err)
 	}
 	defer client.Close()
 

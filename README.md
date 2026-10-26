@@ -98,6 +98,12 @@ make build-all
 
 ## Installation
 
+**Requirements:** TrueNAS 25.04 or later. The server uses the JSON-RPC 2.0
+endpoint (`/api/current`) and `auth.login_ex`, both introduced in 25.04; there
+is no fallback to the legacy `/websocket` protocol, so TrueNAS 24.10 and older
+are not supported. An older server answers the handshake with HTTP 404, which
+is reported as "TrueNAS 25.04 or later required".
+
 ### Step 1: Download or Build Binary
 
 Choose the appropriate binary for your platform:
@@ -133,6 +139,7 @@ copy truenas-mcp-windows-amd64.exe C:\Windows\System32\truenas-mcp.exe
 4. Give it a name (e.g., "Claude Desktop MCP")
 5. Make sure it has appropriate permissions (admin recommended)
 6. **Copy the API key** - you'll need it for configuration
+7. Note the **user that owns the key** (e.g. `truenas_admin`) - it is required as `--api-user` / `TRUENAS_API_USER`
 
 ### Step 3: Configure Your MCP Client
 
@@ -164,7 +171,8 @@ Add the TrueNAS MCP server configuration:
       "command": "truenas-mcp",
       "args": [
         "--truenas-url", "truenas.local",
-        "--api-key", "your-api-key-here"
+        "--api-key", "your-api-key-here",
+        "--api-user", "your-api-user"
       ]
     }
   }
@@ -177,7 +185,8 @@ Add the TrueNAS MCP server configuration:
 ```json
 "args": [
   "--truenas-url", "192.168.0.31",
-  "--api-key", "your-api-key-here"
+  "--api-key", "your-api-key-here",
+  "--api-user", "your-api-user"
 ]
 ```
 
@@ -189,7 +198,8 @@ Add the TrueNAS MCP server configuration:
       "command": "truenas-mcp",
       "env": {
         "TRUENAS_URL": "192.168.0.31",
-        "TRUENAS_API_KEY": "your-api-key-here"
+        "TRUENAS_API_KEY": "your-api-key-here",
+        "TRUENAS_API_USER": "your-api-user"
       }
     }
   }
@@ -204,6 +214,7 @@ export your server's certificate once and trust it (recommended):
 "env": {
   "TRUENAS_URL": "192.168.0.31",
   "TRUENAS_API_KEY": "your-api-key-here",
+  "TRUENAS_API_USER": "your-api-user",
   "TRUENAS_TLS_CA": "/path/to/truenas-cert.pem"
 }
 ```
@@ -224,7 +235,7 @@ Claude Code uses the `claude mcp` command to configure MCP servers:
 
 **Add TrueNAS MCP server:**
 ```bash
-claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key-here
+claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key-here --api-user your-api-user
 ```
 
 **Verify the configuration:**
@@ -239,7 +250,7 @@ claude mcp get truenas
 claude mcp remove truenas
 
 # Re-add with updated configuration
-claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key new-api-key
+claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key new-api-key --api-user your-api-user
 ```
 
 ### Step 4: Restart Your MCP Client
@@ -263,11 +274,12 @@ You should now be able to ask TrueNAS questions:
 ### Flags
 
 - `--truenas-url` - TrueNAS hostname (required, or use `TRUENAS_URL` env var)
-  - Examples: `truenas.local` or `192.168.0.31` (automatically uses `wss://<host>:443/api/current`), or a full `wss://host[:port]/api/current` URL
-  - A `wss://` URL ending in the legacy `/websocket` path is upgraded to `/api/current` with a warning
+  - Examples: `truenas.local`, `192.168.0.31` or `fe80::1` (automatically uses `wss://<host>:443/api/current`), a host with a port such as `truenas.local:8443` or `[fe80::1]:8443`, or a full `wss://host[:port]/api/current` URL
+  - A bare host cannot include a path; use a full `wss://` URL for that
+  - A `wss://` URL ending in the legacy `/websocket` (or `/websocket/`) path is rewritten to `/api/current` with a one-time warning; the legacy endpoint is deprecated and planned for removal in TrueNAS 28
   - ⚠️ **Note**: `ws://` (unencrypted) is **not allowed** - TrueNAS will revoke API keys used over unencrypted connections
 - `--api-key` - TrueNAS API key for authentication (required, or use `TRUENAS_API_KEY` env var)
-- `--api-user` - The user that owns the API key, sent to `auth.login_ex` (default `root`, or use `TRUENAS_API_USER`). Installs where the admin is `truenas_admin` need `--api-user truenas_admin`
+- `--api-user` - The user that owns the API key, sent to `auth.login_ex` (required, or use `TRUENAS_API_USER`), e.g. `truenas_admin`. There is no default; the server exits at startup if it is missing
 - `--tls-ca` - Path to a PEM certificate to trust, e.g. the TrueNAS self-signed certificate (or use `TRUENAS_TLS_CA` env var)
 - `--insecure` - Disable TLS certificate verification entirely (or set `TRUENAS_INSECURE=1`) - **unsafe**: allows man-in-the-middle attacks; prefer `--tls-ca`
 - `--debug` - Enable debug logging (or set `TRUENAS_MCP_DEBUG=1`)
@@ -287,16 +299,17 @@ replaced with `[REDACTED]`, so debug logs are safe to share in bug reports.
 
 ```bash
 # Basic usage
-./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key
+./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --api-user your-api-user
 
 # Using environment variables
 export TRUENAS_URL=192.168.0.31
 export TRUENAS_API_KEY=your-api-key
+export TRUENAS_API_USER=your-api-user
 ./truenas-mcp
 
 # With debug logging (full request/response bodies, credentials redacted)
-./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --debug
-# or: TRUENAS_MCP_DEBUG=1 ./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key
+./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --api-user your-api-user --debug
+# or: TRUENAS_MCP_DEBUG=1 ./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --api-user your-api-user
 ```
 
 ## Connection Details
@@ -305,7 +318,7 @@ export TRUENAS_API_KEY=your-api-key
 
 The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 
-1. **Uses secure WebSocket (wss://)**: Connects to the JSON-RPC 2.0 endpoint `wss://your-truenas:443/api/current` (TrueNAS 25.04 or later)
+1. **Uses secure WebSocket (wss://)**: Connects to the JSON-RPC 2.0 endpoint `wss://your-truenas:443/api/current` (TrueNAS 25.04 or later; no `/websocket` fallback)
 2. **Verifies certificates by default**: trust the TrueNAS self-signed certificate with `--tls-ca` (see [TLS with a self-signed certificate](#step-3-configure-your-mcp-client))
 3. **Authenticates via API key**: Logs in with `auth.login_ex` (`API_KEY_PLAIN` mechanism, user from `--api-user`)
 
@@ -317,7 +330,8 @@ The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 
 **Connection Issues:**
 - Verify TrueNAS is accessible from your machine
-- Check firewall allows port 443 (wss)
+- Check firewall allows port 443 (wss), or the port you configured
+- `HTTP 404` / "TrueNAS 25.04 or later required": the server predates the JSON-RPC API; upgrade TrueNAS
 - Verify API key is valid and has admin permissions
 
 **Certificate Verification Errors** (`x509: certificate signed by unknown authority` or similar):
@@ -328,6 +342,7 @@ The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 - Generate a new API key in TrueNAS System Settings → API Keys
 - Ensure the key has appropriate permissions
 - Check that the key wasn't accidentally truncated when copying
+- Check that `--api-user` / `TRUENAS_API_USER` names the user that owns the key
 
 ## Security
 

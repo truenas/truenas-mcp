@@ -21,9 +21,9 @@ import (
 func authWithTLSConfig(t *testing.T, srv *httptest.Server, cfg *tls.Config) error {
 	t.Helper()
 	endpoint := "wss://" + strings.TrimPrefix(srv.URL, "https://") + apiPath
-	client, err := NewClient(endpoint, testAPIKey, cfg)
+	client, err := NewClientWithOptions(endpoint, testAPIKey, cfg, Options{APIUser: testAPIUser})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf("NewClientWithOptions: %v", err)
 	}
 	defer client.Close()
 	return client.Authenticate()
