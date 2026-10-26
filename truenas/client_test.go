@@ -182,3 +182,17 @@ func TestServerEchoedKeyIsScrubbed(t *testing.T) {
 		t.Errorf("expected scrubbed error message, got: %s", authErr)
 	}
 }
+
+func TestRedactionSharedWithLogsAndErrors(t *testing.T) {
+	pem := "-----BEGIN EC PRIVATE KEY-----\\nFAKEFAKEnotreal\\n-----END EC PRIVATE KEY-----"
+	out := string(RedactJSONForLog([]byte(`{"result":[{"name":"cert","privatekey":"` + pem + `","notes":"` + pem + `"}]}`)))
+	if strings.Contains(out, "FAKEFAKEnotreal") || !strings.Contains(out, `"name":"cert"`) {
+		t.Errorf("debug log not redacted: %s", out)
+	}
+
+	c := &Client{apiKey: testAPIKey}
+	msg := c.scrubSecrets(`[EINVAL] {'password': 'fake-user-pw', 'username': 'alice'} key ` + testAPIKey)
+	if strings.Contains(msg, "fake-user-pw") || strings.Contains(msg, testAPIKey) || !strings.Contains(msg, "'username': 'alice'") {
+		t.Errorf("server-supplied text not redacted: %s", msg)
+	}
+}
