@@ -1,16 +1,14 @@
 package truenas
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -31,11 +29,16 @@ type fakeTrueNAS struct {
 	dropOn     string                            // close the socket instead of answering this method (once)
 	expireOnce bool                              // forget the login after the first non-auth reply (once)
 	nullIDFor  string                            // answer this method with a null-id error
+	holdConn   int                               // with holdMethod: connection (1-based) whose replies wait for release; 0 = all
+	holdMethod string                            // hold replies to this method ("*" = every method) until release is closed
+	release    chan struct{}
+	noPong     bool // ignore websocket pings, like a half-open connection
 
 	mu         sync.Mutex
 	frames     []string
 	paths      []string
 	conns      int
+	sockets    []*websocket.Conn
 	unauthed   int // non-auth calls received on a connection that was not logged in
 	dropped    bool
 	expired    bool
@@ -44,7 +47,7 @@ type fakeTrueNAS struct {
 
 func newFakeTrueNAS(t *testing.T, configure func(*fakeTrueNAS)) *fakeTrueNAS {
 	t.Helper()
-	f := &fakeTrueNAS{loginType: "SUCCESS", errors: map[string]map[string]interface{}{}}
+	f := &fakeTrueNAS{loginType: "SUCCESS", errors: map[string]map[string]interface{}{}, release: make(chan struct{})}
 	if configure != nil {
 		configure(f)
 	}
@@ -62,6 +65,7 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.paths = append(f.paths, r.URL.Path)
 	f.conns++
+	index := f.conns
 	f.mu.Unlock()
 
 	upgrader := websocket.Upgrader{}
@@ -70,6 +74,18 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	f.mu.Lock()
+	f.sockets = append(f.sockets, conn)
+	f.mu.Unlock()
+	if f.noPong {
+		conn.SetPingHandler(func(string) error { return nil })
+	}
+	var writeMu sync.Mutex // held replies are written from other goroutines
+	send := func(v interface{}) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteJSON(v)
+	}
 
 	calls := 0
 	authed := false
@@ -94,7 +110,7 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 			id = string(req.ID)
 		}
 		if f.notify {
-			conn.WriteJSON(map[string]interface{}{
+			send(map[string]interface{}{
 				"jsonrpc": "2.0", "method": "collection_update",
 				"params": map[string]interface{}{"msg": "added", "collection": "core.get_jobs"},
 			})
@@ -147,7 +163,14 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 			// Secret-bearing result, like core.get_jobs job arguments
 			reply["result"] = map[string]interface{}{"bindpw": "responsesecret9", "domain": "example.com"}
 		}
-		if err := conn.WriteJSON(reply); err != nil {
+		if f.holdMethod != "" && (f.holdMethod == "*" || f.holdMethod == req.Method) && (f.holdConn == 0 || f.holdConn == index) {
+			go func() {
+				<-f.release
+				send(reply)
+			}()
+			continue
+		}
+		if err := send(reply); err != nil {
 			return
 		}
 		f.mu.Lock()
@@ -165,17 +188,6 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 func (f *fakeTrueNAS) wsURL(host string) string {
 	port := f.Listener.Addr().(*net.TCPAddr).Port
 	return "wss://" + net.JoinHostPort(host, strconv.Itoa(port)) + apiPath
-}
-
-func (f *fakeTrueNAS) sawKey() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, fr := range f.frames {
-		if strings.Contains(fr, testAPIKey) {
-			return true
-		}
-	}
-	return false
 }
 
 // logins counts the auth.login_ex frames received.
@@ -197,16 +209,29 @@ func (f *fakeTrueNAS) unauthedCalls() int {
 	return f.unauthed
 }
 
+// closeSocket closes the server side of connection i (1-based).
+func (f *fakeTrueNAS) closeSocket(i int) {
+	f.mu.Lock()
+	conn := f.sockets[i-1]
+	f.mu.Unlock()
+	conn.Close()
+}
+
+// waitFrames waits until the fake has received at least n frames.
+func (f *fakeTrueNAS) waitFrames(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if raws, _, _ := f.snapshot(); len(raws) >= n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("fake did not receive %d frames", n)
+}
+
 func (f *fakeTrueNAS) snapshot() ([]string, []string, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.frames...), append([]string(nil), f.paths...), f.conns
-}
-
-// trustingTLS verifies the fake's certificate properly (it is valid for
-// 127.0.0.1 and example.com), unlike InsecureSkipVerify.
-func (f *fakeTrueNAS) trustingTLS() *tls.Config {
-	pool := x509.NewCertPool()
-	pool.AddCert(f.Certificate())
-	return &tls.Config{RootCAs: pool}
 }

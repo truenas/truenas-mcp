@@ -274,7 +274,8 @@ You should now be able to ask TrueNAS questions:
 ### Flags
 
 - `--truenas-url` - TrueNAS hostname (required, or use `TRUENAS_URL` env var)
-  - Examples: `truenas.local`, `192.168.0.31` or `fe80::1` (automatically uses `wss://<host>:443/api/current`), a host with a port such as `truenas.local:8443` or `[fe80::1]:8443`, or a full `wss://host[:port]/api/current` URL
+  - Examples: `truenas.local`, `192.168.0.31` or `fd00::10` (automatically uses `wss://<host>:443/api/current`), a host with a port such as `truenas.local:8443` or `[2001:db8::10]:8443`, or a full `wss://host[:port]/api/current` URL
+  - Credentials go in `--api-key` and `--api-user`; a URL containing `user:password@` is refused
   - A bare host cannot include a path; use a full `wss://` URL for that
   - A `wss://` URL ending in the legacy `/websocket` (or `/websocket/`) path is rewritten to `/api/current` with a one-time warning; the legacy endpoint is deprecated and planned for removal in TrueNAS 28
   - ⚠️ **Note**: `ws://` (unencrypted) is **not allowed** - TrueNAS will revoke API keys used over unencrypted connections

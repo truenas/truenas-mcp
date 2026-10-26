@@ -50,25 +50,47 @@ type Client struct {
 	// share a single auth.login_ex per connection.
 	authMu sync.Mutex
 
-	// connMu protects conn and authedConn.
+	// connMu protects conn, authedConn and authGen.
 	connMu sync.Mutex
 	conn   *websocket.Conn
 	// authedConn is the connection auth.login_ex last succeeded on. Requests
 	// are only sent once authedConn == conn, so a reconnect is never mistaken
 	// for an authenticated session.
 	authedConn *websocket.Conn
+	// authGen counts successful logins, so a stale ENOTAUTHENTICATED reply
+	// only discards the login it was sent under.
+	authGen uint64
+
+	// Keepalive: a ping every pingInterval; the connection is dropped when
+	// nothing (not even a pong) arrives within pongWait.
+	pingInterval time.Duration
+	pongWait     time.Duration
 
 	legacyWarning sync.Once
 
 	// writeMu protects concurrent WebSocket writes
 	writeMu sync.Mutex
 
-	// pending maps request ID -> response channel for concurrent request multiplexing
+	// pending maps request ID -> in-flight request, for concurrent request
+	// multiplexing. Each entry records the connection it was written to, so
+	// a dying connection only fails its own requests.
 	pendingMu sync.Mutex
-	pending   map[string]chan *responseResult
+	pending   map[string]*pendingCall
 
 	requestID atomic.Uint64
 }
+
+type pendingCall struct {
+	conn *websocket.Conn
+	ch   chan *responseResult
+}
+
+const (
+	callTimeout         = 120 * time.Second
+	loginTimeout        = 30 * time.Second
+	defaultPingInterval = 30 * time.Second
+	defaultPongWait     = 75 * time.Second
+)
 
 type responseResult struct {
 	resp *rpcResponse
@@ -194,7 +216,10 @@ func NewClientWithOptions(endpoint, apiKey string, tlsConfig *tls.Config, opts O
 		apiKey:    apiKey,
 		apiUser:   opts.APIUser,
 		tlsConfig: tlsConfig,
-		pending:   make(map[string]chan *responseResult),
+		pending:   make(map[string]*pendingCall),
+
+		pingInterval: defaultPingInterval,
+		pongWait:     defaultPongWait,
 	}, nil
 }
 
@@ -221,7 +246,11 @@ func (c *Client) connect() error {
 	conn, resp, err := wsDialer.Dial(u.String(), nil)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			err = fmt.Errorf("%w (HTTP 404 for %s: TrueNAS 25.04 or later required)", err, u.Redacted())
+			if u.Path == apiPath {
+				err = fmt.Errorf("%w (HTTP 404 for %s: TrueNAS 25.04 or later required)", err, u.Redacted())
+			} else {
+				err = fmt.Errorf("%w (HTTP 404 for %s: check the path; the JSON-RPC endpoint is %s, and TrueNAS 25.04 or later required)", err, u.Redacted(), apiPath)
+			}
 		} else if strings.Contains(err.Error(), "x509:") || strings.Contains(err.Error(), "certificate") {
 			err = fmt.Errorf("%w (TrueNAS uses a self-signed certificate by default: pass --tls-ca <cert.pem> to trust it, or --insecure to disable verification at the cost of man-in-the-middle protection)", err)
 		}
@@ -236,19 +265,51 @@ func (c *Client) connect() error {
 	c.conn = conn
 	c.authedConn = nil
 
+	// Keepalive: any inbound frame or pong extends the read deadline, so a
+	// half-open connection is noticed instead of every call timing out.
+	pongWait := c.pongWait
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+	done := make(chan struct{})
+	go c.keepalive(conn, done)
+
 	// Start the read loop to multiplex concurrent responses
-	go c.readLoop(conn)
+	go c.readLoop(conn, done)
 
 	log.Printf("Successfully connected via %s", u.Redacted())
 	return nil
 }
 
+// keepalive pings conn until done is closed. WriteControl may be called
+// concurrently with other writes.
+func (c *Client) keepalive(conn *websocket.Conn, done <-chan struct{}) {
+	ticker := time.NewTicker(c.pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
+				return // readLoop notices the broken connection
+			}
+		}
+	}
+}
+
 // readLoop reads all WebSocket responses and routes them to the waiting callers
 // via the pending map. Runs as a goroutine for the lifetime of the connection.
-func (c *Client) readLoop(conn *websocket.Conn) {
+func (c *Client) readLoop(conn *websocket.Conn, done chan struct{}) {
+	defer close(done)
 	for {
 		var resp rpcResponse
-		if err := conn.ReadJSON(&resp); err != nil {
+		err := conn.ReadJSON(&resp)
+		if err == nil {
+			conn.SetReadDeadline(time.Now().Add(c.pongWait))
+		}
+		if err != nil {
 			// Clear the connection BEFORE failing waiters, so their retry
 			// reconnects instead of reusing this dead socket.
 			c.connMu.Lock()
@@ -258,19 +319,21 @@ func (c *Client) readLoop(conn *websocket.Conn) {
 			}
 			c.connMu.Unlock()
 			conn.Close()
-			c.failAllPending(fmt.Errorf("failed to read response: %w", err))
+			c.failPending(conn, fmt.Errorf("failed to read response: %w", err))
 			return
 		}
 
 		key := responseKey(resp.ID)
 		if key == "" && resp.Error != nil {
-			// An error with a null id (e.g. parse error) cannot be matched to
-			// a request. Fail everything in flight rather than leave callers
-			// waiting for the timeout.
+			// A null id means the server could not parse a frame. It keeps
+			// serving the connection and answers every other request, so
+			// only fail a request when it is the only one in flight here.
 			err := fmt.Errorf("API error without a request id: %s (code %d)",
 				c.scrubSecrets(resp.Error.toAPIError().Message), resp.Error.Code)
 			log.Printf("Received %v", err)
-			c.failAllPending(err)
+			if call := c.takeOnlyPending(conn); call != nil {
+				call.ch <- &responseResult{err: err}
+			}
 			continue
 		}
 		if key == "" {
@@ -294,55 +357,103 @@ func (c *Client) readLoop(conn *websocket.Conn) {
 
 		// Route response to the waiting caller
 		c.pendingMu.Lock()
-		ch, ok := c.pending[key]
+		call, ok := c.pending[key]
 		if ok {
 			delete(c.pending, key)
 		}
 		c.pendingMu.Unlock()
 
 		if ok {
-			ch <- &responseResult{resp: &resp}
+			call.ch <- &responseResult{resp: &resp}
 		} else {
 			log.Printf("Warning: received response for unknown request ID %s (may have timed out)", key)
 		}
 	}
 }
 
-// failAllPending delivers an error to all in-flight requests (called on disconnect)
-func (c *Client) failAllPending(err error) {
+// failPending delivers err to every request in flight on conn (called when
+// conn breaks). Requests on other connections are left alone.
+func (c *Client) failPending(conn *websocket.Conn, err error) {
 	c.pendingMu.Lock()
-	pending := c.pending
-	c.pending = make(map[string]chan *responseResult)
+	var failed []*pendingCall
+	for key, call := range c.pending {
+		if call.conn == conn {
+			failed = append(failed, call)
+			delete(c.pending, key)
+		}
+	}
 	c.pendingMu.Unlock()
 
-	for _, ch := range pending {
-		ch <- &responseResult{err: err}
+	for _, call := range failed {
+		call.ch <- &responseResult{err: err}
 	}
 }
+
+// takeOnlyPending removes and returns the request in flight on conn if it is
+// the only one, and returns nil otherwise.
+func (c *Client) takeOnlyPending(conn *websocket.Conn) *pendingCall {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	var only *pendingCall
+	var onlyKey string
+	for key, call := range c.pending {
+		if call.conn != conn {
+			continue
+		}
+		if only != nil {
+			return nil
+		}
+		only, onlyKey = call, key
+	}
+	if only != nil {
+		delete(c.pending, onlyKey)
+	}
+	return only
+}
+
+// errUserinfo rejects credentials embedded in the URL. The error never
+// echoes the input, which would leak them.
+var errUserinfo = errors.New("TrueNAS URL must not contain user info (user:password@); pass the API key with --api-key and the user with --api-user")
 
 // endpointURL returns the JSON-RPC 2.0 endpoint to dial. A bare host (name,
 // IPv4, IPv6, optionally bracketed and with a port) becomes
 // wss://<host>:<port or 443>/api/current. A wss:// URL is used as given,
-// except that an empty path or the legacy /websocket path is replaced with
-// /api/current, so existing configurations keep working.
+// except that trailing slashes are dropped and an empty path or the legacy
+// /websocket path is replaced with /api/current, so existing configurations
+// keep working. Errors never quote input that could hold credentials.
 func (c *Client) endpointURL() (*url.URL, error) {
-	e := c.endpoint
-	if strings.HasPrefix(e, "ws://") {
-		// SECURITY: TrueNAS revokes API keys used over unencrypted connections
-		return nil, fmt.Errorf("SECURITY ERROR: ws:// (unencrypted) connections are not allowed. TrueNAS will revoke API keys used over ws://. Use wss:// instead")
-	}
-	if strings.HasPrefix(e, "wss://") {
-		u, err := url.Parse(e)
+	e := strings.TrimSpace(c.endpoint)
+	if i := strings.Index(e, "://"); i >= 0 {
+		switch strings.ToLower(e[:i]) {
+		case "wss":
+		case "ws":
+			// SECURITY: TrueNAS revokes API keys used over unencrypted connections
+			return nil, fmt.Errorf("SECURITY ERROR: ws:// (unencrypted) connections are not allowed. TrueNAS will revoke API keys used over ws://. Use wss:// instead")
+		default:
+			return nil, fmt.Errorf("unsupported URL scheme: pass a hostname or a wss:// URL")
+		}
+		u, err := url.Parse("wss" + e[i:])
 		if err != nil {
-			return nil, fmt.Errorf("invalid TrueNAS URL %q: %w", e, err)
+			var urlErr *url.Error
+			if errors.As(err, &urlErr) {
+				err = urlErr.Err // drop the URL itself from the message
+			}
+			if strings.Contains(e, "@") {
+				return nil, errUserinfo
+			}
+			return nil, fmt.Errorf("invalid TrueNAS URL: %w", err)
+		}
+		if u.User != nil {
+			return nil, errUserinfo
 		}
 		if u.Hostname() == "" {
-			return nil, fmt.Errorf("TrueNAS URL %q has no host", e)
+			return nil, fmt.Errorf("TrueNAS URL has no host")
 		}
+		u.Path, u.RawPath = strings.TrimRight(u.Path, "/"), ""
 		switch u.Path {
-		case "", "/":
+		case "":
 			u.Path = apiPath
-		case legacyPath, legacyPath + "/":
+		case legacyPath:
 			c.legacyWarning.Do(func() {
 				log.Printf("Warning: %s is the legacy protocol (deprecated, planned for removal in TrueNAS 28); using %s instead", legacyPath, apiPath)
 			})
@@ -350,9 +461,10 @@ func (c *Client) endpointURL() (*url.URL, error) {
 		}
 		return u, nil
 	}
-	if strings.Contains(e, "://") {
-		return nil, fmt.Errorf("unsupported scheme in %q: pass a hostname or a wss:// URL", e)
+	if strings.Contains(e, "@") {
+		return nil, errUserinfo
 	}
+	// From here on e holds no userinfo, so quoting it is safe.
 	if strings.ContainsAny(e, "/?#") {
 		return nil, fmt.Errorf("invalid TrueNAS host %q: a bare host cannot include a path; pass a full wss://host[:port]%s URL instead", e, apiPath)
 	}
@@ -373,25 +485,27 @@ func (c *Client) endpointURL() (*url.URL, error) {
 
 // Authenticate connects if needed and logs in with auth.login_ex.
 func (c *Client) Authenticate() error {
-	_, err := c.session(true)
+	_, _, err := c.session(true)
 	return err
 }
 
-// authedSession returns the current connection if it is logged in.
-func (c *Client) authedSession() *websocket.Conn {
+// authedSession returns the current connection and its login generation if
+// it is logged in.
+func (c *Client) authedSession() (*websocket.Conn, uint64) {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 	if c.conn != nil && c.authedConn == c.conn {
-		return c.conn
+		return c.conn, c.authGen
 	}
-	return nil
+	return nil, 0
 }
 
-// forgetSession marks conn as no longer logged in.
-func (c *Client) forgetSession(conn *websocket.Conn) {
+// forgetSession marks conn as no longer logged in, unless it has logged in
+// again since login generation gen.
+func (c *Client) forgetSession(conn *websocket.Conn, gen uint64) {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
-	if c.authedConn == conn {
+	if c.authedConn == conn && c.authGen == gen {
 		c.authedConn = nil
 	}
 }
@@ -399,18 +513,18 @@ func (c *Client) forgetSession(conn *websocket.Conn) {
 // session returns a logged-in connection, connecting and logging in first
 // if needed. authMu serializes this, so concurrent callers share one login.
 // force logs in again even if the current connection is already logged in.
-func (c *Client) session(force bool) (*websocket.Conn, error) {
+func (c *Client) session(force bool) (*websocket.Conn, uint64, error) {
 	if !force {
-		if conn := c.authedSession(); conn != nil {
-			return conn, nil
+		if conn, gen := c.authedSession(); conn != nil {
+			return conn, gen, nil
 		}
 	}
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
 	if !force {
 		// Another caller may have logged in while we waited.
-		if conn := c.authedSession(); conn != nil {
-			return conn, nil
+		if conn, gen := c.authedSession(); conn != nil {
+			return conn, gen, nil
 		}
 	}
 
@@ -420,19 +534,22 @@ func (c *Client) session(force bool) (*websocket.Conn, error) {
 		conn := c.conn
 		c.connMu.Unlock()
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 
 		err = c.login(conn)
 		c.connMu.Lock()
 		current := c.conn == conn
+		gen := c.authGen
 		if err == nil && current {
+			c.authGen++
+			gen = c.authGen
 			c.authedConn = conn
 		}
 		c.connMu.Unlock()
 		if err == nil && current {
 			log.Println("TrueNAS middleware authentication successful")
-			return conn, nil
+			return conn, gen, nil
 		}
 		if err == nil {
 			err = errors.New("authentication failed: connection lost during login")
@@ -443,7 +560,7 @@ func (c *Client) session(force bool) (*websocket.Conn, error) {
 			log.Printf("Connection lost during login, reconnecting: %v", err)
 			continue
 		}
-		return nil, err
+		return nil, 0, err
 	}
 }
 
@@ -459,7 +576,7 @@ func (c *Client) login(conn *websocket.Conn) error {
 		"username":  c.apiUser,
 		"api_key":   c.apiKey,
 	}}
-	resp, err := c.roundTrip(conn, "auth.login_ex", params)
+	resp, err := c.roundTrip(conn, "auth.login_ex", params, loginTimeout)
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
@@ -492,12 +609,12 @@ func (c *Client) Call(method string, params ...interface{}) (json.RawMessage, er
 	}
 	for attempt := 0; ; attempt++ {
 		retry := attempt == 0
-		conn, err := c.session(false)
+		conn, gen, err := c.session(false)
 		if err != nil {
 			return nil, err
 		}
 
-		resp, err := c.roundTrip(conn, method, params)
+		resp, err := c.roundTrip(conn, method, params, callTimeout)
 		if err != nil {
 			if retry && errors.Is(err, errNotSent) {
 				log.Printf("Retrying %s on a new connection: %v", method, err)
@@ -508,7 +625,7 @@ func (c *Client) Call(method string, params ...interface{}) (json.RawMessage, er
 		if resp.Error != nil {
 			if retry && resp.Error.notAuthenticated() {
 				log.Printf("Session not authenticated; logging in again and retrying %s", method)
-				c.forgetSession(conn)
+				c.forgetSession(conn, gen)
 				continue
 			}
 			return nil, c.formatAPIErrorWithContext(resp.Error.toAPIError(), method, params)
@@ -599,18 +716,12 @@ func redactParams(method string, params []interface{}) []interface{} {
 	return redacted
 }
 
-// roundTrip sends one request on conn and waits for its response via the
-// pending map. It never retries. A failed write is wrapped in errNotSent.
-func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interface{}) (*rpcResponse, error) {
+// roundTrip sends one request on conn and waits up to timeout for its
+// response via the pending map. It never retries. A failed write is wrapped
+// in errNotSent; a request that cannot be encoded is never written.
+func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interface{}, timeout time.Duration) (*rpcResponse, error) {
 	id := c.requestID.Add(1)
 	key := strconv.FormatUint(id, 10)
-
-	// Register the response channel BEFORE writing, to avoid a race where
-	// the response arrives before we add the channel to the pending map.
-	ch := make(chan *responseResult, 1)
-	c.pendingMu.Lock()
-	c.pending[key] = ch
-	c.pendingMu.Unlock()
 
 	req := rpcRequest{
 		JSONRPC: "2.0",
@@ -618,6 +729,19 @@ func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interfa
 		Method:  method,
 		Params:  params,
 	}
+	// Encode before touching the socket: a marshal error must not send an
+	// empty frame or tear down a healthy connection.
+	frame, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode request for %s: %w", method, err)
+	}
+
+	// Register the response channel BEFORE writing, to avoid a race where
+	// the response arrives before we add the channel to the pending map.
+	ch := make(chan *responseResult, 1)
+	c.pendingMu.Lock()
+	c.pending[key] = &pendingCall{conn: conn, ch: ch}
+	c.pendingMu.Unlock()
 
 	if debugLogging.Load() {
 		logReq := req
@@ -630,7 +754,7 @@ func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interfa
 
 	// writeMu ensures only one goroutine writes to the WebSocket at a time
 	c.writeMu.Lock()
-	err := conn.WriteJSON(req)
+	err = conn.WriteMessage(websocket.TextMessage, frame)
 	c.writeMu.Unlock()
 
 	if err != nil {
@@ -652,7 +776,7 @@ func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interfa
 	}
 
 	// Wait for the response router to deliver our response
-	timer := time.NewTimer(120 * time.Second)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case result := <-ch:
@@ -665,7 +789,7 @@ func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interfa
 		c.pendingMu.Lock()
 		delete(c.pending, key)
 		c.pendingMu.Unlock()
-		return nil, fmt.Errorf("request timed out after 120 seconds (method: %s)", method)
+		return nil, fmt.Errorf("request timed out after %s (method: %s)", timeout, method)
 	}
 }
 

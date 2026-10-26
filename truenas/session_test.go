@@ -3,7 +3,9 @@ package truenas
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -91,7 +93,7 @@ func TestDropDuringLoginTwiceFails(t *testing.T) {
 	if _, err := c.Call("system.info"); err == nil {
 		t.Fatal("Call succeeded although every login was dropped")
 	}
-	if c.authedSession() != nil {
+	if conn, _ := c.authedSession(); conn != nil {
 		t.Error("a connection is marked authenticated after failed logins")
 	}
 	if n := f.unauthedCalls(); n != 0 {
@@ -176,7 +178,22 @@ func TestOldTrueNASGets404Hint(t *testing.T) {
 	}
 }
 
-func TestNullIDErrorReachesCaller(t *testing.T) {
+func TestOtherPath404Hint(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	defer srv.Close()
+	endpoint := "wss://" + strings.TrimPrefix(srv.URL, "https://") + "/api/v99"
+	c, err := NewClientWithOptions(endpoint, testAPIKey, &tls.Config{InsecureSkipVerify: true}, Options{APIUser: testAPIUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	err = c.Authenticate()
+	if err == nil || !strings.Contains(err.Error(), "check the path") || !strings.Contains(err.Error(), apiPath) {
+		t.Errorf("got %v, want a hint about the path", err)
+	}
+}
+
+func TestNullIDErrorReachesOnlyPendingCaller(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.nullIDFor = "system.info" })
 	c := insecureClient(t, f, Options{})
 	done := make(chan error, 1)
@@ -194,10 +211,173 @@ func TestNullIDErrorReachesCaller(t *testing.T) {
 	}
 }
 
-func TestURLLoggingRedactedAndLegacyWarningOnce(t *testing.T) {
+func TestNullIDErrorDoesNotFailOtherCalls(t *testing.T) {
+	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) {
+		f.nullIDFor = "bad.method"
+		f.holdMethod = "system.info"
+	})
+	c := insecureClient(t, f, Options{})
+	if err := c.Authenticate(); err != nil {
+		t.Fatal(err)
+	}
+	good := make(chan error, 1)
+	go func() {
+		_, err := c.Call("system.info")
+		good <- err
+	}()
+	f.waitFrames(t, 2)
+	bad := make(chan error, 1)
+	go func() {
+		_, err := c.Call("bad.method")
+		bad <- err
+	}()
+	f.waitFrames(t, 3) // the null-id reply is sent right away, two calls pending
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case err := <-bad:
+		t.Fatalf("ambiguous null-id error failed a call: %v", err)
+	case err := <-good:
+		t.Fatalf("ambiguous null-id error failed a call: %v", err)
+	default:
+	}
+	close(f.release)
+	if err := <-good; err != nil {
+		t.Errorf("unrelated call failed: %v", err)
+	}
+	// The unmatched call is released when the connection closes.
+	c.Close()
+	select {
+	case err := <-bad:
+		if err == nil {
+			t.Error("unanswered call succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("unanswered call still waiting after Close")
+	}
+}
+
+func TestUnencodableRequestIsNotSent(t *testing.T) {
 	f := newFakeTrueNAS(t, nil)
-	endpoint := strings.Replace(f.wsURL("127.0.0.1"), "wss://", "wss://user:hunter2@", 1)
-	endpoint = strings.TrimSuffix(endpoint, apiPath) + legacyPath
+	c := insecureClient(t, f, Options{})
+	if err := c.Authenticate(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.Call("system.info", math.NaN())
+	if err == nil || !strings.Contains(err.Error(), "failed to encode request") || errors.Is(err, errNotSent) {
+		t.Fatalf("got %v, want an encode error", err)
+	}
+	if _, err := c.Call("system.info"); err != nil {
+		t.Fatalf("next Call: %v", err)
+	}
+	raws, _, conns := f.snapshot()
+	if len(raws) != 2 || conns != 1 {
+		t.Errorf("%d frames over %d connections; the bad request must not be sent or reset the connection", len(raws), conns)
+	}
+}
+
+func TestStaleNotAuthenticatedKeepsNewLogin(t *testing.T) {
+	f := newFakeTrueNAS(t, nil)
+	c := insecureClient(t, f, Options{})
+	if err := c.Authenticate(); err != nil {
+		t.Fatal(err)
+	}
+	conn, gen := c.authedSession()
+	if err := c.Authenticate(); err != nil { // a newer login on the same connection
+		t.Fatal(err)
+	}
+	c.forgetSession(conn, gen) // stale ENOTAUTHENTICATED for the old login
+	if now, _ := c.authedSession(); now != conn {
+		t.Fatal("stale ENOTAUTHENTICATED cleared a newer login")
+	}
+	_, gen = c.authedSession()
+	c.forgetSession(conn, gen)
+	if now, _ := c.authedSession(); now != nil {
+		t.Fatal("ENOTAUTHENTICATED for the current login did not clear it")
+	}
+}
+
+func TestKeepaliveDropsSilentConnection(t *testing.T) {
+	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) {
+		f.noPong = true
+		f.holdMethod = "system.info"
+	})
+	c := insecureClient(t, f, Options{})
+	c.pingInterval, c.pongWait = 20*time.Millisecond, 200*time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Call("system.info") // never answered
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("call on a silent connection succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("call on a silent connection still waiting: no keepalive")
+	}
+	waitDisconnected(t, c)
+}
+
+func TestKeepaliveKeepsIdleConnection(t *testing.T) {
+	f := newFakeTrueNAS(t, nil)
+	c := insecureClient(t, f, Options{})
+	c.pingInterval, c.pongWait = 20*time.Millisecond, 100*time.Millisecond
+	if err := c.Authenticate(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond) // five pongWaits without traffic
+	if conn, _ := c.authedSession(); conn == nil {
+		t.Fatal("idle connection with pongs was dropped")
+	}
+	if _, err := c.Call("system.info"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, conns := f.snapshot(); conns != 1 {
+		t.Errorf("%d connections, want 1", conns)
+	}
+}
+
+func TestURLWithUserinfoRefused(t *testing.T) {
+	f := newFakeTrueNAS(t, nil)
+	host := strings.TrimPrefix(f.wsURL("127.0.0.1"), "wss://")
+	host = strings.TrimSuffix(host, apiPath)
+	endpoints := []string{
+		"wss://alice:hunter2@" + host + legacyPath,
+		"wss://alice@" + host,
+		" WSS://alice:hunter2@" + host + "/api/current/ ",
+		"wss://alice:hun%zzter2@" + host, // unparseable userinfo
+		"alice:hunter2@" + host,
+		"alice@" + host,
+	}
+	for _, endpoint := range endpoints {
+		var buf bytes.Buffer
+		log.SetOutput(&buf)
+		c, err := NewClientWithOptions(endpoint, testAPIKey, &tls.Config{InsecureSkipVerify: true}, Options{APIUser: testAPIUser})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = c.Authenticate()
+		c.Close()
+		log.SetOutput(os.Stderr)
+		if !errors.Is(err, errUserinfo) {
+			t.Errorf("%q: got %v, want the userinfo refusal", endpoint, err)
+			continue
+		}
+		for _, secret := range []string{"alice", "hunter2", "hun%zzter2"} {
+			if strings.Contains(err.Error(), secret) || strings.Contains(buf.String(), secret) {
+				t.Errorf("%q: %q leaked into the error or logs:\n%v\n%s", endpoint, secret, err, buf.String())
+			}
+		}
+	}
+	if _, _, conns := f.snapshot(); conns != 0 {
+		t.Errorf("%d connections made with userinfo URLs", conns)
+	}
+}
+
+func TestURLLoggingAndLegacyWarningOnce(t *testing.T) {
+	f := newFakeTrueNAS(t, nil)
+	endpoint := strings.TrimSuffix(f.wsURL("127.0.0.1"), apiPath) + legacyPath
 
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
@@ -208,10 +388,13 @@ func TestURLLoggingRedactedAndLegacyWarningOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	// The dialer refuses userinfo, but the URL is logged first, and each
-	// attempt resolves the endpoint again.
+	// Each connection resolves the endpoint again.
 	for i := 0; i < 2; i++ {
-		_ = c.Authenticate()
+		if err := c.Authenticate(); err != nil {
+			t.Fatal(err)
+		}
+		c.Close()
+		waitDisconnected(t, c)
 	}
 	out := buf.String()
 	if n := strings.Count(out, "Connecting to"); n != 2 {
@@ -220,10 +403,65 @@ func TestURLLoggingRedactedAndLegacyWarningOnce(t *testing.T) {
 	if n := strings.Count(out, "legacy protocol"); n != 1 {
 		t.Errorf("legacy warning logged %d times, want 1", n)
 	}
-	if strings.Contains(out, "hunter2") {
-		t.Errorf("password from the URL was logged:\n%s", out)
-	}
 	if strings.Contains(out, "26.04") {
 		t.Errorf("stale version claim in log:\n%s", out)
+	}
+}
+
+// staleConnection simulates a writer that has noticed a broken socket: the
+// client drops conn 1 and reconnects, while conn 1's readLoop is still
+// running and only sees its read error later.
+func staleConnection(t *testing.T, c *Client) {
+	t.Helper()
+	if err := c.Authenticate(); err != nil {
+		t.Fatal(err)
+	}
+	c.connMu.Lock()
+	c.conn, c.authedConn = nil, nil
+	c.connMu.Unlock()
+}
+
+func TestOldConnectionDoesNotFailNewRequests(t *testing.T) {
+	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.holdConn, f.holdMethod = 2, "system.info" })
+	c := insecureClient(t, f, Options{})
+	staleConnection(t, c) // frame 1: login on conn 1
+
+	errs := make(chan error, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			_, err := c.Call("system.info")
+			errs <- err
+		}()
+	}
+	f.waitFrames(t, 5) // login on conn 2, then three calls held on conn 2
+	f.closeSocket(1)
+	time.Sleep(100 * time.Millisecond) // let conn 1's readLoop see its error
+	close(f.release)
+	for i := 0; i < 3; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("call in flight on the new connection failed: %v", err)
+		}
+	}
+}
+
+func TestOldConnectionDoesNotFailNewLogin(t *testing.T) {
+	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.holdConn, f.holdMethod = 2, "auth.login_ex" })
+	c := insecureClient(t, f, Options{})
+	staleConnection(t, c)
+
+	errs := make(chan error, 1)
+	go func() {
+		_, err := c.Call("system.info")
+		errs <- err
+	}()
+	f.waitFrames(t, 2) // login on conn 2, held
+	f.closeSocket(1)
+	time.Sleep(100 * time.Millisecond)
+	close(f.release)
+	if err := <-errs; err != nil {
+		t.Fatalf("login in flight on the new connection failed: %v", err)
+	}
+	if n := f.logins(t); n != 2 {
+		t.Errorf("auth.login_ex sent %d times, want 2", n)
 	}
 }

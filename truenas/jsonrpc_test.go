@@ -62,6 +62,12 @@ func TestEndpointURL(t *testing.T) {
 		"wss://truenas.example:443/websocket":    "wss://truenas.example:443/api/current", // legacy path upgraded
 		"wss://truenas.example":                  "wss://truenas.example/api/current",
 		"wss://truenas.example:443/":             "wss://truenas.example:443/api/current",
+		"wss://truenas.example/api/current/":     "wss://truenas.example/api/current", // trailing slash dropped
+		"wss://truenas.example/api/v25.10.0//":   "wss://truenas.example/api/v25.10.0",
+		"  truenas.example \n":                   "wss://truenas.example:443/api/current", // whitespace trimmed
+		" wss://truenas.example/websocket\t":     "wss://truenas.example/api/current",
+		"WSS://truenas.example/api/current":      "wss://truenas.example/api/current", // scheme is case-insensitive
+		"Wss://truenas.example":                  "wss://truenas.example/api/current",
 	}
 	for in, want := range ok {
 		c := &Client{endpoint: in}
@@ -82,6 +88,11 @@ func TestEndpointURL(t *testing.T) {
 		"truenas.example:70000":            "port",
 		":8443":                            "no host",
 		"[::1]:":                           "port",
+		"WS://truenas.example/api/current": "ws://",
+		"HTTPS://truenas.example":          "scheme",
+		"wss://u:p@truenas.example":        "user info",
+		"u:p@truenas.example":              "user info",
+		"wss://truenas.example:abc":        "invalid TrueNAS URL",
 	}
 	for in, mention := range refused {
 		c := &Client{endpoint: in}
