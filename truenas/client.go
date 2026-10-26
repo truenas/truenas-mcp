@@ -247,6 +247,23 @@ func tlsHint(err error, host string) string {
 	return ""
 }
 
+// wsDial performs the WebSocket handshake. Tests may replace it.
+var wsDial = func(d *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
+	return d.Dial(urlStr, nil)
+}
+
+// safeDial calls wsDial and converts an unexpected panic into an error, so
+// a failed dial never takes the process down.
+func safeDial(d *websocket.Dialer, urlStr string) (conn *websocket.Conn, resp *http.Response, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			conn, resp = nil, nil
+			err = fmt.Errorf("websocket dial failed unexpectedly: %v", r)
+		}
+	}()
+	return wsDial(d, urlStr)
+}
+
 // connect establishes the WebSocket connection and starts the read loop.
 // Must be called with connMu held.
 func (c *Client) connect() error {
@@ -277,7 +294,7 @@ func (c *Client) connect() error {
 	}
 
 	log.Printf("Connecting to %s%s...", u.Redacted(), via)
-	conn, resp, err := wsDialer.Dial(u.String(), nil)
+	conn, resp, err := safeDial(&wsDialer, u.String())
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			if u.Path == apiPath {
