@@ -17,10 +17,11 @@ const (
 	Unclassified Access = iota
 	// Read tools only query state.
 	Read
-	// Write tools change state in a way that is additive or easily reverted.
+	// Write tools change state in a way that is additive or recoverable.
 	Write
-	// Destructive tools reboot the system, delete data or configuration, or
-	// interrupt running services. They require confirm=true to execute.
+	// Destructive tools reboot the system, delete data or configuration,
+	// cut off users, make one-way changes, or interrupt running services.
+	// They require confirm=true to execute.
 	Destructive
 )
 
@@ -42,6 +43,11 @@ type Safety struct {
 	// Idempotent reports that repeating a call with the same arguments has
 	// no further effect. Read tools are always idempotent.
 	Idempotent bool
+	// Overwrites marks a write tool that replaces existing state in place.
+	// It advertises destructiveHint (MCP: "may perform destructive,
+	// non-additive updates") without requiring confirm. Destructive tools
+	// always advertise destructiveHint.
+	Overwrites bool
 }
 
 // toolSafety classifies every registered tool. A tool missing from this
@@ -74,7 +80,7 @@ var toolSafety = map[string]Safety{
 	"query_directory_services":     {Access: Read},
 	"list_directory_certificates":  {Access: Read},
 	"refresh_directory_cache":      {Access: Write, Idempotent: true},
-	"configure_directory_service":  {Access: Write, Idempotent: true},
+	"configure_directory_service":  {Access: Destructive, Idempotent: true},
 	"leave_directory_service":      {Access: Destructive, Idempotent: true},
 
 	// Storage and shares
@@ -107,8 +113,8 @@ var toolSafety = map[string]Safety{
 	"search_app_catalog":      {Access: Read},
 	"get_app_catalog_details": {Access: Read},
 	"install_app":             {Access: Write},
-	"update_app":              {Access: Write, Idempotent: true},
-	"upgrade_app":             {Access: Write},
+	"update_app":              {Access: Write, Idempotent: true, Overwrites: true},
+	"upgrade_app":             {Access: Destructive},
 	"start_app":               {Access: Write, Idempotent: true},
 	"stop_app":                {Access: Destructive, Idempotent: true},
 	"delete_app":              {Access: Destructive, Idempotent: true},
@@ -203,7 +209,7 @@ func (r *Registry) applySafety() {
 		s := safetyOf(name)
 		tool.Definition.Annotations = &mcp.ToolAnnotations{
 			ReadOnlyHint:    s.Access == Read,
-			DestructiveHint: s.Access == Destructive,
+			DestructiveHint: s.Access == Destructive || s.Overwrites,
 			IdempotentHint:  s.Access == Read || s.Idempotent,
 			OpenWorldHint:   false,
 		}
@@ -215,7 +221,7 @@ func (r *Registry) applySafety() {
 			}
 			props["confirm"] = map[string]interface{}{
 				"type":        "boolean",
-				"description": "Required to execute: set to true only after the user has explicitly approved this destructive operation. Without it the server returns a preview and changes nothing. Not needed with dry_run=true.",
+				"description": "Required to execute: set to true only after the user has explicitly approved this destructive operation. Without it the server returns a preview and changes nothing.",
 				"default":     false,
 			}
 			tool.Definition.Description += " **DESTRUCTIVE: requires confirm=true.** Without confirm the server only returns a preview; show it to the user and get their explicit approval before calling again with confirm=true."
@@ -224,12 +230,23 @@ func (r *Registry) applySafety() {
 	}
 }
 
+// hasParam reports whether a tool's input schema declares the parameter.
+func hasParam(tool Tool, name string) bool {
+	props, _ := tool.Definition.InputSchema["properties"].(map[string]interface{})
+	_, ok := props[name]
+	return ok
+}
+
 // requiresConfirmation reports whether a destructive call must be held for
 // explicit approval: confirm is not true and this is not a dry run.
-func requiresConfirmation(args map[string]interface{}) bool {
-	confirm, _ := args["confirm"].(bool)
+// dry_run only counts for tools that declare it; a handler without dry-run
+// support would otherwise execute for real.
+func requiresConfirmation(tool Tool, args map[string]interface{}) bool {
+	if confirm, _ := args["confirm"].(bool); confirm {
+		return false
+	}
 	dryRun, _ := args["dry_run"].(bool)
-	return !confirm && !dryRun
+	return !(dryRun && hasParam(tool, "dry_run"))
 }
 
 // confirmationRequired builds the non-error reply for a destructive call
@@ -242,8 +259,7 @@ func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]
 		"message": fmt.Sprintf("%s is a destructive operation and was NOT executed. Show the user what it will do, "+
 			"ask them to explicitly approve it, and only then call %s again with the same arguments plus confirm=true.", name, name),
 	}
-	props, _ := tool.Definition.InputSchema["properties"].(map[string]interface{})
-	if _, ok := props["dry_run"]; ok {
+	if hasParam(tool, "dry_run") {
 		preview := make(map[string]interface{}, len(args)+1)
 		for k, v := range args {
 			preview[k] = v
@@ -251,7 +267,8 @@ func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]
 		preview["dry_run"] = true
 		out, err := tool.Handler(r.client, preview)
 		if err != nil {
-			return "", fmt.Errorf("%s requires confirm=true; building its preview failed: %w", name, err)
+			return "", fmt.Errorf("%s was NOT executed. Preview failed: %w. Resolve this before confirming; "+
+				"the user must see a successful preview and explicitly approve it first", name, err)
 		}
 		if json.Valid([]byte(out)) {
 			reply["preview"] = json.RawMessage(out)

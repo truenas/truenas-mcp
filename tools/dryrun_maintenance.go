@@ -16,15 +16,19 @@ func handleSystemRebootWithDryRun(client *truenas.Client, args map[string]interf
 	return ExecuteWithDryRun(client, args, &systemRebootDryRun{}, handleSystemReboot)
 }
 
-// rebootDelay returns the optional non-negative delay argument in seconds.
+// maxRebootDelay caps system_reboot's delay at one day: no tool can cancel a
+// pending reboot.
+const maxRebootDelay = 86400
+
+// rebootDelay returns the optional delay argument in seconds.
 func rebootDelay(args map[string]interface{}) (int, error) {
 	v, ok := args["delay"]
 	if !ok || v == nil {
 		return 0, nil
 	}
 	f, ok := v.(float64)
-	if !ok || f < 0 || f != math.Trunc(f) || f > math.MaxInt32 {
-		return 0, fmt.Errorf("delay must be a non-negative integer number of seconds")
+	if !ok || f < 0 || f != math.Trunc(f) || f > maxRebootDelay {
+		return 0, fmt.Errorf("delay must be an integer number of seconds between 0 and %d", maxRebootDelay)
 	}
 	return int(f), nil
 }

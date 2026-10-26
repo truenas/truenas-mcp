@@ -3,6 +3,9 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -136,14 +139,15 @@ func (r *Registry) registerTools() {
 	r.tools["system_reboot"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "system_reboot",
-			Description: "Reboot the TrueNAS system. This will disconnect all active sessions and services. Use after applying system updates. Supports dry-run mode and an optional delay.",
+			Description: "Reboot the TrueNAS system. This will disconnect all active sessions and services. Use after applying system updates. Supports dry-run mode and an optional delay of up to 86400 seconds. A pending delayed reboot cannot be cancelled through this server.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"delay": map[string]interface{}{
 						"type":        "integer",
-						"description": "Optional: seconds to wait before rebooting (default: reboot immediately)",
+						"description": "Optional: seconds to wait before rebooting, 0-86400 (default: reboot immediately). Cannot be cancelled through this server once scheduled.",
 						"minimum":     0,
+						"maximum":     maxRebootDelay,
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -1813,7 +1817,21 @@ func (r *Registry) ListTools() []mcp.Tool {
 	return tools
 }
 
-func (r *Registry) CallTool(name string, args map[string]interface{}) (string, error) {
+func (r *Registry) CallTool(name string, args map[string]interface{}) (result string, err error) {
+	// A panicking handler must not take down the server. Log the details to
+	// stderr (the panic value only for runtime errors, which carry no
+	// argument values) and return a generic error to the client.
+	defer func() {
+		if p := recover(); p != nil {
+			detail := fmt.Sprintf("%T", p)
+			if re, ok := p.(runtime.Error); ok {
+				detail = re.Error()
+			}
+			log.Printf("tool %s panicked: %s\n%s", name, detail, debug.Stack())
+			result, err = "", fmt.Errorf("internal error in tool %s; the operation may not have completed, check the system state before retrying", name)
+		}
+	}()
+
 	tool, exists := r.tools[name]
 	if !exists {
 		return "", fmt.Errorf("unknown tool: %s", name)
@@ -1823,7 +1841,7 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (string, e
 	if err := r.checkPolicy(name); err != nil {
 		return "", err
 	}
-	if safetyOf(name).Access == Destructive && requiresConfirmation(args) {
+	if safetyOf(name).Access == Destructive && requiresConfirmation(tool, args) {
 		return r.confirmationRequired(name, tool, args)
 	}
 
@@ -5141,7 +5159,10 @@ func (d *downloadUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[st
 		return nil, fmt.Errorf("failed to parse system info: %w", err)
 	}
 
-	currentVersion := sysInfo["version"].(string)
+	currentVersion, ok := sysInfo["version"].(string)
+	if !ok || currentVersion == "" {
+		return nil, fmt.Errorf("system.info returned no usable version")
+	}
 
 	actions := []PlannedAction{
 		{
@@ -5265,7 +5286,10 @@ func (a *applyUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[strin
 		return nil, fmt.Errorf("failed to parse system info: %w", err)
 	}
 
-	currentVersion := sysInfo["version"].(string)
+	currentVersion, ok := sysInfo["version"].(string)
+	if !ok || currentVersion == "" {
+		return nil, fmt.Errorf("system.info returned no usable version")
+	}
 
 	// Check update status to get target version
 	statusResult, err := client.Call("update.status")

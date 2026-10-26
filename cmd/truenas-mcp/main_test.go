@@ -22,25 +22,42 @@ func TestCheckRequired(t *testing.T) {
 }
 
 func TestSafetyPolicy(t *testing.T) {
-	env := map[string]string{
+	envOf := func(env map[string]string) func(string) (string, bool) {
+		return func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	}
+	env := envOf(map[string]string{
 		"TRUENAS_MCP_READ_ONLY":   "yes",
 		"TRUENAS_MCP_ALLOW_TOOLS": " query_pools, ,list_alerts ",
 		"TRUENAS_MCP_DENY_TOOLS":  "system_reboot",
+	})
+	p, err := safetyPolicy(false, nil, env)
+	if err != nil || !p.ReadOnly || strings.Join(p.Allow, ",") != "query_pools,list_alerts" || strings.Join(p.Deny, ",") != "system_reboot" {
+		t.Errorf("env policy = %+v, %v", p, err)
 	}
-	p := safetyPolicy(false, "", "", func(k string) string { return env[k] })
-	if !p.ReadOnly || strings.Join(p.Allow, ",") != "query_pools,list_alerts" || strings.Join(p.Deny, ",") != "system_reboot" {
-		t.Errorf("env policy = %+v", p)
-	}
-	p = safetyPolicy(false, "query_apps", "", func(k string) string { return env[k] })
-	if strings.Join(p.Allow, ",") != "query_apps" {
-		t.Errorf("flag did not override env: %+v", p)
+	p, err = safetyPolicy(false, map[string]string{"allow-tools": "query_apps", "deny-tools": ""}, env)
+	if err != nil || strings.Join(p.Allow, ",") != "query_apps" || len(p.Deny) != 0 {
+		t.Errorf("flags did not override env: %+v, %v", p, err)
 	}
 	for _, v := range []string{"", "0", "false", "No", "off"} {
-		if safetyPolicy(false, "", "", func(string) string { return v }).ReadOnly {
+		p, _ := safetyPolicy(false, nil, envOf(map[string]string{"TRUENAS_MCP_READ_ONLY": v}))
+		if p.ReadOnly {
 			t.Errorf("TRUENAS_MCP_READ_ONLY=%q enabled read-only", v)
 		}
 	}
-	if !safetyPolicy(true, "", "", func(string) string { return "" }).ReadOnly {
+	if p, _ := safetyPolicy(true, nil, envOf(nil)); !p.ReadOnly {
 		t.Error("--read-only ignored")
+	}
+	if p, err := safetyPolicy(false, nil, envOf(nil)); err != nil || p.Allow != nil {
+		t.Errorf("unset allow list = %+v, %v; want no restriction", p, err)
+	}
+
+	// An allow list that is set but names no tools must fail closed.
+	for _, v := range []string{"", ",", " , ", " ,, "} {
+		if _, err := safetyPolicy(false, nil, envOf(map[string]string{"TRUENAS_MCP_ALLOW_TOOLS": v})); err == nil {
+			t.Errorf("TRUENAS_MCP_ALLOW_TOOLS=%q accepted", v)
+		}
+		if _, err := safetyPolicy(false, map[string]string{"allow-tools": v}, envOf(nil)); err == nil {
+			t.Errorf("--allow-tools=%q accepted", v)
+		}
 	}
 }

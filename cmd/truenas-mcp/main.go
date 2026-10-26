@@ -61,20 +61,29 @@ func truthy(v string) bool {
 	return true
 }
 
-// safetyPolicy combines the safety flags with their environment variables;
-// a flag that is set wins over its variable.
-func safetyPolicy(readOnly bool, allow, deny string, getenv func(string) string) tools.Policy {
-	if allow == "" {
-		allow = getenv("TRUENAS_MCP_ALLOW_TOOLS")
+// safetyPolicy combines the safety flags with their environment variables.
+// setFlags holds the flags passed on the command line; a passed flag wins
+// over its variable. An allow list that is set but names no tools is an
+// error rather than "allow everything".
+func safetyPolicy(readOnly bool, setFlags map[string]string, lookupEnv func(string) (string, bool)) (tools.Policy, error) {
+	setting := func(flagName, envName string) (string, bool) {
+		if v, ok := setFlags[flagName]; ok {
+			return v, true
+		}
+		return lookupEnv(envName)
 	}
-	if deny == "" {
-		deny = getenv("TRUENAS_MCP_DENY_TOOLS")
-	}
-	return tools.Policy{
-		ReadOnly: readOnly || truthy(getenv("TRUENAS_MCP_READ_ONLY")),
+	roEnv, _ := lookupEnv("TRUENAS_MCP_READ_ONLY")
+	allow, allowSet := setting("allow-tools", "TRUENAS_MCP_ALLOW_TOOLS")
+	deny, _ := setting("deny-tools", "TRUENAS_MCP_DENY_TOOLS")
+	p := tools.Policy{
+		ReadOnly: readOnly || truthy(roEnv),
 		Allow:    tools.ParseToolList(allow),
 		Deny:     tools.ParseToolList(deny),
 	}
+	if allowSet && len(p.Allow) == 0 {
+		return p, fmt.Errorf("--allow-tools / TRUENAS_MCP_ALLOW_TOOLS is set but names no tools; unset it to expose all tools")
+	}
+	return p, nil
 }
 
 func main() {
@@ -156,7 +165,12 @@ func main() {
 
 	// Create tool registry
 	registry := tools.NewRegistry(client, taskManager)
-	policy := safetyPolicy(*readOnly, *allowTools, *denyTools, os.Getenv)
+	setFlags := map[string]string{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = f.Value.String() })
+	policy, err := safetyPolicy(*readOnly, setFlags, os.LookupEnv)
+	if err != nil {
+		log.Fatalf("Invalid tool safety settings: %v", err)
+	}
 	if err := registry.SetPolicy(policy); err != nil {
 		log.Fatalf("Invalid tool safety settings: %v", err)
 	}

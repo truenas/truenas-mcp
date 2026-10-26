@@ -381,26 +381,29 @@ was never shown. Dry runs of write tools are refused too.
 takes a comma-separated list; only those tools are listed and callable.
 `--deny-tools` / `TRUENAS_MCP_DENY_TOOLS` hides and refuses the listed tools.
 A flag overrides its environment variable. The server refuses to start if a
-list names an unknown tool, or if `--allow-tools` names a write tool while
-`--read-only` is set.
+list names an unknown tool, if `--allow-tools` is set but names no tools (for
+example `","`), or if `--allow-tools` names a write tool while `--read-only`
+is set.
 
 ```bash
 # Monitoring only
 ./truenas-mcp --read-only
 
-# Monitoring plus app restarts
-TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,tasks_get ./truenas-mcp
+# Monitoring plus app restarts (stop_app still needs confirm=true)
+TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
 **Confirmation for destructive tools.** These tools need `"confirm": true` to execute:
 
 | Tool | Why it is destructive |
 |------|-----------------------|
-| `system_reboot` | Interrupts every service and client connection |
+| `system_reboot` | Interrupts every service and client connection. `delay` is capped at 86400 seconds; a pending reboot cannot be cancelled through this server |
 | `apply_update` | Replaces the system software and may reboot |
 | `delete_boot_environment` | Permanently removes a rollback target |
 | `delete_app` | Removes an application and its configuration |
 | `stop_app` | Takes a running service offline |
+| `upgrade_app` | Takes the app offline; upgrades can run one-way migrations and there is no rollback tool |
+| `configure_directory_service` | Disabling or re-pointing a joined service cuts off domain users, like leaving |
 | `leave_directory_service` | Leaves the domain; domain users lose access to shares |
 | `delete_scrub_schedule` | Removes automatic data-integrity checks |
 
@@ -408,16 +411,21 @@ Called without `confirm`, a destructive tool changes nothing and returns a
 normal (non-error) result with `"status": "confirmation_required"` and the
 tool's dry-run preview. The assistant should show the preview, get the user's
 explicit approval, and call again with the same arguments plus
-`"confirm": true`. `"dry_run": true` still works without `confirm`.
+`"confirm": true`. If the preview itself fails, the call returns an error and
+nothing runs; resolve the problem before confirming. `"dry_run": true` still
+works without `confirm` (only on tools that declare `dry_run`, which all
+destructive tools do). `confirm` and `dry_run` must be JSON booleans.
 
-> **Breaking change:** clients or scripts that called these seven tools without
-> arguments now get a preview instead of the operation. Add `"confirm": true`
+> **Breaking change:** clients or scripts that called these nine tools without
+> `confirm` now get a preview instead of the operation. Add `"confirm": true`
 > to execute them.
 
 **Tool annotations.** Every tool in `tools/list` carries MCP
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`)
 derived from the same table, so clients can apply their own approval prompts.
+`destructiveHint` is true for the nine destructive tools and for `update_app`,
+which replaces app configuration in place but does not need `confirm`.
 Annotations were added in MCP 2025-03-26; this server still reports protocol
 `2024-11-05`, and older clients ignore the extra field.
 

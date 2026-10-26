@@ -2,7 +2,7 @@
 
 This document provides a comprehensive list of all available MCP tools for TrueNAS management.
 
-Tools are classified as read, write or destructive (`tools/safety.go`). Write and destructive tools are hidden and refused in `--read-only` mode, and `--allow-tools` / `--deny-tools` restrict the exposed set. Destructive tools (marked below) require `confirm: true` to execute; without it they return a `confirmation_required` result with their dry-run preview. **Breaking change:** callers that used these tools without `confirm` now get the preview instead. See [Safety Controls](../README.md#safety-controls).
+Tools are classified as read, write or destructive (`tools/safety.go`). Write and destructive tools are hidden and refused in `--read-only` mode, and `--allow-tools` / `--deny-tools` restrict the exposed set. Destructive tools (marked below) require `confirm: true` to execute; without it they return a `confirmation_required` result with their dry-run preview. **Breaking change:** callers that used these nine tools without `confirm` now get the preview instead. See [Safety Controls](../README.md#safety-controls).
 
 ## Read-Only Monitoring Tools
 
@@ -137,9 +137,14 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Supports dry-run mode to preview deletion
   - Returns task ID for tracking deletion progress
 
-- **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup
+- **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup (**destructive**: the app goes offline and migrations may be one-way)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations
+
+- **update_app** - Change an installed application's configuration
+  - Write operation (no confirm needed), but advertises `destructiveHint: true` because it replaces the configuration in place
+  - Supports dry-run mode
 
 - **start_app** - Start a stopped application
   - Supports dry-run mode; returns a task ID for tracking
@@ -176,7 +181,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Quick operation, no task tracking needed
 
 ### Write Operations
-- **configure_directory_service** - Configure and join directory service
+- **configure_directory_service** - Configure and join directory service (**destructive**: disabling or re-pointing a joined service cuts off domain users)
+  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Supports Active Directory, LDAP, and FreeIPA/IPA
   - Multiple credential types:
     - **Active Directory**: KERBEROS_USER (username/password) or KERBEROS_PRINCIPAL (principal/keytab)
@@ -337,7 +343,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 - **system_reboot** - Reboot the TrueNAS system (**destructive**)
   - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Supports dry-run mode showing hostname, version and uptime
-  - Optional `delay` in seconds before rebooting (default: immediately)
+  - Optional `delay` in seconds before rebooting, 0-86400 (default: immediately); a pending reboot cannot be cancelled through this server
   - Performs a clean system reboot
   - Disconnects all active sessions and services
   - Use after applying system updates that require a reboot
