@@ -2,6 +2,7 @@ package truenas
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,7 @@ type Client struct {
 	endpoint  string
 	apiKey    string
 	apiUser   string
+	proxy     string
 	tlsConfig *tls.Config
 
 	// authMu serializes connecting and logging in, so concurrent callers
@@ -199,6 +201,10 @@ type Options struct {
 	// APIUser is the user that owns the API key, sent to auth.login_ex.
 	// Required.
 	APIUser string
+	// Proxy overrides TRUENAS_PROXY, HTTPS_PROXY and ALL_PROXY for the
+	// TrueNAS connection (NO_PROXY still applies); "none" disables
+	// proxying. Optional.
+	Proxy string
 }
 
 func NewClientWithOptions(endpoint, apiKey string, tlsConfig *tls.Config, opts Options) (*Client, error) {
@@ -215,12 +221,30 @@ func NewClientWithOptions(endpoint, apiKey string, tlsConfig *tls.Config, opts O
 		endpoint:  endpoint,
 		apiKey:    apiKey,
 		apiUser:   opts.APIUser,
+		proxy:     strings.TrimSpace(opts.Proxy),
 		tlsConfig: tlsConfig,
 		pending:   make(map[string]*pendingCall),
 
 		pingInterval: defaultPingInterval,
 		pongWait:     defaultPongWait,
 	}, nil
+}
+
+// tlsHint suggests a fix for a certificate verification failure, or returns
+// "" if err is not one.
+func tlsHint(err error, host string) string {
+	var hostErr x509.HostnameError
+	if errors.As(err, &hostErr) {
+		fix := "connect using a host name listed in the certificate, or install a TrueNAS certificate whose subject alternative names include " + host
+		if net.ParseIP(host) != nil {
+			fix = "connect using a host name listed in the certificate instead of the IP address, or install a TrueNAS certificate with IP " + host + " in its subject alternative names"
+		}
+		return "the TrueNAS certificate is not valid for " + host + ": " + fix + "; --tls-ca cannot fix a name mismatch, and --insecure (which disables verification at the cost of man-in-the-middle protection) is the last resort"
+	}
+	if strings.Contains(err.Error(), "x509:") || strings.Contains(err.Error(), "certificate") {
+		return "TrueNAS uses a self-signed certificate by default: pass --tls-ca <cert.pem> to trust it, or --insecure to disable verification at the cost of man-in-the-middle protection"
+	}
+	return ""
 }
 
 // connect establishes the WebSocket connection and starts the read loop.
@@ -241,8 +265,18 @@ func (c *Client) connect() error {
 		ReadBufferSize:   65536,       // 64KB read buffer to handle large messages
 		WriteBufferSize:  65536,       // 64KB write buffer to handle large messages
 	}
+	proxy, err := c.proxyFor(u)
+	if err != nil {
+		return err
+	}
+	via := ""
+	if proxy != nil {
+		// TLS still runs end to end inside the proxy tunnel.
+		wsDialer.Proxy = http.ProxyURL(dialerProxy(proxy.url))
+		via = " via proxy " + proxy.String()
+	}
 
-	log.Printf("Connecting to %s...", u.Redacted())
+	log.Printf("Connecting to %s%s...", u.Redacted(), via)
 	conn, resp, err := wsDialer.Dial(u.String(), nil)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
@@ -251,8 +285,11 @@ func (c *Client) connect() error {
 			} else {
 				err = fmt.Errorf("%w (HTTP 404 for %s: check the path; the JSON-RPC endpoint is %s, and TrueNAS 25.04 or later required)", err, u.Redacted(), apiPath)
 			}
-		} else if strings.Contains(err.Error(), "x509:") || strings.Contains(err.Error(), "certificate") {
-			err = fmt.Errorf("%w (TrueNAS uses a self-signed certificate by default: pass --tls-ca <cert.pem> to trust it, or --insecure to disable verification at the cost of man-in-the-middle protection)", err)
+		} else if hint := tlsHint(err, u.Hostname()); hint != "" {
+			err = fmt.Errorf("%w (%s)", err, hint)
+		} else if opErr := (*net.OpError)(nil); proxy != nil && errors.As(err, &opErr) && opErr.Op == "dial" {
+			// Through a proxy, the only TCP dial is to the proxy itself.
+			err = fmt.Errorf("connecting via proxy %s from %s: proxy unreachable: %w", proxy, proxy.source, err)
 		}
 		log.Printf("Connection failed: %v", err)
 		return fmt.Errorf("connection failed: %w", err)
@@ -278,7 +315,7 @@ func (c *Client) connect() error {
 	// Start the read loop to multiplex concurrent responses
 	go c.readLoop(conn, done)
 
-	log.Printf("Successfully connected via %s", u.Redacted())
+	log.Printf("Successfully connected to %s%s", u.Redacted(), via)
 	return nil
 }
 

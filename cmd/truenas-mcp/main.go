@@ -23,6 +23,7 @@ var (
 	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication")
 	insecure   = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks)")
 	tlsCA      = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
+	proxyURL   = flag.String("proxy", "", "Proxy for the TrueNAS connection: http://, socks5:// or socks5h://host:port, or none to ignore proxy env vars (env TRUENAS_PROXY; overrides HTTPS_PROXY and ALL_PROXY)")
 	versionFlg = flag.Bool("version", false, "Print version and exit")
 	debug      = flag.Bool("debug", false, "Enable debug logging")
 )
@@ -104,9 +105,13 @@ func main() {
 	// Create TrueNAS client
 	client, err := truenas.NewClientWithOptions(*truenasURL, *apiKey, tlsConfig, truenas.Options{
 		APIUser: *apiUser,
+		Proxy:   *proxyURL,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create TrueNAS client: %v", err)
+	}
+	if err := client.ValidateProxy(); err != nil {
+		log.Fatalf("Invalid proxy configuration: %v", err)
 	}
 	defer client.Close()
 
