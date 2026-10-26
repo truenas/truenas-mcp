@@ -586,8 +586,157 @@ func TestAnalyzeMemoryCapacityStaleArcIgnored(t *testing.T) {
 	if _, ok := analysis["arc_bytes"]; ok {
 		t.Errorf("stale ARC sample should not be used: %v", analysis)
 	}
-	if note, _ := analysis["note"].(string); !strings.Contains(note, "older than 15 minutes") {
+	if note, _ := analysis["note"].(string); !strings.Contains(note, "more than 15 minutes older") {
 		t.Errorf("note = %q, want stale ARC explanation", note)
+	}
+}
+
+// arcSkewAnalysis runs analyzeMemoryCapacity with memory and ARC graphs whose
+// latest samples (and "end") are at nasNow and arcEnd in the NAS's clock.
+func arcSkewAnalysis(t *testing.T, nasNow, arcEnd time.Time) map[string]interface{} {
+	t.Helper()
+	graphs := map[string]map[string]interface{}{
+		"memory":  reportingGraphEnding(nasNow, "memory", "available", 11*gib, 11*gib),
+		"arcsize": reportingGraphEnding(arcEnd, "arcsize", "size", 72*gib),
+	}
+	results := map[string]interface{}{
+		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 100 * gib},
+	}
+	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
+	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return analysis
+}
+
+func TestArcFreshnessUsesNASClock(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		skew time.Duration
+	}{
+		{"NAS clock 1h behind host", -time.Hour},
+		{"NAS clock 1h ahead of host", time.Hour},
+		{"NAS clock 1 day behind host", -24 * time.Hour},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			nasNow := time.Now().Add(c.skew)
+			// ARC sample 1 minute old in NAS time: fresh.
+			a := arcSkewAnalysis(t, nasNow, nasNow.Add(-time.Minute))
+			if a["arc_bytes"] != int64(72*gib) || a["used_excluding_arc_bytes"] != int64(17*gib) {
+				t.Errorf("fresh ARC sample (NAS time) not used: %v", a)
+			}
+			if _, ok := a["note"]; ok {
+				t.Errorf("unexpected note: %v", a["note"])
+			}
+			if _, ok := a["arc_freshness_note"]; ok {
+				t.Errorf("unexpected arc_freshness_note: %v", a["arc_freshness_note"])
+			}
+		})
+	}
+}
+
+func TestArcStaleRelativeToNASClock(t *testing.T) {
+	// NAS clock 1h ahead of the host; the ARC sample is 1h old relative to
+	// the NAS's newest memory sample, though "now" for the host. Stale.
+	nasNow := time.Now().Add(time.Hour)
+	a := arcSkewAnalysis(t, nasNow, nasNow.Add(-time.Hour))
+	if _, ok := a["arc_bytes"]; ok {
+		t.Errorf("stale ARC sample (NAS time) should not be used: %v", a)
+	}
+	if note, _ := a["note"].(string); !strings.Contains(note, "older than the newest TrueNAS reporting timestamp") {
+		t.Errorf("note = %q, want stale ARC explanation", note)
+	}
+}
+
+func TestCurrentArcBytesReference(t *testing.T) {
+	nasNow := time.Now().Add(-3 * time.Hour) // NAS clock well behind host
+	cases := []struct {
+		name      string
+		graph     func() map[string]interface{}
+		memRef    float64
+		wantErr   error
+		wantBytes float64
+		wantKnown bool
+	}{
+		{
+			name: "stale against own graph end",
+			graph: func() map[string]interface{} {
+				g := reportingGraphEnding(nasNow.Add(-time.Hour), "arcsize", "size", 8*gib)
+				g["end"] = nasNow.Unix()
+				return g
+			},
+			wantErr: errArcStale,
+		},
+		{
+			name: "fresh against own graph end",
+			graph: func() map[string]interface{} {
+				g := reportingGraphEnding(nasNow.Add(-time.Minute), "arcsize", "size", 8*gib)
+				g["end"] = nasNow.Unix()
+				return g
+			},
+			wantBytes: 8 * gib, wantKnown: true,
+		},
+		{
+			name: "no NAS reference: unknown, used",
+			graph: func() map[string]interface{} {
+				g := reportingGraphEnding(nasNow.Add(-time.Hour), "arcsize", "size", 8*gib)
+				delete(g, "end")
+				return g
+			},
+			wantBytes: 8 * gib, wantKnown: false,
+		},
+		{
+			name: "memory reference only",
+			graph: func() map[string]interface{} {
+				g := reportingGraphEnding(nasNow.Add(-time.Hour), "arcsize", "size", 8*gib)
+				delete(g, "end")
+				return g
+			},
+			memRef:  float64(nasNow.Unix()),
+			wantErr: errArcStale,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			graphs := map[string]map[string]interface{}{"arcsize": c.graph()}
+			client, _ := newFakeClientFrom(t, reportingFake(t, graphs, nil, nil))
+			got, known, err := currentArcBytes(client, c.memRef)
+			if c.wantErr != nil {
+				if !errors.Is(err, c.wantErr) {
+					t.Fatalf("err = %v, want %v", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil || got != c.wantBytes || known != c.wantKnown {
+				t.Errorf("got (%v, %v, %v), want (%v, %v, nil)", got, known, err, c.wantBytes, c.wantKnown)
+			}
+		})
+	}
+}
+
+func TestAnalyzeMemoryCapacityArcFreshnessUnknownNote(t *testing.T) {
+	// Neither graph carries a timestamp: the ARC sample is used, with a note.
+	mem := reportingGraph("memory", "available", 11*gib)
+	mem["data"] = []interface{}{[]interface{}{nil, 11 * gib}}
+	delete(mem, "end")
+	arc := reportingGraph("arcsize", "size", 72*gib)
+	arc["data"] = []interface{}{[]interface{}{nil, 72 * gib}}
+	delete(arc, "end")
+	graphs := map[string]map[string]interface{}{"memory": mem, "arcsize": arc}
+	results := map[string]interface{}{
+		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 100 * gib},
+	}
+	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
+	a, err := analyzeMemoryCapacity(client, "HOUR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a["arc_bytes"] != int64(72*gib) {
+		t.Errorf("ARC sample with unknown freshness should be used: %v", a)
+	}
+	if note, _ := a["arc_freshness_note"].(string); !strings.Contains(note, "could not be checked") {
+		t.Errorf("arc_freshness_note = %q", note)
 	}
 }
 

@@ -75,7 +75,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Trend detection (increasing/stable/decreasing)
   - Capacity status warnings (healthy/warning/critical at 70%/85% thresholds)
   - Growth projections when metrics are trending upward
-  - Memory: used = total - available; `capacity_status` uses memory used excluding the ZFS ARC when the latest ARC size is known and recent (`arc_bytes`, `used_excluding_arc_bytes`, `utilization_excluding_arc_pct`). current/average/peak/trend still include the ARC, and no memory projection is given in that case (`projection_note`), since only the latest ARC size is known
+  - Memory: used = total - available; `capacity_status` uses memory used excluding the ZFS ARC when the latest ARC size is known and recent (`arc_bytes`, `used_excluding_arc_bytes`, `utilization_excluding_arc_pct`). current/average/peak/trend still include the ARC, and no memory projection is given in that case (`projection_note`), since only the latest ARC size is known. "Recent" means at most 15 minutes older than the newest timestamp in the NAS's own reporting data (the memory graph's latest sample or the graph `end`), so clock skew between the NAS and the MCP host does not matter; if no such timestamp is available the ARC size is used and `arc_freshness_note` says its age could not be checked
   - Time ranges: HOUR, DAY, WEEK, MONTH, YEAR
   - Overall recommendations based on all metrics
 

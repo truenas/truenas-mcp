@@ -1958,7 +1958,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 					// the latest available sample, not the hourly average.
 					avgAvailable := calculateAverage(dataPoints)
 					label, suffix := "Memory utilization", " (may include ZFS ARC cache)"
-					if arcBytes, err := currentArcBytes(client); err == nil {
+					if arcBytes, _, err := currentArcBytes(client, nasReferenceTime(memData[0])); err == nil {
 						avgAvailable = dataPoints[len(dataPoints)-1] + arcBytes
 						label, suffix = "Memory utilization excluding ZFS ARC", ""
 					}
@@ -4610,8 +4610,11 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 	// latest ARC size is known, so it is compared with the latest available
 	// sample rather than an average over the range.
 	statusPct := current
-	arcBytes, arcErr := currentArcBytes(client)
+	arcBytes, arcFreshKnown, arcErr := currentArcBytes(client, nasReferenceTime(metricsData[0]))
 	if arcErr == nil {
+		if !arcFreshKnown {
+			analysis["arc_freshness_note"] = "The TrueNAS reporting data had no reference timestamp, so the age of the ZFS ARC sample could not be checked; it was used as is."
+		}
 		latestUsed := math.Max(0, totalMemory-availablePoints[len(availablePoints)-1])
 		usedExclArc := latestUsed - arcBytes
 		if usedExclArc < 0 {
@@ -4665,28 +4668,69 @@ func extractAvailableMemory(metric map[string]interface{}) ([]float64, error) {
 	return valid, nil
 }
 
-// arcMaxAge is how old the latest arcsize sample may be before it is
-// treated as unavailable rather than compared with current memory figures.
+// arcMaxAge is how old the latest arcsize sample may be, relative to the
+// NAS's own reference time, before it is treated as unavailable rather than
+// compared with current memory figures.
 const arcMaxAge = 15 * time.Minute
 
 // errArcStale reports that the latest arcsize sample is older than arcMaxAge.
 var errArcStale = errors.New("latest ZFS ARC sample is stale")
 
+// nasReferenceTime returns the newest timestamp in a reporting.get_data
+// graph, in the NAS's clock: the later of the graph's "end" and its newest
+// sample with a value. It returns 0 when neither is present.
+func nasReferenceTime(graph map[string]interface{}) float64 {
+	ref := 0.0
+	if graph == nil {
+		return ref
+	}
+	if end, ok := graph["end"].(float64); ok && end > ref && !math.IsInf(end, 0) {
+		ref = end
+	}
+	rows, _ := graph["data"].([]interface{})
+	for i := len(rows) - 1; i >= 0; i-- {
+		row, ok := rows[i].([]interface{})
+		if !ok || len(row) < 2 {
+			continue
+		}
+		if val, ok := row[1].(float64); !ok || math.IsNaN(val) || math.IsInf(val, 0) || val <= 0 {
+			continue // gap
+		}
+		if ts, ok := row[0].(float64); ok && ts > ref && !math.IsInf(ts, 0) {
+			ref = ts
+		}
+		break
+	}
+	return ref
+}
+
 // currentArcBytes returns the latest ZFS ARC size from the "arcsize"
-// reporting graph. A sample older than arcMaxAge yields errArcStale.
-func currentArcBytes(client *truenas.Client) (float64, error) {
+// reporting graph. Its age is judged only against timestamps from the NAS
+// itself, never this host's clock, so clock skew between the two does not
+// matter: the reference is the later of memRef (the newest timestamp of a
+// graph the caller fetched from the same NAS, 0 if none) and the arcsize
+// graph's "end". A sample more than arcMaxAge older than the
+// reference yields errArcStale. With no reference at all, freshness is
+// unknown: the sample is returned with freshKnown false.
+func currentArcBytes(client *truenas.Client, memRef float64) (bytes float64, freshKnown bool, err error) {
 	result, err := client.Call("reporting.get_data", []interface{}{
 		map[string]interface{}{"name": "arcsize", "identifier": nil},
 	}, map[string]interface{}{"unit": "HOUR"})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	var data []map[string]interface{}
 	if err := json.Unmarshal(result, &data); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if len(data) == 0 {
-		return 0, fmt.Errorf("no arcsize data")
+		return 0, false, fmt.Errorf("no arcsize data")
+	}
+	// Only the graph's "end" counts here: the ARC sample can't vouch for its
+	// own freshness.
+	ref := memRef
+	if end, ok := data[0]["end"].(float64); ok && end > ref && !math.IsInf(end, 0) {
+		ref = end
 	}
 	rows, _ := data[0]["data"].([]interface{})
 	for i := len(rows) - 1; i >= 0; i-- {
@@ -4698,18 +4742,22 @@ func currentArcBytes(client *truenas.Client) (float64, error) {
 		if !ok || math.IsNaN(val) || math.IsInf(val, 0) || val <= 0 {
 			continue // gap
 		}
-		if ts, ok := row[0].(float64); ok && time.Since(time.Unix(int64(ts), 0)) > arcMaxAge {
-			return 0, errArcStale
+		ts, ok := row[0].(float64)
+		if !ok || ts <= 0 || ref <= 0 {
+			return val, false, nil
 		}
-		return val, nil
+		if ref-ts > arcMaxAge.Seconds() {
+			return 0, false, errArcStale
+		}
+		return val, true, nil
 	}
-	return 0, fmt.Errorf("no arcsize data")
+	return 0, false, fmt.Errorf("no arcsize data")
 }
 
 // arcUnavailableNote explains why memory figures may include the ARC.
 func arcUnavailableNote(err error) string {
 	if errors.Is(err, errArcStale) {
-		return "Latest ZFS ARC sample is older than 15 minutes, so it was not subtracted; utilization may include the ZFS ARC cache, which is reclaimable."
+		return "Latest ZFS ARC sample is more than 15 minutes older than the newest TrueNAS reporting timestamp, so it was not subtracted; utilization may include the ZFS ARC cache, which is reclaimable."
 	}
 	return "ZFS ARC size unavailable; utilization may include the ZFS ARC cache, which is reclaimable."
 }
