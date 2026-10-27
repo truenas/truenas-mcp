@@ -612,3 +612,32 @@ func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
 		t.Fatalf("boot.environment.destroy calls = %v, want one for 25.04.1", calls)
 	}
 }
+
+// TestDeleteBootEnvironmentConfirmedRefusesProtected checks that a confirmed
+// delete_boot_environment still refuses the running, the next-boot and the
+// protected boot environment, and never sends boot.environment.destroy.
+func TestDeleteBootEnvironmentConfirmedRefusesProtected(t *testing.T) {
+	bootEnvs := []interface{}{
+		map[string]interface{}{"id": "running", "active": true, "activated": false, "keep": false},
+		map[string]interface{}{"id": "next-boot", "active": false, "activated": true, "keep": false},
+		map[string]interface{}{"id": "protected", "active": false, "activated": false, "keep": true},
+		map[string]interface{}{"id": "running-minimal", "active": true},
+	}
+	client, fake := newFakeClientWith(t, map[string]interface{}{"boot.environment.query": bootEnvs}, nil)
+	r := NewRegistry(client, nil)
+
+	for id, want := range map[string]string{
+		"running":       "currently running",
+		"next-boot":     "will boot on next restart",
+		"protected":     "keep flag is set",
+		"running-minimal": "currently running",
+	} {
+		_, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": id, "confirm": true})
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("confirmed delete of %q: err = %v, want an error containing %q", id, err, want)
+		}
+	}
+	if calls := fake.called("boot.environment.destroy"); len(calls) != 0 {
+		t.Fatalf("a refused delete sent boot.environment.destroy: %v", calls)
+	}
+}
