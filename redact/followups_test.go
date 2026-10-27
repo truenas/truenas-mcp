@@ -495,3 +495,84 @@ func TestTextQuotedSeparatorsNoOverRedaction(t *testing.T) {
 		}
 	}
 }
+
+// TestTextQuotedSeparatorsFollowUps pins the handling of escaped quotes,
+// line continuations, separators glued to a secret, redirections, bare
+// carriage returns and the '\” idiom.
+func TestTextQuotedSeparatorsFollowUps(t *testing.T) {
+	checkText(t, []struct{ in, want string }{
+		// Escaped quotes inside an outer double-quoted string, and in raw JSON text.
+		{`sh -c "mysql -e \"a;b\" -pfake-db-pw"`, `sh -c "mysql -e \"a;b\" -p` + Marker + `"`},
+		{`ssh h "curl -d \"a|b\" -u bob:fake-user-pw https://h/"`, `ssh h "curl -d \"a|b\" -u bob:` + Marker + ` https://h/"`},
+		{`{"cmd":"sh -c \"mysql -e \\\"a;b\\\" -pfake-db-pw\""}`, `{"cmd":"sh -c \"mysql -e \\\"a;b\\\" -p` + Marker + `"}`},
+		{`sh -c "mysql -e \"\" -e \"a\\\\\" -pfake-db-pw"`, `sh -c "mysql -e \"\" -e \"a\\\\\" -p` + Marker + `"`},
+		{`sh -c "mysql -e \"a;b -pfake-db-pw`, `sh -c "mysql -e \"a;b -p` + Marker},
+		{`sh -c "mysql -e \"a;b\" -p\"fake db pw\" db"`, `sh -c "mysql -e \"a;b\" -p` + Marker + ` db"`},
+		{"mysql -e \"a\" -pfake-db-pw\nmysql -e \\\"a;b -pfake-user-pw", "mysql -e \"a\" -p" + Marker + "\nmysql -e \\\"a;b -p" + Marker},
+		{"mysql -e \"a\" -pfake-db-pw\nmysql -e \\\"a;b\ngrep -px", "mysql -e \"a\" -p" + Marker + "\nmysql -e \\\"a;b\ngrep -px"},
+		// Backslash-newline continues the command.
+		{"mysql -u root \\\n  -pfake-db-pw db", "mysql -u root \\\n  -p" + Marker + " db"},
+		{"mysql -u root \\\r\n  -pfake-db-pw db", "mysql -u root \\\r\n  -p" + Marker + " db"},
+		{"mysql -u root \\\n-pfake-db-pw db", "mysql -u root \\\n-p" + Marker + " db"},
+		{"curl -d 'a;b' \\\n  --user bob:fake-user-pw \\\n  https://h/", "curl -d 'a;b' \\\n  --user bob:" + Marker + " \\\n  https://h/"},
+		{"smbclient //srv/share \\\n -U bob%fake-smb-pw", "smbclient //srv/share \\\n -U bob%" + Marker},
+		{"ipmitool -H h \\\n -P fake-user-pw power on", "ipmitool -H h \\\n -P " + Marker + " power on"},
+		{"sshpass -e \\\n -p fake-ssh-pw ssh h", "sshpass -e \\\n -p " + Marker + " ssh h"},
+		{"mysql -pfake-db-pw \\\n  db\nmysql -e x\ngrep -px", "mysql -p" + Marker + " \\\n  db\nmysql -e x\ngrep -px"},
+		{"mysql db \\\n\ngrep -px", "mysql db \\\n\ngrep -px"},
+		// A separator glued to the secret ends the value, and the next command is still matched.
+		{"mysql -pfake-db-pw;mysql -pfake-user-pw", "mysql -p" + Marker + ";mysql -p" + Marker},
+		{"mysql -pfake-db-pw|mysql -pfake-user-pw", "mysql -p" + Marker + "|mysql -p" + Marker},
+		{"mysql -pfake-db-pw&&mysql -pfake-user-pw", "mysql -p" + Marker + "&&mysql -p" + Marker},
+		{"mysql -pfake-db-pw;grep -px", "mysql -p" + Marker + ";grep -px"},
+		{"curl -u a:fake-user-pw;curl -u b:fake-db-pw", "curl -u a:" + Marker + ";curl -u b:" + Marker},
+		{"ipmitool -P fake-user-pw;ipmitool -P fake-db-pw", "ipmitool -P " + Marker + ";ipmitool -P " + Marker},
+		{"sshpass -p fake-ssh-pw;sshpass -p fake-user-pw ssh h", "sshpass -p " + Marker + ";sshpass -p " + Marker + " ssh h"},
+		{"smbclient -U a%fake-smb-pw;smbclient -U b%fake-db-pw", "smbclient -U a%" + Marker + ";smbclient -U b%" + Marker},
+		// Redirections do not end the command.
+		{"mysql -e x 2>&1 -pfake-db-pw", "mysql -e x 2>&1 -p" + Marker},
+		{"mysql -e x >&2 -pfake-db-pw", "mysql -e x >&2 -p" + Marker},
+		{"mysql -e x &>/dev/null -pfake-db-pw", "mysql -e x &>/dev/null -p" + Marker},
+		{"mysql -e x <&3 -pfake-db-pw", "mysql -e x <&3 -p" + Marker},
+		{"curl -s https://h/ 2>&1 -u bob:fake-user-pw", "curl -s https://h/ 2>&1 -u bob:" + Marker},
+		{"mysql -e x & mysql -pfake-db-pw", "mysql -e x & mysql -p" + Marker},
+		{"mysql -e x 2>&1 | grep -px", "mysql -e x 2>&1 | grep -px"},
+		{"mysql -e x 2>&1 && grep -px", "mysql -e x 2>&1 && grep -px"},
+		{"mysql -e x &\ngrep -px", "mysql -e x &\ngrep -px"},
+		// A bare carriage return ends a command and an unbalanced quote, like a newline.
+		{"mysql -e 'a|b\rmysql -pfake-db-pw", "mysql -e 'a|b\rmysql -p" + Marker},
+		{"mysql -e 'a|b\rgrep -px", "mysql -e 'a|b\rgrep -px"},
+		{"mysql -e \"a|b\rgrep -px", "mysql -e \"a|b\rgrep -px"},
+		{"mysql -e x\rgrep -px", "mysql -e x\rgrep -px"},
+		{"mysql -e x\r\ngrep -px", "mysql -e x\r\ngrep -px"},
+		{"mysql -pfake-db-pw\rgrep -px", "mysql -p" + Marker + "\rgrep -px"},
+		{"mysql -e 'a\\\rgrep -px", "mysql -e 'a\\\rgrep -px"},
+		// A password in the '\'' idiom of a single-quoted sh -c string.
+		{`sh -c 'mysql -p'\''fake db pw'\'' db'`, `sh -c 'mysql -p'\''` + Marker + `'\'' db'`},
+		{`sh -c 'mysql -e '\''a;b'\'' -p'\''fake db pw'\'' db'`, `sh -c 'mysql -e '\''a;b'\'' -p'\''` + Marker + `'\'' db'`},
+		{`sh -c 'curl -u '\''bob:fake user pw'\'' https://h/'`, `sh -c 'curl -u '\''bob:` + Marker + `'\'' https://h/'`},
+		{`sh -c 'mysql -p'\''fake db pw db'`, `sh -c 'mysql -p'` + Marker + `'`},
+	})
+}
+
+// TestTextQuotedSeparatorsFollowUpsNoOverRedaction: negatives for the
+// escaped-quote, continuation, separator and redirection handling.
+func TestTextQuotedSeparatorsFollowUpsNoOverRedaction(t *testing.T) {
+	for _, in := range []string{
+		"mysql -e x \\\n  db\ngrep -px",
+		"mysql -e x \\\r\n  db\r\ngrep -px",
+		"mysql db;grep -px",
+		"mysql db;mysql -p",
+		"mysql db&&mysql -p db",
+		"mysql db 2>&1 | grep -px",
+		"mysql db >&2; grep -px",
+		"mysql db &> /dev/null; grep -px",
+		`sh -c 'mysql -e '\''a;b'\'' db' ; grep -px`,
+		"mysql db\rgrep -px",
+		"sshpass -e ssh h;sshpass -e ssh -p 22 h",
+	} {
+		if got := Text(in); got != in {
+			t.Errorf("Text(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}

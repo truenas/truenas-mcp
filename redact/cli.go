@@ -95,7 +95,8 @@ func looksLikeFlag(arg string) bool {
 func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 
 // secretArg returns arg with its secret redacted: all of it, or the part
-// after p.sep. Quotes around the value are kept.
+// after p.sep. Quotes around the value are kept, as is the '\” idiom
+// around it (see quoteIdiom).
 func secretArg(arg string, sep byte, meta metaKind) string {
 	if arg == "" {
 		return arg
@@ -104,19 +105,28 @@ func secretArg(arg string, sep byte, meta metaKind) string {
 	if arg[0] == '"' || arg[0] == '\'' {
 		q = arg[:1]
 	}
+	idiom := strings.HasPrefix(arg, quoteIdiom)
 	if sep != 0 {
 		i := strings.IndexByte(arg, sep)
 		if i < 0 {
 			return arg // a user name alone
 		}
 		rest, closing := arg[i+1:], ""
-		if q != "" && strings.HasSuffix(rest, q) {
+		if idiom && strings.HasSuffix(rest, quoteIdiom) {
+			rest, closing = rest[:len(rest)-len(quoteIdiom)], quoteIdiom
+		} else if q != "" && strings.HasSuffix(rest, q) {
 			rest, closing = rest[:len(rest)-1], q
 		}
 		if !isRedactable(rest) {
 			return arg
 		}
 		return arg[:i+1] + Marker + closing
+	}
+	if idiom && len(arg) >= 2*len(quoteIdiom) && strings.HasSuffix(arg, quoteIdiom) {
+		if inner := arg[len(quoteIdiom) : len(arg)-len(quoteIdiom)]; !isRedactable(inner) || meta.visible(inner) {
+			return arg
+		}
+		return quoteIdiom + Marker + quoteIdiom
 	}
 	if q != "" && len(arg) >= 2 && strings.HasSuffix(arg, q) {
 		if inner := arg[1 : len(arg)-1]; !isRedactable(inner) || meta.visible(inner) {
@@ -219,20 +229,20 @@ var (
 	textPrograms = []textProgram{
 		// sshpass -p S3CR3T / -pS3CR3T, after any of its other options. Later
 		// options belong to the command sshpass runs.
-		{names: []string{"sshpass"}, re: regexp.MustCompile(`\bsshpass(?:[ \t]+(?:-[ev]|-[fdP][ \t]*(?:"(?:[^"\\\n]|\\[^\n])*"|'[^'\n]*'|[^\s"']+)))*[ \t]+-p[ \t]*`)},
+		{names: []string{"sshpass"}, re: regexp.MustCompile(`\bsshpass(?:(?:[ \t]|\\\r?\n)+(?:-[ev]|-[fdP][ \t]*(?:"(?:[^"\\\n]|\\[^\n])*"|'[^'\n]*'|[^\s"']+)))*(?:[ \t]|\\\r?\n)+-p[ \t]*`)},
 		// The attached password of the MySQL and MariaDB clients
 		// (mysql -pS3CR3T db). A separate "-p" prompts for the password and
 		// is left alone, as is "-p" for other programs, where it often means
 		// something else (port, parents).
 		programOption([]string{"mysql", "mariadb"},
-			`mysql(?:dump|admin|import|check|show)?|mariadb(?:-dump|-admin)?`, `[ \t]-p[^\s]`, 1, 0),
+			`mysql(?:dump|admin|import|check|show)?|mariadb(?:-dump|-admin)?`, `[ \t\n]-p[^\s]`, 1, 0),
 		// smbclient -U user%S3CR3T (and the other Samba clients).
 		programOption([]string{"smb", "rpcclient"},
-			`smbclient|rpcclient|smbcacls|smbcquotas|smbget|smbtree`, `[ \t](?:-U[ \t]*|--user(?:=|[ \t]+))`, 0, '%'),
+			`smbclient|rpcclient|smbcacls|smbcquotas|smbget|smbtree`, `[ \t\n](?:-U[ \t]*|--user(?:=|[ \t]+))`, 0, '%'),
 		// curl -u user:S3CR3T, --user, and the proxy forms -U/--proxy-user.
-		programOption([]string{"curl"}, `curl`, `[ \t](?:-[uU][ \t]*|--(?:proxy-)?user(?:=|[ \t]+))`, 0, ':'),
+		programOption([]string{"curl"}, `curl`, `[ \t\n](?:-[uU][ \t]*|--(?:proxy-)?user(?:=|[ \t]+))`, 0, ':'),
 		// ipmitool -P S3CR3T.
-		programOption([]string{"ipmitool"}, `ipmitool`, `[ \t]-P[ \t]*`, 0, 0),
+		programOption([]string{"ipmitool"}, `ipmitool`, `[ \t\n]-P[ \t]*`, 0, 0),
 	}
 )
 
@@ -257,13 +267,13 @@ func programOption(names []string, progs, opt string, back int, sep byte) textPr
 // quotedEnd returns the end of the quoted string starting at s[i], a single
 // or double quote: just after its closing quote, with backslash escapes
 // inside double quotes. A string that is not closed runs to the end of the
-// line, so an unbalanced quote never hides the rest of the line from the
-// redaction.
+// line (a '\n' or '\r'), so an unbalanced quote never hides the rest of the
+// line from the redaction.
 func quotedEnd(s string, i int) int {
 	q := s[i]
 	k := i + 1
-	for k < len(s) && s[k] != q && s[k] != '\n' && s[k] != '\r' {
-		if q == '"' && s[k] == '\\' && k+1 < len(s) && s[k+1] != '\n' {
+	for k < len(s) && s[k] != q && !isLineEnd(s[k]) {
+		if q == '"' && s[k] == '\\' && k+1 < len(s) && !isLineEnd(s[k+1]) {
 			k++
 		}
 		k++
@@ -274,21 +284,72 @@ func quotedEnd(s string, i int) int {
 	return k
 }
 
-// shellWordEnd returns the end of the shell-style word starting at s[i]:
-// a quoted string (see quotedEnd), or a run of characters up to white space
-// or a quote, with backslash escapes.
-func shellWordEnd(s string, i int) int {
-	if i < len(s) && (s[i] == '"' || s[i] == '\'') {
-		return quotedEnd(s, i)
+func isLineEnd(c byte) bool { return c == '\n' || c == '\r' }
+
+// escapedQuoteEnd returns the end of the string that starts at the escaped
+// quote \q at s[i:], just after the next \q. It is how a quoted string looks
+// inside another double-quoted string (sh -c "mysql -e \"a;b\" -pX") or
+// inside JSON text. Backslash pairs are skipped, and a string that is not
+// closed runs to the end of the line.
+func escapedQuoteEnd(s string, i int, q byte) int {
+	k := i + 2
+	for k < len(s) && !isLineEnd(s[k]) {
+		if s[k] == '\\' && k+1 < len(s) && !isLineEnd(s[k+1]) {
+			if s[k+1] == q {
+				return k + 2
+			}
+			k++
+		}
+		k++
 	}
+	return k
+}
+
+// lineContinuation returns the length of the backslash-newline at s[i:]
+// (a line continuation), or 0.
+func lineContinuation(s string, i int) int {
+	if i+1 < len(s) && s[i] == '\\' {
+		if s[i+1] == '\n' {
+			return 2
+		}
+		if s[i+1] == '\r' && i+2 < len(s) && s[i+2] == '\n' {
+			return 3
+		}
+	}
+	return 0
+}
+
+// separatorAt reports whether the unquoted s[i] ends a command: '|', ';'
+// and '&', except the '&' of a redirection (2>&1, >&2, <&3, &>file).
+func separatorAt(s string, i int) bool {
+	switch s[i] {
+	case '|', ';':
+		return true
+	case '&':
+		return !(i > 0 && (s[i-1] == '>' || s[i-1] == '<') || i+1 < len(s) && s[i+1] == '>')
+	}
+	return false
+}
+
+// wordRunEnd returns the end of the run of unquoted characters at s[i]: up
+// to white space, a quote, or a line continuation, with backslash escapes,
+// and also up to an unquoted command separator if stopAtSep.
+func wordRunEnd(s string, i int, stopAtSep bool) int {
 	j := i
 	for j < len(s) {
 		switch s[j] {
 		case ' ', '\t', '\n', '\r', '"', '\'':
 			return j
 		case '\\':
-			if j+1 < len(s) && s[j+1] != '\n' {
+			if lineContinuation(s, j) > 0 {
+				return j
+			}
+			if j+1 < len(s) && !isLineEnd(s[j+1]) {
 				j++
+			}
+		default:
+			if stopAtSep && separatorAt(s, j) {
+				return j
 			}
 		}
 		j++
@@ -296,21 +357,72 @@ func shellWordEnd(s string, i int) int {
 	return j
 }
 
+// shellWordEnd returns the end of the shell-style word starting at s[i]:
+// a quoted string (see quotedEnd), or a run of characters up to white space
+// or a quote, with backslash escapes.
+func shellWordEnd(s string, i int) int {
+	if i < len(s) && (s[i] == '"' || s[i] == '\'') {
+		return quotedEnd(s, i)
+	}
+	return wordRunEnd(s, i, false)
+}
+
+// quoteIdiom is how a single quote is written inside a single-quoted
+// string: the string is closed, a quote is added and the string is opened
+// again, as in sh -c 'mysql -p'\”S 3CR3T'\” db'.
+const quoteIdiom = `'\''`
+
+// programWordEnd returns the end of the value of a program's password
+// option at s[i]. It is like shellWordEnd, except that an unquoted value
+// ends at an unquoted command separator (mysql -pA;mysql -pB), and that a
+// value that starts with a quote written inside another quoted string
+// ('\”S 3CR3T'\” or \"S 3CR3T\") runs to the matching quote.
+func programWordEnd(s string, i int) int {
+	switch {
+	case strings.HasPrefix(s[i:], quoteIdiom):
+		k := i + len(quoteIdiom)
+		for k < len(s) && !isLineEnd(s[k]) {
+			if strings.HasPrefix(s[k:], quoteIdiom) {
+				return k + len(quoteIdiom)
+			}
+			k++
+		}
+		return k
+	case strings.HasPrefix(s[i:], `\"`):
+		return escapedQuoteEnd(s, i, '"')
+	case i < len(s) && (s[i] == '"' || s[i] == '\''):
+		return quotedEnd(s, i)
+	}
+	return wordRunEnd(s, i, true)
+}
+
 // commandEnd returns the end of the command that continues at s[i]: the
-// first '|', ';', '&' or newline that is not inside a single- or
-// double-quoted string and not escaped by a backslash. An unbalanced quote
-// runs to the end of the line, so the rest of that line belongs to the
-// command. It reads each byte once.
+// first '|', ';', '&' (not in a redirection) or line end that is not inside
+// a quoted string and not escaped by a backslash. A backslash-newline
+// continues the command on the next line. An unbalanced quote runs to the
+// end of the line, so the rest of that line belongs to the command. A
+// quote escaped by a backslash starts a string that runs to the next
+// escaped quote, as in sh -c "mysql -e \"a;b\" -pX", unless it follows a
+// closing quote of the same kind ('\”). It reads each byte once.
 func commandEnd(s string, i int) int {
 	for i < len(s) {
-		switch s[i] {
-		case '\n', '|', ';', '&':
+		c := s[i]
+		switch {
+		case isLineEnd(c) || separatorAt(s, i):
 			return i
-		case '"', '\'':
+		case c == '"' || c == '\'':
 			i = quotedEnd(s, i)
 			continue
-		case '\\':
-			if i+1 < len(s) && s[i+1] != '\n' {
+		case c == '\\':
+			if n := lineContinuation(s, i); n > 0 {
+				i += n
+				continue
+			}
+			if i+1 < len(s) && !isLineEnd(s[i+1]) {
+				if q := s[i+1]; (q == '"' || q == '\'') && (i == 0 || s[i-1] != q) {
+					i = escapedQuoteEnd(s, i, q)
+					continue
+				}
 				i++
 			}
 		}
@@ -381,7 +493,7 @@ func redactProgramOption(s string, p textProgram) string {
 	var b strings.Builder
 	pos, written := 0, 0
 	redactAt := func(vs int) int {
-		end := shellWordEnd(s, vs)
+		end := programWordEnd(s, vs)
 		if w := s[vs:end]; w != "" {
 			if r := secretArg(w, p.sep, metaNone); r != w {
 				b.WriteString(s[written:vs])
