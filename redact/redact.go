@@ -5,8 +5,9 @@
 // password, DB_PASS, bindpw, token, private_key or a key named "key") with
 // value-based backstops for free text: PEM private key blocks, quoted and
 // unquoted key/value pairs, NAME=VALUE environment entries, Bearer tokens,
-// passwords embedded in URLs, command-line options and YAML. Redacted values are replaced with Marker; the
-// key is kept so the model can still see that the field exists.
+// passwords embedded in URLs, command-line options and YAML. Redacted values
+// are replaced with Marker; the key is kept so the model can still see that
+// the field exists.
 package redact
 
 import (
@@ -76,15 +77,41 @@ var typeExemptBlockers = map[string]bool{
 	"pass": true, "pw": true, "pwd": true, "pin": true, "otp": true,
 }
 
+// metaKind says which values a metadata key (one that describes a secret
+// rather than holds it, such as token_ttl) may show.
+type metaKind uint8
+
+const (
+	metaNone   metaKind = iota // not a metadata key
+	metaScalar                 // booleans, numbers, null, dates and durations
+	metaIdent                  // also identifiers (algorithm names: HS256)
+)
+
+// visible reports whether v, a value written as text (unquoted), may be
+// shown under a key of this kind.
+func (m metaKind) visible(v string) bool {
+	switch m {
+	case metaNone:
+		return false
+	case metaIdent:
+		if isIdentText(v) {
+			return true
+		}
+	}
+	return isScalarText(v)
+}
+
 // metadataSegments, as the final word of a multi-word key, describe a secret
 // rather than hold it (pass_count, session_timeout, password_length,
-// token_ttl), so the key is not sensitive.
-var metadataSegments = map[string]bool{
-	"count": true, "timeout": true, "length": true, "len": true, "ttl": true,
-	"lifetime": true, "expiry": true, "expires": true, "expiration": true, "age": true,
-	"interval": true, "size": true, "min": true, "max": true, "limit": true,
-	"retries": true, "attempts": true, "enabled": true, "disabled": true,
-	"required": true, "set": true, "configured": true, "changed": true, "algorithm": true,
+// token_ttl, jwt_secret_algorithm), so the key is not sensitive.
+var metadataSegments = map[string]metaKind{
+	"count": metaScalar, "timeout": metaScalar, "length": metaScalar, "len": metaScalar,
+	"ttl": metaScalar, "lifetime": metaScalar, "expiry": metaScalar, "expires": metaScalar,
+	"expiration": metaScalar, "age": metaScalar, "interval": metaScalar, "size": metaScalar,
+	"min": metaScalar, "max": metaScalar, "limit": metaScalar, "retries": metaScalar,
+	"attempts": metaScalar, "enabled": metaScalar, "disabled": metaScalar,
+	"required": metaScalar, "set": metaScalar, "configured": metaScalar, "changed": metaScalar,
+	"algorithm": metaIdent, "algo": metaIdent, "alg": metaIdent,
 }
 
 func normalize(key string) string {
@@ -128,37 +155,52 @@ func segments(key string) []string {
 	return out
 }
 
-// privateSegments, as the final word of a multi-word key, name private key
-// material (wg_private, ssh_priv).
+// privateSegments, as the final word of a key whose previous word is one of
+// privateKeyContexts, name private key material (wg_private, ssh_priv).
+// Elsewhere "private" is a flag or a network name (is_private,
+// network_private, dhcp_private) and is not sensitive.
 var privateSegments = map[string]bool{"private": true, "priv": true}
+
+var privateKeyContexts = map[string]bool{
+	"wg": true, "wireguard": true, "ssh": true, "tls": true, "ssl": true, "rsa": true,
+	"dsa": true, "ecdsa": true, "ec": true, "ed25519": true, "gpg": true, "pgp": true,
+	"x509": true, "cert": true, "certificate": true, "key": true, "host": true,
+}
 
 // IsSensitiveKey reports whether values under key must be redacted. Matching
 // is case-insensitive and ignores '_', '-', '.', spaces and camelCase.
 // Public key fields and "<kind>_type" enum fields (credential_type,
 // token_type) are not secret. Keys that describe a secret rather than hold
 // it (token_ttl, password_set) are not sensitive here; when redacting a
-// value, such keys still hide string, object and array values and only
-// show booleans, numbers and null (see classifyKey).
+// value, such keys still hide objects, arrays and most strings, and only
+// show booleans, numbers, null, dates and durations (and identifiers for
+// *_algorithm; see classifyKey).
 func IsSensitiveKey(key string) bool {
 	sensitive, metadata := classifyKey(key)
-	return sensitive && !metadata
+	return sensitive && metadata == metaNone
 }
 
 // classifyKey reports whether key names a secret, ignoring metadata words,
-// and whether its final word is a metadata word (token_ttl, password_set,
-// secret_expires), in which case a boolean, numeric or null value is
-// visible.
-func classifyKey(key string) (sensitive, metadata bool) {
+// and, for a sensitive key, whether its final word is a metadata word
+// (token_ttl, password_set, secret_expires, jwt_secret_algorithm) and so
+// which values stay visible.
+func classifyKey(key string) (sensitive bool, metadata metaKind) {
 	k := normalize(key)
 	if k == "" || publicKeyNames[k] {
-		return false, false
+		return false, metaNone
 	}
 	segs := segments(key)
 	n := len(segs)
 	if n >= 2 && segs[n-1] == "type" && !typeExemptBlockers[segs[n-2]] {
-		return false, false
+		return false, metaNone
 	}
-	return sensitiveName(k, segs), n >= 2 && metadataSegments[segs[n-1]]
+	if !sensitiveName(k, segs) {
+		return false, metaNone
+	}
+	if n >= 2 {
+		return true, metadataSegments[segs[n-1]]
+	}
+	return true, metaNone
 }
 
 // trimDigits removes trailing digits from a key word, so that numbered
@@ -176,7 +218,7 @@ func sensitiveName(k string, segs []string) bool {
 			return true
 		}
 	}
-	if n := len(segs); n > 1 && (segs[n-1] == "key" || privateSegments[segs[n-1]]) {
+	if n := len(segs); n > 1 && (segs[n-1] == "key" || (privateSegments[segs[n-1]] && privateKeyContexts[segs[n-2]])) {
 		return true // encryption_key, privateKey, "dataset key", wg_private
 	}
 	for _, f := range sensitiveKeyFragments {
@@ -223,7 +265,8 @@ var (
 	// cannot contain whitespace, quotes, '/', '?' or '#', so it never runs
 	// into the path, query or a following URL. The user name cannot contain
 	// ':' or '@', so forms without a password (ssh://root@host) never match.
-	urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://[^\s:/@'"]*:)([^\s/?#'"]+)@`)
+	// The "//" may be JSON-escaped ("postgres:\/\/u:p@host").
+	urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*:\\?/\\?/[^\s:/@'"\\]*:)([^\s/?#'"]+)@`)
 	// envPair matches a whole string of the form NAME=VALUE (compose
 	// environment lists, env files). It is limited to a single line and
 	// to unquoted values; quoted and multi-line text is left to barePair.
@@ -269,42 +312,45 @@ func Text(s string) string {
 	if m := envPair.FindStringSubmatch(s); m != nil {
 		name := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[1]), "="))
 		sens, meta := classifyKey(name)
-		if sens && isRedactable(m[2]) && !(meta && scalarAt(m[2], 0)) {
+		if sens && isRedactable(m[2]) && !scalarAt(m[2], 0, meta) {
 			return m[1] + Marker
 		}
 	}
 	s = authHeader.ReplaceAllString(s, "${1}${2} "+Marker)
 	s = bearerToken.ReplaceAllString(s, "${1}"+Marker)
+	// Before the quoted pairs, which would redact a sensitive-looking name
+	// ('key': 'DB_PASS') that these passes need to see.
+	s = redactOptions(s)
+	s = redactYAML(s)
+	s = redactFlowPairs(s)
 	s = quotedPair.ReplaceAllStringFunc(s, func(m string) string {
 		sub := quotedPair.FindStringSubmatch(m)
 		key := quotedKey.FindStringSubmatch(sub[1])
 		if key == nil {
 			return m
 		}
-		if sens, _ := classifyKey(key[1]); !sens { // a quoted value is a string
+		sens, meta := classifyKey(key[1])
+		if !sens {
 			return m
 		}
 		if strings.HasPrefix(m[len(sub[1]):], `"`) {
-			if !isRedactable(sub[2]) {
+			if !isRedactable(sub[2]) || meta.visible(sub[2]) {
 				return m
 			}
 			return sub[1] + `"` + Marker + `"`
 		}
-		if !isRedactable(sub[3]) {
+		if !isRedactable(sub[3]) || meta.visible(sub[3]) {
 			return m
 		}
 		return sub[1] + `'` + Marker + `'`
 	})
 	s = escapedPair.ReplaceAllStringFunc(s, func(m string) string {
 		sub := escapedPair.FindStringSubmatch(m)
-		if sens, _ := classifyKey(sub[2]); !sens || !isRedactable(sub[3]) {
+		if sens, meta := classifyKey(sub[2]); !sens || !isRedactable(sub[3]) || meta.visible(sub[3]) {
 			return m
 		}
 		return sub[1] + `\"` + Marker + `\"`
 	})
-	s = redactOptions(s)
-	s = redactYAML(s)
-	s = redactFlowPairs(s)
 	return redactBarePairs(s)
 }
 
@@ -354,7 +400,10 @@ func redactBarePairs(s string) string {
 		b.WriteString(s[pos:valStart])
 		pos = valStart
 		sens, meta := classifyKey(key)
-		if !sens || strings.HasSuffix(s[:keyStart], "://") || (meta && scalarAt(s, valStart)) {
+		if strings.HasSuffix(s[:keyStart], "--") {
+			sens, meta = optionSecret(key) // --password-file=/path
+		}
+		if !sens || strings.HasSuffix(s[:keyStart], "://") || scalarAt(s, valStart, meta) {
 			continue
 		}
 		if lineEnd < valStart {
@@ -384,18 +433,34 @@ func redactBarePairs(s string) string {
 	return b.String()
 }
 
-// scalarAt reports whether the unquoted value starting at s[i] is a
-// boolean, number, null or empty (token_ttl=3600), up to the next
-// delimiter. It looks at no more than 33 bytes.
-func scalarAt(s string, i int) bool {
-	end := i
-	for end < len(s) && end-i <= 32 && !strings.ContainsRune(" \t\r\n,;)}]&", rune(s[end])) {
-		end++
-	}
-	if end-i > 32 {
+// scalarAt reports whether the value starting at s[i], up to the next
+// delimiter (or the closing quote of a quoted value), may be shown under a
+// metadata key of kind meta (token_ttl=3600, password_expires: 2026-12-01,
+// token_lifetime: "1h"). It looks at no more than maxScalarText+2 bytes.
+func scalarAt(s string, i int, meta metaKind) bool {
+	if meta == metaNone {
 		return false
 	}
-	return isScalarText(s[i:end])
+	if i < len(s) && (s[i] == '"' || s[i] == '\'') {
+		q := s[i]
+		for end := i + 1; end < len(s) && end-i <= maxScalarText+1; end++ {
+			switch s[end] {
+			case q:
+				return meta.visible(s[i+1 : end])
+			case '\\', '\n', '\r':
+				return false
+			}
+		}
+		return false
+	}
+	end := i
+	for end < len(s) && end-i <= maxScalarText && !strings.ContainsRune(" \t\r\n,;)}]&\"'", rune(s[end])) {
+		end++
+	}
+	if end-i > maxScalarText {
+		return false
+	}
+	return meta.visible(s[i:end])
 }
 
 // closingQuote returns the index of the quote that closes the value opening
@@ -470,16 +535,17 @@ func Value(v interface{}) interface{} {
 
 // ctx describes where a value sits.
 type ctx struct {
-	sensitive   bool // under a sensitive key
-	metadata    bool // the sensitive key describes a secret (token_ttl): scalars stay visible
-	keepNumbers bool // numbers under this key are IDs (see keepsNumbers)
-	kerberos    bool // inside a keytab/kerberos object
+	sensitive   bool     // under a sensitive key
+	metadata    metaKind // the sensitive key describes a secret (token_ttl): scalars stay visible
+	keepNumbers bool     // numbers under this key are IDs (see keepsNumbers)
+	kerberos    bool     // inside a keytab/kerberos object
 }
 
 // walk redacts v and reports whether anything changed.
 //
-// Under a sensitive key, a non-empty string, a number (unless it is an ID
-// or the key is a metadata key such as token_ttl) or a non-empty
+// Under a sensitive key, a non-empty string (unless the key is a metadata
+// key such as token_ttl and the string is a date, duration or number), a
+// number (unless it is an ID or the key is a metadata key) or a non-empty
 // object/array is replaced with Marker wholesale. Booleans, null and empty
 // strings stay visible (password_disabled, unset fields). An object that
 // refers to a stored credential (it has an "id" or "name") is not replaced
@@ -492,7 +558,7 @@ func walk(v interface{}, c ctx) (interface{}, bool) {
 		return v, false
 	case map[string]interface{}:
 		if c.sensitive && len(t) > 0 {
-			if !c.metadata && isReference(t) {
+			if c.metadata == metaNone && isReference(t) {
 				return walkReference(t, c)
 			}
 			return Marker, true
@@ -505,7 +571,7 @@ func walk(v interface{}, c ctx) (interface{}, bool) {
 		return walkArray(t, c)
 	case string:
 		if c.sensitive {
-			if isRedactable(t) {
+			if isRedactable(t) && !c.metadata.visible(t) {
 				return Marker, true
 			}
 			return t, false
@@ -514,7 +580,7 @@ func walk(v interface{}, c ctx) (interface{}, bool) {
 		return r, r != t
 	case json.Number, float64, float32, int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64:
-		if c.sensitive && !c.keepNumbers && !c.metadata {
+		if c.sensitive && !c.keepNumbers && c.metadata == metaNone {
 			return Marker, true
 		}
 		return v, false
@@ -563,7 +629,7 @@ func walkMap(t map[string]interface{}, c ctx) (interface{}, bool) {
 			child.sensitive = sens || (jobSecret && k == "result") ||
 				(c.kerberos && nk == "file") ||
 				(userObj && nk == "hash")
-			child.metadata = sens && meta
+			child.metadata = meta
 			child.keepNumbers = keepsNumbers(k)
 		}
 		nv, ch := walk(val, child)
@@ -597,29 +663,47 @@ func redactString(s string) string {
 // "value": "..."}. It returns the field holding the name (empty if m is not
 // such a pair), whether that name is sensitive and whether it is a metadata
 // name (REDIS_PASSWORD_SET), whose boolean or numeric value stays visible.
-func nameValuePair(m map[string]interface{}) (field string, sensitive, metadata bool) {
+func nameValuePair(m map[string]interface{}) (field string, sensitive bool, metadata metaKind) {
 	if _, ok := m["value"]; !ok {
-		return "", false, false
+		return "", false, metaNone
 	}
 	for _, f := range []string{"name", "key", "variable"} {
 		if n, ok := m[f].(string); ok {
 			sens, meta := classifyKey(n)
-			return f, sens, sens && meta
+			return f, sens, meta
 		}
 	}
-	return "", false, false
+	return "", false, metaNone
 }
 
-// isReferenceField reports whether key identifies a stored credential
-// rather than holding its secret: id, name, type and <kind>_type.
-func isReferenceField(key string) bool {
-	switch normalize(key) {
-	case "id", "name", "type":
-		return true
+// referenceTypeFields are the normalised names of the fields that give the
+// kind of a stored credential.
+var referenceTypeFields = map[string]bool{
+	"type": true, "providertype": true, "credentialtype": true, "credentialstype": true,
+	"authtype": true, "authenticationtype": true,
+}
+
+// enumValue matches a short identifier-like value (S3, SSH_CREDENTIALS,
+// oauth2), as held by a type field.
+var enumValue = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+
+// isReferenceField reports whether key, holding val, identifies a stored
+// credential rather than holding its secret: a scalar id or name, or a
+// known type field (type, provider_type, credential_type, auth_type) whose
+// value looks like an enum. Other *_type fields (key_type) are redacted.
+func isReferenceField(key string, val interface{}) bool {
+	if !isScalar(val) {
+		return false
 	}
-	segs := segments(key)
-	n := len(segs)
-	return n >= 2 && segs[n-1] == "type" && !typeExemptBlockers[segs[n-2]]
+	k := normalize(key)
+	switch {
+	case k == "id" || k == "name":
+		return true
+	case referenceTypeFields[k]:
+		s, isString := val.(string)
+		return !isString || enumValue.MatchString(s)
+	}
+	return false
 }
 
 // isReference reports whether m, found under a sensitive key, refers to a
@@ -644,7 +728,7 @@ func isScalar(v interface{}) bool {
 }
 
 // walkReference redacts an object under a sensitive key that refers to a
-// stored credential. Scalar reference fields (id, name, type, *_type) stay
+// stored credential. Reference fields (see isReferenceField) stay
 // visible, nested objects that have a reference field are handled the same
 // way (provider: {"type": "S3", ...}), and every other field is redacted
 // as if it were directly under the sensitive key.
@@ -653,7 +737,7 @@ func walkReference(t map[string]interface{}, c ctx) (interface{}, bool) {
 	for k, val := range t {
 		var nv interface{}
 		switch m, isMap := val.(map[string]interface{}); {
-		case isReferenceField(k) && isScalar(val):
+		case isReferenceField(k, val):
 			nv, _ = walk(val, ctx{kerberos: c.kerberos})
 		case isMap && hasReferenceField(m):
 			nv, _ = walkReference(m, c)
@@ -667,7 +751,7 @@ func walkReference(t map[string]interface{}, c ctx) (interface{}, bool) {
 
 func hasReferenceField(m map[string]interface{}) bool {
 	for k, v := range m {
-		if isReferenceField(k) && isScalar(v) {
+		if isReferenceField(k, v) {
 			return true
 		}
 	}
@@ -763,92 +847,30 @@ func ToolOutput(s string) string {
 	return string(enc)
 }
 
-// attachedPasswordPrograms take a password attached to the short -p option
-// ("-pSECRET"); a separate "-p" alone prompts for it.
-var attachedPasswordPrograms = map[string]bool{
-	"mysql": true, "mysqldump": true, "mysqladmin": true, "mysqlimport": true,
-	"mysqlcheck": true, "mysqlshow": true, "mariadb": true, "mariadb-dump": true,
-	"mariadb-admin": true,
-}
+// maxScalarText is the length of the longest value isScalarText accepts.
+const maxScalarText = 40
 
-// sshpassValueOptions are the sshpass options that take a value.
-var sshpassValueOptions = map[string]bool{"-p": true, "-f": true, "-d": true, "-P": true}
-
-// walkArray redacts the elements of a non-sensitive array. An array of
-// strings may be a command line (argv): the value after a sensitive long
-// option ("--password", "S3CR3T") is redacted, as are the password options
-// of sshpass ("-p", "S3CR3T" or "-pS3CR3T", before the command it runs) and
-// the MySQL clients ("-pS3CR3T").
-func walkArray(t []interface{}, c ctx) (interface{}, bool) {
-	out := make([]interface{}, len(t))
-	changed := false
-	prog := ""         // sshpass or a MySQL client seen earlier in the array
-	sshpassValue := "" // the sshpass option whose value is the current element
-	for i, val := range t {
-		nv, ch := walk(val, ctx{kerberos: c.kerberos})
-		if s, ok := val.(string); ok {
-			red := ""
-			switch {
-			case prog == "sshpass" && sshpassValue != "":
-				if sshpassValue == "-p" && isRedactable(s) {
-					red = Marker
-				}
-				sshpassValue = ""
-			case prog == "sshpass" && sshpassValueOptions[s]:
-				sshpassValue = s
-			case prog == "sshpass" && strings.HasPrefix(s, "-p") && len(s) > 2:
-				red = "-p" + Marker
-			case prog == "sshpass" && !strings.HasPrefix(s, "-"):
-				prog = "" // the command sshpass runs
-			case attachedPasswordPrograms[prog] && strings.HasPrefix(s, "-p") && len(s) > 2:
-				red = "-p" + Marker
-			case i > 0 && sensitiveOption(t[i-1], s):
-				red = Marker
-			}
-			if red != "" && isRedactable(strings.TrimPrefix(s, "-p")) {
-				nv, ch = red, true
-			}
-			if p := program(s); p != "" {
-				prog, sshpassValue = p, ""
-			}
-		}
-		out[i] = nv
-		changed = changed || ch
-	}
-	return out, changed
-}
-
-// sensitiveOption reports whether arg, the argv element after prev, is the
-// value of a sensitive long option ("--password", "--s3-secret-access-key").
-func sensitiveOption(prev interface{}, arg string) bool {
-	p, ok := prev.(string)
-	if !ok || !isRedactable(arg) || strings.HasPrefix(arg, "-") ||
-		!strings.HasPrefix(p, "--") || strings.Contains(p, "=") {
-		return false
-	}
-	sens, meta := classifyKey(p[2:])
-	return sens && !(meta && isScalarText(arg))
-}
-
-// program returns the base name of arg when it is sshpass or a program
-// whose short -p option carries an attached password.
-func program(arg string) string {
-	base := arg[strings.LastIndexByte(arg, '/')+1:]
-	if base == "sshpass" || attachedPasswordPrograms[base] {
-		return base
-	}
-	return ""
-}
+var (
+	// isoDate matches an ISO 8601 / RFC 3339 date or timestamp.
+	isoDate = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,9})?)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)?$`)
+	// duration matches a Go-style or simple duration (1h, 1h30m, 500ms,
+	// 7d, 2w) or an ISO 8601 one (PT1H, P30D).
+	duration = regexp.MustCompile(`^(?:(?:[0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h|d|w))+|P(?:[0-9]+[YMWD])*(?:T(?:[0-9]+(?:\.[0-9]+)?[HMS])+)?)$`)
+)
 
 // isScalarText reports whether a value written as text is a boolean, a
-// number, null or empty, which a metadata key (token_ttl) may show.
+// number, null, empty, a date or a duration, which a metadata key
+// (token_ttl, password_expires) may show.
 func isScalarText(v string) bool {
 	switch strings.ToLower(v) {
 	case "", "true", "false", "null", "none", "nil", "yes", "no", "on", "off":
 		return true
 	}
-	if len(v) > 32 {
+	if len(v) > maxScalarText {
 		return false
+	}
+	if v != "P" && (isoDate.MatchString(v) || duration.MatchString(v)) {
+		return true
 	}
 	digits := 0
 	for i, r := range v {
@@ -861,4 +883,20 @@ func isScalarText(v string) bool {
 		}
 	}
 	return digits > 0
+}
+
+// isIdentText reports whether v is a short identifier such as an algorithm
+// name (HS256, aes-256-gcm, sha512), which a *_algorithm key may show.
+func isIdentText(v string) bool {
+	if v == "" || len(v) > maxScalarText {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '_' || c == '-' || c == '.' || c == '+' || c == '/') {
+			return false
+		}
+	}
+	return true
 }

@@ -59,8 +59,9 @@ func redactToolCallResult(r mcp.ToolCallResult) mcp.ToolCallResult {
 }
 
 // redactToolCallMap redacts a tool call result decoded as a generic map: the
-// text of its content blocks, as in redactToolCallResult, and every other
-// field (structuredContent, _meta ...) structurally. It reports false, and
+// text of its content blocks (including embedded resources), as in
+// redactToolCallResult, and every other field (structuredContent, _meta ...)
+// structurally. It reports false, and
 // leaves r alone, if r is not a tool call result. r is not modified.
 func redactToolCallMap(r map[string]interface{}) (map[string]interface{}, bool) {
 	content, hasContent := r["content"].([]interface{})
@@ -82,19 +83,41 @@ func redactToolCallMap(r map[string]interface{}) (map[string]interface{}, bool) 
 		for i, b := range content {
 			blocks[i] = b
 			if block, ok := b.(map[string]interface{}); ok {
-				if text, ok := block["text"].(string); ok {
-					nb := make(map[string]interface{}, len(block))
-					for k, v := range block {
-						nb[k] = v
-					}
-					nb["text"] = redact.ToolOutput(text)
-					blocks[i] = nb
-				}
+				blocks[i] = redactContentBlock(block)
 			}
 		}
 		m["content"] = blocks
 	}
 	return m, true
+}
+
+// redactContentBlock returns a content block with its text redacted: the
+// text of a text block and the text of an embedded resource
+// ({"type":"resource","resource":{"uri":...,"text":...}}). block is not
+// modified.
+func redactContentBlock(block map[string]interface{}) map[string]interface{} {
+	text, hasText := block["text"].(string)
+	res, hasRes := block["resource"].(map[string]interface{})
+	resText, hasResText := res["text"].(string)
+	if !hasText && !(hasRes && hasResText) {
+		return block
+	}
+	nb := make(map[string]interface{}, len(block))
+	for k, v := range block {
+		nb[k] = v
+	}
+	if hasText {
+		nb["text"] = redact.ToolOutput(text)
+	}
+	if hasRes && hasResText {
+		nr := make(map[string]interface{}, len(res))
+		for k, v := range res {
+			nr[k] = v
+		}
+		nr["text"] = redact.ToolOutput(resText)
+		nb["resource"] = nr
+	}
+	return nb
 }
 
 // decodeResult decodes a raw JSON result that is an object, keeping numbers

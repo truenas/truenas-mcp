@@ -5,38 +5,23 @@ import (
 	"strings"
 )
 
-// Free-text formats beyond key=value pairs: command-line options, YAML
-// blocks and name/value entries written as text.
+// Free-text formats beyond key=value pairs: name/value entries written on
+// one line and YAML blocks. Command lines are in cli.go.
 
 var (
-	// longOption matches a long command-line option and a separate value
-	// ("--password S3CR3T", "--s3-secret-access-key 'x y'"). The value may
-	// not start with '-' (that is the next option). "--password=S3CR3T" is
-	// a key=value pair and is handled by redactBarePairs.
-	longOption = regexp.MustCompile(`(^|[\s"'\[(,])(--[A-Za-z][A-Za-z0-9_-]{0,63}[ \t]+)("[^"\n]*"|'[^'\n]*'|[^\s"'-][^\s"']*)`)
-	// sshpassOption matches the password option of sshpass ("sshpass -p
-	// S3CR3T ssh ...", "sshpass -pS3CR3T"), after any of its other options.
-	sshpassOption = regexp.MustCompile(`(\bsshpass(?:[ \t]+(?:-[ev]|-[fdP][ \t]*[^\s"']+))*[ \t]+-p[ \t]*)("[^"\n]*"|'[^'\n]*'|[^\s"']+)`)
-	// mysqlPassword matches the attached password option of the MySQL and
-	// MariaDB clients ("mysql -u root -pS3CR3T db"). A separate "-p" prompts
-	// for the password and is left alone, as is "-p" for other programs,
-	// where it often means something else (port, parents).
-	mysqlPassword = regexp.MustCompile(`(\b(?:mysql(?:dump|admin|import|check|show)?|mariadb(?:-dump|-admin)?)[ \t][^\n|;&]*?[ \t]-p)("[^"\n]*"|'[^'\n]*'|[^\s"']+)`)
 	// flowNameValue matches a name/value entry written on one line, as in
-	// YAML flow style or a repr: {name: DB_PASS, value: S3CR3T},
-	// {'key': 'DB_PASS', 'value': 'S3CR3T'}. Group 1 is the name, group 2
-	// everything up to the value, group 3 the value.
-	flowNameValue = regexp.MustCompile(`(?:\b|["'])(?:name|key|variable)["']?[ \t]*[:=][ \t]*["']?([A-Za-z_][A-Za-z0-9_.-]{0,127})["']?[ \t]*,[ \t]*(["']?value["']?[ \t]*[:=][ \t]*)("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^,}\]\s][^,}\]\n]*)`)
-	// flowValueName is flowNameValue with the value first. Group 1 is the
-	// prefix, group 2 the value, group 3 the rest up to the name, group 4
-	// the name.
-	flowValueName = regexp.MustCompile(`(\bvalue["']?[ \t]*[:=][ \t]*)("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[^,}\]\s"'][^,}\]\n]*?)([ \t]*,[ \t]*["']?(?:name|key|variable)["']?[ \t]*[:=][ \t]*["']?)([A-Za-z_][A-Za-z0-9_.-]{0,127})`)
-	// yamlKeyLine matches a YAML mapping line: indentation, list item
-	// dashes, the key and its value (possibly empty).
-	yamlKeyLine = regexp.MustCompile(`^([ \t]*)((?:-[ \t]+)*)["']?([A-Za-z_][A-Za-z0-9_.-]{0,127})["']?[ \t]*:(?:[ \t]+(.*?))?[ \t]*$`)
-	// yamlBlockIndicator matches the value of a key that opens a block
-	// scalar (|, >, |-, >+2 ...), with an optional comment.
-	yamlBlockIndicator = regexp.MustCompile(`^[|>][-+0-9]*(?:[ \t]+#.*)?$`)
+	// YAML flow style or a repr ({name: DB_PASS, value: S3CR3T},
+	// {'key': 'DB_PASS', 'value': 'S3CR3T'}), up to the start of the value.
+	// Other entries may come between the name and the value
+	// ({name: DB_PASS, description: x, value: S3CR3T}), up to 256 bytes and
+	// within one pair of braces. Group 1 is the name.
+	flowNameValue = regexp.MustCompile(`(?:\b|["'])(?:name|key|variable)["']?[ \t]*[:=][ \t]*["']?([A-Za-z_][A-Za-z0-9_.-]{0,127})["']?[ \t]*,(?:[^{}\[\]\n]{0,256}?,)?[ \t]*["']?value["']?[ \t]*[:=][ \t]*`)
+	// flowValueName is the same entry with the value first. Group 1 is the
+	// prefix, group 2 the value and any other entries up to the name, group
+	// 3 the rest up to the name, group 4 the name.
+	flowValueName = regexp.MustCompile(`(\bvalue["']?[ \t]*[:=][ \t]*)([^{}\[\]\n]*?)([ \t]*,[ \t]*["']?(?:name|key|variable)["']?[ \t]*[:=][ \t]*["']?)([A-Za-z_][A-Za-z0-9_.-]{0,127})`)
+	// flowNextKey matches the start of the next entry after a ','.
+	flowNextKey = regexp.MustCompile(`^[ \t]*["']?[A-Za-z_][A-Za-z0-9_.-]{0,63}["']?[ \t]*[:=]`)
 )
 
 // unquote removes one pair of matching quotes around v.
@@ -48,14 +33,11 @@ func unquote(v string) string {
 }
 
 // redactValueText returns the replacement for a value written as text
-// (quoted or not) under a key classified as sensitive/metadata, or v itself
-// if it stays visible.
-func redactValueText(v string, metadata bool) string {
+// (quoted or not) under a key classified as sensitive with metadata kind
+// meta, or v itself if it stays visible.
+func redactValueText(v string, meta metaKind) string {
 	inner := unquote(v)
-	if !isRedactable(inner) {
-		return v
-	}
-	if inner == v && metadata && isScalarText(v) {
+	if !isRedactable(inner) || meta.visible(inner) {
 		return v
 	}
 	if inner != v {
@@ -64,32 +46,40 @@ func redactValueText(v string, metadata bool) string {
 	return Marker
 }
 
-// redactOptions redacts the values of sensitive long options, the sshpass
-// password option and the attached password of the MySQL clients.
-func redactOptions(s string) string {
-	if strings.Contains(s, "--") {
-		s = longOption.ReplaceAllStringFunc(s, func(m string) string {
-			sub := longOption.FindStringSubmatch(m)
-			sens, meta := classifyKey(strings.TrimRight(sub[2][2:], " \t"))
-			if !sens {
-				return m
+// flowValueEnd returns the end of the flow-style value starting at s[i],
+// looking no further than limit: a quoted string (with backslash escapes)
+// up to its closing quote, or an unquoted value up to the closing '}' or
+// ']', the end of the line or a ',' that starts the next entry ("key:"). A
+// ',' inside an unquoted value (S3CR3T,with,commas) does not end it.
+func flowValueEnd(s string, i, limit int) int {
+	if i < limit && (s[i] == '"' || s[i] == '\'') {
+		q := s[i]
+		k := i + 1
+		for k < limit && s[k] != q && s[k] != '\n' && s[k] != '\r' {
+			if s[k] == '\\' && k+1 < limit && s[k+1] != '\n' {
+				k++
 			}
-			return sub[1] + sub[2] + redactValueText(sub[3], meta)
-		})
+			k++
+		}
+		if k < limit && s[k] == q {
+			return k + 1
+		}
+		return k
 	}
-	if strings.Contains(s, "sshpass") {
-		s = sshpassOption.ReplaceAllStringFunc(s, func(m string) string {
-			sub := sshpassOption.FindStringSubmatch(m)
-			return sub[1] + redactValueText(sub[2], false)
-		})
+	k := i
+	for ; k < limit; k++ {
+		c := s[k]
+		if c == '\n' || c == '\r' || c == '}' || c == ']' {
+			break
+		}
+		if c == ',' && flowNextKey.MatchString(s[k+1:min(limit, k+1+72)]) {
+			break
+		}
 	}
-	if strings.Contains(s, "mysql") || strings.Contains(s, "mariadb") {
-		s = mysqlPassword.ReplaceAllStringFunc(s, func(m string) string {
-			sub := mysqlPassword.FindStringSubmatch(m)
-			return sub[1] + redactValueText(sub[2], false)
-		})
+	for k > i && (s[k-1] == ' ' || s[k-1] == '\t') {
+		k--
 	}
-	return s
+	return k
 }
 
 // redactFlowPairs redacts the value of name/value entries written on one
@@ -98,52 +88,142 @@ func redactFlowPairs(s string) string {
 	if !strings.Contains(s, "value") {
 		return s
 	}
-	s = flowNameValue.ReplaceAllStringFunc(s, func(m string) string {
-		sub := flowNameValue.FindStringSubmatchIndex(m)
-		sens, meta := classifyKey(m[sub[2]:sub[3]])
-		// An unquoted Marker ends before its ']' here.
-		if !sens || strings.HasPrefix(Marker, m[sub[6]:]) {
-			return m
+	var b strings.Builder
+	pos, written := 0, 0
+	for pos < len(s) {
+		m := flowNameValue.FindStringSubmatchIndex(s[pos:])
+		if m == nil {
+			break
 		}
-		val := strings.TrimRight(m[sub[6]:sub[7]], " \t")
-		return m[:sub[6]] + redactValueText(val, meta) + m[sub[6]+len(val):]
-	})
+		vs := pos + m[1]
+		sens, meta := classifyKey(s[pos+m[2] : pos+m[3]])
+		if !sens {
+			pos += m[3] // a later name may start before this value
+			continue
+		}
+		if strings.HasPrefix(s[vs:], Marker) {
+			pos = vs + len(Marker)
+			continue
+		}
+		end := flowValueEnd(s, vs, len(s))
+		if r := redactValueText(s[vs:end], meta); r != s[vs:end] {
+			b.WriteString(s[written:vs])
+			b.WriteString(r)
+			written = end
+		}
+		pos = max(end, vs)
+		if pos == vs {
+			pos++
+		}
+	}
+	if written > 0 {
+		b.WriteString(s[written:])
+		s = b.String()
+	}
 	return flowValueName.ReplaceAllStringFunc(s, func(m string) string {
 		sub := flowValueName.FindStringSubmatch(m)
 		sens, meta := classifyKey(sub[4])
-		if !sens || strings.HasPrefix(Marker, sub[2]) {
+		v := sub[2]
+		if !sens || v == "" || unquote(v) == Marker {
 			return m
 		}
-		return sub[1] + redactValueText(sub[2], meta) + sub[3] + sub[4]
+		end := flowValueEnd(v, 0, len(v))
+		val, rest := v[:end], v[end:]
+		if strings.Contains(rest, "value") {
+			val, rest = v, "" // another value before the name: redact it all
+		}
+		return sub[1] + redactValueText(val, meta) + rest + sub[3] + sub[4]
 	})
 }
 
 // yamlLine is a parsed YAML mapping line.
 type yamlLine struct {
 	col   int // column of the key
-	dash  bool
 	key   string
 	value string // raw value, possibly empty
 	vpos  int    // offset of value in the line
+	dash  bool
 }
 
+func isYAMLSpace(c byte) bool { return c == ' ' || c == '\t' }
+
+func isKeyStart(c byte) bool { return isLetter(c) || c == '_' }
+
+func isKeyChar(c byte) bool {
+	return isKeyStart(c) || c >= '0' && c <= '9' || c == '.' || c == '-'
+}
+
+// parseYAMLLine parses a YAML mapping line: indentation, list item dashes,
+// the key (optionally quoted) and its value (possibly empty).
 func parseYAMLLine(line string) (yamlLine, bool) {
-	m := yamlKeyLine.FindStringSubmatchIndex(line)
-	if m == nil {
-		return yamlLine{}, false
+	i := 0
+	for i < len(line) && isYAMLSpace(line[i]) {
+		i++
 	}
-	l := yamlLine{col: m[5] - m[2], dash: m[5] > m[4], key: line[m[6]:m[7]], vpos: len(line)}
-	if m[8] >= 0 {
-		l.value, l.vpos = line[m[8]:m[9]], m[8]
+	l := yamlLine{}
+	for i+1 < len(line) && line[i] == '-' && isYAMLSpace(line[i+1]) {
+		l.dash = true
+		for i += 2; i < len(line) && isYAMLSpace(line[i]); i++ {
+		}
 	}
+	l.col = i
+	if i < len(line) && (line[i] == '"' || line[i] == '\'') {
+		i++
+	}
+	ks := i
+	if i >= len(line) || !isKeyStart(line[i]) {
+		return l, false
+	}
+	for i++; i < len(line) && i-ks < 128 && isKeyChar(line[i]); i++ {
+	}
+	l.key = line[ks:i]
+	if i < len(line) && (line[i] == '"' || line[i] == '\'') {
+		i++
+	}
+	for i < len(line) && isYAMLSpace(line[i]) {
+		i++
+	}
+	if i >= len(line) || line[i] != ':' {
+		return l, false
+	}
+	i++
+	if i < len(line) && !isYAMLSpace(line[i]) {
+		return l, false // "key:value" is not a mapping
+	}
+	for i < len(line) && isYAMLSpace(line[i]) {
+		i++
+	}
+	l.value, l.vpos = strings.TrimRight(line[i:], " \t"), i
 	return l, true
+}
+
+// isBlockIndicator reports whether v opens a block scalar (|, >, |-, >+2
+// ...), with an optional comment.
+func isBlockIndicator(v string) bool {
+	if v == "" || (v[0] != '|' && v[0] != '>') {
+		return false
+	}
+	i := 1
+	for i < len(v) && (v[i] == '-' || v[i] == '+' || v[i] >= '0' && v[i] <= '9') {
+		i++
+	}
+	if i == len(v) {
+		return true
+	}
+	if !isYAMLSpace(v[i]) {
+		return false
+	}
+	for i < len(v) && isYAMLSpace(v[i]) {
+		i++
+	}
+	return i < len(v) && v[i] == '#'
 }
 
 // indentOf returns the column of the first non-blank character of line, or
 // -1 for a blank line.
 func indentOf(line string) int {
 	for i := 0; i < len(line); i++ {
-		if line[i] != ' ' && line[i] != '\t' {
+		if !isYAMLSpace(line[i]) {
 			return i
 		}
 	}
@@ -157,47 +237,67 @@ func indentOf(line string) int {
 //     Kubernetes container env (- name: DB_PASS / value: S3CR3T), in either
 //     order.
 //
-// Lines are scanned once; a stored value line is revisited at most once.
+// The content of other block scalars is scanned like any other lines, so
+// YAML embedded in YAML (a ConfigMap's "app.yaml: |") is handled too.
+//
+// Each line is parsed once; the end of every block scalar is found in one
+// more pass, and a stored value line is revisited at most once.
 func redactYAML(s string) string {
-	if !strings.Contains(s, "\n") || !strings.Contains(s, ":") {
+	if !strings.Contains(s, "\n") || !strings.Contains(s, ":") ||
+		(!strings.Contains(s, "value") && !strings.ContainsAny(s, "|>")) {
 		return s
 	}
 	lines := strings.SplitAfter(s, "\n")
-	drop := make([]bool, len(lines))
-	changed := false
-
-	body := func(i int) string { return strings.TrimRight(lines[i], "\r\n") }
-	// blockEnd returns the index after the last content line of a block
-	// scalar opened on line i whose key is at column col.
-	blockEnd := func(i, col int) int {
-		end := i + 1
-		for j := i + 1; j < len(lines); j++ {
-			ind := indentOf(body(j))
-			if ind < 0 {
-				continue
-			}
-			if ind <= col {
-				break
-			}
-			end = j + 1
-		}
-		return end
+	n := len(lines)
+	type parsed struct {
+		l     yamlLine
+		ok    bool
+		block bool
+		ind   int
+		end   int // for a block scalar, the index after its last content line
 	}
-	// redactLine redacts the value on line i (parsed as l), dropping the
-	// content of a block scalar.
-	redactLine := func(i int, l yamlLine, metadata bool, end int) {
-		b := body(i)
+	p := make([]parsed, n)
+	var open []int // block scalars whose content may continue
+	last := -1     // the last non-blank line
+	for i := range lines {
+		b := strings.TrimRight(lines[i], "\r\n")
+		p[i].ind = indentOf(b)
+		if p[i].ind >= 0 {
+			for len(open) > 0 && p[i].ind <= p[open[len(open)-1]].l.col {
+				j := open[len(open)-1]
+				p[j].end = max(last+1, j+1)
+				open = open[:len(open)-1]
+			}
+			last = i
+		}
+		p[i].l, p[i].ok = parseYAMLLine(b)
+		if p[i].ok && isBlockIndicator(p[i].l.value) {
+			p[i].block = true
+			open = append(open, i)
+		}
+	}
+	for _, j := range open {
+		p[j].end = max(last+1, j+1)
+	}
+
+	drop := make([]bool, n)
+	changed := false
+	// redactLine redacts the value on line i, dropping the content of a
+	// block scalar.
+	redactLine := func(i int, meta metaKind) {
+		l := p[i].l
+		b := strings.TrimRight(lines[i], "\r\n")
 		var nv string
-		if yamlBlockIndicator.MatchString(l.value) {
-			if end <= i+1 {
+		if p[i].block {
+			if p[i].end <= i+1 {
 				return // empty block
 			}
-			for j := i + 1; j < end; j++ {
+			for j := i + 1; j < p[i].end; j++ {
 				drop[j] = true
 			}
 			nv = Marker
 		} else {
-			nv = redactValueText(l.value, metadata)
+			nv = redactValueText(l.value, meta)
 		}
 		if nv != l.value {
 			lines[i] = b[:l.vpos] + nv + b[l.vpos+len(l.value):] + lines[i][len(b):]
@@ -208,29 +308,23 @@ func redactYAML(s string) string {
 	// items is the stack of open mappings (list items or nested blocks),
 	// innermost last, each with the column of its keys.
 	type item struct {
-		col        int
-		named      bool
-		sens, meta bool
-		valLine    int // a value line seen before the name, or -1
-		valParsed  yamlLine
-		valEnd     int
+		col     int
+		named   bool
+		sens    bool
+		meta    metaKind
+		valLine int // a value line seen before the name, or -1
 	}
 	var items []item
-	for i := 0; i < len(lines); i++ {
-		b := body(i)
-		l, ok := parseYAMLLine(b)
-		if !ok {
-			if ind := indentOf(b); ind >= 0 {
+	for i := 0; i < n; i++ {
+		if !p[i].ok {
+			if ind := p[i].ind; ind >= 0 {
 				for len(items) > 0 && items[len(items)-1].col > ind {
 					items = items[:len(items)-1]
 				}
 			}
 			continue
 		}
-		end := i + 1
-		if yamlBlockIndicator.MatchString(l.value) {
-			end = blockEnd(i, l.col)
-		}
+		l := p[i].l
 		for len(items) > 0 && (items[len(items)-1].col > l.col || (l.dash && items[len(items)-1].col == l.col)) {
 			items = items[:len(items)-1]
 		}
@@ -238,29 +332,34 @@ func redactYAML(s string) string {
 			items = append(items, item{col: l.col, valLine: -1})
 		}
 		it := &items[len(items)-1]
+		skip := false
 		switch l.key {
 		case "name", "key", "variable":
-			if l.value != "" && end == i+1 {
+			if l.value != "" && !p[i].block {
 				it.named = true
 				it.sens, it.meta = classifyKey(unquote(l.value))
 				if it.sens && it.valLine >= 0 {
-					redactLine(it.valLine, it.valParsed, it.meta, it.valEnd)
+					redactLine(it.valLine, it.meta)
 				}
 				it.valLine = -1
 			}
 		case "value":
-			if it.named {
-				if it.sens {
-					redactLine(i, l, it.meta, end)
-				}
-			} else {
-				it.valLine, it.valParsed, it.valEnd = i, l, end
+			if !it.named {
+				it.valLine = i
+			} else if it.sens {
+				redactLine(i, it.meta)
+				skip = p[i].block
 			}
 		}
-		if sens, _ := classifyKey(l.key); sens && end > i+1 {
-			redactLine(i, l, false, end) // block scalar under a sensitive key
+		if p[i].block && !skip {
+			if sens, _ := classifyKey(l.key); sens {
+				redactLine(i, metaNone) // block scalar under a sensitive key ("key: |")
+				skip = true
+			}
 		}
-		i = end - 1 // skip block scalar content
+		if skip {
+			i = p[i].end - 1 // the content was dropped
+		}
 	}
 	if !changed {
 		return s

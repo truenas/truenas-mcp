@@ -80,3 +80,19 @@ func TestRedactResponseStructuredContent(t *testing.T) {
 		t.Errorf("tools/list raw result changed: %v", got)
 	}
 }
+
+func TestRedactResponseEmbeddedResource(t *testing.T) {
+	block := map[string]interface{}{"type": "resource", "resource": map[string]interface{}{
+		"uri": "truenas://app/config", "mimeType": "text/plain", "text": "DB_PASS=fake-db-pw"}}
+	result := map[string]interface{}{"content": []interface{}{block}}
+	raw := json.RawMessage(`{"content":[{"type":"resource","resource":{"uri":"truenas://x","text":"{\"password\": \"fake-user-pw\"}"}}]}`)
+	for _, r := range []interface{}{result, raw} {
+		out := marshal(t, redactResponse(&mcp.Response{JSONRPC: "2.0", ID: 1, Result: r}).Result)
+		if strings.Contains(out, "fake-") || !strings.Contains(out, redact.Marker) || !strings.Contains(out, "truenas://") {
+			t.Errorf("resource text not redacted: %s", out)
+		}
+	}
+	if block["resource"].(map[string]interface{})["text"] != "DB_PASS=fake-db-pw" {
+		t.Error("input modified")
+	}
+}
