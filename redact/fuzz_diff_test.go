@@ -78,6 +78,17 @@ var fuzzPrograms = []struct {
 	{"sshpass-sudo", true, func(s string) string { return "sudo -n sshpass -d 3 -P assword -p " + s + " scp -P 2222 f u@h:" }},
 	{"sshpass-late", true, func(s string) string { return "sshpass -v -p " + s + " -- ssh -p 22 u@h" }},
 	{"sshpass-first", true, func(s string) string { return "sshpass -p " + s + " -p2222" }},
+	// a quoted password with a space, written as an attached or separate escaped
+	// quote (the JSON form of -p"S 3CR3T"), or with a plain double quote
+	{"sshpass-escq", true, func(string) string { return `sshpass -p\"` + fuzzMarker + ` x\" ssh -p2222 u@h` }},
+	{"sshpass-escq-sep", true, func(string) string { return `sshpass -v -p \"` + fuzzMarker + ` x\" ssh -p2222 u@h` }},
+	{"sshpass-dq-att", true, func(string) string { return `sshpass -vp"` + fuzzMarker + ` x" ssh -p2222 u@h` }},
+	// a second sshpass after an option value with the quote idiom
+	{"sshpass-idiom-2nd", true, func(s string) string {
+		return `sshpass -f 'it'\''s' ssh u@h; sshpass -p ` + s + ` ssh -p2222 u@h`
+	}},
+	// an escaped separator in an option value
+	{"sshpass-escsep", true, func(s string) string { return `sshpass -f a\\|b -p ` + s + ` ssh -p2222 u@h` }},
 }
 
 // noise before and after the command.
@@ -100,7 +111,7 @@ func genFuzzCase(r *rand.Rand, shape string) fuzzCase {
 		for !prog.sshpas {
 			prog = fuzzPrograms[r.Intn(len(fuzzPrograms))]
 		}
-		w = fuzzWrappers[r.Intn(3)]
+		w = fuzzWrappers[r.Intn(len(fuzzWrappers))] // also the JSON forms
 		sec = fuzzSecrets[r.Intn(2)]
 		post = pick(fuzzPost[:len(fuzzPost)-2])
 	case "outer-escape":

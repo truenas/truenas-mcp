@@ -27,6 +27,12 @@ func TestTextSshpassScope(t *testing.T) {
 		{"sshpass -p'fake ssh pw' ssh h", "sshpass -p'" + Marker + "' ssh h"},
 		{"sshpass -vp'fake ssh pw' ssh h", "sshpass -vp'" + Marker + "' ssh h"},
 		{`sshpass -p "fake ssh pw" ssh h`, `sshpass -p "` + Marker + `" ssh h`},
+		// an attached quoted value with a space, plain and escaped quotes
+		{`sshpass -p\"fake ssh pw\" ssh h`, `sshpass -p` + Marker + ` ssh h`},
+		{`sshpass -p \"fake ssh pw\" ssh h`, `sshpass -p ` + Marker + ` ssh h`},
+		{`sh -c "sshpass -p\"fake ssh pw\" ssh h"`, `sh -c "sshpass -p` + Marker + ` ssh h"`},
+		{`{"cmd": "sshpass -p\"fake ssh pw\" ssh h"}`, `{"cmd": "sshpass -p` + Marker + ` ssh h"}`},
+		{`{"cmd": "sshpass -p\"fakesshpw\" ssh h"}`, `{"cmd": "sshpass -p` + Marker + ` ssh h"}`},
 		{"sh -c 'sshpass -vp fake-ssh-pw ssh u@h; ls'", "sh -c 'sshpass -vp " + Marker + " ssh u@h; ls'"},
 		{"sh -c 'sshpass -p'\\''fake ssh pw'\\'' ssh h'", "sh -c 'sshpass -p'\\''" + Marker + "'\\'' ssh h'"},
 		// The command that sshpass runs has its own options.

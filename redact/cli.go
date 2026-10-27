@@ -400,6 +400,14 @@ func separatorAt(s string, i int) bool {
 	return false
 }
 
+// escapedSeparator reports whether s[i:] is a doubled backslash and a
+// separator character (\\|, \\;, \\&): the text may be inside another string
+// (JSON text, sh -c "..."), where it is an escaped separator, not one. See
+// commandEnd.
+func escapedSeparator(s string, i int) bool {
+	return i+2 < len(s) && s[i] == '\\' && s[i+1] == '\\' && (s[i+2] == '|' || s[i+2] == ';' || s[i+2] == '&')
+}
+
 // wordRunEnd returns the end of the run of unquoted characters at s[i]: up
 // to white space, a quote, or a line continuation, with backslash escapes,
 // and also up to an unquoted command separator if stopAtSep.
@@ -413,7 +421,9 @@ func wordRunEnd(s string, i int, stopAtSep bool) int {
 			if lineContinuation(s, j) > 0 {
 				return j
 			}
-			if j+1 < len(s) && !isLineEnd(s[j+1]) {
+			if stopAtSep && escapedSeparator(s, j) {
+				j += 2
+			} else if j+1 < len(s) && !isLineEnd(s[j+1]) {
 				j++
 			}
 		default:
@@ -580,7 +590,7 @@ func commandEnd(s string, i int) int {
 					i = escapedQuoteEnd(s, i, q)
 					continue
 				}
-				if s[i+1] == '\\' && i+2 < len(s) && (s[i+2] == '|' || s[i+2] == ';' || s[i+2] == '&') {
+				if escapedSeparator(s, i) {
 					i += 3
 					continue
 				}
@@ -724,12 +734,15 @@ func redactSshpass(s string) string {
 		}
 		return programWordEnd(s, i, 0), true
 	}
+	cmdFrom, cmdTo := 0, -1 // the command end found last: from where, to where
 	for pos < len(s) {
 		m := sshpassStart.FindStringIndex(s[pos:])
 		if m == nil {
 			break
 		}
-		i := pos + m[1] - 1
+		// The scan starts after the white space or the line continuation.
+		i := pos + m[1]
+		from := i
 		for {
 			end, ok := word(i)
 			if !ok || end == skipBlanks(s, i) {
@@ -754,6 +767,13 @@ func redactSshpass(s string) string {
 			}
 			switch kind {
 			case optSecretAttached:
+				// -p\"S 3CR3T\": a quoted value written inside another quoted
+				// string has white space in it, so the word ended inside it.
+				if qe := quotedPartEnd(s, start+off, true); qe > end {
+					redact(start+off, qe)
+					i = qe
+					break
+				}
 				redact(start+off, end)
 			case optSecretNext, optValueNext:
 				vs := skipBlanks(s, i)
@@ -764,6 +784,17 @@ func redactSshpass(s string) string {
 					i = ve
 				}
 			}
+		}
+		// A word that reads a quote wrongly (the quote idiom after a quoted
+		// string) may run to the end of the line, past a separator and the
+		// next sshpass: do not go beyond the end of the command. The end is
+		// kept while the next sshpass is in the same command, so that each
+		// part of the line is read once.
+		if i > from {
+			if from < cmdFrom || from > cmdTo {
+				cmdFrom, cmdTo = from, commandEnd(s, from)
+			}
+			i = min(i, cmdTo)
 		}
 		pos = max(i, pos+m[1])
 	}
