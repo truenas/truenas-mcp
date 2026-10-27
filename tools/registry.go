@@ -607,7 +607,7 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 	r.tools["query_snapshots"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_snapshots",
-			Description: "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, dataset, and holds status. Use 'limit' to control result size, 'order_by' to sort.",
+			Description: "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, sizes and dataset. Holds are included only with 'include_holds' or 'holds_only' (they cost an extra lookup per snapshot). Use 'limit' to control result size, 'order_by' to sort.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -630,7 +630,11 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 					},
 					"holds_only": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Optional: Return only snapshots with holds that prevent deletion (default: false)",
+						"description": "Optional: Return only snapshots with holds that prevent deletion (default: false). Implies include_holds.",
+					},
+					"include_holds": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Optional: Include each snapshot's holds (default: false; one extra lookup per snapshot on the NAS)",
 					},
 				},
 			},
@@ -1723,7 +1727,7 @@ Returns task_id for tracking progress with tasks_get.
 					"time_range": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"DAY", "WEEK", "MONTH", "YEAR"},
-						"description": "Historical time range for trend analysis (default: MONTH for ~90 days)",
+						"description": "Historical time range for trend analysis (default: MONTH, about 30 days; note the get_*_metrics tools default to HOUR). The range used is returned as time_range in each section",
 						"default":     "MONTH",
 					},
 					"metrics": map[string]interface{}{
@@ -1918,7 +1922,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 	if err == nil {
 		var cpuData []map[string]interface{}
 		if err := json.Unmarshal(cpuResult, &cpuData); err == nil && len(cpuData) > 0 {
-			if dataPoints := columnPoints(cpuData[0], 1, true); len(dataPoints) > 0 {
+			if dataPoints := columnPoints(cpuData[0], legendColumn(cpuData[0], "cpu", 1), true); len(dataPoints) > 0 {
 				avgCPU := calculateAverage(dataPoints)
 				if avgCPU > 85 {
 					capacityWarnings = append(capacityWarnings,
@@ -1954,15 +1958,16 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 		if err == nil {
 			var memData []map[string]interface{}
 			if err := json.Unmarshal(memResult, &memData); err == nil && len(memData) > 0 {
-				if dataPoints, err := extractAvailableMemory(memData[0]); err == nil {
+				if mem, err := availableMemorySamples(memData[0]); err == nil {
+					dataPoints := mem.all
 					// The "memory" graph reports available bytes, not used.
 					// The ZFS ARC is reclaimable, so exclude it when known.
 					// Only the latest ARC size is known, so it is compared with
-					// the latest available sample, not the hourly average.
+					// the latest complete available sample, not the hourly average.
 					avgAvailable := calculateAverage(dataPoints)
 					label, suffix := "Memory utilization", " (may include ZFS ARC cache)"
 					if arcBytes, freshKnown, err := currentArcBytes(client, nasReferenceTime(memData[0])); err == nil {
-						avgAvailable = dataPoints[len(dataPoints)-1] + arcBytes
+						avgAvailable = mem.latest + arcBytes
 						label, suffix = "Memory utilization excluding ZFS ARC", ""
 						if !freshKnown {
 							arcFreshnessNote = arcFreshnessUnknownNote
@@ -2032,8 +2037,8 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 		}
 	}
 
-	// Dismissed alerts are acknowledged: keep them in the list but do not
-	// count them as active.
+	// Dismissed alerts are acknowledged: count them separately, not as
+	// active.
 	activeAlerts, criticalAlerts, dismissedAlerts := 0, 0, 0
 	for _, alert := range alerts {
 		if dismissed, _ := alert["dismissed"].(bool); dismissed {
@@ -2047,12 +2052,17 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 		}
 	}
 
-	for i, alert := range alerts {
-		alerts[i] = readableDatesMap(alert)
+	// Only active alerts are listed; dismissed ones are only counted
+	// (list_alerts returns them).
+	activeAlertList := make([]map[string]interface{}, 0, activeAlerts)
+	for _, alert := range alerts {
+		if dismissed, _ := alert["dismissed"].(bool); !dismissed {
+			activeAlertList = append(activeAlertList, readableDatesMap(alert))
+		}
 	}
 
 	response := map[string]interface{}{
-		"alerts":                alerts,
+		"alerts":                activeAlertList,
 		"alert_count":           activeAlerts,
 		"critical_alert_count":  criticalAlerts,
 		"dismissed_alert_count": dismissedAlerts,
@@ -2386,15 +2396,18 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 		filters = append(filters, []interface{}{"pool", "=", pool})
 	}
 
-	// Request creation time, sizes and holds explicitly: TrueNAS 27.0 only
-	// returns the properties named in extra.properties and only returns
-	// holds with extra.holds.
-	options := map[string]interface{}{
-		"extra": map[string]interface{}{
-			"properties": snapshotProperties,
-			"holds":      true,
-		},
+	// Request creation time and sizes explicitly: TrueNAS 27.0 only returns
+	// the properties named in extra.properties. Holds are only returned
+	// with extra.holds, which costs one extra ZFS lookup per snapshot, so
+	// they are requested only for holds_only or include_holds.
+	holdsOnly, _ := args["holds_only"].(bool)
+	includeHolds, _ := args["include_holds"].(bool)
+	wantHolds := holdsOnly || includeHolds
+	extra := map[string]interface{}{"properties": snapshotProperties}
+	if wantHolds {
+		extra["holds"] = true
 	}
+	options := map[string]interface{}{"extra": extra}
 
 	result, err := client.Call("pool.snapshot.query", filters, options)
 	if err != nil {
@@ -2414,7 +2427,7 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Filter by holds_only if requested
-	if holdsOnly, ok := args["holds_only"].(bool); ok && holdsOnly {
+	if holdsOnly {
 		filtered := make([]map[string]interface{}, 0)
 		for _, snap := range simplified {
 			if holdsCount, ok := snap["holds_count"].(int); ok && holdsCount > 0 {
@@ -2446,6 +2459,7 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 		"snapshots":       simplified,
 		"snapshot_count":  len(simplified),
 		"total_snapshots": totalSnapshots,
+		"holds_included":  wantHolds,
 	}
 	if dataset, ok := args["dataset"].(string); ok && dataset != "" {
 		response["dataset_filter"] = dataset
@@ -2453,7 +2467,7 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 	if pool, ok := args["pool"].(string); ok && pool != "" {
 		response["pool_filter"] = pool
 	}
-	if holdsOnly, ok := args["holds_only"].(bool); ok && holdsOnly {
+	if holdsOnly {
 		response["holds_filter"] = "only snapshots with holds"
 	}
 	if len(simplified) < totalSnapshots {
@@ -2747,8 +2761,9 @@ func simplifyVM(vm map[string]interface{}) map[string]interface{} {
 	if tOk {
 		summary["threads_per_core"] = int(threads)
 	}
-	if sOk && cOk && tOk {
-		summary["total_vcpus"] = int(sockets) * int(cores) * int(threads)
+	if sOk || cOk || tOk {
+		// Each value defaults to 1 in the VM schema.
+		summary["total_vcpus"] = atLeastOne(sockets) * atLeastOne(cores) * atLeastOne(threads)
 	}
 	if cpuMode, ok := vm["cpu_mode"].(string); ok {
 		summary["cpu_mode"] = cpuMode
@@ -2757,7 +2772,7 @@ func simplifyVM(vm map[string]interface{}) map[string]interface{} {
 	// Memory: the API value is in MiB.
 	if memory, ok := vm["memory"].(float64); ok {
 		summary["memory_mib"] = int(memory)
-		summary["memory_gib"] = fmt.Sprintf("%.1f GiB", memory/1024.0)
+		summary["memory_gib"] = formatGiB(memory)
 	}
 	if minMemory, ok := vm["min_memory"].(float64); ok && minMemory > 0 {
 		summary["min_memory_mib"] = int(minMemory)
@@ -4541,15 +4556,18 @@ func analyzeCPUCapacity(client *truenas.Client, timeRange string) (map[string]in
 		return nil, fmt.Errorf("no CPU metrics data available")
 	}
 
-	// Overall CPU usage is the first series. Rows with no sample (all
-	// zero/null, as the middleware zero-fills gaps) are skipped.
-	dataPoints := columnPoints(metricsData[0], 1, true)
-	if len(dataPoints) == 0 {
+	// Overall CPU usage is the legend series "cpu" (column 1 if the legend
+	// has none). Rows with no sample (all zero/null, as the middleware
+	// zero-fills gaps) are skipped.
+	samples := columnSamples(metricsData[0], legendColumn(metricsData[0], "cpu", 1), true, nil)
+	if len(samples) == 0 {
 		return nil, fmt.Errorf("no valid data points")
 	}
+	dataPoints := sampleValues(samples)
+	complete, partial := completeSamples(metricsData[0], samples)
 
-	// Calculate statistics
-	current := calculateRecentAverage(dataPoints, 5) // Last 5 points
+	// Calculate statistics; current is the last 5 complete samples.
+	current := calculateRecentAverage(sampleValues(complete), 5)
 	average := calculateAverage(dataPoints)
 	peak := calculateMax(dataPoints)
 	trend := calculateTrendDirection(dataPoints)
@@ -4563,6 +4581,9 @@ func analyzeCPUCapacity(client *truenas.Client, timeRange string) (map[string]in
 		"peak_utilization_pct":    fmt.Sprintf("%.2f", peak),
 		"trend":                   trend,
 		"capacity_status":         status,
+	}
+	if partial {
+		analysis["partial_sample_note"] = partialSampleNote
 	}
 
 	// Add projections if trending up
@@ -4619,21 +4640,25 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 
 	// Extract data points: the "memory" graph (truenas_meminfo.available)
 	// reports AVAILABLE bytes, so used = total - available.
-	availablePoints, err := extractAvailableMemory(metricsData[0])
+	mem, err := availableMemorySamples(metricsData[0])
 	if err != nil {
 		return nil, err
 	}
+	availablePoints := mem.all
 
 	// Convert to used percentages
 	dataPointsPct := make([]float64, len(availablePoints))
 	for i, avail := range availablePoints {
 		dataPointsPct[i] = memoryUsedPct(totalMemory, avail)
 	}
-	currentAvailable := calculateRecentAverage(availablePoints, 5)
-	currentUsed := math.Max(0, totalMemory-currentAvailable)
+
+	// All current figures use one basis: the latest complete sample. Byte
+	// counts are integers first, so current_used_bytes - arc_bytes equals
+	// used_excluding_arc_bytes exactly.
+	usedBytes := int64(math.Max(0, totalMemory-mem.latest))
+	currentPct := bytesPct(usedBytes, totalMemory)
 
 	// Calculate statistics
-	current := calculateRecentAverage(dataPointsPct, 5)
 	average := calculateAverage(dataPointsPct)
 	peak := calculateMax(dataPointsPct)
 	trend := calculateTrendDirection(dataPointsPct)
@@ -4641,42 +4666,45 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 	analysis := map[string]interface{}{
 		"metric":                  "Memory",
 		"time_range":              timeRange,
-		"current_utilization_pct": fmt.Sprintf("%.2f", current),
+		"current_utilization_pct": fmt.Sprintf("%.2f", currentPct),
 		"average_utilization_pct": fmt.Sprintf("%.2f", average),
 		"peak_utilization_pct":    fmt.Sprintf("%.2f", peak),
 		"trend":                   trend,
 		"total_memory_bytes":      int64(totalMemory),
-		"current_available_bytes": int64(currentAvailable),
-		"current_used_bytes":      int64(currentUsed),
+		"current_available_bytes": int64(mem.latest),
+		"current_used_bytes":      usedBytes,
 		"samples_used":            len(availablePoints),
+	}
+	if mem.partialDropped {
+		analysis["partial_sample_note"] = partialSampleNote
 	}
 
 	// The ZFS ARC is reclaimable cache that the available figure does not
 	// count, so status is based on memory used excluding the ARC. Only the
-	// latest ARC size is known, so it is compared with the latest available
-	// sample rather than an average over the range.
-	statusPct := current
+	// latest ARC size is known, so it is compared with the latest complete
+	// available sample rather than an average over the range.
+	statusPct := currentPct
 	arcBytes, arcFreshKnown, arcErr := currentArcBytes(client, nasReferenceTime(metricsData[0]))
 	if arcErr == nil {
 		if !arcFreshKnown {
 			analysis["arc_freshness_note"] = arcFreshnessUnknownNote
 		}
-		latestUsed := math.Max(0, totalMemory-availablePoints[len(availablePoints)-1])
-		usedExclArc := latestUsed - arcBytes
+		arc := int64(arcBytes)
+		usedExclArc := usedBytes - arc
 		if usedExclArc < 0 {
 			usedExclArc = 0
 			analysis["arc_clamped"] = true
 			analysis["clamp_note"] = "ZFS ARC size exceeds memory used, so used_excluding_arc_bytes was clamped to 0; the ARC and memory samples may be from different times."
 		}
-		statusPct = usedExclArc / totalMemory * 100
-		analysis["arc_bytes"] = int64(arcBytes)
-		analysis["used_excluding_arc_bytes"] = int64(usedExclArc)
+		statusPct = bytesPct(usedExclArc, totalMemory)
+		analysis["arc_bytes"] = arc
+		analysis["used_excluding_arc_bytes"] = usedExclArc
 		analysis["utilization_excluding_arc_pct"] = fmt.Sprintf("%.2f", statusPct)
 		// The headline figure matches capacity_status: excluding the ARC.
 		analysis["current_utilization_pct"] = fmt.Sprintf("%.2f", statusPct)
-		analysis["current_utilization_including_arc_pct"] = fmt.Sprintf("%.2f", current)
+		analysis["current_utilization_including_arc_pct"] = fmt.Sprintf("%.2f", currentPct)
 		analysis["current_utilization_basis"] = "excluding_arc"
-		analysis["utilization_basis"] = "used = total_memory_bytes - available (reporting graph 'memory'). current_utilization_pct and capacity_status use the latest used sample minus the latest ZFS ARC size (arcsize), which is reclaimable cache. current_utilization_including_arc_pct, average_utilization_pct, peak_utilization_pct, trend and current_used_bytes include the ARC."
+		analysis["utilization_basis"] = "used = total_memory_bytes - available (reporting graph 'memory'). current_used_bytes, current_available_bytes, current_utilization_including_arc_pct, used_excluding_arc_bytes, current_utilization_pct and capacity_status all use the latest complete sample; current_utilization_pct and capacity_status subtract the latest ZFS ARC size (arcsize), which is reclaimable cache. average_utilization_pct, peak_utilization_pct and trend include the ARC."
 		// Only the latest ARC size is known, not its history, so a trend
 		// excluding the ARC can't be computed. Projecting the ARC-inclusive
 		// trend would report ARC growth as a threshold risk, so none is given.
@@ -4684,7 +4712,7 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 			analysis["projection_note"] = "No threshold projection: the trend includes the ZFS ARC, which grows as the cache warms, while capacity_status excludes it."
 		}
 	} else {
-		analysis["utilization_basis"] = "used = total_memory_bytes - available (reporting graph 'memory' reports available memory); all figures may include the ZFS ARC"
+		analysis["utilization_basis"] = "used = total_memory_bytes - available (reporting graph 'memory' reports available memory). current_used_bytes, current_available_bytes, current_utilization_pct and capacity_status use the latest complete sample; all figures may include the ZFS ARC"
 		analysis["current_utilization_basis"] = "including_arc"
 		analysis["note"] = arcUnavailableNote(arcErr)
 		// Status and trend are both ARC-inclusive here, so projecting is consistent.
@@ -4699,24 +4727,38 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 	return analysis, nil
 }
 
-// extractAvailableMemory returns the available-memory samples of a
+// availableMemory holds the available-memory samples of a "memory" graph.
+type availableMemory struct {
+	all            []float64 // every valid sample, oldest first
+	latest         float64   // latest complete sample (not past the graph's end)
+	partialDropped bool      // a partial last bucket was skipped for latest
+}
+
+// availableMemorySamples returns the available-memory samples of a
 // "memory" graph, skipping gaps: null, non-finite and non-positive values
 // (a running system never has zero available memory).
-func extractAvailableMemory(metric map[string]interface{}) ([]float64, error) {
-	points, err := extractDataPoints(metric)
-	if err != nil {
-		return nil, err
+func availableMemorySamples(metric map[string]interface{}) (availableMemory, error) {
+	if _, ok := metric["data"].([]interface{}); !ok {
+		return availableMemory{}, fmt.Errorf("no data field in metric")
 	}
-	valid := points[:0]
-	for _, v := range points {
-		if v > 0 {
-			valid = append(valid, v)
-		}
+	samples := columnSamples(metric, 1, false, func(v float64) bool { return v > 0 })
+	if len(samples) == 0 {
+		return availableMemory{}, fmt.Errorf("no valid data points")
 	}
-	if len(valid) == 0 {
-		return nil, fmt.Errorf("no valid data points")
+	complete, dropped := completeSamples(metric, samples)
+	return availableMemory{
+		all:            sampleValues(samples),
+		latest:         complete[len(complete)-1].v,
+		partialDropped: dropped,
+	}, nil
+}
+
+// bytesPct is used as a percentage of total, clamped to 0-100.
+func bytesPct(used int64, total float64) float64 {
+	if total <= 0 {
+		return 0
 	}
-	return valid, nil
+	return math.Max(0, math.Min(100, float64(used)/total*100))
 }
 
 // arcMaxAge is how old the latest arcsize sample may be, relative to the
@@ -4879,7 +4921,7 @@ func analyzeNetworkCapacity(client *truenas.Client, timeRange string) (map[strin
 		}
 
 		// Analyze both TX and RX
-		ifaceInfo := make(map[string]interface{})
+		ifaceInfo := map[string]interface{}{"time_range": timeRange}
 		if linkSpeed > 0 {
 			ifaceInfo["link_speed_mbps"] = linkSpeed
 		}
@@ -4890,15 +4932,18 @@ func analyzeNetworkCapacity(client *truenas.Client, timeRange string) (map[strin
 		for _, metric := range metricsData {
 			legend := legendNames(metric)
 			for col := 1; col < len(legend); col++ {
-				dataPoints := columnPoints(metric, col, false)
-				if len(dataPoints) == 0 || legend[col] == "" {
+				samples := columnSamples(metric, col, false, nil)
+				if len(samples) == 0 || legend[col] == "" {
 					continue
 				}
-				dataPointsMbps := make([]float64, len(dataPoints))
-				for i, dp := range dataPoints {
-					dataPointsMbps[i] = math.Abs(dp) / 1000.0
+				for i := range samples {
+					samples[i].v = math.Abs(samples[i].v) / 1000.0
 				}
-				ifaceInfo[legend[col]] = networkSeriesInfo(dataPointsMbps, linkSpeed)
+				complete, partial := completeSamples(metric, samples)
+				if partial {
+					ifaceInfo["partial_sample_note"] = partialSampleNote
+				}
+				ifaceInfo[legend[col]] = networkSeriesInfo(sampleValues(samples), sampleValues(complete), linkSpeed)
 			}
 		}
 
@@ -4910,8 +4955,11 @@ func analyzeNetworkCapacity(client *truenas.Client, timeRange string) (map[strin
 
 // networkSeriesInfo summarizes one interface series in Mbps, with
 // utilization against linkSpeed (Mbps) when known.
-func networkSeriesInfo(dataPointsMbps []float64, linkSpeed float64) map[string]interface{} {
-	current := calculateRecentAverage(dataPointsMbps, 5)
+// networkSeriesInfo summarises one interface series in Mbps. current_mbps
+// is the mean of the last 5 complete samples (completeMbps excludes a
+// partial last bucket); average and peak use every sample.
+func networkSeriesInfo(dataPointsMbps, completeMbps []float64, linkSpeed float64) map[string]interface{} {
+	current := calculateRecentAverage(completeMbps, 5)
 	average := calculateAverage(dataPointsMbps)
 	peak := calculateMax(dataPointsMbps)
 
@@ -4998,19 +5046,25 @@ func analyzeDiskCapacity(client *truenas.Client, timeRange string) (map[string]i
 
 		// Analyze throughput per series (legend "reads", "writes"). The
 		// "disk" graph is in Kibibytes/s.
-		diskInfo := map[string]interface{}{"unit": "KiB/s"}
+		// current is the mean of the last 5 complete samples.
+		diskInfo := map[string]interface{}{"unit": reportingUnits["disk"], "time_range": timeRange}
 		for _, metric := range metricsData {
 			legend := legendNames(metric)
 			for col := 1; col < len(legend); col++ {
-				dataPoints := columnPoints(metric, col, false)
-				if len(dataPoints) == 0 || legend[col] == "" {
+				samples := columnSamples(metric, col, false, nil)
+				if len(samples) == 0 || legend[col] == "" {
 					continue
 				}
-				for i, dp := range dataPoints {
-					dataPoints[i] = math.Abs(dp)
+				for i := range samples {
+					samples[i].v = math.Abs(samples[i].v)
 				}
+				complete, partial := completeSamples(metric, samples)
+				if partial {
+					diskInfo["partial_sample_note"] = partialSampleNote
+				}
+				dataPoints := sampleValues(samples)
 				diskInfo[legend[col]] = map[string]interface{}{
-					"current": fmt.Sprintf("%.2f", calculateRecentAverage(dataPoints, 5)),
+					"current": fmt.Sprintf("%.2f", calculateRecentAverage(sampleValues(complete), 5)),
 					"average": fmt.Sprintf("%.2f", calculateAverage(dataPoints)),
 					"peak":    fmt.Sprintf("%.2f", calculateMax(dataPoints)),
 					"trend":   calculateTrendDirection(dataPoints),

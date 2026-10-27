@@ -845,6 +845,16 @@ func TestSystemHealthExcludesDismissedAlerts(t *testing.T) {
 	if resp["dismissed_alert_count"] != float64(2) {
 		t.Errorf("dismissed_alert_count = %v, want 2", resp["dismissed_alert_count"])
 	}
+	// Only active alerts are listed.
+	listed, _ := resp["alerts"].([]interface{})
+	if len(listed) != 3 {
+		t.Errorf("alerts has %d entries, want 3", len(listed))
+	}
+	for _, a := range listed {
+		if a.(map[string]interface{})["dismissed"] != false {
+			t.Errorf("dismissed alert listed: %v", a)
+		}
+	}
 	if resp["health_check"] != "ALERTS_PRESENT" {
 		t.Errorf("health_check = %v, want ALERTS_PRESENT", resp["health_check"])
 	}

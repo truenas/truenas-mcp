@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 )
@@ -188,7 +189,8 @@ func lastSampleAfterEnd(graph map[string]interface{}, rows []interface{}) float6
 // (all zero/null, the middleware's null2zero gap filling) are dropped from
 // the data sample; when there are any, "aggregations" is recomputed over
 // the remaining rows and the middleware's values, which include the gaps,
-// are kept as "aggregations_reported".
+// are kept as "aggregations_reported". Graphs in skipZeroAggregationGraphs
+// keep the middleware's aggregations, which already skip zero values.
 func summarizeSystemGraph(graph map[string]interface{}, name string) map[string]interface{} {
 	summary := make(map[string]interface{}, len(graph)+4)
 	for k, v := range graph {
@@ -207,7 +209,12 @@ func summarizeSystemGraph(graph map[string]interface{}, name string) map[string]
 	summary["data_points_total"] = len(rows)
 	summary["data_points_valid"] = len(valid)
 	summary["data_sample"] = sampleRows(valid)
-	if gaps > 0 {
+	if gaps > 0 && skipZeroAggregationGraphs[name] {
+		// The middleware already skipped zero values when aggregating, per
+		// value rather than per row, so its aggregations are kept.
+		summary["gap_samples_excluded"] = gaps
+		summary["gap_note"] = "Rows whose values are all 0 or null are periods without data (zero-filled by TrueNAS) and are excluded from data_sample. aggregations are as reported by TrueNAS, which already skips zero values for this graph."
+	} else if gaps > 0 {
 		summary["gap_samples_excluded"] = gaps
 		if reported, ok := graph["aggregations"]; ok {
 			summary["aggregations_reported"] = reported
@@ -281,4 +288,105 @@ func snapshotPropertyBytes(props map[string]interface{}, name string) (int64, bo
 		return 0, false
 	}
 	return int64(f), true
+}
+
+// skipZeroAggregationGraphs are the reporting graphs whose middleware
+// aggregations already skip zero values (skip_zero_values_in_aggregation in
+// the 27.0 netdata graph classes). Recomputing them here would count zeros
+// the middleware skipped, so their aggregations are kept as reported.
+var skipZeroAggregationGraphs = map[string]bool{
+	"cputemp":  true,
+	"disktemp": true,
+}
+
+// legendColumn returns the data column of the legend series called name,
+// or fallback when the legend has no such series.
+func legendColumn(metric map[string]interface{}, name string, fallback int) int {
+	for i, l := range legendNames(metric) {
+		if i > 0 && l == name {
+			return i
+		}
+	}
+	return fallback
+}
+
+// timedSample is one finite value of a reporting series with its row
+// timestamp (0 when the row has none).
+type timedSample struct {
+	ts float64
+	v  float64
+}
+
+// columnSamples is columnPoints with timestamps. keep, when non-nil, drops
+// values it returns false for.
+func columnSamples(metric map[string]interface{}, col int, skipGaps bool, keep func(float64) bool) []timedSample {
+	rows, _ := metric["data"].([]interface{})
+	samples := make([]timedSample, 0, len(rows))
+	for _, r := range rows {
+		row, ok := r.([]interface{})
+		if !ok || len(row) <= col {
+			continue
+		}
+		if skipGaps && isGapRow(row) {
+			continue
+		}
+		f, ok := finiteValue(row[col])
+		if !ok || (keep != nil && !keep(f)) {
+			continue
+		}
+		ts, _ := finiteValue(row[0])
+		samples = append(samples, timedSample{ts: ts, v: f})
+	}
+	return samples
+}
+
+// sampleValues returns the values of samples.
+func sampleValues(samples []timedSample) []float64 {
+	vals := make([]float64, len(samples))
+	for i, s := range samples {
+		vals[i] = s.v
+	}
+	return vals
+}
+
+// completeSamples drops trailing samples stamped after the graph's "end".
+// Netdata stamps aligned buckets by their end, so with MONTH and other
+// long ranges the last bucket can lie past "end" and cover only part of its
+// interval; it must not feed "current" figures. It returns the remaining
+// samples and whether any were dropped. If every sample lies past "end", or
+// the graph has no "end", samples are returned unchanged.
+func completeSamples(graph map[string]interface{}, samples []timedSample) ([]timedSample, bool) {
+	end, ok := finiteValue(graph["end"])
+	if !ok || end <= 0 {
+		return samples, false
+	}
+	n := len(samples)
+	for n > 0 && samples[n-1].ts > end {
+		n--
+	}
+	if n == 0 || n == len(samples) {
+		return samples, false
+	}
+	return samples[:n], true
+}
+
+// partialSampleNote explains a dropped partial last bucket.
+const partialSampleNote = "The last sample is stamped after the graph's end (a partial bucket) and is not used for current figures; it is still included in average, peak and trend."
+
+// atLeastOne returns v as an int, or 1 when v is missing or below 1 (the
+// VM schema's default and minimum for vcpus, cores and threads).
+func atLeastOne(v float64) int {
+	if v < 1 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 1
+	}
+	return int(v)
+}
+
+// formatGiB formats a size in MiB as GiB: one decimal from 1 GiB up, two
+// below, so small VMs (the minimum is 20 MiB) don't show as "0.0 GiB".
+func formatGiB(mib float64) string {
+	if mib < 1024 {
+		return fmt.Sprintf("%.2f GiB", mib/1024.0)
+	}
+	return fmt.Sprintf("%.1f GiB", mib/1024.0)
 }
