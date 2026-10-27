@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"golang.org/x/net/http/httpproxy"
@@ -73,6 +74,10 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 		raw = "http://" + raw
 	}
 	p, err := url.Parse(raw)
+	if err == nil && strings.Contains(p.Hostname(), ":") && !strings.HasPrefix(p.Host, "[") {
+		// url.Parse accepts "corp:3128:3128" and splits at the last colon.
+		return nil, fmt.Errorf("invalid proxy URL in %s: the host is not a host name or bracketed IPv6 address", source)
+	}
 	if err != nil || p.Hostname() == "" {
 		return nil, fmt.Errorf("invalid proxy URL in %s: %s", source, proxyParseReason(err))
 	}
@@ -89,6 +94,10 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 	}
 	if p.Port() == "" {
 		p.Host = net.JoinHostPort(p.Hostname(), port)
+	} else if n, err := parsePort(p.Port()); err != nil {
+		return nil, fmt.Errorf("invalid proxy port in %s: the port must be 1-65535", source)
+	} else {
+		p.Host = net.JoinHostPort(p.Hostname(), strconv.Itoa(n)) // ":08080" -> ":8080"
 	}
 	return &proxyChoice{url: p, source: source}, nil
 }
