@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/truenas/truenas-mcp/truenas"
@@ -111,6 +112,12 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 	var newStatus TaskStatus
 	var statusMessage string
 
+	if task.VerifyApp != "" {
+		// Bounded, readable view of the job; the raw result can be an entire
+		// app entry.
+		task.Job = SummarizeJob(job)
+	}
+
 	switch state {
 	case "RUNNING", "WAITING":
 		newStatus = TaskStatusWorking
@@ -129,11 +136,20 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 		if result, ok := job["result"]; ok {
 			task.Result = result
 		}
+		if task.VerifyApp != "" {
+			// A finished job is not a healthy app: hold the task open until
+			// the app is observed running, or report what state it is in.
+			task.Result = task.Job
+			newStatus, statusMessage = p.verifyApp(task)
+		}
 
 	case "FAILED":
 		newStatus = TaskStatusFailed
 		if errMsg, ok := job["error"].(string); ok {
 			statusMessage = errMsg
+			if task.VerifyApp != "" {
+				statusMessage, _ = TruncateText(errMsg, MaxJobTextChars)
+			}
 		} else {
 			statusMessage = "Job failed"
 		}
@@ -152,6 +168,91 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 		task.StatusMessage = statusMessage
 		p.store.Update(task)
 	}
+}
+
+// verifyApp decides the task status after its job succeeded, from the app's
+// live state. It returns working while the app is still coming up and the
+// timeout has not elapsed, completed once the app is RUNNING with no crashed
+// or starting container, and failed otherwise.
+func (p *Poller) verifyApp(task *Task) (TaskStatus, string) {
+	if task.VerifyStartedAt.IsZero() {
+		task.VerifyStartedAt = time.Now()
+	}
+	expired := time.Since(task.VerifyStartedAt) >= task.VerifyTimeout
+
+	state, notRunning, version, err := p.appHealth(task.VerifyApp)
+	if err == nil && state == "RUNNING" && len(notRunning) == 0 {
+		msg := fmt.Sprintf("Upgrade completed; app %s is RUNNING", task.VerifyApp)
+		if version != "" {
+			msg += " (version " + version + ")"
+		}
+		return TaskStatusCompleted, msg
+	}
+
+	var what string
+	switch {
+	case err != nil:
+		what = "unknown"
+		if state != "" {
+			what = state
+		}
+	case state != "RUNNING":
+		what = state
+	default:
+		what = "RUNNING with containers not healthy: " + strings.Join(notRunning, ", ")
+	}
+	if expired {
+		if err != nil {
+			return TaskStatusFailed, fmt.Sprintf("upgrade job finished but app state could not be verified: %v", err)
+		}
+		return TaskStatusFailed, fmt.Sprintf("upgrade job finished but app is %s", what)
+	}
+	return TaskStatusWorking, fmt.Sprintf("Upgrade job finished; waiting for app %s to be RUNNING (currently %s)", task.VerifyApp, what)
+}
+
+// appHealth queries the app and returns its state, the containers that are
+// crashed or still starting, and its human version. TrueNAS exposes no container health
+// probe in app.query, so container state is the health signal.
+func (p *Poller) appHealth(appName string) (state string, notRunning []string, version string, err error) {
+	raw, err := p.client.Call("app.query", []interface{}{
+		[]interface{}{"name", "=", appName},
+	})
+	if err != nil {
+		return "", nil, "", err
+	}
+	var apps []map[string]interface{}
+	if err := json.Unmarshal(raw, &apps); err != nil {
+		return "", nil, "", err
+	}
+	if len(apps) == 0 {
+		return "", nil, "", fmt.Errorf("app %s not found", appName)
+	}
+	app := apps[0]
+	state, _ = app["state"].(string)
+	version, _ = app["human_version"].(string)
+	if aw, ok := app["active_workloads"].(map[string]interface{}); ok {
+		details, _ := aw["container_details"].([]interface{})
+		for _, d := range details {
+			c, ok := d.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			// Init and one-shot containers legitimately end up "exited" or
+			// "created" in a healthy app; only crashed or still-starting
+			// containers count against it.
+			if cs, _ := c["state"].(string); cs == "crashed" || cs == "starting" {
+				name, _ := c["service_name"].(string)
+				if name == "" {
+					name = "container"
+				}
+				notRunning = append(notRunning, fmt.Sprintf("%s (%s)", name, cs))
+			}
+		}
+	}
+	if state == "" {
+		return "", nil, version, fmt.Errorf("app %s reported no state", appName)
+	}
+	return state, notRunning, version, nil
 }
 
 // updateTaskFromStatus updates task state based on custom status endpoint

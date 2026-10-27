@@ -65,8 +65,28 @@ func (m *Manager) cleanupLoop() {
 	}
 }
 
+// TaskOption customises a task at creation.
+type TaskOption func(*Task)
+
+// WithAppHealthCheck makes a job task verify the app after the job succeeds:
+// the task stays "working" until app.query reports the app RUNNING (with no crashed or
+// starting container), and fails with "job finished but app is <state>"
+// if that does not happen within timeout. It also records a bounded job
+// summary on the task.
+func WithAppHealthCheck(appName string, timeout time.Duration) TaskOption {
+	return func(t *Task) {
+		t.VerifyApp = appName
+		t.VerifyTimeout = timeout
+	}
+}
+
+// PollNow polls every active task once, outside the background schedule.
+func (m *Manager) PollNow() {
+	m.poller.pollAllTasks()
+}
+
 // CreateJobTask creates a task for a job-based operation
-func (m *Manager) CreateJobTask(toolName string, args map[string]interface{}, jobID int, ttl time.Duration) (*Task, error) {
+func (m *Manager) CreateJobTask(toolName string, args map[string]interface{}, jobID int, ttl time.Duration, opts ...TaskOption) (*Task, error) {
 	task := &Task{
 		TaskID:        uuid.New().String(),
 		Status:        TaskStatusWorking,
@@ -78,6 +98,10 @@ func (m *Manager) CreateJobTask(toolName string, args map[string]interface{}, jo
 		JobID:         &jobID,
 		ToolName:      toolName,
 		Arguments:     args,
+	}
+
+	for _, opt := range opts {
+		opt(task)
 	}
 
 	if err := m.store.Add(task); err != nil {

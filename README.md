@@ -598,6 +598,7 @@ The server implements MCP Tasks specification for operations that take time to c
 1. Write operations (like `upgrade_app`) return a `task_id` instead of blocking
 2. Tasks are automatically tracked in the background
 3. Use `tasks_get` with the task ID to check progress
+4. `upgrade_app` only reports success once the app is seen RUNNING after the upgrade job finishes (waits `health_timeout_seconds`, default 60s); job output is summarized to a bounded size with a truncation flag
 4. Tasks update automatically - no manual polling needed
 
 **Example:**

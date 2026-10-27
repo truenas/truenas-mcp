@@ -165,7 +165,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Supports dry-run mode to preview deletion
   - Returns task ID for tracking deletion progress
 
-- **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup (**destructive**: the app goes offline and migrations may be one-way)
+- **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup (**destructive**: the app goes offline and migrations may be one-way). The task completes only once the app is RUNNING; `snapshot_hostpaths` is a request, not a confirmation that a snapshot was taken
   - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations

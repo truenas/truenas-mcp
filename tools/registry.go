@@ -1210,7 +1210,7 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 	r.tools["upgrade_app"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "upgrade_app",
-			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress. This is a write operation that modifies the system.",
+			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress; the task completes only once the app is observed RUNNING after the upgrade job finishes (otherwise it fails with the app's state). This is a write operation that modifies the system.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1225,8 +1225,13 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 					},
 					"snapshot_hostpaths": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Create snapshots of host volumes before upgrade (default: true for safety)",
+						"description": "Request snapshots of host-path datasets before upgrade (default: true for safety). Only a request: the upgrade job does not report which snapshots it took, and host paths that are not ZFS datasets are skipped.",
 						"default":     true,
+					},
+					"health_timeout_seconds": map[string]interface{}{
+						"type":        "integer",
+						"description": "After the upgrade job finishes, how long to wait for the app to report RUNNING before the task fails (default: 60, maximum: 600; 0 checks once without waiting)",
+						"default":     defaultUpgradeHealthTimeoutSeconds,
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -3895,6 +3900,7 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 	if err := json.Unmarshal(summaryResult, &summary); err != nil {
 		return "", fmt.Errorf("failed to parse upgrade summary: %w", err)
 	}
+	summary = normalizeUpgradeSummary(summary)
 
 	// Perform the upgrade - this returns a job ID since it's a long-running operation
 	upgradeOptions := map[string]interface{}{
@@ -3922,26 +3928,33 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 		jobID = jobIDArray[0]
 	}
 
-	// Create task to track upgrade progress
+	// Create task to track upgrade progress. The task only completes once the
+	// app is seen RUNNING after the job finishes.
 	task, err := r.taskManager.CreateJobTask(
 		"upgrade_app",
 		args,
 		jobID,
 		1*time.Hour, // 1 hour TTL
+		tasks.WithAppHealthCheck(appName, upgradeHealthTimeout(args)),
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
 
 	response := map[string]interface{}{
-		"app_name":         appName,
-		"upgrade_summary":  summary,
-		"task_id":          task.TaskID,
-		"task_status":      task.Status,
-		"poll_interval":    task.PollInterval,
-		"job_id":           jobID,
-		"snapshot_created": snapshotHostpaths,
-		"message":          fmt.Sprintf("Upgrade started. Track progress with tasks_get using task_id: %s", task.TaskID),
+		"app_name":        appName,
+		"upgrade_summary": summary,
+		"task_id":         task.TaskID,
+		"task_status":     task.Status,
+		"poll_interval":   task.PollInterval,
+		"job_id":          jobID,
+		// What was asked for, not what happened: the upgrade job does not
+		// report which snapshots, if any, it took.
+		"snapshot_requested": snapshotHostpaths,
+		"snapshot_note":      snapshotNote(snapshotHostpaths),
+		"message": fmt.Sprintf("Upgrade started. Track progress with tasks_get using task_id: %s. "+
+			"The task completes only after the app is RUNNING (waits up to %ds after the job finishes).",
+			task.TaskID, int(upgradeHealthTimeout(args)/time.Second)),
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -4007,6 +4020,7 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	if err := json.Unmarshal(summaryResult, &summary); err != nil {
 		return nil, fmt.Errorf("failed to parse upgrade summary: %w", err)
 	}
+	summary = normalizeUpgradeSummary(summary)
 
 	// Build current state
 	currentState := map[string]interface{}{
@@ -4034,6 +4048,12 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 			Step:        3,
 			Description: "Start application with new version",
 			Operation:   "start",
+			Target:      appName,
+		},
+		{
+			Step:        4,
+			Description: fmt.Sprintf("Verify the app reports RUNNING after the job finishes (waits up to %ds); otherwise the task fails with the app's state", int(upgradeHealthTimeout(args)/time.Second)),
+			Operation:   "verify",
 			Target:      appName,
 		},
 	}
@@ -4435,13 +4455,28 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 			jobInfo["time_finished"] = readableDates(timeFinished)
 		}
 		if result, ok := job["result"]; ok && result != nil {
-			jobInfo["result"] = result
+			// A job result can be a whole app entry or similar: bound it and
+			// say so when it was cut.
+			bounded, truncated, size := tasks.BoundResult(readableDates(result))
+			jobInfo["result"] = bounded
+			if truncated {
+				jobInfo["result_truncated"] = true
+				jobInfo["result_size_bytes"] = size
+			}
 		}
 		if errorMsg, ok := job["error"]; ok && errorMsg != nil {
 			jobInfo["error"] = errorMsg
 		}
 		if exception, ok := job["exception"]; ok && exception != nil {
-			jobInfo["exception"] = exception
+			if text, isText := exception.(string); isText {
+				cut, truncated := tasks.TruncateText(text, tasks.MaxJobTextChars)
+				jobInfo["exception"] = cut
+				if truncated {
+					jobInfo["exception_truncated"] = true
+				}
+			} else {
+				jobInfo["exception"] = exception
+			}
 		}
 		if abortable, ok := job["abortable"]; ok {
 			jobInfo["abortable"] = abortable
