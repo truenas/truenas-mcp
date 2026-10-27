@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -60,13 +61,20 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 	if raw == "" || bypassProxy(target) {
 		return nil, nil
 	}
+	// "none" is only an opt-out in --proxy and TRUENAS_PROXY. In the standard
+	// variables it would be taken as a proxy host named "none", and quietly
+	// connecting directly instead could bypass a proxy that policy requires,
+	// so refuse and say how to opt out.
+	if strings.EqualFold(raw, noProxyValue) {
+		return nil, fmt.Errorf("%s=%s is not an opt-out: it would name a proxy host called %q. To connect without a proxy, set TRUENAS_PROXY=none (or pass --proxy none); otherwise unset %s", source, raw, raw, source)
+	}
 
 	if !strings.Contains(raw, "://") {
 		raw = "http://" + raw
 	}
 	p, err := url.Parse(raw)
 	if err != nil || p.Hostname() == "" {
-		return nil, fmt.Errorf("invalid proxy URL in %s", source)
+		return nil, fmt.Errorf("invalid proxy URL in %s: %s", source, proxyParseReason(err))
 	}
 	p.Scheme = strings.ToLower(p.Scheme)
 	port := "1080"
@@ -83,6 +91,38 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 		p.Host = net.JoinHostPort(p.Hostname(), port)
 	}
 	return &proxyChoice{url: p, source: source}, nil
+}
+
+// proxyParseReason says why a proxy URL did not parse (err is nil if it
+// parsed but has no host name). It never repeats any part of the URL: url's
+// own errors quote the URL, and the pieces they quote (a bad port or
+// escape, say) can come from the user info or the host name.
+func proxyParseReason(err error) string {
+	if err == nil {
+		return "no host name"
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "invalid userinfo"):
+		return "invalid user info: percent-encode special characters in the user name and password (for example @ as %40)"
+	case strings.Contains(msg, "missing ']'"):
+		return "unterminated [ in the host (an IPv6 address needs a closing ])"
+	case strings.Contains(msg, "invalid port"):
+		return "the port is not a number"
+	case strings.Contains(msg, "invalid URL escape"):
+		return "invalid percent-escape (a % must be followed by two hex digits; write a literal % as %25)"
+	case strings.Contains(msg, "invalid character") && strings.Contains(msg, "host"):
+		return "invalid character in the host name"
+	case strings.Contains(msg, "invalid control character"):
+		return "invalid control character"
+	case strings.Contains(msg, "cannot contain colon"):
+		return "the URL must look like scheme://host:port"
+	}
+	return "not a valid URL; expected scheme://[user:password@]host[:port]"
 }
 
 // bypassProxy reports whether NO_PROXY, or httpproxy's localhost and

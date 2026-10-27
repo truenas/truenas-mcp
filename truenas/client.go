@@ -111,6 +111,15 @@ const apiPath = "/api/current"
 // apiPath so existing configurations keep working.
 const legacyPath = "/websocket"
 
+// ConnectError is returned when the connection to TrueNAS could not be
+// established (name resolution, dial, proxy, TLS or WebSocket handshake), as
+// opposed to a failed login on a connection that was established. Err is the
+// underlying cause, including any hint on how to fix it.
+type ConnectError struct{ Err error }
+
+func (e *ConnectError) Error() string { return "connection failed: " + e.Err.Error() }
+func (e *ConnectError) Unwrap() error { return e.Err }
+
 // errNotSent marks a request that never reached the socket. Only such
 // requests are retried: once written, the server may already have acted on it.
 var errNotSent = errors.New("request not sent")
@@ -311,7 +320,7 @@ func (c *Client) connect() error {
 			err = fmt.Errorf("connecting via proxy %s from %s: proxy unreachable: %w", proxy, proxy.source, err)
 		}
 		log.Printf("Connection failed: %v", err)
-		return fmt.Errorf("connection failed: %w", err)
+		return &ConnectError{Err: err}
 	}
 
 	// Set read limit to handle large responses (e.g., large upgrade summaries)

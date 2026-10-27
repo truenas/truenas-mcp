@@ -354,7 +354,10 @@ The proxy is chosen in this order:
 
 To ignore inherited proxy variables, pass `--proxy none` (or set
 `TRUENAS_PROXY=none`). An empty `--proxy` / `TRUENAS_PROXY` means "not set",
-so the environment variables still apply.
+so the environment variables still apply. `none` is only an opt-out in those
+two settings: `HTTPS_PROXY=none` or `ALL_PROXY=none` is refused at startup
+(it would name a proxy host called "none"), with a message pointing to
+`TRUENAS_PROXY=none`.
 
 A proxy setting is only checked when it applies to the TrueNAS host: an
 unusable inherited value (say an `https://` proxy) does not matter if
@@ -387,6 +390,7 @@ HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.0.2.0/24 ./truenas-mcp --truenas-
 ### Troubleshooting
 
 **Connection Issues:**
+- "Could not connect to TrueNAS (no login was attempted)" means the TCP, proxy, TLS or WebSocket step failed; "Failed to authenticate with TrueNAS" means the connection worked and the login was rejected
 - Verify TrueNAS is accessible from your machine
 - Check firewall allows port 443 (wss), or the port you configured
 - `HTTP 404` / "TrueNAS 25.04 or later required": the server predates the JSON-RPC API; upgrade TrueNAS
