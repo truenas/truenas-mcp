@@ -447,77 +447,114 @@ func (r *Registry) registerTools() {
 	r.tools["configure_directory_service"] = Tool{
 		Definition: mcp.Tool{
 			Name: "configure_directory_service",
-			Description: `Configure and join a directory service (Active Directory, LDAP, or IPA). Setting enable=true joins the domain automatically.
+			Description: `Configure and join a directory service (Active Directory, LDAP, or IPA) with TrueNAS directoryservices.update (TrueNAS 25.10 or later). Setting enable=true joins the domain automatically the first time. The arguments are the fields of that API call. Omitted optional fields keep their current value.
 
-**Service Types:**
-- ACTIVEDIRECTORY: Microsoft Active Directory integration
-- LDAP: Generic LDAP server (OpenLDAP, etc.)
-- IPA: FreeIPA / Red Hat Identity Management
+**To enable or change a service, service_type, credential, configuration and enable are all required, and configuration must match service_type. The old flat arguments (type, server, bindname, netbiosname, ssl, domain, ...) no longer exist: put them in credential and configuration as below.**
 
-**Credential Types by Service:**
+**To disable the configured service, send only enable=false** (no service_type, credential or configuration): the settings are kept and domain authentication stops until it is enabled again. When service_type is sent with enable=false, a KERBEROS_USER credential is rejected for ACTIVEDIRECTORY and IPA (TrueNAS does not store it); use KERBEROS_PRINCIPAL.
 
-Active Directory:
-- KERBEROS_USER: {type: "KERBEROS_USER", username: "admin", password: "pass"}
-- KERBEROS_PRINCIPAL: {type: "KERBEROS_PRINCIPAL", principal: "host/truenas", keytab: "..."}
+**Credential (credential_type and its fields):**
 
-LDAP:
-- LDAP_PLAIN: {type: "LDAP_PLAIN", binddn: "cn=admin,dc=example,dc=com", bindpw: "pass"}
-- LDAP_ANONYMOUS: {type: "LDAP_ANONYMOUS"}
-- LDAP_MTLS: {type: "LDAP_MTLS", certificate_id: 123}
-- KERBEROS_USER or KERBEROS_PRINCIPAL (same as Active Directory)
+Active Directory and IPA (Kerberos only; the first join needs KERBEROS_USER with domain admin rights):
+- KERBEROS_USER: {credential_type: "KERBEROS_USER", username: "admin", password: "pass"}
+- KERBEROS_PRINCIPAL: {credential_type: "KERBEROS_PRINCIPAL", principal: "host/truenas@EXAMPLE.COM"} (the principal must already be in a keytab on TrueNAS)
 
-IPA:
-- KERBEROS_USER or KERBEROS_PRINCIPAL (same as Active Directory)
+LDAP (also accepts the Kerberos types above, which need kerberos_realm to be set):
+- LDAP_PLAIN: {credential_type: "LDAP_PLAIN", binddn: "cn=admin,dc=example,dc=com", bindpw: "pass"}
+- LDAP_ANONYMOUS: {credential_type: "LDAP_ANONYMOUS"}
+- LDAP_MTLS: {credential_type: "LDAP_MTLS", client_certificate: "name of a certificate on TrueNAS"}
 
-**Configuration Object (service-specific):**
-For Active Directory: {hostname: "truenas-nyc", domain: "corp.example.com", ...}
-For LDAP: {hostname: "ldap.example.com", port: 389, ...}
-For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
+**Configuration (fields per service_type; * = required):**
+- ACTIVEDIRECTORY: hostname*, domain*, site, computer_account_ou, use_default_domain, enable_trusted_domains, trusted_domains, idmap
+  e.g. {hostname: "truenas", domain: "corp.example.com"}
+- IPA: target_server*, hostname*, domain*, basedn*, smb_domain, validate_certificates
+  e.g. {target_server: "ipa.example.com", hostname: "truenas", domain: "example.com", basedn: "dc=example,dc=com"}
+- LDAP: server_urls* (ldap:// or ldaps:// URIs), basedn*, starttls, validate_certificates, schema (RFC2307 or RFC2307BIS), search_bases, attribute_maps, auxiliary_parameters
+  e.g. {server_urls: ["ldaps://ldap.example.com"], basedn: "dc=example,dc=com"}
+idmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed to TrueNAS unchanged; see the TrueNAS API docs for directoryservices.update for their fields.
 
 **Security:**
 - Credentials are stored in TrueNAS configuration
 - Use Kerberos principals with keytabs instead of passwords for production
-- Dry-run shows credential requirements without exposing values
+- Dry-run shows the exact payload that would be sent with every secret value masked (password, bindpw, ldap_user_dn_password in idmap and trusted_domains, ...); credential_type and username stay visible
 
-**Returns:** task_id for tracking long-running domain join operation (2-10 minutes typical)`,
+**Returns:** task_id for tracking the long-running domain join job (2-10 minutes typical)`,
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"service_type": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"ACTIVEDIRECTORY", "LDAP", "IPA"},
-						"description": "Directory service type",
+						"description": "Directory service type. Selects which configuration fields apply.",
 					},
 					"enable": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Enable service (true to join domain, false to disable)",
+						"description": "Enable the service (true joins the domain the first time; false disables it but keeps the settings)",
 					},
 					"credential": map[string]interface{}{
 						"type":        "object",
-						"description": "Credential object with 'type' field and credential-specific fields (see tool description)",
+						"description": "Credential used to bind to the directory service. credential_type selects the other fields: KERBEROS_USER (username, password), KERBEROS_PRINCIPAL (principal), LDAP_PLAIN (binddn, bindpw), LDAP_ANONYMOUS (none), LDAP_MTLS (client_certificate). LDAP_* types are only valid for service_type LDAP.",
+						"properties": map[string]interface{}{
+							"credential_type": map[string]interface{}{
+								"type": "string",
+								"enum": []string{"KERBEROS_USER", "KERBEROS_PRINCIPAL", "LDAP_PLAIN", "LDAP_ANONYMOUS", "LDAP_MTLS"},
+							},
+							"username":           map[string]interface{}{"type": "string", "description": "KERBEROS_USER: account used to obtain a Kerberos ticket"},
+							"password":           map[string]interface{}{"type": "string", "description": "KERBEROS_USER: password of that account"},
+							"principal":          map[string]interface{}{"type": "string", "description": "KERBEROS_PRINCIPAL: principal present in a keytab on TrueNAS"},
+							"binddn":             map[string]interface{}{"type": "string", "description": "LDAP_PLAIN: distinguished name to bind as"},
+							"bindpw":             map[string]interface{}{"type": "string", "description": "LDAP_PLAIN: password of the bind DN"},
+							"client_certificate": map[string]interface{}{"type": "string", "description": "LDAP_MTLS: name of the client certificate on TrueNAS"},
+						},
+						"required":             []string{"credential_type"},
+						"additionalProperties": false,
 					},
 					"configuration": map[string]interface{}{
 						"type":        "object",
-						"description": "Service-specific configuration (domain, hostname, etc.)",
+						"description": "service_type specific configuration; see the tool description for the fields of each service type and which are required",
+						"properties": map[string]interface{}{
+							"hostname":               map[string]interface{}{"type": "string", "description": "ACTIVEDIRECTORY, IPA: hostname TrueNAS registers in the domain (required)"},
+							"domain":                 map[string]interface{}{"type": "string", "description": "ACTIVEDIRECTORY, IPA: DNS domain name (required)"},
+							"target_server":          map[string]interface{}{"type": "string", "description": "IPA: name of the IPA server used when joining or leaving (required)"},
+							"basedn":                 map[string]interface{}{"type": "string", "description": "IPA, LDAP: base DN for LDAP operations (required)"},
+							"server_urls":            map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "LDAP: server URIs beginning with ldap:// or ldaps:// (required)"},
+							"site":                   map[string]interface{}{"type": "string", "description": "ACTIVEDIRECTORY: Active Directory site (detected automatically when omitted)"},
+							"computer_account_ou":    map[string]interface{}{"type": "string", "description": "ACTIVEDIRECTORY: OU in which the computer account is created on first join"},
+							"use_default_domain":     map[string]interface{}{"type": "boolean", "description": "ACTIVEDIRECTORY: drop the domain prefix from user and group names"},
+							"enable_trusted_domains": map[string]interface{}{"type": "boolean", "description": "ACTIVEDIRECTORY: support trusted domains (set trusted_domains too)"},
+							"trusted_domains":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}, "description": "ACTIVEDIRECTORY: idmap configuration for each trusted domain"},
+							"idmap":                  map[string]interface{}{"type": "object", "description": "ACTIVEDIRECTORY: idmap settings (builtin and idmap_domain), passed to TrueNAS unchanged"},
+							"smb_domain":             map[string]interface{}{"type": "object", "description": "IPA: SMB domain settings, passed to TrueNAS unchanged"},
+							"validate_certificates":  map[string]interface{}{"type": "boolean", "description": "IPA, LDAP: validate the directory server's certificates (TrueNAS default: true)"},
+							"starttls":               map[string]interface{}{"type": "boolean", "description": "LDAP: use StartTLS"},
+							"schema":                 map[string]interface{}{"type": "string", "enum": []string{"RFC2307", "RFC2307BIS"}, "description": "LDAP: attribute schema of the server"},
+							"search_bases":           map[string]interface{}{"type": "object", "description": "LDAP: base_user, base_group and base_netgroup search bases, passed to TrueNAS unchanged"},
+							"attribute_maps":         map[string]interface{}{"type": "object", "description": "LDAP: attribute mappings for non-standard servers, passed to TrueNAS unchanged"},
+							"auxiliary_parameters":   map[string]interface{}{"type": "string", "description": "LDAP: extra SSSD parameters (not validated by TrueNAS)"},
+						},
+						"additionalProperties": false,
 					},
 					"enable_account_cache": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Cache user/group lists (default: true)",
-						"default":     true,
+						"description": "Cache user and group lists (TrueNAS default: true; omit to keep the current value)",
 					},
 					"enable_dns_updates": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Auto DNS updates via nsupdate (default: true)",
-						"default":     true,
+						"description": "Automatic DNS updates via nsupdate (TrueNAS default: true; omit to keep the current value)",
 					},
 					"timeout": map[string]interface{}{
 						"type":        "integer",
-						"description": "DNS query and LDAP request timeout in seconds (5-60, default: 10)",
-						"default":     10,
+						"minimum":     5,
+						"maximum":     60,
+						"description": "DNS query and LDAP request timeout in seconds (5-60; TrueNAS default: 10)",
 					},
 					"kerberos_realm": map[string]interface{}{
 						"type":        "string",
-						"description": "Kerberos realm for authentication (optional)",
+						"description": "Kerberos realm used to authenticate to the directory service. Required for Kerberos credentials with service_type LDAP; detected automatically when first joining AD or IPA.",
+					},
+					"force": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Skip the check for an existing server registered with the same hostname in the domain. Can replace that server; do not use casually.",
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -525,7 +562,7 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 						"default":     false,
 					},
 				},
-				"required": []string{"service_type", "enable", "credential"},
+				"required": []string{"enable"},
 			},
 		},
 		Handler: r.handleConfigureDirectoryServiceWithDryRun,
@@ -534,27 +571,46 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 	r.tools["leave_directory_service"] = Tool{
 		Definition: mcp.Tool{
 			Name: "leave_directory_service",
-			Description: `Disconnect from directory service and leave the domain.
+			Description: `Leave the Active Directory or IPA domain TrueNAS has joined, with TrueNAS directoryservices.leave (TrueNAS 25.10 or later).
+
+TrueNAS removes its computer account from the domain using the credential you provide, then resets its local directory service configuration and disables the service. LDAP cannot be left; use configure_directory_service with enable=false to disable it.
+
+**credential is required:** a KERBEROS_USER credential, {credential_type: "KERBEROS_USER", username: "admin", password: "pass"}, for an account with the administrative privileges needed to remove the computer account. It is used for this operation only and is never shown: the password is masked in the dry run and in stored task data.
 
 **WARNING:** This is a destructive operation:
 - Removes TrueNAS from the domain
-- Deletes computer account (if possible)
 - Clears all cached user/group data
 - All domain user authentication will stop working
 - SMB/NFS shares configured with domain users will become inaccessible
 
 **Alternative:** Use configure_directory_service with enable=false for temporary disable without leaving the domain.
 
-**Returns:** task_id for tracking the leave operation (30 seconds to 5 minutes typical)`,
+**Returns:** task_id for tracking the leave job (30 seconds to 5 minutes typical)`,
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
+					"credential": map[string]interface{}{
+						"type":        "object",
+						"description": "KERBEROS_USER credential used to remove the computer account from the domain",
+						"properties": map[string]interface{}{
+							"credential_type": map[string]interface{}{
+								"type":        "string",
+								"enum":        []string{"KERBEROS_USER"},
+								"description": "Must be KERBEROS_USER, the only credential type directoryservices.leave accepts",
+							},
+							"username": map[string]interface{}{"type": "string", "description": "Account used to obtain a Kerberos ticket; it must exist on the domain controller"},
+							"password": map[string]interface{}{"type": "string", "description": "Password of that account"},
+						},
+						"required":             []string{"credential_type", "username", "password"},
+						"additionalProperties": false,
+					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
 						"description": "Preview operation without executing (default: false, STRONGLY RECOMMENDED to use dry_run first)",
 						"default":     false,
 					},
 				},
+				"required": []string{"credential"},
 			},
 		},
 		Handler: r.handleLeaveDirectoryServiceWithDryRun,

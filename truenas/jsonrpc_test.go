@@ -92,7 +92,7 @@ func TestEndpointURL(t *testing.T) {
 		"HTTPS://truenas.example":          "scheme",
 		"wss://u:p@truenas.example":        "user info",
 		"u:p@truenas.example":              "user info",
-		"wss://truenas.example:abc":        "invalid TrueNAS URL",
+		"wss://truenas.example:abc":        "malformed URL",
 	}
 	for in, mention := range refused {
 		c := &Client{endpoint: in}
@@ -358,7 +358,7 @@ func TestEndpointURLHostAndPort(t *testing.T) {
 		"wss://truenas.example:99999":        "bad port",
 		"wss://truenas.example:443:443":      "not a host name",
 		"wss://10.0.0.1:443:443/api/current": "not a host name",
-		"wss://[::1]:443:443":                "invalid port",
+		"wss://[::1]:443:443":                "the port is not a number",
 		"wss://[::1]:":                       "empty port",
 		"wss://[::1]:0":                      "bad port",
 	}
