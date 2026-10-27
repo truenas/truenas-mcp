@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 
@@ -585,20 +586,23 @@ func (c *Client) parseEndpoint() (*url.URL, error) {
 		}
 		u, err := url.Parse("wss" + e[i:])
 		if err != nil {
-			var urlErr *url.Error
-			if errors.As(err, &urlErr) {
-				err = urlErr.Err // drop the URL itself from the message
-			}
 			if strings.Contains(e, "@") {
 				return nil, errUserinfo
 			}
-			return nil, fmt.Errorf("malformed URL: %w", err)
+			// url.Parse errors quote parts of the input (a bad port, an
+			// escape), so only a fixed reason is given.
+			return nil, fmt.Errorf("malformed URL: %s", proxyParseReason(err))
 		}
 		if u.User != nil {
 			return nil, errUserinfo
 		}
 		if u.Hostname() == "" {
 			return nil, errors.New("the URL has no host")
+		}
+		if strings.IndexFunc(u.Hostname(), func(r rune) bool { return !bareHostRune(r) }) >= 0 {
+			// url.Parse accepts ";", "," and similar in a host. They end up
+			// in the dial error and the log, so refuse them without echoing.
+			return nil, errors.New("the host is not a host name or IPv6 address (it has characters that cannot be part of one)")
 		}
 		if strings.HasSuffix(u.Host, ":") {
 			return nil, errors.New("empty port after the host's colon")
@@ -629,11 +633,11 @@ func (c *Client) parseEndpoint() (*url.URL, error) {
 	if strings.Contains(e, "@") {
 		return nil, errUserinfo
 	}
-	// From here on e holds no userinfo. Anything from the first "/", "?" or
-	// "#" is dropped before the input is quoted, as logURL does for a parsed
-	// URL, so no path, query or fragment is ever echoed.
-	if i := strings.IndexAny(e, "/?#"); i >= 0 {
-		return nil, fmt.Errorf("%q: a bare host cannot include a path, query or fragment; pass a full wss://host[:port]%s URL instead", e[:i], apiPath)
+	// From here on e holds no userinfo. "/", "?", "#", ";" and "\" start a
+	// path, query or parameters, so only what comes before the first of them
+	// is quoted. Everything echoed below is cut by hostPrefix in the same way.
+	if i := strings.IndexAny(e, `/?#;\`); i >= 0 {
+		return nil, fmt.Errorf("%q: a bare host cannot include a path, query or fragment; pass a full wss://host[:port]%s URL instead", hostPrefix(e[:i]), apiPath)
 	}
 	host, port := e, "443"
 	if h, p, err := net.SplitHostPort(e); err == nil {
@@ -642,18 +646,36 @@ func (c *Client) parseEndpoint() (*url.URL, error) {
 		host = e[1 : len(e)-1] // bracketed IPv6 without a port
 	} // otherwise a name or an unbracketed IPv6 address, without a port
 	if host == "" || strings.ContainsAny(host, "[]") {
-		return nil, fmt.Errorf("%q: no host name", e)
+		return nil, fmt.Errorf("%q: no host name", hostPrefix(e))
+	}
+	if i := strings.IndexFunc(host, func(r rune) bool { return !bareHostRune(r) }); i >= 0 {
+		return nil, fmt.Errorf("%q: not a host name or IPv6 address (write IPv6 as [addr]:port)", hostPrefix(e))
 	}
 	if strings.Contains(host, ":") && !validIPv6(host) {
 		// More than one colon and not an IPv6 address, e.g. "host:443:443".
-		return nil, fmt.Errorf("%q: not a host name or IPv6 address (write IPv6 as [addr]:port)", e)
+		return nil, fmt.Errorf("%q: not a host name or IPv6 address (write IPv6 as [addr]:port)", hostPrefix(e))
 	}
 	n, err := parsePort(port)
 	if err != nil {
-		return nil, fmt.Errorf("%q: %w", e, err)
+		return nil, fmt.Errorf("%q: %w", hostPrefix(e), err)
 	}
 	port = strconv.Itoa(n)
 	return &url.URL{Scheme: "wss", Host: net.JoinHostPort(host, port), Path: apiPath}, nil
+}
+
+// bareHostRune reports whether r may appear in a bare host: letters, digits,
+// and the punctuation of names, ports and IPv6 addresses ("[fe80::1%eth0]:443").
+func bareHostRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(".-_:[]%", r)
+}
+
+// hostPrefix returns the leading part of s that is made of host characters,
+// the only part of a bare-host input that error messages may quote.
+func hostPrefix(s string) string {
+	if i := strings.IndexFunc(s, func(r rune) bool { return !bareHostRune(r) }); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // parsePort parses a TCP port written as plain decimal digits, 1-65535.
@@ -661,14 +683,24 @@ func (c *Client) parseEndpoint() (*url.URL, error) {
 func parsePort(s string) (int, error) {
 	for _, r := range s {
 		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("bad port %q", s)
+			return 0, badPort(s)
 		}
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 1 || n > 65535 {
-		return 0, fmt.Errorf("bad port %q", s)
+		return 0, badPort(s)
 	}
 	return n, nil
+}
+
+// badPort describes a bad port. The text is quoted only when it is made of
+// digits and signs ("+443", "99999"); anything else may be part of a query
+// or other input, so it is not echoed.
+func badPort(s string) error {
+	if len(s) <= 8 && strings.Trim(s, "0123456789+-") == "" {
+		return fmt.Errorf("bad port %q", s)
+	}
+	return errors.New("bad port: not a number")
 }
 
 // validIPv6 reports whether s is an IPv6 address, with an optional zone.

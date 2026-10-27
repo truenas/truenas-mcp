@@ -487,6 +487,19 @@ func TestEndpointErrorsNeverEchoQueryFragmentOrUserinfo(t *testing.T) {
 		"h.test?token=" + secret,
 		"h.test/path?token=" + secret + "#frag" + secret,
 		"h.test#" + secret,
+		"h.test;token=" + secret,
+		"h.test:443;token=" + secret,
+		"h.test\\token=" + secret,
+		"h.test,token=" + secret,
+		"h.test&token=" + secret,
+		"h.test:443,token=" + secret,
+		"h.test:443?token=" + secret,
+		"[::1]x;token=" + secret,
+		"wss://h.test:443,token=" + secret,
+		"wss://h.test;token=" + secret + "/api/current",
+		"wss://h.test,token=" + secret,
+		"wss://h.test&token=" + secret,
+		"wss://h.test:443;token=" + secret,
 		"h.test:99999?token=" + secret,
 		"h.test:443:443?token=" + secret,
 		"user:" + secret + "@h.test",
@@ -536,5 +549,27 @@ func TestEndpointErrorsNeverEchoQueryFragmentOrUserinfo(t *testing.T) {
 	c, _ := NewClientWithOptions("h.test/path?token="+secret, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
 	if err := c.ValidateEndpoint(); err == nil || !strings.Contains(err.Error(), `"h.test"`) {
 		t.Errorf("error should quote the host alone, got %v", err)
+	}
+}
+
+func TestBareHostErrorCutsAtEverySeparator(t *testing.T) {
+	clearProxyEnv(t)
+	for endpoint, want := range map[string]string{
+		"h.test;token=X":     `"h.test": a bare host cannot include a path, query or fragment`,
+		"h.test:8443;x=y":    `"h.test:8443": a bare host cannot include a path, query or fragment`,
+		"h.test\\x":          `"h.test": a bare host cannot include a path, query or fragment`,
+		"h.test?a=b":         `"h.test": a bare host cannot include a path, query or fragment`,
+		"h.test#f":           `"h.test": a bare host cannot include a path, query or fragment`,
+		"h.test,token=X":     `"h.test": not a host name or IPv6 address`,
+		"h.test:443,token=X": "bad port: not a number",
+	} {
+		c, err := NewClientWithOptions(endpoint, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = c.ValidateEndpoint()
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: got %v, want it to contain %q", endpoint, err, want)
+		}
 	}
 }

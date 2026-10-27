@@ -93,6 +93,10 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 	case "https":
 		return nil, fmt.Errorf("unsupported proxy scheme https in %s: use http://, socks5:// or socks5h://", source)
 	default:
+		if !validScheme(p.Scheme) {
+			// Not echoed: only a short, plain scheme is quoted back.
+			return nil, fmt.Errorf("unsupported proxy scheme in %s: use http://, socks5:// or socks5h://", source)
+		}
 		return nil, fmt.Errorf("unsupported proxy scheme %q in %s: use http://, socks5:// or socks5h://", p.Scheme, source)
 	}
 	if p.Port() == "" {
