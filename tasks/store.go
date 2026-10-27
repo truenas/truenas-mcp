@@ -7,7 +7,14 @@ import (
 	"time"
 )
 
-// TaskStore provides thread-safe storage for tasks with TTL-based expiry
+// TaskStore provides thread-safe storage for tasks with TTL-based expiry.
+//
+// The store owns the tasks it holds: Add, Update and Save keep a private copy
+// and Get, List and GetActive hand out copies. Callers (the poller, tools
+// marshalling a task for tasks_get) therefore never share a *Task with each
+// other, and nothing mutates a stored task outside the store lock. Map and
+// pointer fields of a Task (Job, Result, Arguments, JobID) are shared between
+// copies and must be replaced, not modified in place.
 type TaskStore struct {
 	mu     sync.RWMutex
 	tasks  map[string]*Task
@@ -31,7 +38,7 @@ func (s *TaskStore) Add(task *Task) error {
 		return fmt.Errorf("task ID cannot be empty")
 	}
 
-	s.tasks[task.TaskID] = task
+	s.tasks[task.TaskID] = task.clone()
 	s.expiry[task.TaskID] = time.Now().Add(time.Duration(task.TTL) * time.Second)
 
 	return nil
@@ -52,10 +59,11 @@ func (s *TaskStore) Get(taskID string) (*Task, error) {
 		return nil, fmt.Errorf("task expired: %s", taskID)
 	}
 
-	return task, nil
+	return task.clone(), nil
 }
 
-// Update modifies an existing task
+// Update stores task as the new state of an existing task and stamps
+// LastUpdatedAt (on task and on the stored copy).
 func (s *TaskStore) Update(task *Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -65,7 +73,22 @@ func (s *TaskStore) Update(task *Task) error {
 	}
 
 	task.LastUpdatedAt = time.Now()
-	s.tasks[task.TaskID] = task
+	s.tasks[task.TaskID] = task.clone()
+
+	return nil
+}
+
+// Save stores task as the new state of an existing task without changing
+// LastUpdatedAt. The poller uses it for internal bookkeeping (the job summary,
+// when the health wait began) that is not a status change.
+func (s *TaskStore) Save(task *Task) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.tasks[task.TaskID]; !exists {
+		return fmt.Errorf("task not found: %s", task.TaskID)
+	}
+	s.tasks[task.TaskID] = task.clone()
 
 	return nil
 }
@@ -82,7 +105,7 @@ func (s *TaskStore) List(cursor string, limit int) ([]*Task, string, error) {
 		if expiry, ok := s.expiry[taskID]; ok && now.After(expiry) {
 			continue // Skip expired
 		}
-		validTasks = append(validTasks, task)
+		validTasks = append(validTasks, task.clone())
 	}
 
 	// Sort by creation time (newest first)
@@ -138,7 +161,7 @@ func (s *TaskStore) GetActive() []*Task {
 
 		// Include only non-terminal states
 		if task.Status == TaskStatusWorking || task.Status == TaskStatusInputRequired {
-			active = append(active, task)
+			active = append(active, task.clone())
 		}
 	}
 

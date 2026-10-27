@@ -54,6 +54,13 @@ type Task struct {
 	VerifyStartedAt time.Time     `json:"-"`
 }
 
+// clone returns a shallow copy of t. Maps and pointers inside are shared and
+// treated as immutable (see TaskStore).
+func (t *Task) clone() *Task {
+	c := *t
+	return &c
+}
+
 // PollerConfig configures the background polling behavior
 type PollerConfig struct {
 	PollInterval    time.Duration // How often to poll TrueNAS
