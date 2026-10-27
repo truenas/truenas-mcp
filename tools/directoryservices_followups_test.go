@@ -221,8 +221,20 @@ func TestConfigureDirectoryServiceBareDisable(t *testing.T) {
 	t.Run("nothing configured", func(t *testing.T) {
 		r, _, _ := leaveFake(t, dsStatus("none", nil))
 		out, err := r.CallTool("configure_directory_service", withArgs(args, obj{"dry_run": true}))
-		if err != nil || !strings.Contains(out, "nothing to disable") {
-			t.Errorf("err=%v\n%s", err, out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got DryRunResult
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, out)
+		}
+		if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "nothing to disable") {
+			t.Errorf("warnings = %v, want only the nothing-to-disable notice", got.Warnings)
+		}
+		for _, s := range append(append([]string{}, got.Warnings...), got.PlannedActions[0].Description, got.PlannedActions[0].Target) {
+			if strings.Contains(s, "none") || strings.Contains(s, "stops") {
+				t.Errorf("preview mentions %q with nothing configured", s)
+			}
 		}
 	})
 
@@ -316,6 +328,28 @@ func TestConfigureDirectoryServiceFlatArgumentsHint(t *testing.T) {
 	}
 	if len(fake.called("directoryservices.update")) != 0 {
 		t.Error("flat arguments reached directoryservices.update")
+	}
+	// The hint does not depend on which check fails first.
+	for name, args := range map[string]obj{
+		"flat key, missing credential and configuration": {"enable": true, "service_type": "LDAP", "hostname": "x"},
+		"flat keys, valid service_type, no credential":   {"enable": true, "service_type": "ACTIVEDIRECTORY", "domain": "example.com", "bindname": "a"},
+		"flat key, bad service_type":                     {"enable": true, "service_type": "activedirectory", "domain": "example.com"},
+		"flat key, bad timeout":                          {"enable": true, "service_type": "LDAP", "server": "x", "timeout": 1.0},
+		"flat key with valid credential/configuration": func() obj {
+			a := fullDSExamples()["LDAP"]
+			a["server"] = "ldap.example.com"
+			return a
+		}(),
+	} {
+		_, err := buildDirectoryServiceUpdatePayload(args)
+		if err == nil || !strings.Contains(err.Error(), "are no longer top-level arguments") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	// Legacy keys are listed alphabetically, whatever the input order.
+	_, err = buildDirectoryServiceUpdatePayload(obj{"enable": true, "service_type": "LDAP", "ssl": "ON", "domain": "x", "bindname": "a", "type": "ldap"})
+	if err == nil || !strings.Contains(err.Error(), "bindname, domain, ssl, type are no longer top-level arguments") {
+		t.Errorf("err = %v", err)
 	}
 	// An unknown argument that is not from the old shape gets no hint.
 	if _, err := buildDirectoryServiceUpdatePayload(obj{"enable": true, "bogus": 1}); err == nil || strings.Contains(err.Error(), "changed") {

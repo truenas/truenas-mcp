@@ -265,7 +265,22 @@ func checkDSFields(path string, fields map[string]dsField, obj map[string]interf
 // it accepts is a bare disable, {"enable": false}, which keeps the stored
 // configuration and turns the service off.
 func buildDirectoryServiceUpdatePayload(args map[string]interface{}) (map[string]interface{}, error) {
-	// Top-level fields.
+	payload, err := buildDirectoryServiceUpdatePayloadChecked(args)
+	if err != nil {
+		// Whichever check failed first, point at the old flat arguments
+		// when any of them is present: they are the likely cause.
+		top := dsUpdateTopLevelFields()
+		if flat := flatArgumentNames(args, top); len(flat) > 0 {
+			return nil, fmt.Errorf("%w; the arguments of configure_directory_service changed: %s are no longer top-level arguments. Use service_type + credential + configuration (see the tool description)", err, strings.Join(flat, ", "))
+		}
+		return nil, err
+	}
+	return payload, nil
+}
+
+// dsUpdateTopLevelFields returns every top-level argument of
+// configure_directory_service.
+func dsUpdateTopLevelFields() map[string]dsField {
 	top := make(map[string]dsField, len(dsTopLevelFields)+3)
 	for k, f := range dsTopLevelFields {
 		top[k] = f
@@ -273,6 +288,12 @@ func buildDirectoryServiceUpdatePayload(args map[string]interface{}) (map[string
 	top["service_type"] = dsField{kind: dsString}
 	top["credential"] = dsField{kind: dsObject}
 	top["configuration"] = dsField{kind: dsObject}
+	return top
+}
+
+func buildDirectoryServiceUpdatePayloadChecked(args map[string]interface{}) (map[string]interface{}, error) {
+	// Top-level fields.
+	top := dsUpdateTopLevelFields()
 
 	// service_type first: it selects the fields the rest is checked against.
 	serviceType := ""
@@ -289,9 +310,6 @@ func buildDirectoryServiceUpdatePayload(args map[string]interface{}) (map[string
 
 	payload, err := checkDSFields("arguments", top, args, func(k string) bool { return dsControlArgs[k] })
 	if err != nil {
-		if flat := flatArgumentNames(args, top); len(flat) > 0 {
-			return nil, fmt.Errorf("%w; the arguments of configure_directory_service changed: %s are no longer top-level arguments. Use service_type + credential + configuration (see the tool description)", err, strings.Join(flat, ", "))
-		}
 		return nil, err
 	}
 	enabled, _ := payload["enable"].(bool)
@@ -369,7 +387,7 @@ var dsLegacyArgumentNames = []string{
 	"cert_id", "kerberos_principal", "starttls", "validate_certificates",
 }
 
-// flatArgumentNames returns, sorted, the unknown top-level arguments that
+// flatArgumentNames returns, sorted alphabetically, the unknown top-level arguments that
 // are names from the old flat form or fields that now belong inside
 // credential or configuration.
 func flatArgumentNames(args map[string]interface{}, top map[string]dsField) []string {

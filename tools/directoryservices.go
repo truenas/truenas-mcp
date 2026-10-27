@@ -425,13 +425,17 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, 
 
 	// A bare disable names no service_type: it applies to what is configured.
 	target := serviceType
+	nothingToDisable := serviceType == "" && status.Type == "none"
 	if target == "" {
 		target = status.Type
+	}
+	if nothingToDisable {
+		target = "the configured directory service"
 	}
 
 	warnings := []string{}
 
-	if serviceType == "" && status.Type == "none" {
+	if nothingToDisable {
 		warnings = append(warnings, "No directory service is currently configured; there is nothing to disable")
 	}
 	if serviceType != "" && status.Type != "none" && status.Type != serviceType {
@@ -455,7 +459,7 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, 
 		warnings = append(warnings,
 			"force=true bypasses the check for an existing server with this hostname registered in the domain; it can replace that server")
 	}
-	if !enabled {
+	if !enabled && !nothingToDisable {
 		warnings = append(warnings,
 			fmt.Sprintf("Disabling %s stops domain/directory authentication: its users and groups stop resolving, and SMB/NFS access that depends on them fails until the service is enabled again", target),
 			"The settings are kept and the computer account is not removed from the domain; use leave_directory_service to leave an Active Directory or IPA domain")
