@@ -4564,7 +4564,7 @@ func analyzeCPUCapacity(client *truenas.Client, timeRange string) (map[string]in
 		return nil, fmt.Errorf("no valid data points")
 	}
 	dataPoints := sampleValues(samples)
-	complete, partial := completeSamples(metricsData[0], samples)
+	complete, partialNote := completeSamples(metricsData[0], samples)
 
 	// Calculate statistics; current is the last 5 complete samples.
 	current := calculateRecentAverage(sampleValues(complete), 5)
@@ -4582,8 +4582,8 @@ func analyzeCPUCapacity(client *truenas.Client, timeRange string) (map[string]in
 		"trend":                   trend,
 		"capacity_status":         status,
 	}
-	if partial {
-		analysis["partial_sample_note"] = partialSampleNote
+	if partialNote != "" {
+		analysis["partial_sample_note"] = partialNote
 	}
 
 	// Add projections if trending up
@@ -4675,8 +4675,8 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 		"current_used_bytes":      usedBytes,
 		"samples_used":            len(availablePoints),
 	}
-	if mem.partialDropped {
-		analysis["partial_sample_note"] = partialSampleNote
+	if mem.partialNote != "" {
+		analysis["partial_sample_note"] = mem.partialNote
 	}
 
 	// The ZFS ARC is reclaimable cache that the available figure does not
@@ -4729,9 +4729,9 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 
 // availableMemory holds the available-memory samples of a "memory" graph.
 type availableMemory struct {
-	all            []float64 // every valid sample, oldest first
-	latest         float64   // latest complete sample (not past the graph's end)
-	partialDropped bool      // a partial last bucket was skipped for latest
+	all         []float64 // every valid sample, oldest first
+	latest      float64   // latest complete sample (latest sample if all are partial)
+	partialNote string    // completeSamples note about a partial last bucket
 }
 
 // availableMemorySamples returns the available-memory samples of a
@@ -4745,11 +4745,11 @@ func availableMemorySamples(metric map[string]interface{}) (availableMemory, err
 	if len(samples) == 0 {
 		return availableMemory{}, fmt.Errorf("no valid data points")
 	}
-	complete, dropped := completeSamples(metric, samples)
+	complete, note := completeSamples(metric, samples)
 	return availableMemory{
-		all:            sampleValues(samples),
-		latest:         complete[len(complete)-1].v,
-		partialDropped: dropped,
+		all:         sampleValues(samples),
+		latest:      complete[len(complete)-1].v,
+		partialNote: note,
 	}, nil
 }
 
@@ -4939,9 +4939,9 @@ func analyzeNetworkCapacity(client *truenas.Client, timeRange string) (map[strin
 				for i := range samples {
 					samples[i].v = math.Abs(samples[i].v) / 1000.0
 				}
-				complete, partial := completeSamples(metric, samples)
-				if partial {
-					ifaceInfo["partial_sample_note"] = partialSampleNote
+				complete, note := completeSamples(metric, samples)
+				if note != "" {
+					ifaceInfo["partial_sample_note"] = note
 				}
 				ifaceInfo[legend[col]] = networkSeriesInfo(sampleValues(samples), sampleValues(complete), linkSpeed)
 			}
@@ -4954,10 +4954,9 @@ func analyzeNetworkCapacity(client *truenas.Client, timeRange string) (map[strin
 }
 
 // networkSeriesInfo summarizes one interface series in Mbps, with
-// utilization against linkSpeed (Mbps) when known.
-// networkSeriesInfo summarises one interface series in Mbps. current_mbps
-// is the mean of the last 5 complete samples (completeMbps excludes a
-// partial last bucket); average and peak use every sample.
+// utilization against linkSpeed (Mbps) when known. current_mbps is the
+// mean of the last 5 complete samples (completeMbps excludes a partial
+// last bucket); average and peak use every sample.
 func networkSeriesInfo(dataPointsMbps, completeMbps []float64, linkSpeed float64) map[string]interface{} {
 	current := calculateRecentAverage(completeMbps, 5)
 	average := calculateAverage(dataPointsMbps)
@@ -5058,9 +5057,9 @@ func analyzeDiskCapacity(client *truenas.Client, timeRange string) (map[string]i
 				for i := range samples {
 					samples[i].v = math.Abs(samples[i].v)
 				}
-				complete, partial := completeSamples(metric, samples)
-				if partial {
-					diskInfo["partial_sample_note"] = partialSampleNote
+				complete, note := completeSamples(metric, samples)
+				if note != "" {
+					diskInfo["partial_sample_note"] = note
 				}
 				dataPoints := sampleValues(samples)
 				diskInfo[legend[col]] = map[string]interface{}{
@@ -5145,29 +5144,6 @@ func handleGetPoolCapacityDetails(client *truenas.Client, args map[string]interf
 }
 
 // Helper functions for capacity analysis
-
-func extractDataPoints(metric map[string]interface{}) ([]float64, error) {
-	dataRaw, ok := metric["data"].([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("no data field in metric")
-	}
-
-	dataPoints := make([]float64, 0, len(dataRaw))
-	for _, pointRaw := range dataRaw {
-		if point, ok := pointRaw.([]interface{}); ok && len(point) >= 2 {
-			// Skip null (gap) and non-finite samples.
-			if val, ok := point[1].(float64); ok && !math.IsNaN(val) && !math.IsInf(val, 0) {
-				dataPoints = append(dataPoints, val)
-			}
-		}
-	}
-
-	if len(dataPoints) == 0 {
-		return nil, fmt.Errorf("no valid data points")
-	}
-
-	return dataPoints, nil
-}
 
 func calculateAverage(values []float64) float64 {
 	if len(values) == 0 {

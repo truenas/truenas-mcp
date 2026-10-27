@@ -353,25 +353,33 @@ func sampleValues(samples []timedSample) []float64 {
 // Netdata stamps aligned buckets by their end, so with MONTH and other
 // long ranges the last bucket can lie past "end" and cover only part of its
 // interval; it must not feed "current" figures. It returns the remaining
-// samples and whether any were dropped. If every sample lies past "end", or
-// the graph has no "end", samples are returned unchanged.
-func completeSamples(graph map[string]interface{}, samples []timedSample) ([]timedSample, bool) {
+// samples and a note for the output: partialSampleNote when samples were
+// dropped, allPartialSampleNote when every sample lies past "end" (they are
+// then returned unchanged, as there is nothing else to use), or "". A
+// graph without "end" returns samples unchanged with no note.
+func completeSamples(graph map[string]interface{}, samples []timedSample) ([]timedSample, string) {
 	end, ok := finiteValue(graph["end"])
 	if !ok || end <= 0 {
-		return samples, false
+		return samples, ""
 	}
 	n := len(samples)
 	for n > 0 && samples[n-1].ts > end {
 		n--
 	}
-	if n == 0 || n == len(samples) {
-		return samples, false
+	switch {
+	case n == len(samples):
+		return samples, ""
+	case n == 0:
+		return samples, allPartialSampleNote
 	}
-	return samples[:n], true
+	return samples[:n], partialSampleNote
 }
 
 // partialSampleNote explains a dropped partial last bucket.
 const partialSampleNote = "The last sample is stamped after the graph's end (a partial bucket) and is not used for current figures; it is still included in average, peak and trend."
+
+// allPartialSampleNote is given when every sample is past the graph's end.
+const allPartialSampleNote = "Every sample is stamped after the graph's end (a partial bucket), so the current figures come from a partial bucket."
 
 // atLeastOne returns v as an int, or 1 when v is missing or below 1 (the
 // VM schema's default and minimum for vcpus, cores and threads).

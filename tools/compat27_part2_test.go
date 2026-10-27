@@ -564,3 +564,60 @@ func TestSimplifyVMDefaultsAndSmallMemory(t *testing.T) {
 		}
 	}
 }
+
+// Review: when every sample is past end, the current figures come from a
+// partial bucket and partial_sample_note says so.
+func TestCurrentFiguresAllPartialBucket(t *testing.T) {
+	end := time.Now()
+	mem := reportingGraphEnding(end, "memory", "available", 12*gib)
+	mem["end"] = end.Unix() - 5
+	iface := multiGraph(end, "interface", "eth0", []string{"received", "sent"}, []float64{500000, 1000})
+	iface["end"] = end.Unix() - 5
+	disk := multiGraph(end, "disk", "sda", []string{"reads", "writes"}, []float64{100, 10})
+	disk["end"] = end.Unix() - 5
+	cpu := reportingGraphEnding(end, "cpu", "cpu", 10)
+	cpu["end"] = end.Unix() - 5
+	fake := reportingFake(t, map[string]map[string]interface{}{"memory": mem, "cpu": cpu, "interface": iface, "disk": disk},
+		map[string]interface{}{
+			"system.info":      map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 16 * gib},
+			"interface.query":  []interface{}{map[string]interface{}{"name": "eth0", "state": map[string]interface{}{}}},
+			"reporting.graphs": []interface{}{map[string]interface{}{"name": "disk", "identifiers": []interface{}{"sda"}}},
+		}, nil)
+	client, _ := newFakeClientFrom(t, fake)
+
+	m, err := analyzeMemoryCapacity(client, "MONTH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["current_used_bytes"] != int64(4*gib) || m["partial_sample_note"] != allPartialSampleNote {
+		t.Errorf("memory = %v", m)
+	}
+	c, err := analyzeCPUCapacity(client, "MONTH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c["current_utilization_pct"] != "10.00" || c["partial_sample_note"] != allPartialSampleNote {
+		t.Errorf("cpu = %v", c)
+	}
+	n, err := analyzeNetworkCapacity(client, "MONTH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eth0 := n["eth0"].(map[string]interface{})
+	if eth0["received"].(map[string]interface{})["current_mbps"] != "500.00" || eth0["partial_sample_note"] != allPartialSampleNote {
+		t.Errorf("eth0 = %v", eth0)
+	}
+	d, err := analyzeDiskCapacity(client, "MONTH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sda := d["sda"].(map[string]interface{})
+	if sda["reads"].(map[string]interface{})["current"] != "100.00" || sda["partial_sample_note"] != allPartialSampleNote {
+		t.Errorf("sda = %v", sda)
+	}
+
+	// A complete graph gets no note.
+	if _, note := completeSamples(map[string]interface{}{"end": 100.0}, []timedSample{{ts: 90, v: 1}, {ts: 100, v: 2}}); note != "" {
+		t.Errorf("note = %q", note)
+	}
+}
