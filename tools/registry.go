@@ -767,7 +767,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["create_dataset"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "create_dataset",
-			Description: "Create a ZFS dataset (filesystem or volume) for storage. This tool is reusable for SMB shares, NFS exports, iSCSI LUNs, and application storage. Supports compression, quotas, and advanced ZFS features. This tool cannot yet create an encrypted dataset: the encryption_options and inherit_encryption parameters do not enable encryption (see their descriptions).\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create datasets, ask these questions in order:\n\n1. **Pool Selection**: Query available pools first, ask which pool to use\n2. **Dataset Name**: Suggest format 'pool/shares/name' or 'pool/apps/name'\n3. **Dataset Type**: FILESYSTEM (default, for files) or VOLUME (for block storage/VMs)\n4. **Share Type Optimization** (if for sharing):\n   - SMB: Windows/Mac file shares (recommend for SMB shares)\n   - NFS: Unix/Linux file shares\n   - MULTIPROTOCOL: Both SMB and NFS access\n   - APPS: Application storage\n   - GENERIC: General purpose (default)\n5. **Encryption**: not supported by this tool yet. If the user needs a new encrypted dataset, tell them it must be created in the TrueNAS UI; do not rely on encryption_options.\n6. **Compression**: LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF\n7. **Space Quota** (optional): Ask if they want to limit size\n8. **ACL Type** (for SMB): NFSV4 (recommended for SMB/Windows), POSIX (Unix)\n9. **Advanced** (usually skip unless user asks):\n   - Deduplication: Warn about RAM overhead, recommend OFF\n   - Checksum, snapdir, atime, readonly\n\n**IMPORTANT RECOMMENDATIONS:**\n- For SMB shares: share_type=SMB, acltype=NFSV4, compression=LZ4\n- For NFS exports: share_type=NFS, acltype=POSIX, compression=LZ4\n- For multi-protocol: share_type=MULTIPROTOCOL, acltype=NFSV4\n- For apps: share_type=APPS, compression=LZ4 or ZSTD\n- Always recommend compression=LZ4 unless user has specific needs\n- Warn: Deduplication uses ~5GB RAM per TB, not recommended for most users\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display summary showing: name, type, optimization, compression, quota, mountpoint\n3. Get explicit user confirmation with \"Shall I proceed?\"\n4. Warn: This is a WRITE operation creating permanent storage\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview, then ask for confirmation to proceed.",
+			Description: "Create a ZFS dataset (filesystem or volume) for storage. This tool is reusable for SMB shares, NFS exports, iSCSI LUNs, and application storage. Supports native ZFS encryption (encryption=true with encryption_options), compression, quotas, and advanced ZFS features.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create datasets, ask these questions in order:\n\n1. **Pool Selection**: Query available pools first, ask which pool to use\n2. **Dataset Name**: Suggest format 'pool/shares/name' or 'pool/apps/name'\n3. **Dataset Type**: FILESYSTEM (default, for files) or VOLUME (for block storage/VMs)\n4. **Share Type Optimization** (if for sharing):\n   - SMB: Windows/Mac file shares (recommend for SMB shares)\n   - NFS: Unix/Linux file shares\n   - MULTIPROTOCOL: Both SMB and NFS access\n   - APPS: Application storage\n   - GENERIC: General purpose (default)\n5. **Encryption** (recommend for sensitive data):\n   - Ask: \"Is this for sensitive data?\"\n   - If yes: set encryption=true and encryption_options with exactly ONE method; ask which the user wants and do not default to one: generate_key=true, passphrase (8-512 bytes) or key (64 hex characters). encryption_options without encryption=true is rejected\n   - generate_key: TrueNAS stores the key in its key database and does not return it; this tool cannot export it, so tell the user to back it up in the TrueNAS web UI (Datasets > select the dataset > Encryption > Export Key) and keep a copy somewhere other than this system\n   - passphrase: TrueNAS does not store it; if it is lost the data is lost\n   - key: the user must keep it; this tool does not return or recover it\n   - Under a passphrase-encrypted parent, the new dataset must use a passphrase (TrueNAS refuses generate_key and key there)\n   - The algorithm is not configurable through this tool; new encrypted datasets use AES-256-GCM\n6. **Compression**: LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF\n7. **Space Quota** (optional): Ask if they want to limit size\n8. **ACL Type** (for SMB): NFSV4 (recommended for SMB/Windows), POSIX (Unix)\n9. **Advanced** (usually skip unless user asks):\n   - Deduplication: Warn about RAM overhead, recommend OFF\n   - Checksum, snapdir, atime, readonly\n\n**IMPORTANT RECOMMENDATIONS:**\n- For SMB shares: share_type=SMB, acltype=NFSV4, compression=LZ4\n- For NFS exports: share_type=NFS, acltype=POSIX, compression=LZ4\n- For multi-protocol: share_type=MULTIPROTOCOL, acltype=NFSV4\n- For apps: share_type=APPS, compression=LZ4 or ZSTD\n- Always recommend compression=LZ4 unless user has specific needs\n- Warn: Deduplication uses ~5GB RAM per TB, not recommended for most users\n- Warn: Encryption cannot be removed later, only option is to copy data elsewhere\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display summary showing: name, type, optimization, compression, encryption, quota, mountpoint\n3. Get explicit user confirmation with \"Shall I proceed?\"\n4. Warn: This is a WRITE operation creating permanent storage\n5. If encryption enabled, remind the user of the key-backup note for the chosen method after creation\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview, then ask for confirmation to proceed.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -800,22 +800,29 @@ TrueNAS removes its computer account from the domain using the credential you pr
 						"description": "NFSV4 (recommended for SMB/Windows ACLs) or POSIX (Unix permissions)",
 						"enum":        []string{"NFSV4", "POSIX", "INHERIT"},
 					},
+					"encryption": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Create the dataset as a new ZFS encryption root (cannot be removed later). Requires encryption_options. inherit_encryption is sent as false automatically; passing inherit_encryption=true with this is rejected",
+					},
 					"encryption_options": map[string]interface{}{
 						"type":        "object",
-						"description": "Not effective yet: TrueNAS only uses these options together with encryption=true, which this tool cannot send, so a key or passphrase given here does not create an encrypted dataset. Do not rely on it.",
+						"description": "Key material for a new encrypted dataset; only valid together with encryption=true. Provide exactly one of generate_key=true, passphrase or key. The passphrase and key are secrets and are masked in dry-run output",
 						"properties": map[string]interface{}{
 							"generate_key": map[string]interface{}{
 								"type":        "boolean",
-								"description": "Not effective yet: this tool cannot enable encryption, so this option is ignored by TrueNAS",
+								"description": "Let TrueNAS generate the key and store it in its key database; it is not returned. This tool cannot export it: back it up in the TrueNAS web UI (Datasets > select the dataset > Encryption > Export Key) and keep a copy elsewhere. Refused under a passphrase-encrypted parent",
 							},
 							"passphrase": map[string]interface{}{
 								"type":        "string",
-								"description": "Not effective yet: this tool cannot enable encryption, so this option is ignored by TrueNAS",
+								"description": "Passphrase of 8 to 512 bytes. It is not stored by TrueNAS: if it is lost the data is lost",
 							},
-							"algorithm": map[string]interface{}{
+							"key": map[string]interface{}{
 								"type":        "string",
-								"description": "Encryption algorithm (default: AES-256-GCM recommended)",
-								"enum":        []string{"AES-128-CCM", "AES-192-CCM", "AES-256-CCM", "AES-128-GCM", "AES-192-GCM", "AES-256-GCM"},
+								"description": "Raw encryption key as exactly 64 hexadecimal characters. You must keep a copy; this tool never returns it. Refused under a passphrase-encrypted parent",
+							},
+							"pbkdf2iters": map[string]interface{}{
+								"type":        "integer",
+								"description": "PBKDF2 iterations for a passphrase (optional; only with passphrase; minimum 100000, TrueNAS 27.0 requires at least 1300000). Omit to use the TrueNAS default",
 							},
 						},
 					},
@@ -863,7 +870,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					},
 					"inherit_encryption": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Optional. Whether the dataset inherits the parent's encryption settings (TrueNAS default: true). false asks for an unencrypted dataset, which TrueNAS rejects under an encrypted parent. This tool cannot yet enable encryption on a new dataset",
+						"description": "Optional. Whether the dataset inherits the parent's encryption settings (TrueNAS default: true). false asks for an unencrypted dataset, which TrueNAS rejects under an encrypted parent. To create a new encrypted dataset use encryption=true with encryption_options instead (inherit_encryption is then sent as false automatically); inherit_encryption=true together with encryption=true is rejected",
 					},
 					"user_properties": map[string]interface{}{
 						"type":        "array",

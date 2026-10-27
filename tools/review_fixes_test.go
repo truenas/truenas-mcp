@@ -106,23 +106,50 @@ func TestCreateDatasetUserProperties(t *testing.T) {
 	}
 }
 
-// TestCreateDatasetEncryptionDescriptionsAreHonest keeps the schema from
-// promising what the tool cannot do: it never sends encryption=true, so the
-// middleware ignores encryption_options.
+// TestCreateDatasetEncryptionDescriptionsAreHonest keeps the schema
+// consistent with what the tool does: it can create an encrypted dataset
+// (encryption=true plus encryption_options), so no description may still
+// say it cannot, and each one must point at the working route. It also
+// keeps the promises small: the tool never returns or recovers a key.
 func TestCreateDatasetEncryptionDescriptionsAreHonest(t *testing.T) {
 	tool := NewRegistry(nil, nil).tools["create_dataset"]
 	props := tool.Definition.InputSchema["properties"].(map[string]interface{})
-	for _, key := range []string{"inherit_encryption", "encryption_options"} {
+	stale := []string{"not effective yet", "cannot yet", "cannot enable encryption", "cannot send", "not supported by this tool", "does not create an encrypted dataset", "independently encrypted"}
+	for _, key := range []string{"inherit_encryption", "encryption", "encryption_options"} {
 		desc := strings.ToLower(props[key].(map[string]interface{})["description"].(string))
-		if strings.Contains(desc, "independently encrypted") || strings.Contains(desc, "cannot be removed") {
-			t.Errorf("%s description promises encryption: %q", key, desc)
+		for _, s := range stale {
+			if strings.Contains(desc, s) {
+				t.Errorf("%s description still says encryption is unsupported or over-promises (%q): %q", key, s, desc)
+			}
 		}
-		if !strings.Contains(desc, "cannot") {
-			t.Errorf("%s description does not say encryption is unsupported: %q", key, desc)
+		if !strings.Contains(desc, "encryption=true") && key != "encryption" {
+			t.Errorf("%s description does not mention encryption=true: %q", key, desc)
 		}
 	}
-	if strings.Contains(strings.ToLower(tool.Definition.Description), "supports encryption") {
-		t.Error("tool description claims encryption support")
+	// inherit_encryption points at the supported route and states the conflict.
+	inherit := props["inherit_encryption"].(map[string]interface{})["description"].(string)
+	for _, want := range []string{"encryption_options", "rejected"} {
+		if !strings.Contains(inherit, want) {
+			t.Errorf("inherit_encryption description lacks %q: %q", want, inherit)
+		}
+	}
+	sub := props["encryption_options"].(map[string]interface{})["properties"].(map[string]interface{})
+	for k, v := range sub {
+		d := strings.ToLower(v.(map[string]interface{})["description"].(string))
+		for _, s := range stale {
+			if strings.Contains(d, s) {
+				t.Errorf("encryption_options.%s description still says %q: %q", k, s, d)
+			}
+		}
+	}
+	lower := strings.ToLower(tool.Definition.Description)
+	if !strings.Contains(lower, "supports native zfs encryption") {
+		t.Error("tool description does not say encryption is supported")
+	}
+	for _, s := range stale {
+		if strings.Contains(lower, s) {
+			t.Errorf("tool description still says %q", s)
+		}
 	}
 }
 
@@ -277,7 +304,7 @@ func TestCreateDatasetUserPropertiesDescriptionNamesManagedKeys(t *testing.T) {
 	opts := props["encryption_options"].(map[string]interface{})["properties"].(map[string]interface{})
 	for _, k := range []string{"generate_key", "passphrase"} {
 		d := opts[k].(map[string]interface{})["description"].(string)
-		if !strings.HasPrefix(d, "Not effective yet") || strings.Contains(d, "recommended") {
+		if strings.HasPrefix(d, "Not effective yet") || strings.Contains(d, "recommended") {
 			t.Errorf("encryption_options.%s description = %q", k, d)
 		}
 	}
