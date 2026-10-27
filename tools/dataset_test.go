@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -140,20 +141,28 @@ func TestValidateEncryptionOptions(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "valid with passphrase and algorithm",
+			name: "valid with key",
 			input: map[string]interface{}{
-				"passphrase": "mysecurepassword123",
-				"algorithm":  "AES-256-GCM",
+				"key": strings.Repeat("ab", 32),
 			},
 			wantErr: false,
 		},
 		{
-			name: "valid with generate_key and algorithm",
+			name: "valid with passphrase and pbkdf2iters",
 			input: map[string]interface{}{
-				"generate_key": true,
-				"algorithm":    "AES-128-CCM",
+				"passphrase":  "mysecurepassword123",
+				"pbkdf2iters": float64(1300000),
 			},
 			wantErr: false,
+		},
+		{
+			name: "algorithm is not supported",
+			input: map[string]interface{}{
+				"passphrase": "mysecurepassword123",
+				"algorithm":  "AES-256-GCM",
+			},
+			wantErr: true,
+			errMsg:  "encryption_options.algorithm is not configurable through this tool; new encrypted datasets use AES-256-GCM",
 		},
 
 		// Invalid cases - both methods specified
@@ -164,7 +173,7 @@ func TestValidateEncryptionOptions(t *testing.T) {
 				"passphrase":   "password123",
 			},
 			wantErr: true,
-			errMsg:  "cannot specify both generate_key and passphrase - choose one encryption method",
+			errMsg:  "encryption_options accepts only one of generate_key=true, passphrase or key, not several",
 		},
 
 		// Invalid cases - no method specified
@@ -172,7 +181,7 @@ func TestValidateEncryptionOptions(t *testing.T) {
 			name:    "empty options",
 			input:   map[string]interface{}{},
 			wantErr: true,
-			errMsg:  "encryption_options requires either generate_key=true or passphrase",
+			errMsg:  "encryption_options requires exactly one of generate_key=true, passphrase or key",
 		},
 		{
 			name: "only algorithm specified",
@@ -180,7 +189,7 @@ func TestValidateEncryptionOptions(t *testing.T) {
 				"algorithm": "AES-256-GCM",
 			},
 			wantErr: true,
-			errMsg:  "encryption_options requires either generate_key=true or passphrase",
+			errMsg:  "encryption_options.algorithm is not configurable through this tool; new encrypted datasets use AES-256-GCM",
 		},
 
 		// Invalid cases - passphrase too short
@@ -199,26 +208,6 @@ func TestValidateEncryptionOptions(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "passphrase must be at least 8 characters",
-		},
-
-		// Invalid cases - invalid algorithm
-		{
-			name: "invalid algorithm",
-			input: map[string]interface{}{
-				"generate_key": true,
-				"algorithm":    "AES-512-XXX",
-			},
-			wantErr: true,
-			errMsg:  "invalid encryption algorithm: AES-512-XXX",
-		},
-		{
-			name: "algorithm wrong case",
-			input: map[string]interface{}{
-				"generate_key": true,
-				"algorithm":    "aes-256-gcm",
-			},
-			wantErr: true,
-			errMsg:  "invalid encryption algorithm: aes-256-gcm",
 		},
 
 		// Edge cases

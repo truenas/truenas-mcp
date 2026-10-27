@@ -1019,35 +1019,73 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// APICallError is the error for a failed middleware call. Its text is the
+// server's message, the request context (method and already masked params),
+// and the server's details and trace. The parts are kept apart so a caller
+// can post-process only the server-supplied text (Message, Details, Trace)
+// without touching the request block, which was masked by key name already.
+type APICallError struct {
+	Message string // server message, scrubbed of the API key
+	Code    int
+	Method  string
+	Params  string // masked request params as indented JSON; empty if none
+	Details string // server "extra" as indented JSON, scrubbed; empty if none
+	Trace   string // server trace, scrubbed; empty if none
+}
+
+// Error renders the full message in a fixed layout.
+func (e *APICallError) Error() string {
+	errMsg := fmt.Sprintf("API error: %s (code %d)", e.Message, e.Code)
+	errMsg = fmt.Sprintf("%s\n\nRequest:\n  Method: %s", errMsg, e.Method)
+	if e.Params != "" {
+		errMsg = fmt.Sprintf("%s\n  Params: %s", errMsg, e.Params)
+	}
+	if e.Details != "" {
+		errMsg = fmt.Sprintf("%s\n\nDetails: %s", errMsg, e.Details)
+	}
+	if e.Trace != "" {
+		errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, e.Trace)
+	}
+	return errMsg
+}
+
+// MapServerText returns a copy with f applied to the server-supplied parts
+// (Message, Details and Trace). The request block is left as it is.
+func (e *APICallError) MapServerText(f func(string) string) *APICallError {
+	out := *e
+	out.Message = f(e.Message)
+	out.Details = f(e.Details)
+	out.Trace = f(e.Trace)
+	return &out
+}
+
 // formatAPIErrorWithContext formats API error with request context for
 // debugging. Our own params are redacted, and the server-supplied message and
 // trace are scrubbed of the API key in case the server echoes it back.
 func (c *Client) formatAPIErrorWithContext(apiErr *APIError, method string, params []interface{}) error {
-	errMsg := fmt.Sprintf("API error: %s (code %d)", c.scrubSecrets(apiErr.Message), apiErr.Code)
-
-	errMsg = fmt.Sprintf("%s\n\nRequest:\n  Method: %s", errMsg, method)
+	e := &APICallError{Message: c.scrubSecrets(apiErr.Message), Code: apiErr.Code, Method: method}
 
 	if len(params) > 0 {
 		if paramsJSON, err := json.MarshalIndent(redactParams(method, params), "  ", "  "); err == nil {
-			errMsg = fmt.Sprintf("%s\n  Params: %s", errMsg, string(paramsJSON))
+			e.Params = string(paramsJSON)
 		}
 	}
 
 	if apiErr.Extra != nil {
 		if extraJSON, err := json.MarshalIndent(redactValue(apiErr.Extra), "", "  "); err == nil {
-			errMsg = fmt.Sprintf("%s\n\nDetails: %s", errMsg, c.scrubSecrets(string(extraJSON)))
+			e.Details = c.scrubSecrets(string(extraJSON))
 		}
 	}
 
 	if apiErr.Trace != nil {
 		if traceStr, ok := apiErr.Trace.(string); ok && traceStr != "" {
-			errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, c.scrubSecrets(traceStr))
+			e.Trace = c.scrubSecrets(traceStr)
 		} else {
 			if traceJSON, err := json.MarshalIndent(redactValue(apiErr.Trace), "", "  "); err == nil {
-				errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, c.scrubSecrets(string(traceJSON)))
+				e.Trace = c.scrubSecrets(string(traceJSON))
 			}
 		}
 	}
 
-	return fmt.Errorf("%s", errMsg)
+	return e
 }
