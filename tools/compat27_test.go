@@ -472,11 +472,13 @@ func TestAnalyzeMemoryCapacityExcludesArc(t *testing.T) {
 		t.Fatal(err)
 	}
 	checks := map[string]interface{}{
-		"current_utilization_pct":       "89.00",
-		"arc_bytes":                     int64(72 * gib),
-		"used_excluding_arc_bytes":      int64(17 * gib),
-		"utilization_excluding_arc_pct": "17.00",
-		"capacity_status":               "healthy",
+		"current_utilization_pct":               "17.00",
+		"current_utilization_including_arc_pct": "89.00",
+		"current_utilization_basis":             "excluding_arc",
+		"arc_bytes":                             int64(72 * gib),
+		"used_excluding_arc_bytes":              int64(17 * gib),
+		"utilization_excluding_arc_pct":         "17.00",
+		"capacity_status":                       "healthy",
 	}
 	for k, want := range checks {
 		if got := analysis[k]; got != want {
@@ -842,6 +844,16 @@ func TestSystemHealthExcludesDismissedAlerts(t *testing.T) {
 	}
 	if resp["dismissed_alert_count"] != float64(2) {
 		t.Errorf("dismissed_alert_count = %v, want 2", resp["dismissed_alert_count"])
+	}
+	// Only active alerts are listed.
+	listed, _ := resp["alerts"].([]interface{})
+	if len(listed) != 3 {
+		t.Errorf("alerts has %d entries, want 3", len(listed))
+	}
+	for _, a := range listed {
+		if a.(map[string]interface{})["dismissed"] != false {
+			t.Errorf("dismissed alert listed: %v", a)
+		}
 	}
 	if resp["health_check"] != "ALERTS_PRESENT" {
 		t.Errorf("health_check = %v, want ALERTS_PRESENT", resp["health_check"])
