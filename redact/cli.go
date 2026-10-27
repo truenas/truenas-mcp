@@ -60,8 +60,7 @@ var (
 // --password-stdin, --password-env VAR).
 var (
 	optionNegations = map[string]bool{
-		"no": true, "ask": true, "skip": true, "without": true, "prompt": true,
-		"allow": true, "disable": true,
+		"no": true, "ask": true, "skip": true, "without": true, "disable": true,
 	}
 	optionReferenceWords = map[string]bool{
 		"file": true, "path": true, "stdin": true, "prompt": true, "fd": true,
@@ -70,11 +69,15 @@ var (
 )
 
 // optionSecret classifies a long option name (without "--") like
-// classifyKey, except that options naming a file, a prompt or a negation
-// (--password-file, --no-password) do not take a secret.
-func optionSecret(name string) (bool, metaKind) {
+// classifyKey, except that options naming where the secret is
+// (--password-file) do not take a secret, nor do negations
+// (--no-password, --ask-password) when the value is a separate word, which
+// is then the next argument. A negation with an attached value
+// (--no-password=X) is still redacted, as are --allow-password and
+// --prompt-password, whose value may be the secret.
+func optionSecret(name string, attached bool) (bool, metaKind) {
 	if segs := segments(name); len(segs) > 1 &&
-		(optionNegations[segs[0]] || optionReferenceWords[segs[len(segs)-1]]) {
+		((!attached && optionNegations[segs[0]]) || optionReferenceWords[segs[len(segs)-1]]) {
 		return false, metaNone
 	}
 	return classifyKey(name)
@@ -195,7 +198,7 @@ func sensitiveOption(prev interface{}, arg string) bool {
 		!strings.HasPrefix(p, "--") || strings.Contains(p, "=") {
 		return false
 	}
-	sens, meta := optionSecret(p[2:])
+	sens, meta := optionSecret(p[2:], false)
 	return sens && !meta.visible(arg)
 }
 
@@ -207,28 +210,46 @@ var (
 	longOption = regexp.MustCompile(`--([A-Za-z][A-Za-z0-9_-]{0,63})[ \t]+`)
 	// textPrograms match a program name, then (on the same command, before
 	// any '|', ';', '&' or newline) its password option; the secret starts at
-	// the end of the match, less back bytes.
-	textPrograms = []struct {
-		names []string // every match contains one of these
-		re    *regexp.Regexp
-		back  int
-		sep   byte
-	}{
-		// sshpass -p S3CR3T / -pS3CR3T, after any of its other options.
-		{[]string{"sshpass"}, regexp.MustCompile(`\bsshpass(?:[ \t]+(?:-[ev]|-[fdP][ \t]*[^\s"']+))*[ \t]+-p[ \t]*`), 0, 0},
+	// the end of the match, less back bytes. If opt is set, every further
+	// match of opt on the same command is a password option too
+	// (mysql -pA -pB, curl -u a:A --proxy-user b:B).
+	textPrograms = []textProgram{
+		// sshpass -p S3CR3T / -pS3CR3T, after any of its other options. Later
+		// options belong to the command sshpass runs.
+		{names: []string{"sshpass"}, re: regexp.MustCompile(`\bsshpass(?:[ \t]+(?:-[ev]|-[fdP][ \t]*[^\s"']+))*[ \t]+-p[ \t]*`)},
 		// The attached password of the MySQL and MariaDB clients
 		// (mysql -pS3CR3T db). A separate "-p" prompts for the password and
 		// is left alone, as is "-p" for other programs, where it often means
 		// something else (port, parents).
-		{[]string{"mysql", "mariadb"}, regexp.MustCompile(`\b(?:mysql(?:dump|admin|import|check|show)?|mariadb(?:-dump|-admin)?)(?:[ \t][^\n|;&]*?)??[ \t]-p[^\s]`), 1, 0},
+		programOption([]string{"mysql", "mariadb"},
+			`mysql(?:dump|admin|import|check|show)?|mariadb(?:-dump|-admin)?`, `[ \t]-p[^\s]`, 1, 0),
 		// smbclient -U user%S3CR3T (and the other Samba clients).
-		{[]string{"smb", "rpcclient"}, regexp.MustCompile(`\b(?:smbclient|rpcclient|smbcacls|smbcquotas|smbget|smbtree)(?:[ \t][^\n|;&]*?)??[ \t](?:-U[ \t]*|--user(?:=|[ \t]+))`), 0, '%'},
+		programOption([]string{"smb", "rpcclient"},
+			`smbclient|rpcclient|smbcacls|smbcquotas|smbget|smbtree`, `[ \t](?:-U[ \t]*|--user(?:=|[ \t]+))`, 0, '%'),
 		// curl -u user:S3CR3T, --user, and the proxy forms -U/--proxy-user.
-		{[]string{"curl"}, regexp.MustCompile(`\bcurl(?:[ \t][^\n|;&]*?)??[ \t](?:-[uU][ \t]*|--(?:proxy-)?user(?:=|[ \t]+))`), 0, ':'},
+		programOption([]string{"curl"}, `curl`, `[ \t](?:-[uU][ \t]*|--(?:proxy-)?user(?:=|[ \t]+))`, 0, ':'),
 		// ipmitool -P S3CR3T.
-		{[]string{"ipmitool"}, regexp.MustCompile(`\bipmitool(?:[ \t][^\n|;&]*?)??[ \t]-P[ \t]*`), 0, 0},
+		programOption([]string{"ipmitool"}, `ipmitool`, `[ \t]-P[ \t]*`, 0, 0),
 	}
 )
+
+type textProgram struct {
+	names   []string // every match contains one of these
+	re, opt *regexp.Regexp
+	back    int
+	sep     byte
+}
+
+// programOption builds the textProgram for the programs matching the
+// regexp progs, whose password option matches opt.
+func programOption(names []string, progs, opt string, back int, sep byte) textProgram {
+	return textProgram{
+		names: names,
+		re:    regexp.MustCompile(`\b(?:` + progs + `)(?:[ \t][^\n|;&]*?)??` + opt),
+		opt:   regexp.MustCompile(opt),
+		back:  back, sep: sep,
+	}
+}
 
 // shellWordEnd returns the end of the shell-style word starting at s[i]:
 // a quoted string (with backslash escapes inside double quotes) up to its
@@ -273,7 +294,7 @@ func redactOptions(s string) string {
 	for _, p := range textPrograms {
 		for _, n := range p.names {
 			if strings.Contains(s, n) {
-				s = redactProgramOption(s, p.re, p.back, p.sep)
+				s = redactProgramOption(s, p)
 				break
 			}
 		}
@@ -296,7 +317,7 @@ func redactLongOptions(s string) string {
 			pos = start + 2 // "a--b": not an option; look for one after it
 			continue
 		}
-		sens, meta := optionSecret(name)
+		sens, meta := optionSecret(name, false)
 		if !sens {
 			continue
 		}
@@ -319,26 +340,60 @@ func redactLongOptions(s string) string {
 	return b.String()
 }
 
-// redactProgramOption redacts the word at the end of each match of re
-// (less back bytes), the value of a program's password option.
-func redactProgramOption(s string, re *regexp.Regexp, back int, sep byte) string {
+// redactProgramOption redacts the word at the end of each match of p.re
+// (less p.back bytes), the value of a program's password option, and of
+// each match of p.opt after it on the same command.
+func redactProgramOption(s string, p textProgram) string {
 	var b strings.Builder
 	pos, written := 0, 0
-	for pos < len(s) {
-		m := re.FindStringIndex(s[pos:])
-		if m == nil {
-			break
-		}
-		vs := pos + m[1] - back
+	redactAt := func(vs int) int {
 		end := shellWordEnd(s, vs)
-		pos = max(end, pos+m[1])
 		if w := s[vs:end]; w != "" {
-			if r := secretArg(w, sep, metaNone); r != w {
+			if r := secretArg(w, p.sep, metaNone); r != w {
 				b.WriteString(s[written:vs])
 				b.WriteString(r)
 				written = end
 			}
 		}
+		return end
+	}
+	// commandEnd returns the end of the command that continues at s[i].
+	commandEnd := func(i int) int {
+		if k := strings.IndexAny(s[i:], "\n|;&"); k >= 0 {
+			return i + k
+		}
+		return len(s)
+	}
+	for pos < len(s) {
+		m := p.re.FindStringIndex(s[pos:])
+		if m == nil {
+			break
+		}
+		next := pos + m[1]
+		if p.opt == nil {
+			pos = max(redactAt(next-p.back), next)
+			continue
+		}
+		// The command ends at the first '|', ';', '&' or newline, unless it is
+		// inside a quoted value. An unquoted value that runs past one
+		// (-pA;b) is redacted whole, and ends the command.
+		cmdEnd := commandEnd(next - p.back)
+		for {
+			vs := next - p.back
+			pos = max(redactAt(vs), next)
+			if pos > cmdEnd {
+				if s[vs] != '"' && s[vs] != '\'' {
+					break
+				}
+				cmdEnd = commandEnd(pos)
+			}
+			m := p.opt.FindStringIndex(s[pos:cmdEnd])
+			if m == nil {
+				break
+			}
+			next = pos + m[1]
+		}
+		pos = max(pos, cmdEnd)
 	}
 	if written == 0 {
 		return s

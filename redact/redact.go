@@ -85,7 +85,15 @@ const (
 	metaNone   metaKind = iota // not a metadata key
 	metaScalar                 // booleans, numbers, null, dates and durations
 	metaIdent                  // also identifiers (algorithm names: HS256)
+	// metaFlag is not a metadata key: it holds a secret (peer_private) but
+	// may also be a flag, so boolean-like text (true, no, null) stays
+	// visible; numbers and other strings are redacted.
+	metaFlag
 )
+
+// isMeta reports whether m is a metadata kind: the key describes a secret
+// rather than holds it.
+func (m metaKind) isMeta() bool { return m == metaScalar || m == metaIdent }
 
 // visible reports whether v, a value written as text (unquoted), may be
 // shown under a key of this kind.
@@ -93,6 +101,8 @@ func (m metaKind) visible(v string) bool {
 	switch m {
 	case metaNone:
 		return false
+	case metaFlag:
+		return isFlagText(v)
 	case metaIdent:
 		if isIdentText(v) {
 			return true
@@ -155,16 +165,20 @@ func segments(key string) []string {
 	return out
 }
 
-// privateSegments, as the final word of a key whose previous word is one of
-// privateKeyContexts, name private key material (wg_private, ssh_priv).
-// Elsewhere "private" is a flag or a network name (is_private,
-// network_private, dhcp_private) and is not sensitive.
+// privateSegments, as the final word of a multi-word key, name private key
+// material (wg_private, peer_private, ssh_priv), unless the previous word
+// is one of nonSecretPrivateContexts, where "private" is a flag or a
+// network name (is_private, network_private, dhcp_private). Boolean values
+// stay visible under these keys (see metaFlag).
 var privateSegments = map[string]bool{"private": true, "priv": true}
 
-var privateKeyContexts = map[string]bool{
-	"wg": true, "wireguard": true, "ssh": true, "tls": true, "ssl": true, "rsa": true,
-	"dsa": true, "ecdsa": true, "ec": true, "ed25519": true, "gpg": true, "pgp": true,
-	"x509": true, "cert": true, "certificate": true, "key": true, "host": true,
+var nonSecretPrivateContexts = map[string]bool{
+	"is": true, "network": true, "net": true, "dhcp": true, "subnet": true, "vlan": true,
+	"ip": true, "ipv4": true, "ipv6": true, "addr": true, "address": true, "range": true,
+	"cidr": true, "lan": true, "vpc": true, "zone": true, "dns": true, "interface": true,
+	"iface": true, "make": true, "set": true, "mark": true, "keep": true, "only": true,
+	"repo": true, "repository": true, "registry": true, "image": true, "share": true,
+	"visibility": true, "browse": true, "mode": true,
 }
 
 // IsSensitiveKey reports whether values under key must be redacted. Matching
@@ -177,7 +191,7 @@ var privateKeyContexts = map[string]bool{
 // *_algorithm; see classifyKey).
 func IsSensitiveKey(key string) bool {
 	sensitive, metadata := classifyKey(key)
-	return sensitive && metadata == metaNone
+	return sensitive && !metadata.isMeta()
 }
 
 // classifyKey reports whether key names a secret, ignoring metadata words,
@@ -198,6 +212,9 @@ func classifyKey(key string) (sensitive bool, metadata metaKind) {
 		return false, metaNone
 	}
 	if n >= 2 {
+		if privateSegments[segs[n-1]] {
+			return true, metaFlag
+		}
 		return true, metadataSegments[segs[n-1]]
 	}
 	return true, metaNone
@@ -218,7 +235,7 @@ func sensitiveName(k string, segs []string) bool {
 			return true
 		}
 	}
-	if n := len(segs); n > 1 && (segs[n-1] == "key" || (privateSegments[segs[n-1]] && privateKeyContexts[segs[n-2]])) {
+	if n := len(segs); n > 1 && (segs[n-1] == "key" || (privateSegments[segs[n-1]] && !nonSecretPrivateContexts[segs[n-2]])) {
 		return true // encryption_key, privateKey, "dataset key", wg_private
 	}
 	for _, f := range sensitiveKeyFragments {
@@ -401,7 +418,7 @@ func redactBarePairs(s string) string {
 		pos = valStart
 		sens, meta := classifyKey(key)
 		if strings.HasSuffix(s[:keyStart], "--") {
-			sens, meta = optionSecret(key) // --password-file=/path
+			sens, meta = optionSecret(key, true) // --password-file=/path
 		}
 		if !sens || strings.HasSuffix(s[:keyStart], "://") || scalarAt(s, valStart, meta) {
 			continue
@@ -446,7 +463,8 @@ func scalarAt(s string, i int, meta metaKind) bool {
 		for end := i + 1; end < len(s) && end-i <= maxScalarText+1; end++ {
 			switch s[end] {
 			case q:
-				return meta.visible(s[i+1 : end])
+				// The value must end at the quote (not token_ttl="5"x).
+				return valueEndsAt(s, end+1) && meta.visible(s[i+1:end])
 			case '\\', '\n', '\r':
 				return false
 			}
@@ -457,10 +475,16 @@ func scalarAt(s string, i int, meta metaKind) bool {
 	for end < len(s) && end-i <= maxScalarText && !strings.ContainsRune(" \t\r\n,;)}]&\"'", rune(s[end])) {
 		end++
 	}
-	if end-i > maxScalarText {
+	if end-i > maxScalarText || !valueEndsAt(s, end) {
 		return false
 	}
 	return meta.visible(s[i:end])
+}
+
+// valueEndsAt reports whether a value may end at s[i]: the end of s,
+// whitespace or a separator, but not a quote (token_ttl=5'x).
+func valueEndsAt(s string, i int) bool {
+	return i >= len(s) || strings.IndexByte(" \t\r\n,;)}]&", s[i]) >= 0
 }
 
 // closingQuote returns the index of the quote that closes the value opening
@@ -558,7 +582,7 @@ func walk(v interface{}, c ctx) (interface{}, bool) {
 		return v, false
 	case map[string]interface{}:
 		if c.sensitive && len(t) > 0 {
-			if c.metadata == metaNone && isReference(t) {
+			if !c.metadata.isMeta() && isReference(t) {
 				return walkReference(t, c)
 			}
 			return Marker, true
@@ -580,7 +604,7 @@ func walk(v interface{}, c ctx) (interface{}, bool) {
 		return r, r != t
 	case json.Number, float64, float32, int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64:
-		if c.sensitive && !c.keepNumbers && c.metadata == metaNone {
+		if c.sensitive && !c.keepNumbers && !c.metadata.isMeta() {
 			return Marker, true
 		}
 		return v, false
@@ -858,12 +882,21 @@ var (
 	duration = regexp.MustCompile(`^(?:(?:[0-9]+(?:\.[0-9]+)?(?:ns|us|µs|ms|s|m|h|d|w))+|P(?:[0-9]+[YMWD])*(?:T(?:[0-9]+(?:\.[0-9]+)?[HMS])+)?)$`)
 )
 
+// isFlagText reports whether v is boolean-like text (true, no, null, or
+// empty), which a metaFlag key may show.
+func isFlagText(v string) bool {
+	switch strings.ToLower(v) {
+	case "", "true", "false", "null", "none", "nil", "yes", "no", "on", "off":
+		return true
+	}
+	return false
+}
+
 // isScalarText reports whether a value written as text is a boolean, a
 // number, null, empty, a date or a duration, which a metadata key
 // (token_ttl, password_expires) may show.
 func isScalarText(v string) bool {
-	switch strings.ToLower(v) {
-	case "", "true", "false", "null", "none", "nil", "yes", "no", "on", "off":
+	if isFlagText(v) {
 		return true
 	}
 	if len(v) > maxScalarText {

@@ -187,6 +187,36 @@ func TestTextMySQLAttachedPassword(t *testing.T) {
 		{"mysql -p appdb", "mysql -p appdb"},
 		{"mysql -p", "mysql -p"},
 		{"mysql appdb | grep -p x", "mysql appdb | grep -p x"},
+		// Every attached password on the same command.
+		{"mysql -pfake-db-pw -pfake-user-pw appdb", "mysql -p" + Marker + " -p" + Marker + " appdb"},
+		{"mysql -p -u root -pfake-db-pw", "mysql -p -u root -p" + Marker},
+		{"mysql -p'a|b' -pfake-db-pw | grep -px", "mysql -p'" + Marker + "' -p" + Marker + " | grep -px"},
+		{"mysql -pfake-db-pw ; grep -px", "mysql -p" + Marker + " ; grep -px"},
+	})
+}
+
+// TestTextEveryProgramOption: every password option on a matched command
+// is redacted, not only the first.
+func TestTextEveryProgramOption(t *testing.T) {
+	checkText(t, []struct{ in, want string }{
+		{"curl -u a:fake-user-pw --proxy-user b:fake-db-pw https://h/",
+			"curl -u a:" + Marker + " --proxy-user b:" + Marker + " https://h/"},
+		{"curl -u a:fake-user-pw https://h/ | curl -u b https://h/",
+			"curl -u a:" + Marker + " https://h/ | curl -u b https://h/"},
+		{"ipmitool -P fake-db-pw -H h -P fake-user-pw", "ipmitool -P " + Marker + " -H h -P " + Marker},
+		{"smbclient -U a%fake-smb-pw -U b%fake-db-pw", "smbclient -U a%" + Marker + " -U b%" + Marker},
+	})
+}
+
+// TestMetadataValueMustEnd: a metadata value followed by more than a
+// separator (token_ttl=5'x) is not a clean scalar and is redacted.
+func TestMetadataValueMustEnd(t *testing.T) {
+	checkText(t, []struct{ in, want string }{
+		{"token_ttl=5'fake-oauth-token", "token_ttl=" + Marker},
+		{`token_ttl="5"fake-oauth-token`, "token_ttl=" + Marker},
+		{"token_ttl: 5\\fake-oauth-token", "token_ttl: " + Marker},
+		{`token_ttl="5" next`, `token_ttl="5" next`},
+		{"token_ttl=5, other=1", "token_ttl=5, other=1"},
 	})
 }
 
@@ -282,26 +312,52 @@ func TestOptionsNamingFilesOrNegations(t *testing.T) {
 		{"pg_dump --no-password appdb", "pg_dump --no-password appdb"},
 		{"cmd --password-stdin registry", "cmd --password-stdin registry"},
 		{"cmd --passphrase fake-passphrase", "cmd --passphrase " + Marker},
+		{"cmd --ask-password --skip-password x", "cmd --ask-password --skip-password x"},
+		// Only no, skip, without, disable and ask negate, and only when the
+		// value is a separate word; an attached value is redacted.
+		{"cmd --allow-password fake-db-pw", "cmd --allow-password " + Marker},
+		{"cmd --prompt-password fake-db-pw", "cmd --prompt-password " + Marker},
+		{"cmd --no-password=fake-db-pw", "cmd --no-password=" + Marker},
+		{"cmd --disable-password=fake-db-pw", "cmd --disable-password=" + Marker},
+		{"cmd --password-file=/etc/pw", "cmd --password-file=/etc/pw"},
 	})
+	runChecks(t, `{"c":["cmd","--allow-password","fake-db-pw"],"d":["cmd","--no-password=fake-db-pw"]}`,
+		[]check{redacted("c", 2), kept("--no-password="+Marker, "d", 1)})
 	runChecks(t, `{"a":["restic","--password-file","/etc/restic/pw"],"b":["pg_dump","--no-password","appdb"]}`,
 		[]check{kept("/etc/restic/pw", "a", 2), kept("appdb", "b", 2)})
 }
 
-// TestPrivateNeedsKeyContext: "private" as the last word is sensitive only
-// after a key type (wg_private, ssh_private), not network_private.
-func TestPrivateNeedsKeyContext(t *testing.T) {
+// TestPrivateLastWord: "private" or "priv" as the last word of a key is
+// private key material (client_private, peer_private, x_priv), except
+// after a word that makes it a flag or a network name (is_private,
+// network_private, dhcp_private). Under these keys, boolean values stay
+// visible; other values are redacted.
+func TestPrivateLastWord(t *testing.T) {
 	for _, k := range []string{"network_private", "dhcp_private", "is_private", "private"} {
 		if IsSensitiveKey(k) {
 			t.Errorf("IsSensitiveKey(%q) = true", k)
 		}
 	}
-	for _, k := range []string{"wg_private", "ssh_private", "tls_private", "host_priv", "private_key"} {
+	for _, k := range []string{"wg_private", "ssh_private", "tls_private", "host_priv", "private_key",
+		"client_private", "server_private", "peer_private", "node_private", "x_priv", "PeerPrivate"} {
 		if !IsSensitiveKey(k) {
 			t.Errorf("IsSensitiveKey(%q) = false", k)
 		}
 	}
+	runChecks(t, `{"client_private":"fake-hex-key-0000","server_private":"fake-hex-key-0000",`+
+		`"peer_private":true,"node_private":12345,"x_priv":"fake-hex-key-0000","is_private":true,`+
+		`"network_private":"10.0.0.0/8","node_priv":"yes"}`, []check{
+		redacted("client_private"), redacted("server_private"), kept(true, "peer_private"),
+		redacted("node_private"), redacted("x_priv"), kept(true, "is_private"),
+		kept("10.0.0.0/8", "network_private"), kept("yes", "node_priv"),
+	})
 	checkText(t, []struct{ in, want string }{
 		{"network_private: true dhcp_private: 10.0.0.0/8", "network_private: true dhcp_private: 10.0.0.0/8"},
+		{"client_private: fake-hex-key-0000", "client_private: " + Marker},
+		{"peer_private=fake-hex-key-0000", "peer_private=" + Marker},
+		{"x_priv=12345", "x_priv=" + Marker},
+		{"server_private: false node_private: no", "server_private: false node_private: no"},
+		{"server_private: 5", "server_private: " + Marker},
 	})
 }
 
