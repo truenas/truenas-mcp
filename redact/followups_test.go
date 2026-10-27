@@ -77,7 +77,9 @@ func TestCredentialReferences(t *testing.T) {
 			kept(json.Number("2"), "ssh_credentials", "id"), kept("repl-conn", "ssh_credentials", "name"),
 			kept("SSH_CREDENTIALS", "ssh_credentials", "type"), redacted("ssh_credentials", "attributes"),
 			// Not references (no id or name): redacted wholesale.
-			redacted("credential"), redacted("token"),
+			redacted("token"),
+			// A typed credential keeps credential_type; see TestTypedCredential.
+			kept("LDAP_PLAIN", "credential", "credential_type"), redacted("credential", "bindpw"),
 			kept("db", "secrets", "name"), redacted("secrets", "password"), kept(true, "secrets", "enabled"),
 			redacted("secrets", "length"),
 		})
@@ -401,4 +403,244 @@ func TestTextURLWithEscapedSlashes(t *testing.T) {
 		{`postgres:\/\/u:p@fake-db-pw@db.example\/app`, `postgres:\/\/u:` + Marker + `@db.example\/app`},
 		{"postgres://u:p@fake-db-pw@db.example/app", "postgres://u:" + Marker + "@db.example/app"},
 	})
+}
+
+// TestTypedCredential: the object under a "credential" key that has a
+// credential_type shows only its allowlisted non-secret fields; every other
+// field is redacted. Any other value under a credential key keeps being
+// redacted wholesale.
+func TestTypedCredential(t *testing.T) {
+	runChecks(t, `{
+		"user": {"credential": {"credential_type":"KERBEROS_USER","username":"admin","password":"fake-user-pw"}},
+		"principal": {"credential": {"credential_type":"KERBEROS_PRINCIPAL","principal":"host/nas.example.com@EXAMPLE.COM"}},
+		"plain": {"credential": {"credential_type":"LDAP_PLAIN","binddn":"cn=admin,dc=example,dc=com","bindpw":"fake-bind-pw"}},
+		"anon": {"credential": {"credential_type":"LDAP_ANONYMOUS"}},
+		"mtls_id": {"credential": {"credential_type":"LDAP_MTLS","client_certificate":7}},
+		"mtls_name": {"credential": {"credential_type":"LDAP_MTLS","client_certificate":"nas-cert"}},
+		"mtls_obj": {"credential": {"credential_type":"LDAP_MTLS","client_certificate":{"id":7,"name":"nas-cert","privatekey":"fake-hex-key-0000","certificate":"fake-b2-key"}}},
+		"unknown": {"credential": {"credential_type":"LDAP_PLAIN","binddn":"cn=a","extra":"fake-oauth-token","count":5,"nested":{"x":"fake-client-secret"},"list":["fake-ssh-pw"],"flag":true,"empty":""}},
+		"badtype": {"credential": {"credential_type":"fake-totp-secret with spaces","username":"admin"}},
+		"obj_username": {"credential": {"credential_type":"KERBEROS_USER","username":{"v":"fake-db-pw"}}},
+		"inline_text": {"credential": {"credential_type":"KERBEROS_USER","username":"admin password=fake-smb-pw"}},
+		"with_id": {"credential": {"credential_type":"KERBEROS_USER","id":3,"name":"svc","username":"admin","password":"fake-vnc-pw"}},
+		"other": {"auth_credential": {"credential_type":"KERBEROS_USER","username":"admin","password":"fake-ftp-pw"}},
+		"no_type": {"credential": {"username":"admin","password":"fake-user-pw"}},
+		"string": {"credential": "fake-passphrase"},
+		"list": {"credential": [{"credential_type":"KERBEROS_USER","username":"admin"}]},
+		"empty": {"credential": {}}}`,
+		[]check{
+			kept("KERBEROS_USER", "user", "credential", "credential_type"), kept("admin", "user", "credential", "username"),
+			redacted("user", "credential", "password"),
+			kept("KERBEROS_PRINCIPAL", "principal", "credential", "credential_type"),
+			kept("host/nas.example.com@EXAMPLE.COM", "principal", "credential", "principal"),
+			kept("cn=admin,dc=example,dc=com", "plain", "credential", "binddn"), redacted("plain", "credential", "bindpw"),
+			kept("LDAP_ANONYMOUS", "anon", "credential", "credential_type"),
+			kept(json.Number("7"), "mtls_id", "credential", "client_certificate"),
+			kept("nas-cert", "mtls_name", "credential", "client_certificate"),
+			kept(json.Number("7"), "mtls_obj", "credential", "client_certificate", "id"),
+			kept("nas-cert", "mtls_obj", "credential", "client_certificate", "name"),
+			redacted("mtls_obj", "credential", "client_certificate", "privatekey"),
+			redacted("mtls_obj", "credential", "client_certificate", "certificate"),
+			// Unknown inner fields stay redacted; booleans and empty strings are not secrets.
+			kept("LDAP_PLAIN", "unknown", "credential", "credential_type"), kept("cn=a", "unknown", "credential", "binddn"),
+			redacted("unknown", "credential", "extra"), redacted("unknown", "credential", "count"),
+			redacted("unknown", "credential", "nested"), redacted("unknown", "credential", "list"),
+			kept(true, "unknown", "credential", "flag"), kept("", "unknown", "credential", "empty"),
+			// A credential_type that is not an enum value, or an allowlisted field that is not
+			// a scalar, is redacted; allowlisted text is still scrubbed.
+			redacted("badtype", "credential", "credential_type"), kept("admin", "badtype", "credential", "username"),
+			redacted("obj_username", "credential", "username"),
+			kept("admin password="+Marker, "inline_text", "credential", "username"),
+			kept(json.Number("3"), "with_id", "credential", "id"), kept("svc", "with_id", "credential", "name"),
+			redacted("with_id", "credential", "password"),
+			// Other shapes keep today's behaviour.
+			redacted("other", "auth_credential"), redacted("no_type", "credential"), redacted("string", "credential"), redacted("list", "credential"),
+			kept(map[string]interface{}{}, "empty", "credential"),
+		})
+}
+
+// TestTypedCredentialJSONString: a JSON document held in a string is
+// redacted the same way.
+func TestTypedCredentialJSONString(t *testing.T) {
+	out := ToolOutput(`{"args":"{\"credential\":{\"credential_type\":\"KERBEROS_USER\",\"username\":\"admin\",\"password\":\"fake-user-pw\"}}"}`)
+	assertNoSecrets(t, out)
+	for _, want := range []string{"KERBEROS_USER", "admin"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%q missing from %s", want, out)
+		}
+	}
+}
+
+// TestTextQuotedSeparators: a '|', ';', '&' or newline inside a quoted
+// argument of another option does not end the command, so a password option
+// after it is still redacted, for every supported program.
+func TestTextQuotedSeparators(t *testing.T) {
+	checkText(t, []struct{ in, want string }{
+		// mysql / mariadb
+		{"mysql -pfake-db-pw -e 'x|y' -pfake-user-pw", "mysql -p" + Marker + " -e 'x|y' -p" + Marker},
+		{`mysql -e "a;b" -pfake-db-pw`, `mysql -e "a;b" -p` + Marker},
+		{`mysql -e "a&b" -pfake-db-pw db`, `mysql -e "a&b" -p` + Marker + ` db`},
+		{`mariadb -e "a\"|b" -pfake-db-pw`, `mariadb -e "a\"|b" -p` + Marker},
+		{"mysql -e 'a\\' -pfake-db-pw", "mysql -e 'a\\' -p" + Marker},
+		{"mysqldump -r 'a|b' -r \"c;d\" -pfake-db-pw db", "mysqldump -r 'a|b' -r \"c;d\" -p" + Marker + " db"},
+		{`mysql -e "a;b" -p"fake db pw" db`, `mysql -e "a;b" -p"` + Marker + `" db`},
+		{`mysql -e "a;b" -p'x|y' -e 'c|d' -pfake-user-pw`, `mysql -e "a;b" -p'` + Marker + `' -e 'c|d' -p` + Marker},
+		// smbclient, curl, ipmitool
+		{"smbclient //srv/share -c 'ls|more' -U bob%fake-smb-pw", "smbclient //srv/share -c 'ls|more' -U bob%" + Marker},
+		{`rpcclient -c "a;b" -Ubob%fake-smb-pw srv`, `rpcclient -c "a;b" -Ubob%` + Marker + ` srv`},
+		{`smbclient -c "a&b" --user=bob%fake-smb-pw`, `smbclient -c "a&b" --user=bob%` + Marker},
+		{`curl -H "X: a;b" -u bob:fake-user-pw https://h/`, `curl -H "X: a;b" -u bob:` + Marker + ` https://h/`},
+		{`curl -d 'a=1&b=2' --proxy-user bob:fake-user-pw https://h/`, `curl -d 'a=1&b=2' --proxy-user bob:` + Marker + ` https://h/`},
+		{`curl -d "a|b" --user=bob:fake-user-pw https://h/`, `curl -d "a|b" --user=bob:` + Marker + ` https://h/`},
+		{`curl -d 'a|b' -ubob:fake-user-pw -d 'c;d' -U bob:fake-db-pw`, `curl -d 'a|b' -ubob:` + Marker + ` -d 'c;d' -U bob:` + Marker},
+		{`ipmitool -H 'h;1' -P fake-user-pw chassis status`, `ipmitool -H 'h;1' -P ` + Marker + ` chassis status`},
+		{`ipmitool -I "lan|plus" -Pfake-user-pw`, `ipmitool -I "lan|plus" -P` + Marker},
+		// sshpass: quoted values of its own options, and -p inside the command's quotes
+		{`sshpass -f '/tmp/a;b' -p fake-ssh-pw ssh h`, `sshpass -f '/tmp/a;b' -p ` + Marker + ` ssh h`},
+		{`sshpass -P "pass;word" -pfake-ssh-pw ssh h`, `sshpass -P "pass;word" -p` + Marker + ` ssh h`},
+		// the program itself inside quotes
+		{`ssh h "mysql -e 'x|y' -pfake-db-pw"`, `ssh h "mysql -e 'x|y' -p` + Marker + `"`},
+		{`sh -c 'mysql -e "a;b" -pfake-db-pw'`, `sh -c 'mysql -e "a;b" -p` + Marker + `'`},
+		// long options with quoted separators around them
+		{"cmd --note 'a|b' --password fake-user-pw --other 'c;d'", "cmd --note 'a|b' --password " + Marker + " --other 'c;d'"},
+		{`cmd --password "a;b|c" --note 'x'`, `cmd --password "` + Marker + `" --note 'x'`},
+		// separators outside quotes still end the command
+		{"mysql -e 'x' | grep -pfake-db-pw", "mysql -e 'x' | grep -pfake-db-pw"},
+		{`mysql -e "a" ; grep -pfake-db-pw`, `mysql -e "a" ; grep -pfake-db-pw`},
+		{"mysql -e 'a' && grep -px", "mysql -e 'a' && grep -px"},
+		{"mysql -e 'a\nb'\ngrep -px", "mysql -e 'a\nb'\ngrep -px"},
+		{`mysql -e a\;b -pfake-db-pw`, `mysql -e a\;b -p` + Marker},
+		{"curl -d 'a' https://h/ | curl -u bob https://h/ ; grep -u x:y", "curl -d 'a' https://h/ | curl -u bob https://h/ ; grep -u x:y"},
+		// a later command is still found after quoted separators
+		{`mysql -e "a;b" db; mysql -pfake-db-pw`, `mysql -e "a;b" db; mysql -p` + Marker},
+	})
+}
+
+// TestTextUnbalancedQuotes: a quote that is never closed runs to the end
+// of the line, so everything after it on that line is part of the command
+// (and a password option there is redacted), but the next line is not.
+func TestTextUnbalancedQuotes(t *testing.T) {
+	checkText(t, []struct{ in, want string }{
+		{"mysql -e 'a|b -pfake-db-pw", "mysql -e 'a|b -p" + Marker},
+		{`mysql -e "a;b -pfake-db-pw -pfake-user-pw`, `mysql -e "a;b -p` + Marker + ` -p` + Marker},
+		{"mysql -e 'a|b -pfake-db-pw\nmysql -pfake-user-pw", "mysql -e 'a|b -p" + Marker + "\nmysql -p" + Marker},
+		{"mysql -e 'a|b\ngrep -px", "mysql -e 'a|b\ngrep -px"},
+		{`curl -d "a|b -u bob:fake-user-pw`, `curl -d "a|b -u bob:` + Marker},
+		{`smbclient -c "a\" -U bob%fake-smb-pw`, `smbclient -c "a\" -U bob%` + Marker},
+		// an apostrophe in text before the program does not hide it
+		{"it's: mysql -pfake-db-pw", "it's: mysql -p" + Marker},
+		{`echo "don't" ; mysql -pfake-db-pw`, `echo "don't" ; mysql -p` + Marker},
+		// a quote that closes a quoted command leaves later commands visible to the scan
+		{"sh -c 'mysql -pfake-db-pw' ; mysql -pfake-user-pw", "sh -c 'mysql -p" + Marker + "' ; mysql -p" + Marker},
+		{"sh -c 'curl -u a:fake-user-pw' ; curl -u b:fake-db-pw", "sh -c 'curl -u a:" + Marker + "' ; curl -u b:" + Marker},
+		// an unbalanced quote in a password option's own value
+		{`mysql -p"fake-db-pw -e x | y`, `mysql -p"` + Marker},
+		{`curl -u 'bob:fake user pw -d a|b`, `curl -u 'bob:` + Marker},
+	})
+}
+
+// TestTextQuotedSeparatorsNoOverRedaction: ordinary text with quotes and
+// separators is left alone.
+func TestTextQuotedSeparatorsNoOverRedaction(t *testing.T) {
+	for _, in := range []string{
+		`mysql -e "select 1; select 2" db`,
+		`mysql -e 'a|b' -p`,
+		`mysql -e 'a|b' -p db`,
+		`mysql -u root -e "show tables" | grep -p x`,
+		`curl -s -H 'Accept: a;b' https://h/ | jq .`,
+		`curl -d 'a=1&b=2' -u bob https://h/`,
+		`smbclient //srv/share -c 'ls; pwd' -U bob`,
+		`ipmitool -H 'h;1' -E chassis status`,
+		`sshpass -f '/tmp/a;b' ssh h -p 22`,
+		`sshpass -e ssh -o 'ProxyCommand=nc %h %p|cat' h`,
+		`echo "mysql is a database; -px is not an option" | wc`,
+		`echo 'the curl; command -u x:y' done`,
+		`grep -e 'a|b' -pfake file; mysql -e "x;y" db`,
+		"the quote ' in 'text' and \" more | mysql -e x",
+	} {
+		if got := Text(in); got != in {
+			t.Errorf("Text(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}
+
+// TestTextQuotedSeparatorsFollowUps pins the handling of escaped quotes,
+// line continuations, separators glued to a secret, redirections, bare
+// carriage returns and the '\” idiom.
+func TestTextQuotedSeparatorsFollowUps(t *testing.T) {
+	checkText(t, []struct{ in, want string }{
+		// Escaped quotes inside an outer double-quoted string, and in raw JSON text.
+		{`sh -c "mysql -e \"a;b\" -pfake-db-pw"`, `sh -c "mysql -e \"a;b\" -p` + Marker + `"`},
+		{`ssh h "curl -d \"a|b\" -u bob:fake-user-pw https://h/"`, `ssh h "curl -d \"a|b\" -u bob:` + Marker + ` https://h/"`},
+		{`{"cmd":"sh -c \"mysql -e \\\"a;b\\\" -pfake-db-pw\""}`, `{"cmd":"sh -c \"mysql -e \\\"a;b\\\" -p` + Marker + `"}`},
+		{`sh -c "mysql -e \"\" -e \"a\\\\\" -pfake-db-pw"`, `sh -c "mysql -e \"\" -e \"a\\\\\" -p` + Marker + `"`},
+		{`sh -c "mysql -e \"a;b -pfake-db-pw`, `sh -c "mysql -e \"a;b -p` + Marker},
+		{`sh -c "mysql -e \"a;b\" -p\"fake db pw\" db"`, `sh -c "mysql -e \"a;b\" -p` + Marker + ` db"`},
+		{"mysql -e \"a\" -pfake-db-pw\nmysql -e \\\"a;b -pfake-user-pw", "mysql -e \"a\" -p" + Marker + "\nmysql -e \\\"a;b -p" + Marker},
+		{"mysql -e \"a\" -pfake-db-pw\nmysql -e \\\"a;b\ngrep -px", "mysql -e \"a\" -p" + Marker + "\nmysql -e \\\"a;b\ngrep -px"},
+		// Backslash-newline continues the command.
+		{"mysql -u root \\\n  -pfake-db-pw db", "mysql -u root \\\n  -p" + Marker + " db"},
+		{"mysql -u root \\\r\n  -pfake-db-pw db", "mysql -u root \\\r\n  -p" + Marker + " db"},
+		{"mysql -u root \\\n-pfake-db-pw db", "mysql -u root \\\n-p" + Marker + " db"},
+		{"curl -d 'a;b' \\\n  --user bob:fake-user-pw \\\n  https://h/", "curl -d 'a;b' \\\n  --user bob:" + Marker + " \\\n  https://h/"},
+		{"smbclient //srv/share \\\n -U bob%fake-smb-pw", "smbclient //srv/share \\\n -U bob%" + Marker},
+		{"ipmitool -H h \\\n -P fake-user-pw power on", "ipmitool -H h \\\n -P " + Marker + " power on"},
+		{"sshpass -e \\\n -p fake-ssh-pw ssh h", "sshpass -e \\\n -p " + Marker + " ssh h"},
+		{"mysql -pfake-db-pw \\\n  db\nmysql -e x\ngrep -px", "mysql -p" + Marker + " \\\n  db\nmysql -e x\ngrep -px"},
+		{"mysql db \\\n\ngrep -px", "mysql db \\\n\ngrep -px"},
+		// A separator glued to the secret ends the value, and the next command is still matched.
+		{"mysql -pfake-db-pw;mysql -pfake-user-pw", "mysql -p" + Marker + ";mysql -p" + Marker},
+		{"mysql -pfake-db-pw|mysql -pfake-user-pw", "mysql -p" + Marker + "|mysql -p" + Marker},
+		{"mysql -pfake-db-pw&&mysql -pfake-user-pw", "mysql -p" + Marker + "&&mysql -p" + Marker},
+		{"mysql -pfake-db-pw;grep -px", "mysql -p" + Marker + ";grep -px"},
+		{"curl -u a:fake-user-pw;curl -u b:fake-db-pw", "curl -u a:" + Marker + ";curl -u b:" + Marker},
+		{"ipmitool -P fake-user-pw;ipmitool -P fake-db-pw", "ipmitool -P " + Marker + ";ipmitool -P " + Marker},
+		{"sshpass -p fake-ssh-pw;sshpass -p fake-user-pw ssh h", "sshpass -p " + Marker + ";sshpass -p " + Marker + " ssh h"},
+		{"smbclient -U a%fake-smb-pw;smbclient -U b%fake-db-pw", "smbclient -U a%" + Marker + ";smbclient -U b%" + Marker},
+		// Redirections do not end the command.
+		{"mysql -e x 2>&1 -pfake-db-pw", "mysql -e x 2>&1 -p" + Marker},
+		{"mysql -e x >&2 -pfake-db-pw", "mysql -e x >&2 -p" + Marker},
+		{"mysql -e x &>/dev/null -pfake-db-pw", "mysql -e x &>/dev/null -p" + Marker},
+		{"mysql -e x <&3 -pfake-db-pw", "mysql -e x <&3 -p" + Marker},
+		{"curl -s https://h/ 2>&1 -u bob:fake-user-pw", "curl -s https://h/ 2>&1 -u bob:" + Marker},
+		{"mysql -e x & mysql -pfake-db-pw", "mysql -e x & mysql -p" + Marker},
+		{"mysql -e x 2>&1 | grep -px", "mysql -e x 2>&1 | grep -px"},
+		{"mysql -e x 2>&1 && grep -px", "mysql -e x 2>&1 && grep -px"},
+		{"mysql -e x &\ngrep -px", "mysql -e x &\ngrep -px"},
+		// A bare carriage return ends a command and an unbalanced quote, like a newline.
+		{"mysql -e 'a|b\rmysql -pfake-db-pw", "mysql -e 'a|b\rmysql -p" + Marker},
+		{"mysql -e 'a|b\rgrep -px", "mysql -e 'a|b\rgrep -px"},
+		{"mysql -e \"a|b\rgrep -px", "mysql -e \"a|b\rgrep -px"},
+		{"mysql -e x\rgrep -px", "mysql -e x\rgrep -px"},
+		{"mysql -e x\r\ngrep -px", "mysql -e x\r\ngrep -px"},
+		{"mysql -pfake-db-pw\rgrep -px", "mysql -p" + Marker + "\rgrep -px"},
+		{"mysql -e 'a\\\rgrep -px", "mysql -e 'a\\\rgrep -px"},
+		// A password in the '\'' idiom of a single-quoted sh -c string.
+		{`sh -c 'mysql -p'\''fake db pw'\'' db'`, `sh -c 'mysql -p'\''` + Marker + `'\'' db'`},
+		{`sh -c 'mysql -e '\''a;b'\'' -p'\''fake db pw'\'' db'`, `sh -c 'mysql -e '\''a;b'\'' -p'\''` + Marker + `'\'' db'`},
+		{`sh -c 'curl -u '\''bob:fake user pw'\'' https://h/'`, `sh -c 'curl -u '\''bob:` + Marker + `'\'' https://h/'`},
+		{`sh -c 'mysql -p'\''fake db pw db'`, `sh -c 'mysql -p'` + Marker + `'`},
+	})
+}
+
+// TestTextQuotedSeparatorsFollowUpsNoOverRedaction: negatives for the
+// escaped-quote, continuation, separator and redirection handling.
+func TestTextQuotedSeparatorsFollowUpsNoOverRedaction(t *testing.T) {
+	for _, in := range []string{
+		"mysql -e x \\\n  db\ngrep -px",
+		"mysql -e x \\\r\n  db\r\ngrep -px",
+		"mysql db;grep -px",
+		"mysql db;mysql -p",
+		"mysql db&&mysql -p db",
+		"mysql db 2>&1 | grep -px",
+		"mysql db >&2; grep -px",
+		"mysql db &> /dev/null; grep -px",
+		`sh -c 'mysql -e '\''a;b'\'' db' ; grep -px`,
+		"mysql db\rgrep -px",
+		"sshpass -e ssh h;sshpass -e ssh -p 22 h",
+	} {
+		if got := Text(in); got != in {
+			t.Errorf("Text(%q) = %q, want it unchanged", in, got)
+		}
+	}
 }

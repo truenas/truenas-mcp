@@ -1,10 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -22,15 +23,20 @@ var (
 	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'wss://10.0.0.1/api/current')")
 	apiUser    = flag.String("api-user", "", "User that owns the API key, sent to auth.login_ex (required; env TRUENAS_API_USER)")
 	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication")
-	insecure   = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks)")
+	insecure   = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks; prefer --tls-ca)")
 	tlsCA      = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
 	proxyURL   = flag.String("proxy", "", "Proxy for the TrueNAS connection: http://, socks5:// or socks5h://host:port, or none to ignore proxy env vars (env TRUENAS_PROXY; overrides HTTPS_PROXY and ALL_PROXY)")
 	versionFlg = flag.Bool("version", false, "Print version and exit")
 	debug      = flag.Bool("debug", false, "Enable debug logging")
 	readOnly   = flag.Bool("read-only", false, "Hide and refuse every tool that changes the system (env TRUENAS_MCP_READ_ONLY)")
-	allowTools = flag.String("allow-tools", "", "Comma-separated list of the only tools to expose (env TRUENAS_MCP_ALLOW_TOOLS)")
-	denyTools  = flag.String("deny-tools", "", "Comma-separated list of tools to hide and refuse (env TRUENAS_MCP_DENY_TOOLS)")
 )
+
+// --allow-tools and --deny-tools are read through flag.Visit in main (a passed
+// flag wins over its environment variable), so they need no variable here.
+func init() {
+	flag.String("allow-tools", "", "Comma-separated list of the only tools to expose (env TRUENAS_MCP_ALLOW_TOOLS)")
+	flag.String("deny-tools", "", "Comma-separated list of tools to hide and refuse (env TRUENAS_MCP_DENY_TOOLS)")
+}
 
 // Version is the release version, injected at build time via
 // -ldflags "-X main.Version=...". Builds without injection report "dev".
@@ -88,7 +94,16 @@ func safetyPolicy(readOnly bool, setFlags map[string]string, lookupEnv func(stri
 	return p, nil
 }
 
+// configureLogging sends the standard logger to stderr. Stdout carries the
+// JSON-RPC stream, so a log line there would corrupt the protocol framing.
+// This is the log package's default; setting it explicitly keeps it true
+// even if a dependency or a later change alters the default.
+func configureLogging() {
+	log.SetOutput(os.Stderr)
+}
+
 func main() {
+	configureLogging()
 	flag.Parse()
 
 	if *versionFlg {
@@ -137,7 +152,7 @@ func main() {
 		log.Fatalf("Failed to configure TLS: %v", err)
 	}
 	if *insecure {
-		log.Println("WARNING: TLS certificate verification disabled - the connection is vulnerable to man-in-the-middle attacks; prefer --tls-ca with the server's certificate")
+		log.Println(insecureWarning(*tlsCA != ""))
 	}
 
 	// Create TrueNAS client
@@ -148,6 +163,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create TrueNAS client: %v", err)
 	}
+	if err := client.ValidateEndpoint(); err != nil {
+		log.Fatalf("%v (check --truenas-url / TRUENAS_URL)", err)
+	}
 	if err := client.ValidateProxy(); err != nil {
 		log.Fatalf("Invalid proxy configuration: %v", err)
 	}
@@ -155,7 +173,7 @@ func main() {
 
 	// Authenticate with TrueNAS middleware
 	if err := client.Authenticate(); err != nil {
-		log.Fatalf("Failed to authenticate with TrueNAS: %v", err)
+		log.Fatalf("%s", startupAuthError(err))
 	}
 	log.Println("Successfully authenticated with TrueNAS middleware")
 
@@ -194,15 +212,22 @@ func main() {
 // StdioHandler manages stdio communication for MCP protocol
 type StdioHandler struct {
 	registry    mcp.ToolRegistry
-	stdin       *bufio.Scanner
+	stdin       *mcp.LineReader
+	stdout      io.Writer
 	stdoutMutex sync.Mutex
 	debug       bool
 }
 
+// NewStdioHandler serves the protocol on the process's stdin and stdout.
 func NewStdioHandler(registry mcp.ToolRegistry, debug bool) *StdioHandler {
+	return newStdioHandler(registry, debug, os.Stdin, os.Stdout)
+}
+
+func newStdioHandler(registry mcp.ToolRegistry, debug bool, in io.Reader, out io.Writer) *StdioHandler {
 	return &StdioHandler{
 		registry: registry,
-		stdin:    bufio.NewScanner(os.Stdin),
+		stdin:    mcp.NewLineReader(in, mcp.MaxLineBytes),
+		stdout:   out,
 		debug:    debug,
 	}
 }
@@ -212,8 +237,21 @@ func (h *StdioHandler) Run() error {
 		log.Println("Starting stdio handler...")
 	}
 
-	for h.stdin.Scan() {
-		line := h.stdin.Bytes()
+	for {
+		line, err := h.stdin.ReadLine()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if errors.Is(err, mcp.ErrLineTooLong) {
+			log.Printf("Rejected a request longer than %d bytes", mcp.MaxLineBytes)
+			if err := h.sendError(nil, -32600, fmt.Sprintf("Request too large: the limit is %d bytes", mcp.MaxLineBytes)); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stdin error: %w", err)
+		}
 		if h.debug {
 			log.Printf("[STDIN] %s", truenas.RedactJSONForLog(line))
 		}
@@ -223,7 +261,9 @@ func (h *StdioHandler) Run() error {
 			if h.debug {
 				log.Printf("Parse error: %v", err)
 			}
-			h.sendError(nil, -32700, fmt.Sprintf("Parse error: %v", err))
+			if err := h.sendError(nil, -32700, fmt.Sprintf("Parse error: %v", err)); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -235,19 +275,28 @@ func (h *StdioHandler) Run() error {
 		// Only send response if not nil (notifications don't get responses)
 		if resp != nil {
 			if err := h.sendResponse(resp); err != nil {
+				if errors.Is(err, errStdoutWrite) {
+					return err // the client is gone: stop rather than drop every later response
+				}
 				log.Printf("Failed to send response: %v", err)
 			}
 		}
 	}
-
-	if err := h.stdin.Err(); err != nil {
-		return fmt.Errorf("stdin error: %w", err)
-	}
-
-	return nil
 }
 
 func (h *StdioHandler) handleRequest(req *mcp.Request) *mcp.Response {
+	// A message without an id is a notification: it gets no reply, and it
+	// must not run anything. (An explicit "id": null is treated the same;
+	// MCP does not allow null ids.) The ids 0 and "" are real ids.
+	if req.ID == nil {
+		switch req.Method {
+		case "initialize", "tools/list", "tools/call":
+			if h.debug {
+				log.Printf("Ignoring %s sent without an id (a notification)", req.Method)
+			}
+			return nil
+		}
+	}
 	switch req.Method {
 	case "initialize":
 		return h.handleInitialize(req)
@@ -360,6 +409,10 @@ func (h *StdioHandler) createErrorResponse(id interface{}, code int, message str
 	}
 }
 
+// errStdoutWrite marks a failure to write to stdout, after which no response
+// can reach the client.
+var errStdoutWrite = errors.New("failed to write to stdout")
+
 func (h *StdioHandler) sendResponse(resp *mcp.Response) error {
 	h.stdoutMutex.Lock()
 	defer h.stdoutMutex.Unlock()
@@ -373,13 +426,53 @@ func (h *StdioHandler) sendResponse(resp *mcp.Response) error {
 		log.Printf("[STDOUT] %s", truenas.RedactJSONForLog(data))
 	}
 
-	fmt.Printf("%s\n", data)
+	// One write per message, so a line is never split by another writer.
+	if _, err := h.stdout.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("%w: %w", errStdoutWrite, err)
+	}
 	return nil
 }
 
-func (h *StdioHandler) sendError(id interface{}, code int, message string) {
+// sendError sends an error reply. It returns an error only when stdout can no
+// longer be written to.
+func (h *StdioHandler) sendError(id interface{}, code int, message string) error {
 	resp := h.createErrorResponse(id, code, message)
 	if err := h.sendResponse(resp); err != nil {
+		if errors.Is(err, errStdoutWrite) {
+			return err
+		}
 		log.Printf("Failed to send error response: %v", err)
 	}
+	return nil
+}
+
+// insecureWarning is logged at startup when TLS verification is disabled.
+// It points to --tls-ca, the safer way to use TrueNAS's self-signed
+// certificate. caIgnored is true if a CA file was also given, which
+// --insecure overrides.
+func insecureWarning(caIgnored bool) string {
+	msg := "WARNING: TLS certificate verification is disabled (--insecure / TRUENAS_INSECURE): the connection is vulnerable to man-in-the-middle attacks. " +
+		"Prefer --tls-ca <cert.pem> (or TRUENAS_TLS_CA) to trust the server's certificate and keep verification on."
+	if caIgnored {
+		msg += " The CA file you gave is not used while --insecure is set."
+	}
+	return msg
+}
+
+// startupAuthError words the failure of the first connect and login. A
+// connection that could not be established is not an authentication failure
+// and says so; only a rejected or failed login is reported as one.
+func startupAuthError(err error) string {
+	var ee *truenas.EndpointError
+	if errors.As(err, &ee) {
+		return ee.Error()
+	}
+	var ce *truenas.ConnectError
+	if errors.As(err, &ce) {
+		if ce.LoginAttempted {
+			return fmt.Sprintf("Could not connect to TrueNAS (the connection was lost during login, and reconnecting failed): %v", ce.Err)
+		}
+		return fmt.Sprintf("Could not connect to TrueNAS (no login was attempted): %v", ce.Err)
+	}
+	return fmt.Sprintf("Failed to authenticate with TrueNAS: %v", err)
 }
