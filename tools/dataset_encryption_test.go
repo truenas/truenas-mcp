@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 )
@@ -137,7 +138,7 @@ func TestCreateDatasetEncryptionValidation(t *testing.T) {
 		{"non-hex key", map[string]interface{}{"encryption": true, "encryption_options": map[string]interface{}{"key": strings.Repeat("zz", 32)}}, "64 hexadecimal characters"},
 		{"passphrase wrong type", map[string]interface{}{"encryption": true, "encryption_options": map[string]interface{}{"passphrase": float64(12345678)}}, "passphrase must be a string"},
 		{"generate_key wrong type", map[string]interface{}{"encryption": true, "encryption_options": map[string]interface{}{"generate_key": "true"}}, "generate_key must be a boolean"},
-		{"algorithm", map[string]interface{}{"encryption": true, "encryption_options": map[string]interface{}{"generate_key": true, "algorithm": "AES-256-GCM"}}, "algorithm is not supported"},
+		{"algorithm", map[string]interface{}{"encryption": true, "encryption_options": map[string]interface{}{"generate_key": true, "algorithm": "AES-256-GCM"}}, "algorithm is not configurable through this tool"},
 		{"unknown field", map[string]interface{}{"encryption": true, "encryption_options": map[string]interface{}{"generate_key": true, "bogus": 1}}, `unknown encryption_options field "bogus"`},
 		{"unsafe unknown field name", map[string]interface{}{"encryption": true, "encryption_options": map[string]interface{}{"generate_key": true, "pass word=hunter2": 1}}, "field with invalid characters"},
 		{"pbkdf2iters without passphrase", map[string]interface{}{"encryption": true, "encryption_options": map[string]interface{}{"generate_key": true, "pbkdf2iters": float64(1300000)}}, "only to passphrase"},
@@ -302,4 +303,182 @@ func keysOf(m map[string]interface{}) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func encOptsError(opts map[string]interface{}) error {
+	_, _, err := parseDatasetEncryption(map[string]interface{}{"encryption": true, "encryption_options": opts})
+	return err
+}
+
+func TestEncryptionOptionBoundaries(t *testing.T) {
+	pass := func(n int) string { return strings.Repeat("p", n) }
+	tests := []struct {
+		name string
+		opts map[string]interface{}
+		ok   bool
+	}{
+		{"pbkdf2iters 99999", map[string]interface{}{"passphrase": testPassphrase, "pbkdf2iters": float64(99999)}, false},
+		{"pbkdf2iters 100000", map[string]interface{}{"passphrase": testPassphrase, "pbkdf2iters": float64(100000)}, true},
+		{"pbkdf2iters 100001", map[string]interface{}{"passphrase": testPassphrase, "pbkdf2iters": float64(100001)}, true},
+		{"pbkdf2iters MaxInt32", map[string]interface{}{"passphrase": testPassphrase, "pbkdf2iters": float64(math.MaxInt32)}, true},
+		{"pbkdf2iters MaxInt32+1", map[string]interface{}{"passphrase": testPassphrase, "pbkdf2iters": float64(math.MaxInt32) + 1}, false},
+		{"key 63", map[string]interface{}{"key": strings.Repeat("a", 63)}, false},
+		{"key 64", map[string]interface{}{"key": strings.Repeat("a", 64)}, true},
+		{"key 64 upper", map[string]interface{}{"key": strings.Repeat("A", 64)}, true},
+		{"key 65", map[string]interface{}{"key": strings.Repeat("a", 65)}, false},
+		{"passphrase 7", map[string]interface{}{"passphrase": pass(7)}, false},
+		{"passphrase 8", map[string]interface{}{"passphrase": pass(8)}, true},
+		{"passphrase 512 bytes", map[string]interface{}{"passphrase": pass(512)}, true},
+		{"passphrase 513 bytes", map[string]interface{}{"passphrase": pass(513)}, false},
+		{"passphrase 170 three-byte runes (510 bytes)", map[string]interface{}{"passphrase": strings.Repeat("€", 170)}, true},
+		{"passphrase 171 three-byte runes (513 bytes)", map[string]interface{}{"passphrase": strings.Repeat("€", 171)}, false},
+		{"passphrase 7 multibyte runes", map[string]interface{}{"passphrase": strings.Repeat("€", 7)}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := encOptsError(tt.opts)
+			if tt.ok && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if !tt.ok && err == nil {
+				t.Error("expected an error")
+			}
+			if err != nil && strings.Contains(err.Error(), strings.Repeat("p", 8)) {
+				t.Errorf("error leaks the passphrase: %v", err)
+			}
+		})
+	}
+	if err := encOptsError(map[string]interface{}{"passphrase": pass(513)}); err == nil || !strings.Contains(err.Error(), "at most 512 bytes") {
+		t.Errorf("long passphrase error = %v", err)
+	}
+}
+
+func TestValidateEncryptionOptionsDeterministicErrors(t *testing.T) {
+	opts := map[string]interface{}{"zeta": 1, "alpha": 1, "mid": 1, "algorithm": "AES-256-GCM"}
+	first := validateEncryptionOptions(opts)
+	if first == nil || !strings.Contains(first.Error(), "algorithm") {
+		t.Fatalf("first error = %v, want the algorithm error (sorted first)", first)
+	}
+	for i := 0; i < 200; i++ {
+		if err := validateEncryptionOptions(opts); err == nil || err.Error() != first.Error() {
+			t.Fatalf("run %d: error = %v, want %v", i, err, first)
+		}
+	}
+	unknown := map[string]interface{}{"zeta": 1, "alpha": 1, "generate_key": true}
+	want := validateEncryptionOptions(unknown)
+	if want == nil || !strings.Contains(want.Error(), `"alpha"`) {
+		t.Fatalf("error = %v, want alpha reported first", want)
+	}
+	for i := 0; i < 200; i++ {
+		if err := validateEncryptionOptions(unknown); err.Error() != want.Error() {
+			t.Fatalf("run %d: error = %v, want %v", i, err, want)
+		}
+	}
+}
+
+func TestKeyBackupGuidancePerMode(t *testing.T) {
+	for _, tt := range []struct {
+		opts map[string]interface{}
+		want []string
+	}{
+		{map[string]interface{}{"generate_key": true}, []string{"key database", "not returned", "TrueNAS UI"}},
+		{map[string]interface{}{"passphrase": testPassphrase}, []string{"does not store the passphrase", "data on this dataset is lost"}},
+		{map[string]interface{}{"key": testKeyHex}, []string{"must keep a copy", "does not return"}},
+	} {
+		client, _ := newFakeClientWith(t, encFakeResults(), nil)
+		out, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": tt.opts})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatal(err)
+		}
+		w, _ := resp["encryption_warning"].(string)
+		for _, s := range tt.want {
+			if !strings.Contains(w, s) {
+				t.Errorf("warning %q missing %q", w, s)
+			}
+		}
+		if strings.Contains(w, "Storage > Pools") || strings.Contains(out, testPassphrase) || strings.Contains(out, testKeyHex) {
+			t.Errorf("stale path or secret in response: %s", out)
+		}
+	}
+	// A plain dataset gets no warning.
+	client, _ := newFakeClientWith(t, map[string]interface{}{"pool.dataset.create": map[string]interface{}{"id": "tank/p", "name": "tank/p", "encrypted": false, "key_loaded": true}}, nil)
+	out, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/p"})
+	if err != nil || strings.Contains(out, "encryption_warning") {
+		t.Errorf("unexpected warning: %s %v", out, err)
+	}
+	// An encrypted child that inherits gets the generic note.
+	client, _ = newFakeClientWith(t, map[string]interface{}{"pool.dataset.create": map[string]interface{}{"id": "tank/e/c", "name": "tank/e/c", "encrypted": true}}, nil)
+	out, err = handleCreateDataset(client, map[string]interface{}{"name": "tank/e/c"})
+	if err != nil || !strings.Contains(out, "This dataset is encrypted") {
+		t.Errorf("generic note missing: %s %v", out, err)
+	}
+}
+
+func TestRedactLiteralSecrets(t *testing.T) {
+	tricky := `pa"ss\wörd-123`
+	opts := map[string]interface{}{"passphrase": tricky}
+	jsonEsc, _ := json.Marshal(tricky)
+	msg := "bad value " + tricky + " and " + string(jsonEsc[1:len(jsonEsc)-1]) + " done"
+	got := redactLiteralSecrets(msg, opts)
+	if strings.Contains(got, tricky) || strings.Contains(got, string(jsonEsc[1:len(jsonEsc)-1])) || strings.Count(got, "[REDACTED]") != 2 {
+		t.Errorf("got %q", got)
+	}
+	keyOpts := map[string]interface{}{"key": testKeyHex}
+	got = redactLiteralSecrets("invalid "+strings.ToUpper(testKeyHex)+" and "+testKeyHex, keyOpts)
+	if strings.Contains(strings.ToLower(got), testKeyHex) {
+		t.Errorf("key survived: %q", got)
+	}
+	if got := redactLiteralSecrets("nothing here", nil); got != "nothing here" {
+		t.Errorf("got %q", got)
+	}
+	if got := redactLiteralSecrets("a.b", map[string]interface{}{"passphrase": "a.b"}); got != "[REDACTED]" {
+		t.Errorf("regex metacharacters not quoted: %q", got)
+	}
+}
+
+// A middleware error that quotes the supplied values in plain prose (without
+// a field label the redactor could key on) must not leak them.
+func TestCreateDatasetMiddlewareErrorScrubsLiteralSecrets(t *testing.T) {
+	for name, opts := range map[string]map[string]interface{}{
+		"passphrase": {"passphrase": testPassphrase},
+		"key":        {"key": testKeyHex},
+	} {
+		t.Run(name, func(t *testing.T) {
+			secret := testPassphrase
+			if name == "key" {
+				secret = testKeyHex
+			}
+			fake := &fakeMiddleware{handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
+				if method == "pool.dataset.create" {
+					return nil, map[string]interface{}{"code": -32001, "message": "[EINVAL] rejected value '" + secret + "' for new dataset"}, true
+				}
+				return nil, nil, false
+			}}
+			client, _ := newFakeClientFrom(t, fake)
+			_, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": opts})
+			if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[REDACTED]") {
+				t.Errorf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateDatasetEncryptionGuidanceText(t *testing.T) {
+	r := NewRegistry(nil, nil)
+	desc := r.tools["create_dataset"].Definition.Description
+	for _, want := range []string{"do not default to one", "key database", "TrueNAS does not store it", "must keep it",
+		"passphrase-encrypted parent", "not configurable through this tool", "AES-256-GCM"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("create_dataset description missing %q", want)
+		}
+	}
+	for _, bad := range []string{"Storage > Pools", "simplest", "recommended for simplicity"} {
+		if strings.Contains(desc, bad) {
+			t.Errorf("create_dataset description still contains %q", bad)
+		}
+	}
 }

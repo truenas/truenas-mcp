@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -146,7 +147,9 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 	// Call the API (error will include payload automatically)
 	result, err := client.Call("pool.dataset.create", payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to create dataset: %w", err)
+		// The middleware error can quote request values; scrub the literal
+		// passphrase/key (the redactor only recognises labelled secrets).
+		return "", fmt.Errorf("failed to create dataset: %s", redactLiteralSecrets(err.Error(), encOpts))
 	}
 
 	var dataset map[string]interface{}
@@ -173,7 +176,11 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 
 	if keyLoaded, ok := dataset["key_loaded"].(bool); ok && keyLoaded {
 		response["key_loaded"] = keyLoaded
-		response["encryption_warning"] = "IMPORTANT: Back up your encryption key from Storage > Pools"
+	}
+	if mode := encryptionMode(encOpts); mode != "" {
+		response["encryption_warning"] = keyBackupGuidance(mode)
+	} else if encrypted, ok := dataset["encrypted"].(bool); ok && encrypted {
+		response["encryption_warning"] = keyBackupGuidance("")
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -267,23 +274,89 @@ func parseDatasetEncryption(args map[string]interface{}) (bool, map[string]inter
 	return true, out, nil
 }
 
+// encryptionMode names the key source in validated encryption options, or ""
+// when there are none.
+func encryptionMode(opts map[string]interface{}) string {
+	switch {
+	case opts["passphrase"] != nil:
+		return "passphrase"
+	case opts["key"] != nil:
+		return "key"
+	case opts["generate_key"] != nil:
+		return "generate_key"
+	}
+	return ""
+}
+
+// keyBackupGuidance tells the user what they must do to keep access to a
+// dataset created with the given key source ("" for an encrypted dataset
+// whose key source is not known, for example one inheriting from its parent).
+func keyBackupGuidance(mode string) string {
+	switch mode {
+	case "generate_key":
+		return "IMPORTANT: TrueNAS generated this dataset's key and stored it in its key database; it is not returned by this tool. Back it up by exporting the dataset key from the TrueNAS UI and keep the copy somewhere other than this system, because the key is lost if the system or its configuration database is lost."
+	case "passphrase":
+		return "IMPORTANT: TrueNAS does not store the passphrase and it cannot be recovered. If it is lost, the data on this dataset is lost."
+	case "key":
+		return "IMPORTANT: You supplied this dataset's key and must keep a copy of it. This tool does not return or recover keys."
+	}
+	return "IMPORTANT: This dataset is encrypted. Make sure its key or passphrase is backed up somewhere other than this system."
+}
+
+// redactLiteralSecrets replaces the passphrase and key in encOpts, including
+// their JSON-escaped forms, wherever they appear in msg. The key is matched
+// case-insensitively because hex digits may be echoed in either case.
+func redactLiteralSecrets(msg string, encOpts map[string]interface{}) string {
+	for _, field := range []string{"passphrase", "key"} {
+		secret, _ := encOpts[field].(string)
+		if secret == "" {
+			continue
+		}
+		variants := []string{secret}
+		if b, err := json.Marshal(secret); err == nil && len(b) > 2 {
+			if esc := string(b[1 : len(b)-1]); esc != secret {
+				variants = append(variants, esc)
+			}
+		}
+		for _, v := range variants {
+			pattern := regexp.QuoteMeta(v)
+			if field == "key" {
+				pattern = "(?i)" + pattern
+			}
+			msg = regexp.MustCompile(pattern).ReplaceAllString(msg, redact.Marker)
+		}
+	}
+	return msg
+}
+
 // minPBKDF2Iters is the lowest pbkdf2iters any supported TrueNAS version
 // accepts (25.10); 27.0 raised the minimum to 1300000 and the middleware
 // enforces that itself.
 const minPBKDF2Iters = 100000
+
+// maxPassphraseBytes is OpenZFS's passphrase limit (MAX_PASSPHRASE_LEN); the
+// middleware model sets no maximum, so longer values would only fail later at
+// the ZFS layer.
+const maxPassphraseBytes = 512
 
 // validateEncryptionOptions validates the encryption_options object for a new
 // encrypted dataset: exactly one of generate_key=true, passphrase (at least 8
 // characters) or key (64 hex characters), plus an optional pbkdf2iters that is
 // only meaningful with a passphrase. Unknown fields are rejected; algorithm is
 // not configurable (TrueNAS always uses AES-256-GCM, and 27.0 rejects the
-// field). Secret values are never echoed.
+// field). Secret values are never echoed. Fields are checked in sorted order so
+// the reported error is deterministic.
 func validateEncryptionOptions(encOpts map[string]interface{}) error {
+	names := make([]string, 0, len(encOpts))
 	for k := range encOpts {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
 		switch k {
 		case "generate_key", "passphrase", "key", "pbkdf2iters":
 		case "algorithm":
-			return fmt.Errorf("encryption_options.algorithm is not supported: TrueNAS always uses AES-256-GCM for new encrypted datasets")
+			return fmt.Errorf("encryption_options.algorithm is not configurable through this tool; new encrypted datasets use AES-256-GCM")
 		default:
 			if plainFieldName.MatchString(k) {
 				return fmt.Errorf("unknown encryption_options field %q (allowed: generate_key, passphrase, key, pbkdf2iters)", k)
@@ -328,6 +401,9 @@ func validateEncryptionOptions(encOpts map[string]interface{}) error {
 
 	if hasPassphrase && utf8.RuneCountInString(passphrase) < 8 {
 		return fmt.Errorf("passphrase must be at least 8 characters")
+	}
+	if hasPassphrase && len(passphrase) > maxPassphraseBytes {
+		return fmt.Errorf("passphrase must be at most %d bytes (OpenZFS limit)", maxPassphraseBytes)
 	}
 	if hasKey && !hexKey64.MatchString(key) {
 		return fmt.Errorf("key must be exactly 64 hexadecimal characters")

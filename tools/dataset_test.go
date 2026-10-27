@@ -162,7 +162,7 @@ func TestValidateEncryptionOptions(t *testing.T) {
 				"algorithm":  "AES-256-GCM",
 			},
 			wantErr: true,
-			errMsg:  "encryption_options.algorithm is not supported: TrueNAS always uses AES-256-GCM for new encrypted datasets",
+			errMsg:  "encryption_options.algorithm is not configurable through this tool; new encrypted datasets use AES-256-GCM",
 		},
 
 		// Invalid cases - both methods specified
@@ -189,7 +189,7 @@ func TestValidateEncryptionOptions(t *testing.T) {
 				"algorithm": "AES-256-GCM",
 			},
 			wantErr: true,
-			errMsg:  "encryption_options.algorithm is not supported: TrueNAS always uses AES-256-GCM for new encrypted datasets",
+			errMsg:  "encryption_options.algorithm is not configurable through this tool; new encrypted datasets use AES-256-GCM",
 		},
 
 		// Invalid cases - passphrase too short
