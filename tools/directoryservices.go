@@ -334,57 +334,55 @@ func (r *Registry) handleConfigureDirectoryService(client *truenas.Client, args 
 func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[string]interface{}) (string, error) {
 	ctx := context.Background()
 
+	payload, err := buildDirectoryServiceLeavePayload(args)
+	if err != nil {
+		return "", err
+	}
+
 	// Check current status
 	status, err := getDirectoryServiceStatus(ctx, client)
 	if err != nil {
 		return "", err
 	}
-
-	if status.Type == "none" {
-		return "", fmt.Errorf("no directory service is currently configured")
+	if err := checkDirectoryServiceCanLeave(status); err != nil {
+		return "", err
 	}
 
-	if !status.Enabled {
-		return "", fmt.Errorf("%s is configured but not enabled", status.Type)
-	}
-
-	// Call unified leave method (no parameters needed)
-	result, err := client.Call("directoryservices.leave")
+	// directoryservices.leave is a job: the call returns its job ID.
+	result, err := client.Call("directoryservices.leave", payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to leave %s: %w", status.Type, err)
 	}
 
-	// The leave operation may return a job ID or just success
 	var jobID int
 	if err := json.Unmarshal(result, &jobID); err != nil {
-		// Not a job, just success
-		jobID = 0
-	}
-
-	var taskID string
-	if jobID > 0 {
-		// Create task for tracking
-		task, err := r.taskManager.CreateJobTask(
-			"leave_directory_service",
-			args,
-			jobID,
-			5*time.Minute,
-		)
-		if err != nil {
-			return "", fmt.Errorf("failed to create task: %w", err)
+		var jobIDs []int
+		if err2 := json.Unmarshal(result, &jobIDs); err2 == nil && len(jobIDs) > 0 {
+			jobID = jobIDs[0]
 		}
-		taskID = task.TaskID
 	}
 
 	response := map[string]interface{}{
 		"success":        true,
 		"directory_type": status.Type,
-		"message":        fmt.Sprintf("Successfully left %s", status.Type),
+		"message":        fmt.Sprintf("Leaving %s was submitted to TrueNAS; track the task for the result.", status.Type),
 	}
 
-	if taskID != "" {
-		response["task_id"] = taskID
+	if jobID > 0 {
+		// Never keep the credential values in the stored task arguments.
+		task, err := r.taskManager.CreateJobTask(
+			"leave_directory_service",
+			maskDirectoryServicePayload(args),
+			jobID,
+			5*time.Minute,
+		)
+		if err != nil {
+			return "", fmt.Errorf("directoryservices.leave was submitted as job %d but task creation failed: %w", jobID, err)
+		}
+		response["task_id"] = task.TaskID
 		response["job_id"] = jobID
+	} else {
+		response["warning"] = "TrueNAS did not return a job ID, so progress cannot be tracked; check get_directory_service_status."
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -503,18 +501,20 @@ type leaveDirectoryServiceDryRun struct{}
 func (d *leaveDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	ctx := context.Background()
 
+	payload, err := buildDirectoryServiceLeavePayload(args)
+	if err != nil {
+		return nil, err
+	}
+	cred, _ := payload["credential"].(map[string]interface{})
+	username, _ := cred["username"].(string)
+
 	// Get current status
 	status, err := getDirectoryServiceStatus(ctx, client)
 	if err != nil {
 		return nil, err
 	}
-
-	if status.Type == "none" {
-		return nil, fmt.Errorf("no directory service is currently configured")
-	}
-
-	if !status.Enabled {
-		return nil, fmt.Errorf("%s is configured but not enabled", status.Type)
+	if err := checkDirectoryServiceCanLeave(status); err != nil {
+		return nil, err
 	}
 
 	warnings := []string{
@@ -522,52 +522,35 @@ func (d *leaveDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, args
 		"Domain users will no longer be able to authenticate",
 		"Shares with domain ACLs may become inaccessible",
 		"This operation cannot be undone automatically - rejoin will be required",
-	}
-
-	username, hasUsername := args["username"].(string)
-	password, hasPassword := args["password"].(string)
-
-	credFields := []string{}
-	if hasUsername && username != "" {
-		credFields = append(credFields, "username")
-	}
-	if hasPassword && password != "" {
-		credFields = append(credFields, "password")
-	}
-
-	if len(credFields) > 0 {
-		warnings = append(warnings,
-			"Credentials provided - will perform authenticated leave")
-	} else {
-		warnings = append(warnings,
-			"No credentials provided - will attempt force leave (may leave stale objects in directory)")
+		fmt.Sprintf("The %s credential for %q is sent to directoryservices.leave; the password is masked in this preview", dsLeaveCredentialType, username),
 	}
 
 	actions := []PlannedAction{
 		{
 			Step:        1,
-			Description: fmt.Sprintf("Leave %s domain/server", status.Type),
+			Description: fmt.Sprintf("Call directoryservices.leave to leave the %s domain", status.Type),
 			Operation:   "leave",
 			Target:      status.Type,
+			Details: map[string]interface{}{
+				"method": "directoryservices.leave",
+				// Exactly what will be sent to TrueNAS, with the password masked.
+				"payload": maskDirectoryServicePayload(payload),
+			},
 		},
 		{
 			Step:        2,
-			Description: fmt.Sprintf("Disable %s integration", status.Type),
+			Description: fmt.Sprintf("TrueNAS then resets its local %s configuration and disables the service", status.Type),
 			Operation:   "disable",
 			Target:      status.Type,
 		},
 	}
 
-	conditions := []string{
-		fmt.Sprintf("Connectivity to %s servers (if authenticated leave)", status.Type),
-		"Proper DNS configuration (if authenticated leave)",
-	}
-	if len(credFields) > 0 {
-		conditions = append(conditions, fmt.Sprintf("Valid credentials: %v", credFields))
-	}
-
 	requirements := &Requirements{
-		Conditions: conditions,
+		Conditions: []string{
+			fmt.Sprintf("Connectivity to %s servers", status.Type),
+			"Proper DNS configuration",
+			"A KERBEROS_USER credential with the administrative privileges needed to remove the computer account",
+		},
 	}
 
 	return &DryRunResult{

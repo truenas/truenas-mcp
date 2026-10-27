@@ -733,69 +733,210 @@ func onlyMethods(t *testing.T, fake *fakeMiddleware, allowed ...string) {
 	}
 }
 
-func TestLeaveDirectoryServiceDryRunPastPreChecks(t *testing.T) {
-	r, fake, _ := leaveFake(t, dsStatus("ACTIVEDIRECTORY", "HEALTHY"))
-	out, err := r.CallTool("leave_directory_service", obj{"dry_run": true})
+func leaveArgs(extra obj) obj {
+	return withArgs(obj{"credential": obj{"credential_type": "KERBEROS_USER", "username": "admin", "password": "s3cret"}}, extra)
+}
+
+func TestLeaveDirectoryServiceSchemaMatchesHandler(t *testing.T) {
+	tool, ok := NewRegistry(nil, nil).tools["leave_directory_service"]
+	if !ok {
+		t.Fatal("leave_directory_service is not registered")
+	}
+	schema := tool.Definition.InputSchema
+	props := propsOf(t, schema)
+
+	// Top level: the credential plus the tool-level dry_run and confirm.
+	want := []string{"credential"}
+	for k := range dsControlArgs {
+		want = append(want, k)
+	}
+	sort.Strings(want)
+	if got := keysOf(props); !reflect.DeepEqual(got, want) {
+		t.Errorf("schema properties = %v, handler reads %v", got, want)
+	}
+	if req, _ := schema["required"].([]string); !reflect.DeepEqual(req, []string{"credential"}) {
+		t.Errorf("schema required = %v, handler requires [credential]", req)
+	}
+
+	// credential: KERBEROS_USER only, with the fields the handler reads.
+	cred := props["credential"].(obj)
+	credProps := propsOf(t, cred)
+	wantCred := append([]string{"credential_type"}, dsCredentialTypes[dsLeaveCredentialType]...)
+	sort.Strings(wantCred)
+	if got := keysOf(credProps); !reflect.DeepEqual(got, wantCred) {
+		t.Errorf("credential properties = %v, handler reads %v", got, wantCred)
+	}
+	if e := credProps["credential_type"].(obj)["enum"].([]string); !reflect.DeepEqual(e, []string{dsLeaveCredentialType}) {
+		t.Errorf("credential_type enum = %v", e)
+	}
+	gotCredReq, _ := cred["required"].([]string)
+	gotCredReq = append([]string(nil), gotCredReq...)
+	sort.Strings(gotCredReq)
+	if !reflect.DeepEqual(gotCredReq, wantCred) {
+		t.Errorf("credential required = %v, handler requires %v", gotCredReq, wantCred)
+	}
+	if cred["additionalProperties"] != false {
+		t.Error("credential must not allow additional properties")
+	}
+	for name, p := range credProps {
+		if p.(obj)["type"] != "string" {
+			t.Errorf("credential.%s type = %v, handler reads a string", name, p.(obj)["type"])
+		}
+	}
+
+	// Behaviour: everything the schema offers reaches the payload, and only that.
+	payload, err := buildDirectoryServiceLeavePayload(leaveArgs(obj{"dry_run": true, "confirm": true}))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	var got DryRunResult
-	if err := json.Unmarshal([]byte(out), &got); err != nil {
-		t.Fatalf("not JSON: %v\n%s", err, out)
-	}
-	want := DryRunResult{
-		Tool: "leave_directory_service",
-		CurrentState: obj{
-			"directory_type": "ACTIVEDIRECTORY",
-			"enabled":        true,
-			"healthy":        true,
-		},
-		PlannedActions: []PlannedAction{
-			{Step: 1, Description: "Leave ACTIVEDIRECTORY domain/server", Operation: "leave", Target: "ACTIVEDIRECTORY"},
-			{Step: 2, Description: "Disable ACTIVEDIRECTORY integration", Operation: "disable", Target: "ACTIVEDIRECTORY"},
-		},
-		Warnings: []string{
-			"System will leave the ACTIVEDIRECTORY domain/server",
-			"Domain users will no longer be able to authenticate",
-			"Shares with domain ACLs may become inaccessible",
-			"This operation cannot be undone automatically - rejoin will be required",
-			"No credentials provided - will attempt force leave (may leave stale objects in directory)",
-		},
-		Requirements: &Requirements{Conditions: []string{
-			"Connectivity to ACTIVEDIRECTORY servers (if authenticated leave)",
-			"Proper DNS configuration (if authenticated leave)",
-		}},
-		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 60, Note: "Time varies based on network and domain controller response"},
-	}
-	gotJSON, _ := json.Marshal(got)
-	wantJSON, _ := json.Marshal(want)
-	if !jsonEqual(t, gotJSON, wantJSON) {
-		t.Errorf("dry run\n got %s\nwant %s", gotJSON, wantJSON)
+	wantPayload := obj{"credential": obj{"credential_type": "KERBEROS_USER", "username": "admin", "password": "s3cret"}}
+	if !reflect.DeepEqual(payload, wantPayload) {
+		t.Errorf("payload = %v, want %v", payload, wantPayload)
 	}
 
-	// Only status queries; nothing that leaves or changes the configuration.
-	onlyMethods(t, fake, "auth.login_ex", "directoryservices.status")
-	if len(fake.called("directoryservices.status")) == 0 {
-		t.Error("dry run did not query directoryservices.status")
+	// The service types the handler allows are the ones the middleware supports.
+	if !reflect.DeepEqual(dsLeaveServiceTypes, []string{"ACTIVEDIRECTORY", "IPA"}) {
+		t.Errorf("leave service types = %v", dsLeaveServiceTypes)
 	}
 }
 
-func TestLeaveDirectoryServiceDryRunPreChecks(t *testing.T) {
+func TestLeaveDirectoryServiceValidation(t *testing.T) {
+	with := func(mutate func(obj)) obj {
+		a := leaveArgs(nil)
+		mutate(a)
+		return a
+	}
+	cred := func(a obj) obj { return a["credential"].(obj) }
+	tests := []struct {
+		name    string
+		args    obj
+		wantErr string
+	}{
+		{"no arguments", obj{}, "credential is required in arguments"},
+		{"credential not an object", obj{"credential": "admin"}, "credential must be an object"},
+		{"missing credential_type", with(func(a obj) { delete(cred(a), "credential_type") }), "credential.credential_type is required and must be KERBEROS_USER"},
+		{"principal credential", obj{"credential": obj{"credential_type": "KERBEROS_PRINCIPAL", "principal": "p@R"}}, "must be KERBEROS_USER"},
+		{"ldap credential", obj{"credential": obj{"credential_type": "LDAP_PLAIN", "binddn": "x", "bindpw": "y"}}, "must be KERBEROS_USER"},
+		{"missing username", with(func(a obj) { delete(cred(a), "username") }), "username is required in credential (KERBEROS_USER)"},
+		{"missing password", with(func(a obj) { delete(cred(a), "password") }), "password is required in credential (KERBEROS_USER)"},
+		{"empty password", with(func(a obj) { cred(a)["password"] = "" }), "credential (KERBEROS_USER).password must be a non-empty string"},
+		{"password not a string", with(func(a obj) { cred(a)["password"] = 5.0 }), "password must be a non-empty string"},
+		{"unknown credential field", with(func(a obj) { cred(a)["principal"] = "p" }), `unknown field "principal" in credential (KERBEROS_USER)`},
+		{"unknown top-level field", with(func(a obj) { a["force"] = true }), `unknown field "force" in arguments`},
+		{"credentials at the top level", obj{"username": "admin", "password": "s3cret", "credential": leaveArgs(nil)["credential"]}, `unknown field "password" in arguments`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := buildDirectoryServiceLeavePayload(tc.args)
+			if err == nil {
+				t.Fatalf("accepted; payload %v", payload)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	// Invalid arguments are reported before any middleware call, in every mode.
+	r, fake, _ := leaveFake(t, dsStatus("ACTIVEDIRECTORY", "HEALTHY"))
+	for _, extra := range []obj{{}, {"dry_run": true}, {"confirm": true}} {
+		if _, err := r.CallTool("leave_directory_service", withArgs(obj{"credential": obj{"credential_type": "KERBEROS_USER", "username": "a"}}, extra)); err == nil ||
+			!strings.Contains(err.Error(), "password is required") {
+			t.Errorf("%v: err = %v", extra, err)
+		}
+	}
+	if n := len(fake.called("directoryservices.status")) + len(fake.called("directoryservices.leave")); n != 0 {
+		t.Errorf("invalid arguments reached the middleware (%d calls)", n)
+	}
+}
+
+func TestLeaveDirectoryServiceDryRunPastPreChecks(t *testing.T) {
+	for _, dsType := range []string{"ACTIVEDIRECTORY", "IPA"} {
+		t.Run(dsType, func(t *testing.T) {
+			r, fake, _ := leaveFake(t, dsStatus(dsType, "HEALTHY"))
+			out, err := r.CallTool("leave_directory_service", leaveArgs(obj{"dry_run": true}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(out, "s3cret") {
+				t.Errorf("dry run leaked the password:\n%s", out)
+			}
+
+			var got DryRunResult
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("not JSON: %v\n%s", err, out)
+			}
+			want := DryRunResult{
+				Tool:         "leave_directory_service",
+				CurrentState: obj{"directory_type": dsType, "enabled": true, "healthy": true},
+				PlannedActions: []PlannedAction{
+					{
+						Step: 1, Description: "Call directoryservices.leave to leave the " + dsType + " domain", Operation: "leave", Target: dsType,
+						Details: obj{
+							"method": "directoryservices.leave",
+							"payload": obj{"credential": obj{
+								"credential_type": "KERBEROS_USER", "username": "admin", "password": redact.Marker,
+							}},
+						},
+					},
+					{Step: 2, Description: "TrueNAS then resets its local " + dsType + " configuration and disables the service", Operation: "disable", Target: dsType},
+				},
+				Warnings: []string{
+					"System will leave the " + dsType + " domain/server",
+					"Domain users will no longer be able to authenticate",
+					"Shares with domain ACLs may become inaccessible",
+					"This operation cannot be undone automatically - rejoin will be required",
+					`The KERBEROS_USER credential for "admin" is sent to directoryservices.leave; the password is masked in this preview`,
+				},
+				Requirements: &Requirements{Conditions: []string{
+					"Connectivity to " + dsType + " servers",
+					"Proper DNS configuration",
+					"A KERBEROS_USER credential with the administrative privileges needed to remove the computer account",
+				}},
+				EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 60, Note: "Time varies based on network and domain controller response"},
+			}
+			gotJSON, _ := json.Marshal(got)
+			wantJSON, _ := json.Marshal(want)
+			if !jsonEqual(t, gotJSON, wantJSON) {
+				t.Errorf("dry run\n got %s\nwant %s", gotJSON, wantJSON)
+			}
+
+			// Only status queries; nothing that leaves or changes the configuration.
+			onlyMethods(t, fake, "auth.login_ex", "directoryservices.status")
+			if len(fake.called("directoryservices.status")) == 0 {
+				t.Error("dry run did not query directoryservices.status")
+			}
+		})
+	}
+
+	// Without confirm, the preview is the same and nothing is sent.
+	r, fake, _ := leaveFake(t, dsStatus("ACTIVEDIRECTORY", "HEALTHY"))
+	out, err := r.CallTool("leave_directory_service", leaveArgs(nil))
+	if err != nil || !strings.Contains(out, "confirmation_required") || !strings.Contains(out, `"method": "directoryservices.leave"`) {
+		t.Errorf("unconfirmed call: err=%v\n%s", err, out)
+	}
+	if strings.Contains(out, "s3cret") {
+		t.Errorf("preview leaked the password:\n%s", out)
+	}
+	onlyMethods(t, fake, "auth.login_ex", "directoryservices.status")
+}
+
+func TestLeaveDirectoryServicePreChecks(t *testing.T) {
 	tests := []struct {
 		name    string
 		status  obj
 		wantErr string
 	}{
 		{"nothing configured", dsStatus(nil, nil), "no directory service is currently configured"},
-		{"configured but disabled", dsStatus("LDAP", "DISABLED"), "LDAP is configured but not enabled"},
+		{"configured but disabled", dsStatus("IPA", "DISABLED"), "IPA is configured but not enabled"},
+		{"ldap cannot be left", dsStatus("LDAP", "HEALTHY"), "LDAP does not support leave operations (only ACTIVEDIRECTORY and IPA do)"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r, fake, _ := leaveFake(t, tc.status)
-			for _, args := range []obj{{"dry_run": true}, {"confirm": true}} {
-				if _, err := r.CallTool("leave_directory_service", args); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("%v: err = %v, want %q", args, err, tc.wantErr)
+			for _, extra := range []obj{{"dry_run": true}, {"confirm": true}} {
+				if _, err := r.CallTool("leave_directory_service", leaveArgs(extra)); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("%v: err = %v, want %q", extra, err, tc.wantErr)
 				}
 			}
 			onlyMethods(t, fake, "auth.login_ex", "directoryservices.status")
@@ -803,34 +944,108 @@ func TestLeaveDirectoryServiceDryRunPreChecks(t *testing.T) {
 	}
 }
 
-func TestLeaveDirectoryServiceTaskTTL(t *testing.T) {
+func TestLeaveDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	results := dsStatus("ACTIVEDIRECTORY", "HEALTHY")
 	results["directoryservices.leave"] = 77
 	r, fake, mgr := leaveFake(t, results)
 
-	out, err := r.CallTool("leave_directory_service", obj{"confirm": true})
+	out, err := r.CallTool("leave_directory_service", leaveArgs(obj{"confirm": true}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(fake.called("directoryservices.leave")); n != 1 {
-		t.Fatalf("directoryservices.leave called %d times", n)
+	calls := fake.called("directoryservices.leave")
+	if len(calls) != 1 {
+		t.Fatalf("directoryservices.leave called %d times", len(calls))
 	}
+	// One positional argument: exactly the payload the dry run shows, unmasked.
+	wantParams := `[{"credential": {"credential_type": "KERBEROS_USER", "username": "admin", "password": "s3cret"}}]`
+	if !jsonEqual(t, calls[0].Params, []byte(wantParams)) {
+		t.Errorf("params = %s, want %s", calls[0].Params, wantParams)
+	}
+	onlyMethods(t, fake, "auth.login_ex", "directoryservices.status", "directoryservices.leave")
+
 	var reply struct {
-		Success bool   `json:"success"`
-		JobID   int    `json:"job_id"`
-		TaskID  string `json:"task_id"`
+		Success       bool   `json:"success"`
+		DirectoryType string `json:"directory_type"`
+		JobID         int    `json:"job_id"`
+		TaskID        string `json:"task_id"`
 	}
 	if err := json.Unmarshal([]byte(out), &reply); err != nil {
 		t.Fatal(err)
 	}
-	if !reply.Success || reply.JobID != 77 || reply.TaskID == "" {
+	if !reply.Success || reply.DirectoryType != "ACTIVEDIRECTORY" || reply.JobID != 77 || reply.TaskID == "" {
 		t.Fatalf("reply = %s", out)
 	}
+	if strings.Contains(out, "s3cret") {
+		t.Errorf("reply leaked the password: %s", out)
+	}
+
 	task, err := mgr.Get(reply.TaskID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if task.JobID == nil || *task.JobID != 77 {
+		t.Errorf("task job = %v", task.JobID)
+	}
 	if want := int64((5 * time.Minute).Seconds()); task.TTL != want {
 		t.Errorf("task TTL = %ds, want %ds", task.TTL, want)
+	}
+	stored, _ := json.Marshal(task.Arguments)
+	if strings.Contains(string(stored), "s3cret") || !strings.Contains(string(stored), redact.Marker) {
+		t.Errorf("task arguments = %s, want the password masked", stored)
+	}
+}
+
+func TestLeaveDirectoryServiceJobIDForms(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  interface{}
+		wantJob int
+		warning bool
+	}{
+		{"list of job ids", []int{9}, 9, false},
+		{"no job id", nil, 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			results := dsStatus("IPA", "HEALTHY")
+			results["directoryservices.leave"] = tc.result
+			r, _, _ := leaveFake(t, results)
+			out, err := r.CallTool("leave_directory_service", leaveArgs(obj{"confirm": true}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var reply struct {
+				JobID   int    `json:"job_id"`
+				Warning string `json:"warning"`
+			}
+			if err := json.Unmarshal([]byte(out), &reply); err != nil {
+				t.Fatal(err)
+			}
+			if reply.JobID != tc.wantJob || (reply.Warning != "") != tc.warning {
+				t.Errorf("reply = %s", out)
+			}
+		})
+	}
+}
+
+func TestLeaveDirectoryServiceReportsMiddlewareError(t *testing.T) {
+	fake := &fakeMiddleware{
+		results: dsStatus("ACTIVEDIRECTORY", "HEALTHY"),
+		handle: func(method string, _ json.RawMessage) (interface{}, obj, bool) {
+			if method == "directoryservices.leave" {
+				return nil, obj{"code": -32001, "message": "Method call error", "data": obj{"reason": "[EFAULT] bad"}}, true
+			}
+			return nil, nil, false
+		},
+	}
+	client, _ := newFakeClientFrom(t, fake)
+	r := NewRegistry(client, nil)
+	_, err := r.CallTool("leave_directory_service", leaveArgs(obj{"confirm": true}))
+	if err == nil || !strings.Contains(err.Error(), "failed to leave ACTIVEDIRECTORY") {
+		t.Errorf("err = %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "s3cret") {
+		t.Errorf("error leaked the password: %v", err)
 	}
 }

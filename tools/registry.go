@@ -568,27 +568,46 @@ idmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed t
 	r.tools["leave_directory_service"] = Tool{
 		Definition: mcp.Tool{
 			Name: "leave_directory_service",
-			Description: `Disconnect from directory service and leave the domain.
+			Description: `Leave the Active Directory or IPA domain TrueNAS has joined, with TrueNAS directoryservices.leave (TrueNAS 25.10 or later).
+
+TrueNAS removes its computer account from the domain using the credential you provide, then resets its local directory service configuration and disables the service. LDAP cannot be left; use configure_directory_service with enable=false to disable it.
+
+**credential is required:** a KERBEROS_USER credential, {credential_type: "KERBEROS_USER", username: "admin", password: "pass"}, for an account with the administrative privileges needed to remove the computer account. It is used for this operation only and is never shown: the password is masked in the dry run and in stored task data.
 
 **WARNING:** This is a destructive operation:
 - Removes TrueNAS from the domain
-- Deletes computer account (if possible)
 - Clears all cached user/group data
 - All domain user authentication will stop working
 - SMB/NFS shares configured with domain users will become inaccessible
 
 **Alternative:** Use configure_directory_service with enable=false for temporary disable without leaving the domain.
 
-**Returns:** task_id for tracking the leave operation (30 seconds to 5 minutes typical)`,
+**Returns:** task_id for tracking the leave job (30 seconds to 5 minutes typical)`,
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
+					"credential": map[string]interface{}{
+						"type":        "object",
+						"description": "KERBEROS_USER credential used to remove the computer account from the domain",
+						"properties": map[string]interface{}{
+							"credential_type": map[string]interface{}{
+								"type":        "string",
+								"enum":        []string{"KERBEROS_USER"},
+								"description": "Must be KERBEROS_USER, the only credential type directoryservices.leave accepts",
+							},
+							"username": map[string]interface{}{"type": "string", "description": "Account used to obtain a Kerberos ticket; it must exist on the domain controller"},
+							"password": map[string]interface{}{"type": "string", "description": "Password of that account"},
+						},
+						"required":             []string{"credential_type", "username", "password"},
+						"additionalProperties": false,
+					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
 						"description": "Preview operation without executing (default: false, STRONGLY RECOMMENDED to use dry_run first)",
 						"default":     false,
 					},
 				},
+				"required": []string{"credential"},
 			},
 		},
 		Handler: r.handleLeaveDirectoryServiceWithDryRun,

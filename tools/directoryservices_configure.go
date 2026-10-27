@@ -286,3 +286,54 @@ func maskDSValue(v interface{}) interface{} {
 	}
 	return v
 }
+
+// directoryservices.leave (TrueNAS 25.10 and later) takes one argument,
+// {"credential": <KERBEROS_USER credential>}, and only supports
+// ACTIVEDIRECTORY and IPA (DirectoryServicesLeaveArgs in
+// api/v25_10_0/directory_services.py, unchanged through v27_0_0; the
+// middleware's leave() raises for LDAP). It is a job.
+const dsLeaveCredentialType = "KERBEROS_USER"
+
+// dsLeaveServiceTypes are the service types that can be left.
+var dsLeaveServiceTypes = []string{"ACTIVEDIRECTORY", "IPA"}
+
+// buildDirectoryServiceLeavePayload validates the leave_directory_service
+// arguments and returns the single argument of directoryservices.leave. The
+// dry run shows this exact value (password masked).
+func buildDirectoryServiceLeavePayload(args map[string]interface{}) (map[string]interface{}, error) {
+	top := map[string]dsField{"credential": {kind: dsObject, required: true}}
+	checked, err := checkDSFields("arguments", top, args, func(k string) bool { return dsControlArgs[k] })
+	if err != nil {
+		return nil, err
+	}
+	credIn, _ := checked["credential"].(map[string]interface{})
+	if t, _ := credIn["credential_type"].(string); t != dsLeaveCredentialType {
+		return nil, fmt.Errorf("credential.credential_type is required and must be %s, the only credential directoryservices.leave accepts", dsLeaveCredentialType)
+	}
+	credFields := map[string]dsField{"credential_type": {kind: dsString, required: true}}
+	for _, name := range dsCredentialTypes[dsLeaveCredentialType] {
+		credFields[name] = dsField{kind: dsString, required: true}
+	}
+	cred, err := checkDSFields("credential ("+dsLeaveCredentialType+")", credFields, credIn, nil)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"credential": cred}, nil
+}
+
+// checkDirectoryServiceCanLeave applies the middleware's own preconditions
+// for leaving to the current status.
+func checkDirectoryServiceCanLeave(status *DirectoryServiceStatus) error {
+	if status.Type == "none" {
+		return fmt.Errorf("no directory service is currently configured")
+	}
+	if !status.Enabled {
+		return fmt.Errorf("%s is configured but not enabled", status.Type)
+	}
+	for _, t := range dsLeaveServiceTypes {
+		if status.Type == t {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s does not support leave operations (only %s do); use configure_directory_service with enable=false to disable it", status.Type, strings.Join(dsLeaveServiceTypes, " and "))
+}

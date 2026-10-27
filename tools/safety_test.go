@@ -457,8 +457,10 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		"delete_app":              {"app_name": "plex", "remove_images": true},
 		"stop_app":                {"app_name": "plex"},
 		"upgrade_app":             {"app_name": "plex", "version": "2.0.0", "snapshot_hostpaths": false},
-		"leave_directory_service": {},
-		"delete_scrub_schedule":   {"id": 1.0},
+		"leave_directory_service": {
+			"credential": map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"},
+		},
+		"delete_scrub_schedule": {"id": 1.0},
 		"configure_directory_service": {
 			"service_type": "ACTIVEDIRECTORY", "enable": true,
 			"credential":    map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"},
