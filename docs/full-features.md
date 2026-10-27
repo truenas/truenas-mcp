@@ -14,7 +14,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - The memory warning is based on memory used excluding the ZFS ARC (latest complete available sample minus the latest ARC size) when the ARC size is known; otherwise it says the figure may include the ARC. If the ARC size was used but its age could not be checked (no timestamp in the reporting data), `arc_freshness_note` says so, as in `analyze_capacity`
   - Alert datetimes are ISO-8601 UTC strings, as in `list_alerts`
   - The CPU check uses the legend series `cpu` (column 1 if absent) and skips samples without data (all-zero rows, see `get_system_metrics`)
-- **query_jobs** - Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs)
+- **query_jobs** - Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs). Reports `has_more` and `total` when the list was cut by `limit` (default 50); each entry is at most 4 KiB
   - `time_started` and `time_finished` are ISO-8601 UTC strings (same rules as `system_info`)
 
 ### Storage Management
@@ -71,7 +71,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - A graph that fails is reported under `errors.<graph>` while the others are returned; if every graph fails the call is an error
 
 ### Applications
-- **query_apps** - List installed applications with status and available updates
+- **query_apps** - List installed applications with status, `human_version`, and `upgrade_available` (whether an upgrade exists) and `latest_version` (newest catalog version, always set, in catalog form rather than `human_version` form)
 - **search_app_catalog** - Search TrueNAS app catalog by name, category, or keyword
   - Search across all catalog trains (stable, enterprise, community)
   - Filter by category (media, productivity, database, etc.)
@@ -165,7 +165,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Supports dry-run mode to preview deletion
   - Returns task ID for tracking deletion progress
 
-- **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup (**destructive**: the app goes offline and migrations may be one-way)
+- **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup (**destructive**: the app goes offline and migrations may be one-way). The task completes only once the app is RUNNING (`health_timeout_seconds`: integer 0-600, default 60; an app still starting at the deadline fails the task with a message that the upgrade itself succeeded). TrueNAS always stops the app and snapshots its ix-volumes; `snapshot_hostpaths` only requests snapshots of host paths and is not a confirmation that one was taken
   - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations

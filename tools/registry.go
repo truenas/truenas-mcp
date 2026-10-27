@@ -10,11 +10,11 @@ import (
 	"runtime/debug"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/truenas/truenas-mcp/internal/mwtime"
 	"github.com/truenas/truenas-mcp/internal/safego"
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/tasks"
@@ -1286,7 +1286,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["query_apps"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_apps",
-			Description: "Query installed applications with their status, versions, and available updates",
+			Description: "Query installed applications with their status, versions, and available updates. upgrade_available tells whether an upgrade exists; latest_version is the newest catalog version (always set, in catalog form, not comparable to human_version)",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1309,7 +1309,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["upgrade_app"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "upgrade_app",
-			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress. This is a write operation that modifies the system.",
+			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress; the task completes only once the app is observed RUNNING after the upgrade job finishes (otherwise it fails with the app's state; if the app was merely still starting when health_timeout_seconds ran out, the message says the upgrade itself succeeded and the wait can be raised). TrueNAS always stops the app during the upgrade and snapshots its ix-volumes dataset for rollback. This is a write operation that modifies the system.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1324,8 +1324,15 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					},
 					"snapshot_hostpaths": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Create snapshots of host volumes before upgrade (default: true for safety)",
+						"description": "Also request snapshots of the app's host paths before the upgrade (default: true for safety). This only affects host paths: TrueNAS always stops the app and snapshots its ix-volumes dataset regardless. It is a request, not a confirmation: only host paths that are ZFS datasets are snapshotted and the upgrade job does not report which snapshots it took.",
 						"default":     true,
+					},
+					"health_timeout_seconds": map[string]interface{}{
+						"type":        "integer",
+						"description": "After the upgrade job finishes, how long to wait for the app to report RUNNING before the task fails (default: 60; 0 checks once without waiting). Must be an integer from 0 to 600, anything else is rejected. Raise it for slow-starting apps: running out of time while the app is still starting fails the task but does not mean the upgrade failed.",
+						"default":     defaultUpgradeHealthTimeoutSeconds,
+						"minimum":     0,
+						"maximum":     maxUpgradeHealthTimeoutSeconds,
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -1794,7 +1801,7 @@ Returns task_id for tracking progress with tasks_get.
 	r.tools["query_jobs"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_jobs",
-			Description: "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, etc.)",
+			Description: "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, etc.), most recent first. Reports has_more and total when the list was cut by limit; long results and error text are truncated with a flag.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1806,8 +1813,10 @@ Returns task_id for tracking progress with tasks_get.
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of jobs to return (default: 50)",
+						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state filter) when more exist than were returned. Each job entry is at most 4 KiB. Values above 9999 are capped at 9999.",
 						"default":     50,
+						"minimum":     1,
+						"maximum":     maxQueryJobsLimit,
 					},
 				},
 			},
@@ -3941,13 +3950,16 @@ func handleQueryApps(client *truenas.Client, args map[string]interface{}) (strin
 			"id":                app["id"],
 			"state":             app["state"],
 			"version":           app["human_version"],
+			"human_version":     app["human_version"],
 			"upgrade_available": app["upgrade_available"],
 		}
 
-		// Include update info if available
-		if upgradeAvail, ok := app["upgrade_available"].(bool); ok && upgradeAvail {
-			summary["latest_version"] = app["latest_app_version"]
-		}
+		// latest_version is the newest catalog version of the app. app.query
+		// always sets it, also when it equals the installed one, and in the
+		// catalog form (e.g. "1.2.0"), not the human_version form
+		// ("<app>_<chart>"), so the two cannot be compared directly.
+		// upgrade_available is what tells whether an upgrade exists.
+		summary["latest_version"] = app["latest_version"]
 
 		// Include portals (web URLs) if available
 		if portals, ok := app["portals"].([]interface{}); ok && len(portals) > 0 {
@@ -3992,6 +4004,10 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 	if !ok || appName == "" {
 		return "", fmt.Errorf("app_name is required")
 	}
+	healthTimeout, err := upgradeHealthTimeout(args)
+	if err != nil {
+		return "", err
+	}
 
 	version := "latest"
 	if v, ok := args["version"].(string); ok && v != "" {
@@ -4016,6 +4032,7 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 	if err := json.Unmarshal(summaryResult, &summary); err != nil {
 		return "", fmt.Errorf("failed to parse upgrade summary: %w", err)
 	}
+	summary = normalizeUpgradeSummary(summary)
 
 	// Perform the upgrade - this returns a job ID since it's a long-running operation
 	upgradeOptions := map[string]interface{}{
@@ -4043,26 +4060,33 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 		jobID = jobIDArray[0]
 	}
 
-	// Create task to track upgrade progress
+	// Create task to track upgrade progress. The task only completes once the
+	// app is seen RUNNING after the job finishes.
 	task, err := r.taskManager.CreateJobTask(
 		"upgrade_app",
 		args,
 		jobID,
 		1*time.Hour, // 1 hour TTL
+		tasks.WithAppHealthCheck(appName, healthTimeout),
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
 
 	response := map[string]interface{}{
-		"app_name":         appName,
-		"upgrade_summary":  summary,
-		"task_id":          task.TaskID,
-		"task_status":      task.Status,
-		"poll_interval":    task.PollInterval,
-		"job_id":           jobID,
-		"snapshot_created": snapshotHostpaths,
-		"message":          fmt.Sprintf("Upgrade started. Track progress with tasks_get using task_id: %s", task.TaskID),
+		"app_name":        appName,
+		"upgrade_summary": summary,
+		"task_id":         task.TaskID,
+		"task_status":     task.Status,
+		"poll_interval":   task.PollInterval,
+		"job_id":          jobID,
+		// What was asked for, not what happened: the upgrade job does not
+		// report which snapshots, if any, it took.
+		"snapshot_requested": snapshotHostpaths,
+		"snapshot_note":      snapshotNote(snapshotHostpaths),
+		"message": fmt.Sprintf("Upgrade started. Track progress with tasks_get using task_id: %s. "+
+			"The task completes only after the app is RUNNING (waits up to %ds after the job finishes).",
+			task.TaskID, int(healthTimeout/time.Second)),
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -4085,6 +4109,11 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
+	}
+
+	healthTimeout, err := upgradeHealthTimeout(args)
+	if err != nil {
+		return nil, err
 	}
 
 	version := "latest"
@@ -4128,6 +4157,7 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	if err := json.Unmarshal(summaryResult, &summary); err != nil {
 		return nil, fmt.Errorf("failed to parse upgrade summary: %w", err)
 	}
+	summary = normalizeUpgradeSummary(summary)
 
 	// Build current state
 	currentState := map[string]interface{}{
@@ -4157,6 +4187,12 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 			Operation:   "start",
 			Target:      appName,
 		},
+		{
+			Step:        4,
+			Description: fmt.Sprintf("Verify the app reports RUNNING after the job finishes (waits up to %ds); otherwise the task fails with the app's state", int(healthTimeout/time.Second)),
+			Operation:   "verify",
+			Target:      appName,
+		},
 	}
 
 	result := &DryRunResult{
@@ -4173,7 +4209,7 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	// Add warnings if no snapshot
 	if !snapshotHostpaths {
 		result.Warnings = []string{
-			"WARNING: snapshot_hostpaths is disabled. No backup will be created before upgrade.",
+			"WARNING: snapshot_hostpaths is disabled, so no host-path snapshot is requested. TrueNAS still stops the app and snapshots its ix-volumes dataset for rollback; data on host paths is not covered.",
 		}
 	}
 
@@ -4498,6 +4534,10 @@ func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 	}, nil
 }
 
+// maxQueryJobsLimit is the largest query_jobs limit: one below the
+// middleware's 10000-row maximum, as one extra row is requested.
+const maxQueryJobsLimit = 9999
+
 func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (string, error) {
 	state := "RUNNING"
 	if s, ok := args["state"].(string); ok && s != "" {
@@ -4505,8 +4545,8 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 	}
 
 	limit := 50
-	if l, ok := args["limit"].(float64); ok {
-		limit = int(l)
+	if l, ok := args["limit"].(float64); ok && l >= 1 {
+		limit = int(math.Min(l, maxQueryJobsLimit))
 	}
 
 	// Build query filters based on state
@@ -4520,8 +4560,11 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 	}
 
 	// Build options
+	// One row more than asked for tells whether the list was cut. limit is
+	// capped at maxQueryJobsLimit so this stays within the middleware's
+	// 10000-row maximum.
 	options := map[string]interface{}{
-		"limit":    limit,
+		"limit":    limit + 1,
 		"order_by": []string{"-time_started"}, // Most recent first
 	}
 
@@ -4533,6 +4576,24 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 	var jobs []map[string]interface{}
 	if err := json.Unmarshal(result, &jobs); err != nil {
 		return "", fmt.Errorf("failed to parse jobs: %w", err)
+	}
+	hasMore := len(jobs) > limit
+	if hasMore {
+		jobs = jobs[:limit]
+	}
+	total := len(jobs)
+	totalKnown := true
+	if hasMore {
+		// The full count is a separate cheap query; if it fails the list is
+		// still returned, flagged has_more, without a total.
+		totalKnown = false
+		if raw, err := client.Call("core.get_jobs", filters, map[string]interface{}{"count": true}); err == nil {
+			var n float64
+			if json.Unmarshal(raw, &n) == nil && int(n) >= len(jobs) {
+				total = int(n)
+				totalKnown = true
+			}
+		}
 	}
 
 	// Create simplified response with relevant fields
@@ -4556,25 +4617,54 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 			jobInfo["time_finished"] = readableDates(timeFinished)
 		}
 		if result, ok := job["result"]; ok && result != nil {
-			jobInfo["result"] = result
+			// A job result can be a whole app entry or similar: bound it and
+			// say so when it was cut.
+			bounded, truncated, size := tasks.BoundResult(readableDates(result))
+			jobInfo["result"] = bounded
+			if truncated {
+				jobInfo["result_truncated"] = true
+				jobInfo["result_size_bytes"] = size
+			}
 		}
 		if errorMsg, ok := job["error"]; ok && errorMsg != nil {
-			jobInfo["error"] = errorMsg
+			if text, isText := errorMsg.(string); isText {
+				cut, truncated := tasks.TruncateText(text, tasks.MaxJobTextBytes)
+				jobInfo["error"] = cut
+				if truncated {
+					jobInfo["error_truncated"] = true
+				}
+			} else {
+				jobInfo["error"] = errorMsg
+			}
 		}
 		if exception, ok := job["exception"]; ok && exception != nil {
-			jobInfo["exception"] = exception
+			if text, isText := exception.(string); isText {
+				cut, truncated := tasks.TruncateText(text, tasks.MaxJobTextBytes)
+				jobInfo["exception"] = cut
+				if truncated {
+					jobInfo["exception_truncated"] = true
+				}
+			} else {
+				jobInfo["exception"] = exception
+			}
 		}
 		if abortable, ok := job["abortable"]; ok {
 			jobInfo["abortable"] = abortable
 		}
 
-		simplified = append(simplified, jobInfo)
+		// Each entry as a whole stays within tasks.MaxJobResultBytes.
+		simplified = append(simplified, tasks.FitJobSummary(jobInfo))
 	}
 
 	response := map[string]interface{}{
 		"jobs":         simplified,
 		"job_count":    len(simplified),
 		"state_filter": state,
+		"has_more":     hasMore,
+		"limit":        limit,
+	}
+	if totalKnown {
+		response["total"] = total
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -5594,7 +5684,7 @@ func (r *Registry) handleTasksList(client *truenas.Client, args map[string]inter
 	}
 
 	limit := 50
-	if l, ok := args["limit"].(float64); ok {
+	if l, ok := args["limit"].(float64); ok && l >= 1 {
 		limit = int(l)
 	}
 
@@ -6061,7 +6151,7 @@ func handleQueryBootEnvironments(client *truenas.Client, args map[string]interfa
 	}
 
 	limit := 50
-	if l, ok := args["limit"].(float64); ok {
+	if l, ok := args["limit"].(float64); ok && l >= 1 {
 		limit = int(l)
 	}
 
@@ -6316,99 +6406,11 @@ func simplifyBootEnvironment(env map[string]interface{}) map[string]interface{} 
 	return simplified
 }
 
-// bootEnvMinTime is the earliest "created" time accepted as a real date.
-// TrueNAS boot environments can't predate it, so anything earlier (for
-// example "20250105" read as epoch seconds, i.e. 1970) is a misparse.
-var bootEnvMinTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-
-// bootEnvMaxAhead is how far past now a "created" time may be.
-const bootEnvMaxAhead = 10 * 365 * 24 * time.Hour
-
 // parseBootEnvCreated normalizes a boot environment's "created" value and
-// returns it as an ISO-8601 UTC string plus Unix seconds. TrueNAS 25.04+
-// sends a datetime as {"$date": <ms since epoch>}; plain strings and numbers
-// are accepted too. Numbers below 1e12 are seconds, larger ones
-// milliseconds. Only times from 2000-01-01 to 10 years after now are
-// accepted. Anything else (unparseable, out of range or overflowing) is
-// returned raw with timestamp 0: a string as is, the value of $date if
-// present, other values as compact JSON. A missing value yields ("", 0).
+// returns it as an ISO-8601 UTC string plus Unix seconds; see mwtime.Normalize
+// for the accepted forms and the 2000..now+10y range.
 func parseBootEnvCreated(v interface{}) (string, int64) {
-	raw := v
-	if m, ok := v.(map[string]interface{}); ok {
-		if d, ok := m["$date"]; ok {
-			raw = d
-		}
-	}
-	if raw == nil {
-		return "", 0
-	}
-	t, ok := parseEpochOrRFC3339(raw)
-	if !ok || !inBootEnvRange(t) {
-		return rawString(raw), 0
-	}
-	t = t.UTC()
-	return t.Format(time.RFC3339), t.Unix()
-}
-
-// inBootEnvRange reports whether t is a plausible boot environment time.
-func inBootEnvRange(t time.Time) bool {
-	return !t.Before(bootEnvMinTime) && !t.After(time.Now().Add(bootEnvMaxAhead))
-}
-
-// rawString renders an unparsed value for display: strings unchanged,
-// anything else as compact JSON.
-func rawString(v interface{}) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Sprint(v)
-	}
-	return string(b)
-}
-
-// epochTime converts seconds (below 1e12) or milliseconds since the epoch.
-// Values whose time falls outside the boot environment range, including
-// ones that would overflow int64, are rejected before conversion.
-func epochTime(n float64) (time.Time, bool) {
-	if math.IsNaN(n) || math.IsInf(n, 0) {
-		return time.Time{}, false
-	}
-	secs := n
-	if math.Abs(n) >= 1e12 {
-		secs = n / 1000
-	}
-	lo := float64(bootEnvMinTime.Unix())
-	hi := float64(time.Now().Add(bootEnvMaxAhead).Unix())
-	if secs < lo || secs > hi {
-		return time.Time{}, false
-	}
-	if math.Abs(n) < 1e12 {
-		return time.Unix(int64(n), 0), true
-	}
-	return time.UnixMilli(int64(n)), true
-}
-
-// parseEpochOrRFC3339 parses a number, a numeric string, an RFC 3339 string
-// or a naive "2006-01-02T15:04:05" string (UTC, as the middleware uses
-// utcfromtimestamp).
-func parseEpochOrRFC3339(v interface{}) (time.Time, bool) {
-	switch c := v.(type) {
-	case float64:
-		return epochTime(c)
-	case string:
-		if n, err := strconv.ParseFloat(c, 64); err == nil {
-			return epochTime(n)
-		}
-		if t, err := time.Parse(time.RFC3339, c); err == nil {
-			return t, true
-		}
-		if t, err := time.Parse("2006-01-02T15:04:05", c); err == nil {
-			return t, true
-		}
-	}
-	return time.Time{}, false
+	return mwtime.Normalize(v)
 }
 
 func sortBootEnvironments(envs []map[string]interface{}, orderBy string) {
