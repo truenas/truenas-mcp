@@ -74,8 +74,11 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 		raw = "http://" + raw
 	}
 	p, err := url.Parse(raw)
-	if err == nil && strings.Contains(p.Hostname(), ":") && !strings.HasPrefix(p.Host, "[") {
-		// url.Parse accepts "corp:3128:3128" and splits at the last colon.
+	// url.Parse accepts "corp:3128:3128" for some schemes (splitting at the
+	// last colon) and rejects it as a bad port for others. Either way the
+	// cause is the same, so the reason is too.
+	if (err == nil && strings.Contains(p.Hostname(), ":") && !strings.HasPrefix(p.Host, "[")) ||
+		(err != nil && strings.Contains(err.Error(), "invalid port") && hasExtraColon(raw)) {
 		return nil, fmt.Errorf("invalid proxy URL in %s: the host is not a host name or bracketed IPv6 address", source)
 	}
 	if err != nil || p.Hostname() == "" {
@@ -100,6 +103,22 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 		p.Host = net.JoinHostPort(p.Hostname(), strconv.Itoa(n)) // ":08080" -> ":8080"
 	}
 	return &proxyChoice{url: p, source: source}, nil
+}
+
+// hasExtraColon reports whether the host part of the URL raw (which has a
+// scheme) holds more than one colon outside brackets, as in corp:3128:3128.
+func hasExtraColon(raw string) bool {
+	_, rest, ok := strings.Cut(raw, "://")
+	if !ok {
+		return false
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	return !strings.HasPrefix(rest, "[") && strings.Count(rest, ":") > 1
 }
 
 // proxyParseReason says why a proxy URL did not parse (err is nil if it

@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -121,8 +122,13 @@ const legacyPath = "/websocket"
 // ConnectError is returned when the connection to TrueNAS could not be
 // established (name resolution, dial, proxy, TLS or WebSocket handshake), as
 // opposed to a failed login on a connection that was established. Err is the
-// underlying cause, including any hint on how to fix it.
-type ConnectError struct{ Err error }
+// underlying cause, including any hint on how to fix it. LoginAttempted is
+// true if a login had already been sent on an earlier connection of the same
+// attempt, which then dropped: the failed connection was a reconnect.
+type ConnectError struct {
+	Err            error
+	LoginAttempted bool
+}
 
 func (e *ConnectError) Error() string { return "connection failed: " + e.Err.Error() }
 func (e *ConnectError) Unwrap() error { return e.Err }
@@ -265,6 +271,13 @@ func tlsHint(err error, host string) string {
 	return ""
 }
 
+// logURL is u as it may appear in logs and error text: scheme, host and path
+// only. The query and fragment can carry tokens, and user info is a
+// credential, so none of them is ever logged.
+func logURL(u *url.URL) string {
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
+}
+
 // wsDial performs the WebSocket handshake. Tests may replace it.
 var wsDial = func(d *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
 	return d.Dial(urlStr, nil)
@@ -311,14 +324,14 @@ func (c *Client) connect() error {
 		via = " via proxy " + proxy.String()
 	}
 
-	log.Printf("Connecting to %s%s...", u.Redacted(), via)
+	log.Printf("Connecting to %s%s...", logURL(u), via)
 	conn, resp, err := safeDial(&wsDialer, u.String())
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			if u.Path == apiPath {
-				err = fmt.Errorf("%w (HTTP 404 for %s: TrueNAS 25.04 or later required)", err, u.Redacted())
+				err = fmt.Errorf("%w (HTTP 404 for %s: TrueNAS 25.04 or later required)", err, logURL(u))
 			} else {
-				err = fmt.Errorf("%w (HTTP 404 for %s: check the path; the JSON-RPC endpoint is %s, and TrueNAS 25.04 or later required)", err, u.Redacted(), apiPath)
+				err = fmt.Errorf("%w (HTTP 404 for %s: check the path; the JSON-RPC endpoint is %s, and TrueNAS 25.04 or later required)", err, logURL(u), apiPath)
 			}
 		} else if hint := tlsHint(err, u.Hostname()); hint != "" {
 			err = fmt.Errorf("%w (%s)", err, hint)
@@ -326,7 +339,6 @@ func (c *Client) connect() error {
 			// Through a proxy, the only TCP dial is to the proxy itself.
 			err = fmt.Errorf("connecting via proxy %s from %s: proxy unreachable: %w", proxy, proxy.source, err)
 		}
-		log.Printf("Connection failed: %v", err)
 		return &ConnectError{Err: err}
 	}
 
@@ -350,7 +362,7 @@ func (c *Client) connect() error {
 	// Start the read loop to multiplex concurrent responses
 	go c.readLoop(conn, done)
 
-	log.Printf("Successfully connected to %s%s", u.Redacted(), via)
+	log.Printf("Successfully connected to %s%s", logURL(u), via)
 	return nil
 }
 
@@ -545,22 +557,13 @@ func (c *Client) ValidateEndpoint() error {
 	return err
 }
 
+// schemeRE matches what may be quoted back as a URL scheme: short and made
+// of scheme characters only, so it cannot hold user info or other input.
+var schemeRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]{0,15}$`)
+
 // validScheme reports whether s looks like a URL scheme, so that it is safe
 // to quote.
-func validScheme(s string) bool {
-	if s == "" || len(s) > 16 {
-		return false
-	}
-	for i, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
-		case i > 0 && (r >= '0' && r <= '9' || r == '+' || r == '-' || r == '.'):
-		default:
-			return false
-		}
-	}
-	return true
-}
+func validScheme(s string) bool { return schemeRE.MatchString(s) }
 
 func (c *Client) parseEndpoint() (*url.URL, error) {
 	e := strings.TrimSpace(c.endpoint)
@@ -674,7 +677,7 @@ func validIPv6(s string) bool {
 
 // Authenticate connects if needed and logs in with auth.login_ex.
 func (c *Client) Authenticate() error {
-	_, _, err := c.session(true)
+	_, _, err := c.session(true, true)
 	return err
 }
 
@@ -682,7 +685,7 @@ func (c *Client) Authenticate() error {
 // generation of the current session. It changes on every reconnect or new
 // login, so callers can key per-session caches by it.
 func (c *Client) SessionGeneration() (uint64, error) {
-	_, gen, err := c.session(false)
+	_, gen, err := c.session(false, false)
 	return gen, err
 }
 
@@ -710,7 +713,10 @@ func (c *Client) forgetSession(conn *websocket.Conn, gen uint64) {
 // session returns a logged-in connection, connecting and logging in first
 // if needed. authMu serializes this, so concurrent callers share one login.
 // force logs in again even if the current connection is already logged in.
-func (c *Client) session(force bool) (*websocket.Conn, uint64, error) {
+//
+// A failure to connect is logged here unless quiet is set, for callers that
+// report the returned error themselves (startup), so it is logged once.
+func (c *Client) session(force, quiet bool) (*websocket.Conn, uint64, error) {
 	if !force {
 		if conn, gen := c.authedSession(); conn != nil {
 			return conn, gen, nil
@@ -731,6 +737,17 @@ func (c *Client) session(force bool) (*websocket.Conn, uint64, error) {
 		conn := c.conn
 		c.connMu.Unlock()
 		if err != nil {
+			var ce *ConnectError
+			if errors.As(err, &ce) {
+				if !quiet {
+					log.Printf("Connection failed: %v", ce.Err)
+				}
+				if attempt > 0 {
+					// Reconnecting after a connection dropped mid-login:
+					// a login was attempted, just not on this connection.
+					err = &ConnectError{Err: ce.Err, LoginAttempted: true}
+				}
+			}
 			return nil, 0, err
 		}
 
@@ -812,7 +829,7 @@ func (c *Client) CallWithTimeout(timeout time.Duration, method string, params ..
 	}
 	for attempt := 0; ; attempt++ {
 		retry := attempt == 0
-		conn, gen, err := c.session(false)
+		conn, gen, err := c.session(false, false)
 		if err != nil {
 			return nil, err
 		}

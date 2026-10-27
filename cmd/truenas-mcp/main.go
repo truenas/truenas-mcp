@@ -464,6 +464,9 @@ func startupAuthError(err error) string {
 	}
 	var ce *truenas.ConnectError
 	if errors.As(err, &ce) {
+		if ce.LoginAttempted {
+			return fmt.Sprintf("Could not connect to TrueNAS (the connection was lost during login, and reconnecting failed): %v", ce.Err)
+		}
 		return fmt.Sprintf("Could not connect to TrueNAS (no login was attempted): %v", ce.Err)
 	}
 	return fmt.Sprintf("Failed to authenticate with TrueNAS: %v", err)

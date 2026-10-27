@@ -156,8 +156,8 @@ func TestInvalidProxyURLGivesReason(t *testing.T) {
 	}{
 		{"http://alice:s3cretpw@[bad", "unterminated ["},
 		{"http://alice:s3cretpw@corphost:portx", "port is not a number"},
-		{"http://alice:s3cretpw@corphost:1:2", "port is not a number"},
-		{"http://alice:s3cretpw@corphost:3128:3128", "port is not a number"},
+		{"http://alice:s3cretpw@corphost:1:2", "not a host name or bracketed IPv6 address"},
+		{"http://alice:s3cretpw@corphost:3128:3128", "not a host name or bracketed IPv6 address"},
 		{"http://alice:s3%zzretpw@corphost:3128", "percent-escape"},
 		{"http://ali ce:s3cretpw@corphost:3128", "invalid user info"},
 		{"http://alice:s3cretpw@corp host:3128", "invalid character in the host name"},
@@ -241,6 +241,236 @@ func TestInvalidEndpointGivesReason(t *testing.T) {
 		c, _ := NewClientWithOptions(ok, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
 		if err := c.ValidateEndpoint(); err != nil {
 			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+}
+
+// logsOf captures the log for the rest of the test.
+func logsOf(t *testing.T) *syncBuffer {
+	t.Helper()
+	b := &syncBuffer{}
+	captureLog(t, b)
+	return b
+}
+
+func TestLogURLDropsUserInfoQueryAndFragment(t *testing.T) {
+	u, err := url.Parse("wss://alice:s3cretpw@truenas.example:8443/api/current?token=qsecret&x=1#fsecret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := logURL(u)
+	if got != "wss://truenas.example:8443/api/current" {
+		t.Errorf("logURL = %q", got)
+	}
+	// The URL itself is untouched: the dial still uses it.
+	if !strings.Contains(u.String(), "qsecret") {
+		t.Errorf("logURL modified its argument: %s", u)
+	}
+}
+
+// --truenas-url may carry a token in its query or fragment: it is not logged
+// when connecting, nor in the 404 error text.
+func TestEndpointQueryAndFragmentAreNotLogged(t *testing.T) {
+	clearProxyEnv(t)
+	secrets := []string{"qsecret", "fsecret", "token="}
+
+	t.Run("connecting", func(t *testing.T) {
+		f := newFakeTrueNAS(t, nil)
+		logs := logsOf(t)
+		c, err := NewClientWithOptions(f.wsURL("127.0.0.1")+"?token=qsecret#fsecret", testAPIKey, &tls.Config{InsecureSkipVerify: true}, Options{APIUser: testAPIUser, Proxy: "none"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if err := c.Authenticate(); err != nil {
+			t.Fatal(err)
+		}
+		out := logs.String()
+		for _, want := range []string{"Connecting to wss://127.0.0.1:", "Successfully connected to wss://127.0.0.1:"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("log lacks %q:\n%s", want, out)
+			}
+		}
+		for _, s := range secrets {
+			if strings.Contains(out, s) {
+				t.Errorf("log contains %q:\n%s", s, out)
+			}
+		}
+	})
+
+	t.Run("404", func(t *testing.T) {
+		orig := wsDial
+		t.Cleanup(func() { wsDial = orig })
+		wsDial = func(_ *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
+			return nil, &http.Response{StatusCode: http.StatusNotFound}, websocket.ErrBadHandshake
+		}
+		for _, endpoint := range []string{
+			"wss://truenas.example?token=qsecret#fsecret",                      // default path
+			"wss://truenas.example/other/path?token=qsecret#fsecret",           // custom path
+			"wss://truenas.example:8443/api/current?token=qsecret&a=b#fsecret", // explicit path
+		} {
+			logs := logsOf(t)
+			c, err := NewClientWithOptions(endpoint, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser, Proxy: "none"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.Authenticate()
+			if err == nil || !strings.Contains(err.Error(), "HTTP 404 for wss://truenas.example") {
+				t.Fatalf("%q: error = %v", endpoint, err)
+			}
+			for _, s := range secrets {
+				if strings.Contains(err.Error(), s) || strings.Contains(logs.String(), s) {
+					t.Errorf("%q: %q appears in the error or log: %v\n%s", endpoint, s, err, logs)
+				}
+			}
+		}
+	})
+}
+
+// A connection that drops during login is retried on a new connection. If
+// that fails to connect, the error says a login was attempted; a first
+// connect that fails says none was.
+func TestReconnectFailureAfterDroppedLoginSaysLoginWasAttempted(t *testing.T) {
+	clearProxyEnv(t)
+	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.dropLogins = 1 })
+	orig := wsDial
+	t.Cleanup(func() { wsDial = orig })
+	dials := 0
+	wsDial = func(d *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
+		dials++
+		if dials > 1 {
+			return nil, nil, errors.New("dial tcp 192.0.2.1:443: connect: network is unreachable")
+		}
+		return orig(d, urlStr)
+	}
+	c, err := NewClientWithOptions(f.wsURL("127.0.0.1"), testAPIKey, &tls.Config{InsecureSkipVerify: true}, Options{APIUser: testAPIUser, Proxy: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	err = c.Authenticate()
+	var ce *ConnectError
+	if !errors.As(err, &ce) || !ce.LoginAttempted {
+		t.Fatalf("Authenticate = %v; want a *ConnectError with LoginAttempted", err)
+	}
+	if !strings.Contains(err.Error(), "network is unreachable") {
+		t.Errorf("error lost its cause: %v", err)
+	}
+	if n := f.logins(t); n != 1 {
+		t.Errorf("%d logins sent; want the one that dropped", n)
+	}
+
+	// A first connection that fails is not a login attempt.
+	dials = 1
+	c2, _ := NewClientWithOptions(f.wsURL("127.0.0.1"), testAPIKey, &tls.Config{InsecureSkipVerify: true}, Options{APIUser: testAPIUser, Proxy: "none"})
+	err = c2.Authenticate()
+	if !errors.As(err, &ce) || ce.LoginAttempted {
+		t.Errorf("first connect failure = %v; want a *ConnectError without LoginAttempted", err)
+	}
+}
+
+// A connect failure at startup is reported once: Authenticate returns it for
+// the caller to report, and does not log it as well. Later connects, whose
+// errors reach no startup report, are logged.
+func TestConnectFailureIsLoggedOnce(t *testing.T) {
+	clearProxyEnv(t)
+	logs := logsOf(t)
+	c, err := NewClientWithOptions(closedAddr(t), testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser, Proxy: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.Authenticate()
+	if err == nil {
+		t.Fatal("Authenticate succeeded")
+	}
+	if strings.Contains(logs.String(), "connection refused") || strings.Contains(logs.String(), "Connection failed") {
+		t.Errorf("Authenticate logged the failure it returns:\n%s", logs)
+	}
+
+	if _, err := c.SessionGeneration(); err == nil {
+		t.Fatal("SessionGeneration succeeded")
+	}
+	if n := strings.Count(logs.String(), "Connection failed"); n != 1 {
+		t.Errorf("a failed connect after startup was logged %d times, want 1:\n%s", n, logs)
+	}
+}
+
+// corp:3128:3128 is rejected for the same reason whatever else the proxy
+// setting holds: scheme, credentials or none.
+func TestExtraColonProxyReasonIsConsistent(t *testing.T) {
+	target := &url.URL{Scheme: "wss", Host: "truenas.example:443"}
+	const want = "invalid proxy URL in HTTPS_PROXY: the host is not a host name or bracketed IPv6 address"
+	for _, raw := range []string{
+		"corp:3128:3128",
+		"alice:s3cretpw@corp:3128:3128",
+		"alice@corp:3128:3128",
+		"http://corp:3128:3128",
+		"http://alice:s3cretpw@corp:3128:3128",
+		"https://alice:s3cretpw@corp:3128:3128",
+		"socks5://corp:3128:3128",
+		"socks5://alice:s3cretpw@corp:3128:3128",
+		"socks5h://alice:s3cretpw@corp:3128:3128/path",
+		"socks5://alice:s3cretpw@corp:3128:3128?x=1",
+		"socks5://corp:1:2:3",
+	} {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", raw)
+		_, err := (&Client{}).proxyFor(target)
+		if err == nil || err.Error() != want {
+			t.Errorf("%q: error = %v; want %q", raw, err, want)
+		}
+	}
+	// A single colon with a bad port, and bracketed IPv6, keep their own reasons.
+	for raw, reason := range map[string]string{
+		"http://corp:portx":                  "the port is not a number",
+		"socks5://alice:s3cretpw@corp:portx": "the port is not a number",
+		"http://alice:s3cretpw@[::1]:portx":  "the port is not a number",
+	} {
+		clearProxyEnv(t)
+		t.Setenv("HTTPS_PROXY", raw)
+		_, err := (&Client{}).proxyFor(target)
+		if err == nil || !strings.HasSuffix(err.Error(), ": "+reason) {
+			t.Errorf("%q: error = %v; want reason %q", raw, err, reason)
+		}
+	}
+}
+
+// Only something that looks like a scheme is echoed back, and never user
+// info or other input.
+func TestUnsupportedSchemeEchoIsRestricted(t *testing.T) {
+	const generic = "invalid TrueNAS host or URL: not a host name or a wss://host[:port] URL"
+	for _, tc := range []struct {
+		endpoint string
+		want     string // the full error
+	}{
+		{"ftp://truenas.example", `invalid TrueNAS host or URL: unsupported URL scheme "ftp": use the host name alone or a wss://host[:port] URL`},
+		{"FTP://truenas.example", `invalid TrueNAS host or URL: unsupported URL scheme "FTP": use the host name alone or a wss://host[:port] URL`},
+		{"a+b-c.d1://truenas.example", `invalid TrueNAS host or URL: unsupported URL scheme "a+b-c.d1": use the host name alone or a wss://host[:port] URL`},
+		{"a234567890123456://truenas.example", `invalid TrueNAS host or URL: unsupported URL scheme "a234567890123456": use the host name alone or a wss://host[:port] URL`}, // 16 characters
+		{"a2345678901234567://truenas.example", generic}, // 17
+		{"1ftp://truenas.example", generic},              // starts with a digit
+		{"+ftp://truenas.example", generic},
+		{"fт://truenas.example", generic},
+		{"f\tp://truenas.example", generic},
+		{"alice:s3cretpw@host://x", generic},
+		{"alice:s3cretpw://truenas.example", generic},
+		{"s3cretpw@alice://truenas.example", generic},
+		{"ftp://alice:s3cretpw@truenas.example", `invalid TrueNAS host or URL: unsupported URL scheme "ftp": use the host name alone or a wss://host[:port] URL`},
+		{"://truenas.example", generic},
+	} {
+		c, err := NewClientWithOptions(tc.endpoint, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = c.ValidateEndpoint()
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("%q: error = %v; want %q", tc.endpoint, err, tc.want)
+			continue
+		}
+		for _, leak := range []string{"alice", "s3cretpw"} {
+			if strings.Contains(err.Error(), leak) {
+				t.Errorf("%q: error echoes %q", tc.endpoint, leak)
+			}
 		}
 	}
 }

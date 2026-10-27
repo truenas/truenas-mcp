@@ -32,6 +32,15 @@ func TestStartupErrorDistinguishesConnectFromAuth(t *testing.T) {
 		t.Errorf("connect failure worded as %q", got)
 	}
 
+	// A reconnect after a connection dropped mid-login: a login was attempted.
+	re := startupAuthError(&truenas.ConnectError{Err: errors.New("dial tcp 192.0.2.1:443: i/o timeout"), LoginAttempted: true})
+	if strings.Contains(re, "no login was attempted") || !strings.Contains(re, "lost during login") || !strings.Contains(re, "i/o timeout") {
+		t.Errorf("reconnect failure worded as %q", re)
+	}
+	if !strings.Contains(got, "no login was attempted") {
+		t.Errorf("first connect failure worded as %q", got)
+	}
+
 	bad := &truenas.EndpointError{Err: errors.New("bad port")}
 	if got := startupAuthError(bad); got != "invalid TrueNAS host or URL: bad port" {
 		t.Errorf("endpoint error worded as %q", got)
