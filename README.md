@@ -363,7 +363,7 @@ The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 2. **Verifies certificates by default**: trust the TrueNAS self-signed certificate with `--tls-ca` (see [TLS with a self-signed certificate](#step-3-configure-your-mcp-client))
 3. **Authenticates via API key**: Logs in with `auth.login_ex` (`API_KEY_PLAIN` mechanism, user from `--api-user`)
 
-The connection and login happen once, at startup, before the server reads any MCP request. If TrueNAS cannot be reached, or the login fails, the server logs the reason to stderr (for example `Failed to authenticate with TrueNAS: ...`) and exits with a non-zero status instead of starting without a working connection. This is intentional: the MCP client then shows the server as failed, and its log holds that message. Fix the cause (host, port, proxy, certificate or API key, see [Troubleshooting](#troubleshooting)) and restart the client.
+The connection and login happen once, at startup, before the server reads any MCP request. If TrueNAS cannot be reached, or the login fails, the server logs the reason to stderr (`Could not connect to TrueNAS (no login was attempted): ...` when the connection fails, `Failed to authenticate with TrueNAS: ...` when the login is rejected, or `invalid TrueNAS host or URL: ...` for an unusable host setting) and exits with a non-zero status instead of starting without a working connection. This is intentional: the MCP client then shows the server as failed, and its log holds that message. Fix the cause (host, port, proxy, certificate or API key, see [Troubleshooting](#troubleshooting)) and restart the client.
 
 ### ⚠️ Security Requirement
 
@@ -395,7 +395,10 @@ To ignore inherited proxy variables, pass `--proxy none` (or set
 so the environment variables still apply. To bypass an inherited
 `HTTPS_PROXY` / `ALL_PROXY`, use `--proxy none` (or `TRUENAS_PROXY=none`), which
 ignores all proxy variables, or list the TrueNAS host in `NO_PROXY`, which
-exempts only that host.
+exempts only that host. `none` is only an opt-out in those
+two settings: `HTTPS_PROXY=none` or `ALL_PROXY=none` is refused at startup
+(it would name a proxy host called "none"), with a message pointing to
+`TRUENAS_PROXY=none`.
 
 A proxy setting is only checked when it applies to the TrueNAS host: an
 unusable inherited value (say an `https://` proxy) does not matter if
@@ -446,6 +449,8 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 ### Troubleshooting
 
 **Connection Issues:**
+- "invalid TrueNAS host or URL: ...": `--truenas-url` / `TRUENAS_URL` is unusable (bad port, user info in the URL, `https://`, ...); the message says why. Use the host name alone (`truenas.local`, `truenas.local:8443`, `[fd00::1]:8443`) or a `wss://host[:port]` URL
+- "Could not connect to TrueNAS (no login was attempted)" means the TCP, proxy, TLS or WebSocket step failed; "Failed to authenticate with TrueNAS" means the connection worked and the login was rejected. If the connection drops during login and reconnecting fails, the message says so ("the connection was lost during login, and reconnecting failed") instead. The URL is logged without any query, fragment or user info, and error messages never quote them (at most they quote the host name or a short URL scheme)
 - Verify TrueNAS is accessible from your machine
 - Check firewall allows port 443 (wss), or the port you configured
 - `HTTP 404` / "TrueNAS 25.04 or later required": the server predates the JSON-RPC API; upgrade TrueNAS

@@ -23,7 +23,7 @@ var (
 	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'wss://10.0.0.1/api/current')")
 	apiUser    = flag.String("api-user", "", "User that owns the API key, sent to auth.login_ex (required; env TRUENAS_API_USER)")
 	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication")
-	insecure   = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks)")
+	insecure   = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks; prefer --tls-ca)")
 	tlsCA      = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
 	proxyURL   = flag.String("proxy", "", "Proxy for the TrueNAS connection: http://, socks5:// or socks5h://host:port, or none to ignore proxy env vars (env TRUENAS_PROXY; overrides HTTPS_PROXY and ALL_PROXY)")
 	versionFlg = flag.Bool("version", false, "Print version and exit")
@@ -152,7 +152,7 @@ func main() {
 		log.Fatalf("Failed to configure TLS: %v", err)
 	}
 	if *insecure {
-		log.Println("WARNING: TLS certificate verification disabled - the connection is vulnerable to man-in-the-middle attacks; prefer --tls-ca with the server's certificate")
+		log.Println(insecureWarning(*tlsCA != ""))
 	}
 
 	// Create TrueNAS client
@@ -163,6 +163,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create TrueNAS client: %v", err)
 	}
+	if err := client.ValidateEndpoint(); err != nil {
+		log.Fatalf("%v (check --truenas-url / TRUENAS_URL)", err)
+	}
 	if err := client.ValidateProxy(); err != nil {
 		log.Fatalf("Invalid proxy configuration: %v", err)
 	}
@@ -170,7 +173,7 @@ func main() {
 
 	// Authenticate with TrueNAS middleware
 	if err := client.Authenticate(); err != nil {
-		log.Fatalf("Failed to authenticate with TrueNAS: %v", err)
+		log.Fatalf("%s", startupAuthError(err))
 	}
 	log.Println("Successfully authenticated with TrueNAS middleware")
 
@@ -441,4 +444,35 @@ func (h *StdioHandler) sendError(id interface{}, code int, message string) error
 		log.Printf("Failed to send error response: %v", err)
 	}
 	return nil
+}
+
+// insecureWarning is logged at startup when TLS verification is disabled.
+// It points to --tls-ca, the safer way to use TrueNAS's self-signed
+// certificate. caIgnored is true if a CA file was also given, which
+// --insecure overrides.
+func insecureWarning(caIgnored bool) string {
+	msg := "WARNING: TLS certificate verification is disabled (--insecure / TRUENAS_INSECURE): the connection is vulnerable to man-in-the-middle attacks. " +
+		"Prefer --tls-ca <cert.pem> (or TRUENAS_TLS_CA) to trust the server's certificate and keep verification on."
+	if caIgnored {
+		msg += " The CA file you gave is not used while --insecure is set."
+	}
+	return msg
+}
+
+// startupAuthError words the failure of the first connect and login. A
+// connection that could not be established is not an authentication failure
+// and says so; only a rejected or failed login is reported as one.
+func startupAuthError(err error) string {
+	var ee *truenas.EndpointError
+	if errors.As(err, &ee) {
+		return ee.Error()
+	}
+	var ce *truenas.ConnectError
+	if errors.As(err, &ce) {
+		if ce.LoginAttempted {
+			return fmt.Sprintf("Could not connect to TrueNAS (the connection was lost during login, and reconnecting failed): %v", ce.Err)
+		}
+		return fmt.Sprintf("Could not connect to TrueNAS (no login was attempted): %v", ce.Err)
+	}
+	return fmt.Sprintf("Failed to authenticate with TrueNAS: %v", err)
 }
