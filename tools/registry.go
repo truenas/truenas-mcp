@@ -95,6 +95,14 @@ func (r *Registry) registerTools() {
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
+					"train": map[string]interface{}{
+						"type":        "string",
+						"description": "Ignored. Accepted for compatibility only: the download always uses the system's configured update train",
+					},
+					"version": map[string]interface{}{
+						"type":        "string",
+						"description": "Ignored. Accepted for compatibility only: the download fetches whatever update the system's configured train offers",
+					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
 						"description": "Preview changes without executing (default: false)",
@@ -759,7 +767,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["create_dataset"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "create_dataset",
-			Description: "Create a ZFS dataset (filesystem or volume) for storage. This tool is reusable for SMB shares, NFS exports, iSCSI LUNs, and application storage. Supports native ZFS encryption (encryption=true with encryption_options), compression, quotas, and advanced ZFS features.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create datasets, ask these questions in order:\n\n1. **Pool Selection**: Query available pools first, ask which pool to use\n2. **Dataset Name**: Suggest format 'pool/shares/name' or 'pool/apps/name'\n3. **Dataset Type**: FILESYSTEM (default, for files) or VOLUME (for block storage/VMs)\n4. **Share Type Optimization** (if for sharing):\n   - SMB: Windows/Mac file shares (recommend for SMB shares)\n   - NFS: Unix/Linux file shares\n   - MULTIPROTOCOL: Both SMB and NFS access\n   - APPS: Application storage\n   - GENERIC: General purpose (default)\n5. **Encryption** (recommend for sensitive data):\n   - Ask: \"Is this for sensitive data?\"\n   - If yes: set encryption=true and encryption_options with exactly ONE method; ask which the user wants and do not default to one: generate_key=true, passphrase (8-512 bytes) or key (64 hex characters). encryption_options without encryption=true is rejected\n   - generate_key: TrueNAS stores the key in its key database and does not return it; to back it up, offer export_dataset_key (confirm-gated, shows the key once in the chat; it may be disabled on this server) or the TrueNAS UI, and keep a copy somewhere other than this system\n   - passphrase: TrueNAS does not store it; if it is lost the data is lost\n   - key: the user must keep it; this tool does not return or recover it\n   - Under a passphrase-encrypted parent, the new dataset must use a passphrase (TrueNAS refuses generate_key and key there)\n   - The algorithm is not configurable through this tool; new encrypted datasets use AES-256-GCM\n6. **Compression**: LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF\n7. **Space Quota** (optional): Ask if they want to limit size\n8. **ACL Type** (for SMB): NFSV4 (recommended for SMB/Windows), POSIX (Unix)\n9. **Advanced** (usually skip unless user asks):\n   - Deduplication: Warn about RAM overhead, recommend OFF\n   - Checksum, snapdir, atime, readonly\n\n**IMPORTANT RECOMMENDATIONS:**\n- For SMB shares: share_type=SMB, acltype=NFSV4, compression=LZ4\n- For NFS exports: share_type=NFS, acltype=POSIX, compression=LZ4\n- For multi-protocol: share_type=MULTIPROTOCOL, acltype=NFSV4\n- For apps: share_type=APPS, compression=LZ4 or ZSTD\n- Always recommend compression=LZ4 unless user has specific needs\n- Warn: Deduplication uses ~5GB RAM per TB, not recommended for most users\n- Warn: Encryption cannot be removed later, only option is to copy data elsewhere\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display summary showing: name, type, optimization, compression, encryption, quota, mountpoint\n3. Get explicit user confirmation with \"Shall I proceed?\"\n4. Warn: This is a WRITE operation creating permanent storage\n5. If encryption enabled, remind the user of the key-backup note for the chosen method after creation\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview, then ask for confirmation to proceed.",
+			Description: "Create a ZFS dataset (filesystem or volume) for storage. This tool is reusable for SMB shares, NFS exports, iSCSI LUNs, and application storage. Supports native ZFS encryption (encryption=true with encryption_options), compression, quotas, and advanced ZFS features.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create datasets, ask these questions in order:\n\n1. **Pool Selection**: Query available pools first, ask which pool to use\n2. **Dataset Name**: Suggest format 'pool/shares/name' or 'pool/apps/name'\n3. **Dataset Type**: FILESYSTEM (default, for files) or VOLUME (for block storage/VMs)\n4. **Share Type Optimization** (if for sharing):\n   - SMB: Windows/Mac file shares (recommend for SMB shares)\n   - NFS: Unix/Linux file shares\n   - MULTIPROTOCOL: Both SMB and NFS access\n   - APPS: Application storage\n   - GENERIC: General purpose (default)\n5. **Encryption** (recommend for sensitive data):\n   - Ask: \"Is this for sensitive data?\"\n   - If yes: set encryption=true and encryption_options with exactly ONE method; ask which the user wants and do not default to one: generate_key=true, passphrase (8-512 bytes) or key (64 hex characters). encryption_options without encryption=true is rejected\n   - generate_key: TrueNAS stores the key in its key database and does not return it; this tool cannot export it, so tell the user to back it up in the TrueNAS web UI (Datasets > select the dataset > Encryption > Export Key) and keep a copy somewhere other than this system\n   - passphrase: TrueNAS does not store it; if it is lost the data is lost\n   - key: the user must keep it; this tool does not return or recover it\n   - Under a passphrase-encrypted parent, the new dataset must use a passphrase (TrueNAS refuses generate_key and key there)\n   - The algorithm is not configurable through this tool; new encrypted datasets use AES-256-GCM\n6. **Compression**: LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF\n7. **Space Quota** (optional): Ask if they want to limit size\n8. **ACL Type** (for SMB): NFSV4 (recommended for SMB/Windows), POSIX (Unix)\n9. **Advanced** (usually skip unless user asks):\n   - Deduplication: Warn about RAM overhead, recommend OFF\n   - Checksum, snapdir, atime, readonly\n\n**IMPORTANT RECOMMENDATIONS:**\n- For SMB shares: share_type=SMB, acltype=NFSV4, compression=LZ4\n- For NFS exports: share_type=NFS, acltype=POSIX, compression=LZ4\n- For multi-protocol: share_type=MULTIPROTOCOL, acltype=NFSV4\n- For apps: share_type=APPS, compression=LZ4 or ZSTD\n- Always recommend compression=LZ4 unless user has specific needs\n- Warn: Deduplication uses ~5GB RAM per TB, not recommended for most users\n- Warn: Encryption cannot be removed later, only option is to copy data elsewhere\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display summary showing: name, type, optimization, compression, encryption, quota, mountpoint\n3. Get explicit user confirmation with \"Shall I proceed?\"\n4. Warn: This is a WRITE operation creating permanent storage\n5. If encryption enabled, remind the user of the key-backup note for the chosen method after creation\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview, then ask for confirmation to proceed.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -802,7 +810,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 						"properties": map[string]interface{}{
 							"generate_key": map[string]interface{}{
 								"type":        "boolean",
-								"description": "Let TrueNAS generate the key and store it in its key database; it is not returned. Back it up with export_dataset_key or the TrueNAS UI and keep a copy elsewhere. Refused under a passphrase-encrypted parent",
+								"description": "Let TrueNAS generate the key and store it in its key database; it is not returned. This tool cannot export it: back it up in the TrueNAS web UI (Datasets > select the dataset > Encryption > Export Key) and keep a copy elsewhere. Refused under a passphrase-encrypted parent",
 							},
 							"passphrase": map[string]interface{}{
 								"type":        "string",
@@ -854,6 +862,33 @@ TrueNAS removes its computer account from the domain using the credential you pr
 						"type":        "string",
 						"description": "File access time tracking: ON or OFF (OFF improves performance)",
 						"enum":        []string{"ON", "OFF", "INHERIT"},
+					},
+					"volblocksize": map[string]interface{}{
+						"type":        "string",
+						"description": "VOLUME type only (rejected for FILESYSTEM): volume block size. Defaults to 16K, or 128K on a dRAID pool",
+						"enum":        []string{"512", "512B", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K"},
+					},
+					"inherit_encryption": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Optional. Whether the dataset inherits the parent's encryption settings (TrueNAS default: true). false asks for an unencrypted dataset, which TrueNAS rejects under an encrypted parent. To create a new encrypted dataset use encryption=true with encryption_options instead (inherit_encryption is then sent as false automatically); inherit_encryption=true together with encryption=true is rejected",
+					},
+					"user_properties": map[string]interface{}{
+						"type":        "array",
+						"description": "Optional ZFS user properties to set on the dataset, each an object with a 'key' containing a colon in namespace:property form (e.g. 'org:note') and a string 'value'. Property names should use only lowercase letters, digits and ': . _ -' (newer TrueNAS versions reject anything else) and must not repeat within the list. Do not set properties TrueNAS manages itself (org.freenas:description, org.freenas:quota_warning, org.freenas:quota_critical, org.freenas:refquota_warning, org.freenas:refquota_critical, org.truenas:managedby); use the dedicated fields (comments, quota_warning, ...) instead",
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"key": map[string]interface{}{
+									"type":        "string",
+									"description": "User property name in namespace:property form; must contain a colon, e.g. 'org:note'",
+								},
+								"value": map[string]interface{}{
+									"type":        "string",
+									"description": "User property value",
+								},
+							},
+							"required": []string{"key", "value"},
+						},
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -1902,6 +1937,11 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (result st
 	// they were never shown.
 	if err := r.checkPolicy(name); err != nil {
 		return "", err
+	}
+	// Reject arguments the schema does not declare before anything runs,
+	// including the dry-run preview of a destructive tool.
+	if err := validateArgs(name, tool, args); err != nil {
+		return "", withMigrationHint(name, args, err)
 	}
 	if safetyOf(name).Access == Destructive && requiresConfirmation(tool, args) {
 		return r.confirmationRequired(name, tool, args)
@@ -5634,8 +5674,10 @@ func handleUpdateStatus(client *truenas.Client, args map[string]interface{}) (st
 
 // handleDownloadUpdate downloads a TrueNAS system update
 func (r *Registry) handleDownloadUpdate(client *truenas.Client, args map[string]interface{}) (string, error) {
-	train, _ := args["train"].(string)
-	version, _ := args["version"].(string)
+	// train and version are declared for compatibility but ignored:
+	// update.download takes no parameters and fetches whatever the system's
+	// configured train offers. Nothing below reports them as applied.
+	ignored := downloadUpdateIgnoredNote(args)
 
 	// Check if update is already downloaded
 	statusResult, err := client.Call("update.status")
@@ -5646,18 +5688,17 @@ func (r *Registry) handleDownloadUpdate(client *truenas.Client, args map[string]
 			if progress, ok := status["update_download_progress"].(map[string]interface{}); ok {
 				if percent, ok := progress["percent"].(float64); ok && percent == 100 {
 					if dlVersion, ok := progress["version"].(string); ok {
-						// If no specific version requested, or versions match
-						if version == "" || dlVersion == version {
-							response := map[string]interface{}{
-								"train":              train,
-								"version":            dlVersion,
-								"already_downloaded": true,
-								"download_percent":   100,
-								"message":            fmt.Sprintf("Update %s is already downloaded (100%%). Ready to apply.", dlVersion),
-							}
-							formatted, _ := json.MarshalIndent(response, "", "  ")
-							return string(formatted), nil
+						response := map[string]interface{}{
+							"version":            dlVersion,
+							"already_downloaded": true,
+							"download_percent":   100,
+							"message":            fmt.Sprintf("Update %s is already downloaded (100%%). Ready to apply.", dlVersion),
 						}
+						if ignored != "" {
+							response["warning"] = ignored
+						}
+						formatted, _ := json.MarshalIndent(response, "", "  ")
+						return string(formatted), nil
 					}
 				}
 			}
@@ -5680,7 +5721,7 @@ func (r *Registry) handleDownloadUpdate(client *truenas.Client, args map[string]
 	// Create task to track download progress
 	task, err := r.taskManager.CreateJobTask(
 		"download_update",
-		args,
+		withoutKeys(args, "train", "version"),
 		jobID,
 		2*time.Hour, // 2 hour TTL
 	)
@@ -5689,13 +5730,14 @@ func (r *Registry) handleDownloadUpdate(client *truenas.Client, args map[string]
 	}
 
 	response := map[string]interface{}{
-		"train":         train,
-		"version":       version,
 		"task_id":       task.TaskID,
 		"task_status":   task.Status,
 		"poll_interval": task.PollInterval,
 		"job_id":        jobID,
 		"message":       fmt.Sprintf("Update download started. Track progress with tasks_get using task_id: %s", task.TaskID),
+	}
+	if ignored != "" {
+		response["warning"] = ignored
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -5715,9 +5757,6 @@ func (r *Registry) handleDownloadUpdateWithDryRun(client *truenas.Client, args m
 type downloadUpdateDryRun struct{}
 
 func (d *downloadUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	train, _ := args["train"].(string)
-	version, _ := args["version"].(string)
-
 	// Get current system info
 	sysInfoResult, err := client.Call("system.info")
 	if err != nil {
@@ -5743,19 +5782,15 @@ func (d *downloadUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[st
 		},
 		{
 			Step:        2,
-			Description: fmt.Sprintf("Download update files for version %s", version),
+			Description: "Download the update offered by the system's configured update train",
 			Operation:   "download",
-			Target:      version,
-			Details: map[string]interface{}{
-				"train":   train,
-				"version": version,
-			},
+			Target:      "configured update train",
 		},
 		{
 			Step:        3,
 			Description: "Verify update package integrity",
 			Operation:   "verify",
-			Target:      version,
+			Target:      "downloaded update",
 		},
 	}
 
@@ -5771,8 +5806,34 @@ func (d *downloadUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[st
 			Note:       "Time varies based on update size and network speed",
 		},
 	}
+	if note := downloadUpdateIgnoredNote(args); note != "" {
+		result.Warnings = append(result.Warnings, note)
+	}
 
 	return result, nil
+}
+
+// downloadUpdateIgnoredNote explains that train and version had no effect,
+// or returns "" when neither was supplied.
+func downloadUpdateIgnoredNote(args map[string]interface{}) string {
+	_, hasTrain := args["train"]
+	_, hasVersion := args["version"]
+	if !hasTrain && !hasVersion {
+		return ""
+	}
+	return "train and version were ignored: the download always fetches the update offered by the system's configured update train"
+}
+
+// withoutKeys returns a copy of args without the named keys.
+func withoutKeys(args map[string]interface{}, keys ...string) map[string]interface{} {
+	out := make(map[string]interface{}, len(args))
+	for k, v := range args {
+		out[k] = v
+	}
+	for _, k := range keys {
+		delete(out, k)
+	}
+	return out
 }
 
 // handleApplyUpdate applies a downloaded TrueNAS system update

@@ -287,7 +287,7 @@ func TestCreateDatasetEncryptionSchema(t *testing.T) {
 	sub := opts["properties"].(map[string]interface{})
 	want := map[string]string{"generate_key": "boolean", "passphrase": "string", "key": "string", "pbkdf2iters": "integer"}
 	if len(sub) != len(want) {
-		t.Errorf("encryption_options properties = %v, want exactly %v", keysOf(sub), want)
+		t.Errorf("encryption_options properties = %v, want exactly %v", schemaKeysOf(sub), want)
 	}
 	for k, typ := range want {
 		p, _ := sub[k].(map[string]interface{})
@@ -297,7 +297,7 @@ func TestCreateDatasetEncryptionSchema(t *testing.T) {
 	}
 }
 
-func keysOf(m map[string]interface{}) []string {
+func schemaKeysOf(m map[string]interface{}) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -381,7 +381,7 @@ func TestKeyBackupGuidancePerMode(t *testing.T) {
 		opts map[string]interface{}
 		want []string
 	}{
-		{map[string]interface{}{"generate_key": true}, []string{"key database", "not returned", "export_dataset_key", "TrueNAS UI"}},
+		{map[string]interface{}{"generate_key": true}, []string{"key database", "not returned", "Export Key", "TrueNAS web UI"}},
 		{map[string]interface{}{"passphrase": testPassphrase}, []string{"does not store the passphrase", "data on this dataset is lost"}},
 		{map[string]interface{}{"key": testKeyHex}, []string{"must keep a copy", "does not return"}},
 	} {
@@ -470,7 +470,7 @@ func TestCreateDatasetMiddlewareErrorScrubsLiteralSecrets(t *testing.T) {
 func TestCreateDatasetEncryptionGuidanceText(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	desc := r.tools["create_dataset"].Definition.Description
-	for _, want := range []string{"do not default to one", "key database", "export_dataset_key", "TrueNAS does not store it", "must keep it",
+	for _, want := range []string{"do not default to one", "key database", "Export Key", "TrueNAS does not store it", "must keep it",
 		"passphrase-encrypted parent", "not configurable through this tool", "AES-256-GCM"} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("create_dataset description missing %q", want)
@@ -479,6 +479,150 @@ func TestCreateDatasetEncryptionGuidanceText(t *testing.T) {
 	for _, bad := range []string{"Storage > Pools", "simplest", "recommended for simplicity"} {
 		if strings.Contains(desc, bad) {
 			t.Errorf("create_dataset description still contains %q", bad)
+		}
+	}
+}
+
+// TestKeyBackupGuidanceDoesNotNameExportTool: the export_dataset_key tool is
+// not part of this server, so guidance must point at the TrueNAS web UI only.
+func TestKeyBackupGuidanceDoesNotNameExportTool(t *testing.T) {
+	for _, mode := range []string{"generate_key", "passphrase", "key", ""} {
+		if g := keyBackupGuidance(mode); strings.Contains(g, "export_dataset_key") {
+			t.Errorf("guidance for %q names export_dataset_key: %q", mode, g)
+		}
+	}
+	if g := keyBackupGuidance("generate_key"); !strings.Contains(g, "Export Key") || !strings.Contains(g, "web UI") {
+		t.Errorf("generate_key guidance does not point at the web UI: %q", g)
+	}
+	tool := NewRegistry(nil, nil).tools["create_dataset"]
+	blob, err := json.Marshal(tool.Definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "export_dataset_key") {
+		t.Error("create_dataset definition names export_dataset_key")
+	}
+}
+
+// createWithEchoingMiddleware runs create_dataset against a middleware that
+// fails with msg, and returns the resulting error text.
+func createWithEchoingMiddleware(t *testing.T, name, msg string, opts map[string]interface{}) string {
+	t.Helper()
+	fake := &fakeMiddleware{handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if method == "pool.dataset.create" {
+			return nil, map[string]interface{}{"code": -32001, "message": msg}, true
+		}
+		return nil, nil, false
+	}}
+	client, _ := newFakeClientFrom(t, fake)
+	_, err := handleCreateDataset(client, map[string]interface{}{"name": name, "encryption": true, "encryption_options": opts})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	return err.Error()
+}
+
+// paramsBlock returns the request block of an API error text.
+func paramsBlock(t *testing.T, text string) string {
+	t.Helper()
+	i := strings.Index(text, "\n  Params: ")
+	if i < 0 {
+		t.Fatalf("no params block in %q", text)
+	}
+	block := text[i:]
+	if j := strings.Index(block, "\n\nDetails: "); j >= 0 {
+		block = block[:j]
+	}
+	if j := strings.Index(block, "\n\nTrace: "); j >= 0 {
+		block = block[:j]
+	}
+	return block
+}
+
+// TestCreateDatasetErrorScrubLeavesRequestBlockAlone: the literal-secret scrub
+// covers what the server said, not the params block, which is already masked
+// by key name. A passphrase that happens to equal ordinary text must not
+// garble that block.
+func TestCreateDatasetErrorScrubLeavesRequestBlockAlone(t *testing.T) {
+	t.Run("passphrase equal to a field name", func(t *testing.T) {
+		pass := "encryption" // appears in the keys encryption and encryption_options
+		text := createWithEchoingMiddleware(t, "tank/secure", "[EINVAL] bad value '"+pass+"'", map[string]interface{}{"passphrase": pass})
+		block := paramsBlock(t, text)
+		for _, want := range []string{`"encryption": true`, `"encryption_options": {`, `"passphrase": "[REDACTED]"`} {
+			if !strings.Contains(block, want) {
+				t.Errorf("params block lost %q:\n%s", want, text)
+			}
+		}
+		if strings.Contains(block, "[REDACTED]_options") {
+			t.Errorf("params key garbled:\n%s", text)
+		}
+		if strings.Contains(text, "bad value '"+pass+"'") || !strings.Contains(text, "bad value '[REDACTED]'") {
+			t.Errorf("server message not scrubbed:\n%s", text)
+		}
+	})
+	t.Run("passphrase equal to the dataset name", func(t *testing.T) {
+		pass := "tank/secure-data"
+		text := createWithEchoingMiddleware(t, pass, "[EINVAL] dataset "+pass+" rejected", map[string]interface{}{"passphrase": pass})
+		if block := paramsBlock(t, text); !strings.Contains(block, `"name": "`+pass+`"`) {
+			t.Errorf("dataset name masked in params block:\n%s", text)
+		}
+		if strings.Contains(text, "dataset "+pass) {
+			t.Errorf("server message not scrubbed:\n%s", text)
+		}
+	})
+	t.Run("whitespace-only passphrase", func(t *testing.T) {
+		pass := strings.Repeat(" ", 8)
+		text := createWithEchoingMiddleware(t, "tank/secure", "[EINVAL] bad value '"+pass+"'", map[string]interface{}{"passphrase": pass})
+		want := "\n  Params: [\n    {\n      \"create_ancestors\": true,\n      \"encryption\": true,\n      \"encryption_options\": {\n        \"passphrase\": \"[REDACTED]\"\n      },\n      \"inherit_encryption\": false,\n      \"name\": \"tank/secure\",\n      \"type\": \"FILESYSTEM\"\n    }\n  ]"
+		if block := paramsBlock(t, text); block != want {
+			t.Errorf("params block changed:\n got %q\nwant %q", block, want)
+		}
+		if strings.Contains(text, "bad value '"+pass+"'") {
+			t.Errorf("server message not scrubbed:\n%q", text)
+		}
+	})
+	t.Run("upper-case passphrase echoed by the server", func(t *testing.T) {
+		pass := testPassphrase
+		text := createWithEchoingMiddleware(t, "tank/secure", "[EINVAL] bad value '"+strings.ToUpper(pass)+"'", map[string]interface{}{"passphrase": pass})
+		if strings.Contains(strings.ToLower(text), pass) {
+			t.Errorf("passphrase survived in some case:\n%s", text)
+		}
+		if !strings.Contains(text, "bad value '[REDACTED]'") {
+			t.Errorf("server message not scrubbed:\n%s", text)
+		}
+	})
+}
+
+func TestRedactLiteralSecretsPassphraseIsCaseInsensitive(t *testing.T) {
+	opts := map[string]interface{}{"passphrase": "Correct-Horse-Battery"}
+	got := redactLiteralSecrets("a CORRECT-HORSE-BATTERY b correct-horse-battery c Correct-Horse-Battery", opts)
+	if strings.Count(got, "[REDACTED]") != 3 || strings.Contains(strings.ToLower(got), "horse") {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestCreateDatasetErrorScrubCoversDetailsAndTrace(t *testing.T) {
+	fake := &fakeMiddleware{handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if method == "pool.dataset.create" {
+			return nil, map[string]interface{}{"code": -32001, "message": "failed", "data": map[string]interface{}{
+				"error": 22, "errname": "EINVAL", "reason": "bad " + testPassphrase,
+				"trace": "Traceback: value " + testPassphrase,
+				"extra": []interface{}{[]interface{}{"pool_dataset_create.encryption_options", "echoed " + testPassphrase, 22}},
+			}}, true
+		}
+		return nil, nil, false
+	}}
+	client, _ := newFakeClientFrom(t, fake)
+	_, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": map[string]interface{}{"passphrase": testPassphrase}})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), testPassphrase) {
+		t.Errorf("passphrase leaked:\n%s", err)
+	}
+	for _, want := range []string{"bad [REDACTED]", "Traceback: value [REDACTED]", "echoed [REDACTED]"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q:\n%s", want, err)
 		}
 	}
 }

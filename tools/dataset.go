@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -36,6 +37,13 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 		return "", fmt.Errorf("type must be FILESYSTEM or VOLUME, got: %s", dsType)
 	}
 
+	if err := validateVolblocksize(args, dsType); err != nil {
+		return "", err
+	}
+	if err := validateUserProperties(args); err != nil {
+		return "", err
+	}
+
 	// Build the payload
 	payload := map[string]interface{}{
 		"name": name,
@@ -50,8 +58,7 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 		}
 		payload["volsize"] = int64(volsize)
 
-		// Optional volblocksize
-		if volblocksize, ok := args["volblocksize"].(string); ok && volblocksize != "" {
+		if volblocksize, ok := args["volblocksize"].(string); ok {
 			payload["volblocksize"] = volblocksize
 		}
 	}
@@ -149,7 +156,7 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 	if err != nil {
 		// The middleware error can quote request values; scrub the literal
 		// passphrase/key (the redactor only recognises labelled secrets).
-		return "", fmt.Errorf("failed to create dataset: %s", redactLiteralSecrets(err.Error(), encOpts))
+		return "", fmt.Errorf("failed to create dataset: %s", scrubDatasetCreateError(err, encOpts))
 	}
 
 	var dataset map[string]interface{}
@@ -218,6 +225,63 @@ func validateDatasetName(name string) error {
 		return fmt.Errorf("dataset name cannot contain consecutive slashes")
 	}
 
+	return nil
+}
+
+// volblocksizes are the volume block sizes the middleware's
+// pool.dataset.create accepts (TrueNAS 25.10 and 27.0).
+var volblocksizes = []string{"512", "512B", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K"}
+
+// validateVolblocksize rejects a volblocksize that the middleware would
+// reject (or, for FILESYSTEM, that the handler would otherwise ignore).
+func validateVolblocksize(args map[string]interface{}, dsType string) error {
+	v, present := args["volblocksize"]
+	if !present {
+		return nil
+	}
+	if dsType != "VOLUME" {
+		return fmt.Errorf("volblocksize applies only to VOLUME datasets, not %s", dsType)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("volblocksize must be a string, one of %s", strings.Join(volblocksizes, ", "))
+	}
+	for _, allowed := range volblocksizes {
+		if s == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("volblocksize must be one of %s", strings.Join(volblocksizes, ", "))
+}
+
+// validateUserProperties checks user_properties the way the middleware does:
+// a list of {key, value} objects whose key is in namespace:property form
+// (contains a colon) and whose value is a string. Values are never echoed.
+func validateUserProperties(args map[string]interface{}) error {
+	v, present := args["user_properties"]
+	if !present {
+		return nil
+	}
+	list, ok := v.([]interface{})
+	if !ok {
+		return fmt.Errorf("user_properties must be an array of {key, value} objects")
+	}
+	for i, item := range list {
+		prop, ok := item.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("user_properties[%d] must be an object with string fields key and value", i)
+		}
+		key, ok := prop["key"].(string)
+		if !ok || !strings.Contains(key, ":") {
+			return fmt.Errorf("user_properties[%d].key must be a string in namespace:property form (it must contain a colon), e.g. org:note", i)
+		}
+		if _, ok := prop["value"].(string); !ok {
+			return fmt.Errorf("user_properties[%d].value must be a string", i)
+		}
+		if len(prop) != 2 {
+			return fmt.Errorf("user_properties[%d] must contain only the fields key and value", i)
+		}
+	}
 	return nil
 }
 
@@ -294,7 +358,7 @@ func encryptionMode(opts map[string]interface{}) string {
 func keyBackupGuidance(mode string) string {
 	switch mode {
 	case "generate_key":
-		return "IMPORTANT: TrueNAS generated this dataset's key and stored it in its key database; it is not returned by this tool. Back it up with the export_dataset_key tool (it asks for explicit confirmation and shows the key once, if that tool is enabled on this server) or by exporting the dataset key from the TrueNAS UI, and keep the copy somewhere other than this system, because the key is lost if the system or its configuration database is lost."
+		return "IMPORTANT: TrueNAS generated this dataset's key and stored it in its key database; it is not returned by this tool. This tool cannot export it. Back it up by exporting the dataset key in the TrueNAS web UI (Datasets > select the dataset > Encryption > Export Key), and keep the copy somewhere other than this system, because the key is lost if the system or its configuration database is lost."
 	case "passphrase":
 		return "IMPORTANT: TrueNAS does not store the passphrase and it cannot be recovered. If it is lost, the data on this dataset is lost."
 	case "key":
@@ -303,9 +367,33 @@ func keyBackupGuidance(mode string) string {
 	return "IMPORTANT: This dataset is encrypted. Make sure its key or passphrase is backed up somewhere other than this system."
 }
 
+// scrubDatasetCreateError returns the text of a pool.dataset.create error with
+// the literal passphrase and key removed from what the server said (its
+// message, details and trace). The request block of the error is not
+// scrubbed: it was masked by key name already, and replacing a short or
+// common passphrase there would only garble it (field names such as
+// encryption_options, the dataset name, or the JSON indentation).
+func scrubDatasetCreateError(err error, encOpts map[string]interface{}) string {
+	var apiErr *truenas.APICallError
+	if errors.As(err, &apiErr) {
+		return apiErr.MapServerText(func(s string) string {
+			return redactLiteralSecrets(s, encOpts)
+		}).Error()
+	}
+	// Not an API error (for example a connection failure): it has no request
+	// block, so the whole text is server or transport text.
+	return redactLiteralSecrets(err.Error(), encOpts)
+}
+
 // redactLiteralSecrets replaces the passphrase and key in encOpts, including
-// their JSON-escaped forms, wherever they appear in msg. The key is matched
-// case-insensitively because hex digits may be echoed in either case.
+// their JSON-escaped forms, wherever they appear in msg. Both are matched
+// case-insensitively: hex digits of a key may be echoed in either case, and a
+// passphrase may be echoed upper- or lower-cased.
+//
+// Scope: this is a backstop for the literal value, as the middleware echoes it
+// or as a JSON string escapes it. Other encodings (base64, hex or URL
+// encoding, doubly escaped JSON, Python-style escapes) are not covered, because
+// no middleware path emits them.
 func redactLiteralSecrets(msg string, encOpts map[string]interface{}) string {
 	for _, field := range []string{"passphrase", "key"} {
 		secret, _ := encOpts[field].(string)
@@ -319,11 +407,7 @@ func redactLiteralSecrets(msg string, encOpts map[string]interface{}) string {
 			}
 		}
 		for _, v := range variants {
-			pattern := regexp.QuoteMeta(v)
-			if field == "key" {
-				pattern = "(?i)" + pattern
-			}
-			msg = regexp.MustCompile(pattern).ReplaceAllString(msg, redact.Marker)
+			msg = regexp.MustCompile("(?i)"+regexp.QuoteMeta(v)).ReplaceAllString(msg, redact.Marker)
 		}
 	}
 	return msg
