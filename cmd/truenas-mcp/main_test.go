@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,21 @@ func TestSafetyPolicy(t *testing.T) {
 		}
 		if _, err := safetyPolicy(false, map[string]string{"allow-tools": v}, envOf(nil)); err == nil {
 			t.Errorf("--allow-tools=%q accepted", v)
+		}
+	}
+}
+
+// The allow/deny flags are registered without package variables (main reads
+// them through flag.Visit); make sure they stay registered and documented.
+func TestSafetyFlagsRegistered(t *testing.T) {
+	for _, name := range []string{"read-only", "allow-tools", "deny-tools"} {
+		f := flag.Lookup(name)
+		if f == nil {
+			t.Errorf("flag --%s is not registered", name)
+			continue
+		}
+		if !strings.Contains(f.Usage, "TRUENAS_MCP_") {
+			t.Errorf("flag --%s usage does not name its environment variable: %q", name, f.Usage)
 		}
 	}
 }
