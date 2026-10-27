@@ -1,10 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -88,7 +89,16 @@ func safetyPolicy(readOnly bool, setFlags map[string]string, lookupEnv func(stri
 	return p, nil
 }
 
+// configureLogging sends the standard logger to stderr. Stdout carries the
+// JSON-RPC stream, so a log line there would corrupt the protocol framing.
+// This is the log package's default; setting it explicitly keeps it true
+// even if a dependency or a later change alters the default.
+func configureLogging() {
+	log.SetOutput(os.Stderr)
+}
+
 func main() {
+	configureLogging()
 	flag.Parse()
 
 	if *versionFlg {
@@ -194,15 +204,22 @@ func main() {
 // StdioHandler manages stdio communication for MCP protocol
 type StdioHandler struct {
 	registry    mcp.ToolRegistry
-	stdin       *bufio.Scanner
+	stdin       *mcp.LineReader
+	stdout      io.Writer
 	stdoutMutex sync.Mutex
 	debug       bool
 }
 
+// NewStdioHandler serves the protocol on the process's stdin and stdout.
 func NewStdioHandler(registry mcp.ToolRegistry, debug bool) *StdioHandler {
+	return newStdioHandler(registry, debug, os.Stdin, os.Stdout)
+}
+
+func newStdioHandler(registry mcp.ToolRegistry, debug bool, in io.Reader, out io.Writer) *StdioHandler {
 	return &StdioHandler{
 		registry: registry,
-		stdin:    bufio.NewScanner(os.Stdin),
+		stdin:    mcp.NewLineReader(in, mcp.MaxLineBytes),
+		stdout:   out,
 		debug:    debug,
 	}
 }
@@ -212,8 +229,19 @@ func (h *StdioHandler) Run() error {
 		log.Println("Starting stdio handler...")
 	}
 
-	for h.stdin.Scan() {
-		line := h.stdin.Bytes()
+	for {
+		line, err := h.stdin.ReadLine()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if errors.Is(err, mcp.ErrLineTooLong) {
+			log.Printf("Rejected a request longer than %d bytes", mcp.MaxLineBytes)
+			h.sendError(nil, -32600, fmt.Sprintf("Request too large: the limit is %d bytes", mcp.MaxLineBytes))
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stdin error: %w", err)
+		}
 		if h.debug {
 			log.Printf("[STDIN] %s", truenas.RedactJSONForLog(line))
 		}
@@ -239,12 +267,6 @@ func (h *StdioHandler) Run() error {
 			}
 		}
 	}
-
-	if err := h.stdin.Err(); err != nil {
-		return fmt.Errorf("stdin error: %w", err)
-	}
-
-	return nil
 }
 
 func (h *StdioHandler) handleRequest(req *mcp.Request) *mcp.Response {
@@ -373,7 +395,10 @@ func (h *StdioHandler) sendResponse(resp *mcp.Response) error {
 		log.Printf("[STDOUT] %s", truenas.RedactJSONForLog(data))
 	}
 
-	fmt.Printf("%s\n", data)
+	// One write per message, so a line is never split by another writer.
+	if _, err := h.stdout.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("failed to write to stdout: %w", err)
+	}
 	return nil
 }
 

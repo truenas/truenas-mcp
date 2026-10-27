@@ -449,6 +449,9 @@ func TestProxyForSelection(t *testing.T) {
 		{env: map[string]string{"ALL_PROXY": "socks4://u:pw@corp:1080"}, wantErr: `unsupported proxy scheme "socks4" in ALL_PROXY`},
 		{env: map[string]string{"TRUENAS_PROXY": "http://u:pw@[bad"}, wantErr: "invalid proxy URL in TRUENAS_PROXY"},
 		{option: "socks4://u:pw@corp:1080", wantErr: `unsupported proxy scheme "socks4" in --proxy`},
+		{option: "http://u:pw@corp:99999", wantErr: "invalid proxy port in --proxy"},
+		{option: "socks5h://corp:0", wantErr: "invalid proxy port in --proxy"},
+		{env: map[string]string{"HTTPS_PROXY": "corp:70000"}, wantErr: "invalid proxy port in HTTPS_PROXY"},
 	} {
 		clearProxyEnv(t)
 		for k, v := range tc.env {

@@ -81,6 +81,8 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 	}
 	if p.Port() == "" {
 		p.Host = net.JoinHostPort(p.Hostname(), port)
+	} else if _, err := parsePort(p.Port()); err != nil {
+		return nil, fmt.Errorf("invalid proxy port in %s: the port must be 1-65535", source)
 	}
 	return &proxyChoice{url: p, source: source}, nil
 }
