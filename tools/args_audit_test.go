@@ -4,7 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +22,13 @@ import (
 //   - args["key"] on a map parameter named args or a;
 //   - a helper call that passes args followed by a literal key, such as
 //     getOptionalBool(args, "enable", true).
+//
+// Limitations: the audit only sees keys written as string literals. A key
+// built from a const or var, from string concatenation, or read through a
+// map under any other name (an alias such as params, or a copy passed to a
+// helper that indexes it with a non-literal key) is invisible to it. It is
+// a safety net against the common mistake, not a proof; the runtime check
+// in CallTool is what actually enforces the schema.
 //
 // Reachability from a tool's Handler follows every identifier that names a
 // package-level function, every method selected by a name that *Registry
@@ -43,22 +50,31 @@ type toolSource struct {
 func loadToolSource(t *testing.T) *toolSource {
 	t.Helper()
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkg := pkgs["tools"]
-	if pkg == nil {
-		t.Fatal("package tools not found")
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, file)
+	}
+	if len(files) == 0 {
+		t.Fatal("no package source files found")
 	}
 	src := &toolSource{
 		funcs:    map[string]*ast.FuncDecl{},
 		methods:  map[string]map[string]*ast.FuncDecl{},
 		handlers: map[string]string{},
 	}
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		for _, decl := range file.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok {
@@ -197,14 +213,15 @@ func (s *toolSource) keysRead(handler string) map[string][]string {
 }
 
 // knownSchemaMismatches lists tools whose handler reads keys the schema does
-// not declare, with the PR that fixes each. The audit must not hide new
-// mismatches, so entries are checked for staleness: once a tool is fixed,
-// its entry has to be removed.
-var knownSchemaMismatches = map[string]string{
+// not declare, with the exact set of undeclared keys for each. The audit must
+// not hide new mismatches, so the set is compared exactly: a new undeclared
+// key, or a key that was fixed, fails the test until this table is updated.
+// Once a tool is fixed, remove its entry.
+var knownSchemaMismatches = map[string][]string{
 	// Their schema and handlers are being rewritten in PR #39; keep these
 	// entries until it merges, then delete them.
-	"configure_directory_service": "PR #39",
-	"leave_directory_service":     "PR #39",
+	"configure_directory_service": {"basedn", "binddn", "bindname", "bindpw", "certificate", "domain", "hostname", "netbiosname", "ssl", "type"},
+	"leave_directory_service":     {"password", "username"},
 }
 
 func TestHandlersOnlyReadDeclaredArguments(t *testing.T) {
@@ -235,9 +252,11 @@ func TestHandlersOnlyReadDeclaredArguments(t *testing.T) {
 			}
 		}
 		sort.Strings(missing)
-		if _, known := knownSchemaMismatches[name]; known {
+		if want, known := knownSchemaMismatches[name]; known {
 			if len(missing) == 0 {
 				t.Errorf("%s: no longer mismatched; remove it from knownSchemaMismatches", name)
+			} else if strings.Join(missing, ",") != strings.Join(want, ",") {
+				t.Errorf("%s: undeclared keys read by %s changed: got %v, want %v (update knownSchemaMismatches only if the change is intended)", name, handler, missing, want)
 			}
 			continue
 		}

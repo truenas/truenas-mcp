@@ -2,9 +2,13 @@ package tools
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// safeArgName matches the argument names an error may echo back.
+var safeArgName = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 const (
 	// maxReportedUnknownArgs bounds how many unknown argument names an
@@ -49,16 +53,37 @@ func validateArgs(name string, tool Tool, args map[string]interface{}) error {
 	}
 	sort.Strings(unknown)
 
-	quoted := make([]string, 0, len(unknown))
-	for i, key := range unknown {
+	// Only names made of plain characters are echoed. Anything else is
+	// counted instead: a name containing, say, something the redaction
+	// layer treats as sensitive could otherwise truncate the rest of the
+	// message, and control or bidi characters have no business in it.
+	var plain []string
+	invalid := 0
+	for _, key := range unknown {
+		if !safeArgName.MatchString(key) {
+			invalid++
+			continue
+		}
+		plain = append(plain, key)
+	}
+	quoted := make([]string, 0, len(plain)+1)
+	invalidMsg := ""
+	for i, key := range plain {
 		if i == maxReportedUnknownArgs {
-			quoted = append(quoted, fmt.Sprintf("and %d more", len(unknown)-i))
+			quoted = append(quoted, fmt.Sprintf("and %d more", len(plain)-i))
 			break
 		}
-		if r := []rune(key); len(r) > maxArgNameLen {
-			key = string(r[:maxArgNameLen]) + "..."
+		if len(key) > maxArgNameLen {
+			key = key[:maxArgNameLen] + "..."
 		}
 		quoted = append(quoted, fmt.Sprintf("%q", key))
+	}
+	if invalid > 0 {
+		noun := "keys"
+		if invalid == 1 {
+			noun = "key"
+		}
+		invalidMsg = fmt.Sprintf("%d %s with invalid characters", invalid, noun)
 	}
 
 	noun := "argument"
@@ -74,5 +99,12 @@ func validateArgs(name string, tool Tool, args map[string]interface{}) error {
 		sort.Strings(names)
 		valid = "valid arguments: " + strings.Join(names, ", ")
 	}
-	return fmt.Errorf("invalid arguments for tool %s: unknown %s %s (%s); nothing was executed", name, noun, strings.Join(quoted, ", "), valid)
+	detail := " " + strings.Join(quoted, ", ")
+	switch {
+	case len(quoted) == 0:
+		detail = ": " + invalidMsg
+	case invalidMsg != "":
+		detail += " and " + invalidMsg
+	}
+	return fmt.Errorf("invalid arguments for tool %s: unknown %s%s (%s); nothing was executed", name, noun, detail, valid)
 }

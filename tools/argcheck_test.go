@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/truenas/truenas-mcp/mcp"
+	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
@@ -108,11 +109,10 @@ func TestEveryToolRejectsUnknownArguments(t *testing.T) {
 			t.Errorf("%s: handler ran for a rejected call", name)
 		}
 		// A key that merely resembles a declared one is unknown too.
-		for _, key := range declaredKeys(tool) {
-			if _, err := r.CallTool(name, map[string]interface{}{key + "_": "x"}); err == nil {
-				t.Errorf("%s accepted %q", name, key+"_")
+		if keys := declaredKeys(tool); len(keys) > 0 {
+			if _, err := r.CallTool(name, map[string]interface{}{keys[0] + "_": "x"}); err == nil {
+				t.Errorf("%s accepted %q", name, keys[0]+"_")
 			}
-			break
 		}
 	}
 }
@@ -224,8 +224,31 @@ func TestValidateArgsMessage(t *testing.T) {
 	// Names are quoted so control characters cannot forge extra lines, and
 	// are truncated.
 	err = validateArgs("demo", tool, map[string]interface{}{"bad\nname": 1})
-	if err == nil || strings.Contains(err.Error(), "\n") || !strings.Contains(err.Error(), `"bad\nname"`) {
+	if err == nil || strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), "bad") {
 		t.Errorf("control characters: %q", err)
+	}
+	wantInvalid := `invalid arguments for tool demo: unknown argument: 1 key with invalid characters (valid arguments: a, b); nothing was executed`
+	if err == nil || err.Error() != wantInvalid {
+		t.Errorf("control characters: got %v\nwant %s", err, wantInvalid)
+	}
+
+	// Only [A-Za-z0-9_.-] names are listed; the rest are counted. A name
+	// that redaction would act on must not cut the message short.
+	err = validateArgs("demo", tool, map[string]interface{}{
+		"ok_name-1.x":      1,
+		"password=hunter2": 1,
+		"sp ace":           1,
+		"üñí":              1,
+	})
+	wantMixed := `invalid arguments for tool demo: unknown arguments "ok_name-1.x" and 3 keys with invalid characters (valid arguments: a, b); nothing was executed`
+	if err == nil || err.Error() != wantMixed {
+		t.Fatalf("mixed names: got %v\nwant %s", err, wantMixed)
+	}
+	if got := redact.Text(err.Error()); got != wantMixed {
+		t.Errorf("redaction changed the message:\n got %s\nwant %s", got, wantMixed)
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("value leaked: %v", err)
 	}
 	long := strings.Repeat("x", 500)
 	err = validateArgs("demo", tool, map[string]interface{}{long: 1})
