@@ -19,19 +19,6 @@ type DirectoryServiceStatus struct {
 	Status        map[string]interface{} `json:"status,omitempty"`
 }
 
-type DirectoryServiceConfig struct {
-	Type          string                 `json:"type"`
-	Domain        string                 `json:"domain,omitempty"`
-	Hostname      string                 `json:"hostname,omitempty"`
-	Basedn        string                 `json:"basedn,omitempty"`
-	BindDN        string                 `json:"binddn,omitempty"`
-	Kerberos      map[string]interface{} `json:"kerberos,omitempty"`
-	SSL           string                 `json:"ssl,omitempty"`
-	CertID        int                    `json:"cert_id,omitempty"`
-	Enabled       bool                   `json:"enabled"`
-	Configuration map[string]interface{} `json:"configuration,omitempty"`
-}
-
 // Helper functions
 
 func getDirectoryServiceStatus(ctx context.Context, client *truenas.Client) (*DirectoryServiceStatus, error) {
@@ -278,32 +265,57 @@ func handleRefreshDirectoryCache(client *truenas.Client, args map[string]interfa
 
 // Registry write handlers
 
+// dsJobTTL is how long the task of a directoryservices.update or
+// directoryservices.leave job is tracked. A first join or a leave talks to
+// domain controllers and can take several minutes.
+const dsJobTTL = 15 * time.Minute
+
+// parseJobID returns the job id from the result of a job method: a bare
+// integer, or a list whose first element is the id. It returns 0 if there is
+// none.
+func parseJobID(result json.RawMessage) int {
+	var jobID int
+	if err := json.Unmarshal(result, &jobID); err == nil {
+		return jobID
+	}
+	var jobIDs []int
+	if err := json.Unmarshal(result, &jobIDs); err == nil && len(jobIDs) > 0 {
+		return jobIDs[0]
+	}
+	return 0
+}
+
 func (r *Registry) handleConfigureDirectoryService(client *truenas.Client, args map[string]interface{}) (string, error) {
 	payload, err := buildDirectoryServiceUpdatePayload(args)
 	if err != nil {
 		return "", err
 	}
 	serviceType, _ := payload["service_type"].(string)
+	enabled, _ := payload["enable"].(bool)
+	label := serviceType
+	if label == "" {
+		label = "the configured directory service"
+	}
 
 	// directoryservices.update is a job: the call returns its job ID.
 	result, err := client.Call("directoryservices.update", payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to configure %s: %w", serviceType, err)
+		return "", fmt.Errorf("failed to configure %s: %w", label, err)
 	}
 
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		var jobIDs []int
-		if err2 := json.Unmarshal(result, &jobIDs); err2 == nil && len(jobIDs) > 0 {
-			jobID = jobIDs[0]
-		}
-	}
+	jobID := parseJobID(result)
 
 	response := map[string]interface{}{
-		"success":        true,
-		"directory_type": serviceType,
-		"enabled":        payload["enable"],
-		"message":        fmt.Sprintf("%s configuration was submitted to TrueNAS. Enabling it for the first time joins the domain, which may take a few minutes.", serviceType),
+		"success": true,
+		"enabled": enabled,
+	}
+	if serviceType != "" {
+		response["directory_type"] = serviceType
+	}
+	if enabled {
+		response["message"] = fmt.Sprintf("%s configuration was submitted to TrueNAS. Enabling it for the first time joins the domain, which may take a few minutes.", serviceType)
+	} else {
+		response["message"] = fmt.Sprintf("Disabling %s was submitted to TrueNAS; its settings are kept. Domain authentication stops until it is enabled again.", label)
 	}
 
 	if jobID > 0 {
@@ -312,7 +324,7 @@ func (r *Registry) handleConfigureDirectoryService(client *truenas.Client, args 
 			"configure_directory_service",
 			maskDirectoryServicePayload(args),
 			jobID,
-			10*time.Minute,
+			dsJobTTL,
 		)
 		if err != nil {
 			return "", fmt.Errorf("directoryservices.update was submitted as job %d but task creation failed: %w", jobID, err)
@@ -354,13 +366,7 @@ func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[
 		return "", fmt.Errorf("failed to leave %s: %w", status.Type, err)
 	}
 
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		var jobIDs []int
-		if err2 := json.Unmarshal(result, &jobIDs); err2 == nil && len(jobIDs) > 0 {
-			jobID = jobIDs[0]
-		}
-	}
+	jobID := parseJobID(result)
 
 	response := map[string]interface{}{
 		"success":        true,
@@ -374,7 +380,7 @@ func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[
 			"leave_directory_service",
 			maskDirectoryServicePayload(args),
 			jobID,
-			5*time.Minute,
+			dsJobTTL,
 		)
 		if err != nil {
 			return "", fmt.Errorf("directoryservices.leave was submitted as job %d but task creation failed: %w", jobID, err)
@@ -417,9 +423,18 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, 
 		return nil, err
 	}
 
+	// A bare disable names no service_type: it applies to what is configured.
+	target := serviceType
+	if target == "" {
+		target = status.Type
+	}
+
 	warnings := []string{}
 
-	if status.Type != "none" && status.Type != serviceType {
+	if serviceType == "" && status.Type == "none" {
+		warnings = append(warnings, "No directory service is currently configured; there is nothing to disable")
+	}
+	if serviceType != "" && status.Type != "none" && status.Type != serviceType {
 		warnings = append(warnings,
 			fmt.Sprintf("CONFLICT: %s is currently configured and will be replaced by %s", status.Type, serviceType))
 	}
@@ -440,15 +455,26 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, 
 		warnings = append(warnings,
 			"force=true bypasses the check for an existing server with this hostname registered in the domain; it can replace that server")
 	}
-	warnings = append(warnings,
-		fmt.Sprintf("Credential type %s will be sent; secret values are masked in this preview", credType))
+	if !enabled {
+		warnings = append(warnings,
+			fmt.Sprintf("Disabling %s stops domain/directory authentication: its users and groups stop resolving, and SMB/NFS access that depends on them fails until the service is enabled again", target),
+			"The settings are kept and the computer account is not removed from the domain; use leave_directory_service to leave an Active Directory or IPA domain")
+	}
+	if credType != "" {
+		warnings = append(warnings,
+			fmt.Sprintf("Credential type %s will be sent; secret values are masked in this preview", credType))
+	}
 
+	operation, verb := "configure", "configure"
+	if !enabled {
+		operation, verb = "disable", "disable"
+	}
 	actions := []PlannedAction{
 		{
 			Step:        1,
-			Description: fmt.Sprintf("Call directoryservices.update to configure %s", serviceType),
-			Operation:   "configure",
-			Target:      serviceType,
+			Description: fmt.Sprintf("Call directoryservices.update to %s %s", verb, target),
+			Operation:   operation,
+			Target:      target,
 			Details: map[string]interface{}{
 				"method":  "directoryservices.update",
 				"enabled": enabled,
@@ -467,11 +493,16 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, 
 		})
 	}
 
-	conditions := []string{
-		fmt.Sprintf("Connectivity to %s servers", serviceType),
-		"Proper DNS configuration",
-		"Firewall rules allowing directory service traffic",
-		fmt.Sprintf("Valid %s credentials", credType),
+	var conditions []string
+	if enabled {
+		conditions = []string{
+			fmt.Sprintf("Connectivity to %s servers", serviceType),
+			"Proper DNS configuration",
+			"Firewall rules allowing directory service traffic",
+			fmt.Sprintf("Valid %s credentials", credType),
+		}
+	} else {
+		conditions = []string{"A directory service is configured on TrueNAS"}
 	}
 
 	requirements := &Requirements{

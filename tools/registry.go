@@ -448,7 +448,9 @@ func (r *Registry) registerTools() {
 			Name: "configure_directory_service",
 			Description: `Configure and join a directory service (Active Directory, LDAP, or IPA) with TrueNAS directoryservices.update (TrueNAS 25.10 or later). Setting enable=true joins the domain automatically the first time. The arguments are the fields of that API call. Omitted optional fields keep their current value.
 
-**service_type, credential and configuration are all required, and configuration must match service_type.**
+**To enable or change a service, service_type, credential, configuration and enable are all required, and configuration must match service_type. The old flat arguments (type, server, bindname, netbiosname, ssl, domain, ...) no longer exist: put them in credential and configuration as below.**
+
+**To disable the configured service, send only enable=false** (no service_type, credential or configuration): the settings are kept and domain authentication stops until it is enabled again. When service_type is sent with enable=false, a KERBEROS_USER credential is rejected for ACTIVEDIRECTORY and IPA (TrueNAS does not store it); use KERBEROS_PRINCIPAL.
 
 **Credential (credential_type and its fields):**
 
@@ -473,7 +475,7 @@ idmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed t
 **Security:**
 - Credentials are stored in TrueNAS configuration
 - Use Kerberos principals with keytabs instead of passwords for production
-- Dry-run shows the exact payload that would be sent with password and bindpw values masked
+- Dry-run shows the exact payload that would be sent with every secret value masked (password, bindpw, ldap_user_dn_password in idmap and trusted_domains, ...); credential_type and username stay visible
 
 **Returns:** task_id for tracking the long-running domain join job (2-10 minutes typical)`,
 			InputSchema: map[string]interface{}{
@@ -559,7 +561,7 @@ idmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed t
 						"default":     false,
 					},
 				},
-				"required": []string{"service_type", "enable", "credential", "configuration"},
+				"required": []string{"enable"},
 			},
 		},
 		Handler: r.handleConfigureDirectoryServiceWithDryRun,

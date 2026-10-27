@@ -1,7 +1,9 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -79,9 +81,6 @@ var dsCredentialTypes = map[string][]string{
 	"LDAP_MTLS":          {"client_certificate"},
 }
 
-// dsSecretFields hold values that must never be echoed back.
-var dsSecretFields = map[string]bool{"password": true, "bindpw": true}
-
 // dsTopLevelFields are the update fields besides service_type, credential
 // and configuration, which have their own handling.
 var dsTopLevelFields = map[string]dsField{
@@ -130,11 +129,11 @@ func checkDSValue(path string, f dsField, v interface{}) (interface{}, error) {
 		}
 		return b, nil
 	case dsInt:
-		n, ok := v.(float64)
-		if !ok || n != float64(int(n)) || int(n) < f.min || int(n) > f.max {
+		n, ok := toInt(v)
+		if !ok || n < f.min || n > f.max {
 			return nil, fmt.Errorf("%s must be an integer from %d to %d", path, f.min, f.max)
 		}
-		return int(n), nil
+		return n, nil
 	case dsStringList:
 		list, ok := v.([]interface{})
 		if !ok || len(list) == 0 {
@@ -167,6 +166,68 @@ func checkDSValue(path string, f dsField, v interface{}) (interface{}, error) {
 	return nil, fmt.Errorf("%s: unsupported field kind", path)
 }
 
+// toInt returns v as an int if it is an integral number in any of the forms
+// a decoded JSON argument can take: float64 (encoding/json), json.Number
+// (decoders that use UseNumber) or a Go integer. Fractions, strings and
+// values outside the int range are rejected.
+func toInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		if int64(int(n)) != n {
+			return 0, false
+		}
+		return int(n), true
+	case uint:
+		if uint64(n) > math.MaxInt32 {
+			return 0, false
+		}
+		return int(n), true
+	case uint8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case uint32:
+		if uint64(n) > math.MaxInt32 {
+			return 0, false
+		}
+		return int(n), true
+	case uint64:
+		if n > math.MaxInt32 {
+			return 0, false
+		}
+		return int(n), true
+	case float32:
+		return floatToInt(float64(n))
+	case float64:
+		return floatToInt(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return toInt(i)
+		}
+		f, err := n.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return floatToInt(f)
+	}
+	return 0, false
+}
+
+func floatToInt(f float64) (int, bool) {
+	if f != math.Trunc(f) || f < math.MinInt32 || f > math.MaxInt32 {
+		return 0, false
+	}
+	return int(f), true
+}
+
 // checkDSFields validates obj against fields: unknown keys are rejected,
 // required keys must be present and every value must have the right type.
 func checkDSFields(path string, fields map[string]dsField, obj map[string]interface{}, skip func(string) bool) (map[string]interface{}, error) {
@@ -197,29 +258,64 @@ func checkDSFields(path string, fields map[string]dsField, obj map[string]interf
 // returns the single argument of directoryservices.update. Only fields the
 // caller supplied are included: TrueNAS keeps the current value of anything
 // omitted. The dry run shows this exact value (secrets masked).
+//
+// The middleware requires service_type, credential and configuration for
+// every update that names a service_type, and service_type for every
+// update that enables the service. The one payload without a service_type
+// it accepts is a bare disable, {"enable": false}, which keeps the stored
+// configuration and turns the service off.
 func buildDirectoryServiceUpdatePayload(args map[string]interface{}) (map[string]interface{}, error) {
-	serviceType, ok := args["service_type"].(string)
-	if !ok || serviceType == "" {
-		return nil, fmt.Errorf("service_type is required: one of %s", strings.Join(dsServiceTypes, ", "))
-	}
-	configFields, known := dsConfigurationFields[serviceType]
-	if !known {
-		return nil, fmt.Errorf("service_type must be one of %s, got %q", strings.Join(dsServiceTypes, ", "), serviceType)
-	}
-
 	// Top-level fields.
-	top := make(map[string]dsField, len(dsTopLevelFields)+4)
+	top := make(map[string]dsField, len(dsTopLevelFields)+3)
 	for k, f := range dsTopLevelFields {
 		top[k] = f
 	}
 	top["service_type"] = dsField{kind: dsString}
-	top["credential"] = dsField{kind: dsObject, required: true}
-	top["configuration"] = dsField{kind: dsObject, required: true}
+	top["credential"] = dsField{kind: dsObject}
+	top["configuration"] = dsField{kind: dsObject}
+
+	// service_type first: it selects the fields the rest is checked against.
+	serviceType := ""
+	if v, ok := args["service_type"]; ok {
+		str, isStr := v.(string)
+		if _, known := dsConfigurationFields[str]; !isStr || !known {
+			if !isStr || str == "" {
+				return nil, fmt.Errorf("service_type must be one of %s", strings.Join(dsServiceTypes, ", "))
+			}
+			return nil, fmt.Errorf("service_type must be one of %s, got %q", strings.Join(dsServiceTypes, ", "), str)
+		}
+		serviceType = str
+	}
+
 	payload, err := checkDSFields("arguments", top, args, func(k string) bool { return dsControlArgs[k] })
 	if err != nil {
+		if flat := flatArgumentNames(args, top); len(flat) > 0 {
+			return nil, fmt.Errorf("%w; the arguments of configure_directory_service changed: %s are no longer top-level arguments. Use service_type + credential + configuration (see the tool description)", err, strings.Join(flat, ", "))
+		}
 		return nil, err
 	}
+	enabled, _ := payload["enable"].(bool)
+
+	if serviceType == "" {
+		if enabled {
+			return nil, fmt.Errorf("service_type is required to enable a directory service: one of %s", strings.Join(dsServiceTypes, ", "))
+		}
+		// Bare disable: TrueNAS keeps the stored configuration and credential,
+		// and rejects a configuration without a service_type.
+		for _, k := range []string{"credential", "configuration"} {
+			if _, ok := payload[k]; ok {
+				return nil, fmt.Errorf("%s needs service_type; to disable the configured directory service omit service_type, credential and configuration and send only enable=false", k)
+			}
+		}
+		return payload, nil
+	}
+	for _, k := range []string{"credential", "configuration"} {
+		if _, ok := payload[k]; !ok {
+			return nil, fmt.Errorf("%s is required in arguments when service_type is given", k)
+		}
+	}
 	payload["service_type"] = serviceType
+	configFields := dsConfigurationFields[serviceType]
 
 	// credential
 	credIn, _ := payload["credential"].(map[string]interface{})
@@ -247,6 +343,11 @@ func buildDirectoryServiceUpdatePayload(args map[string]interface{}) (map[string
 			return nil, fmt.Errorf("kerberos_realm is required to use %s credentials with service_type LDAP", credType)
 		}
 	}
+	// TrueNAS does not store privileged credentials for a disabled AD or IPA
+	// service (common_validation in plugins/directoryservices_/datastore.py).
+	if !enabled && credType == "KERBEROS_USER" && serviceType != "LDAP" {
+		return nil, fmt.Errorf("KERBEROS_USER credentials may not be stored for a disabled %s service; use a KERBEROS_PRINCIPAL credential, or omit service_type, credential and configuration to disable the configured service", serviceType)
+	}
 
 	// configuration
 	confIn, _ := payload["configuration"].(map[string]interface{})
@@ -259,32 +360,56 @@ func buildDirectoryServiceUpdatePayload(args map[string]interface{}) (map[string
 	return payload, nil
 }
 
-// maskDirectoryServicePayload returns a deep copy of v (a payload or the
-// tool arguments) with password and bindpw values replaced by redact.Marker.
-func maskDirectoryServicePayload(v map[string]interface{}) map[string]interface{} {
-	return maskDSValue(v).(map[string]interface{})
+// dsLegacyArgumentNames are top-level arguments of the earlier flat form of
+// configure_directory_service (type, server, bindname, ...) that are not
+// fields of directoryservices.update.
+var dsLegacyArgumentNames = []string{
+	"type", "server", "servers", "host", "port", "bindname", "bindpw", "binddn", "basedn",
+	"netbiosname", "ssl", "domain", "hostname", "username", "password", "certificate",
+	"cert_id", "kerberos_principal", "starttls", "validate_certificates",
 }
 
-func maskDSValue(v interface{}) interface{} {
-	switch t := v.(type) {
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(t))
-		for k, e := range t {
-			if dsSecretFields[k] {
-				out[k] = redact.Marker
-			} else {
-				out[k] = maskDSValue(e)
-			}
-		}
-		return out
-	case []interface{}:
-		out := make([]interface{}, len(t))
-		for i, e := range t {
-			out[i] = maskDSValue(e)
-		}
-		return out
+// flatArgumentNames returns, sorted, the unknown top-level arguments that
+// are names from the old flat form or fields that now belong inside
+// credential or configuration.
+func flatArgumentNames(args map[string]interface{}, top map[string]dsField) []string {
+	known := map[string]bool{}
+	for _, n := range dsLegacyArgumentNames {
+		known[n] = true
 	}
-	return v
+	for _, fields := range dsConfigurationFields {
+		for n := range fields {
+			known[n] = true
+		}
+	}
+	for _, names := range dsCredentialTypes {
+		for _, n := range names {
+			known[n] = true
+		}
+	}
+	var out []string
+	for k := range args {
+		if _, valid := top[k]; !valid && !dsControlArgs[k] && known[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// maskDirectoryServicePayload returns a deep copy of v (a payload or the
+// tool arguments) with every secret value replaced by redact.Marker. It
+// uses the output redactor's own key matching (any key that names a
+// password, secret, token, ...), at every depth, so nested fields such as
+// idmap.idmap_domain.ldap_user_dn_password and the same field in
+// trusted_domains[] are masked too, and the handler and the redactor that
+// processes the tool output agree. The credential_type and the username,
+// principal or bind DN of a credential stay visible.
+func maskDirectoryServicePayload(v map[string]interface{}) map[string]interface{} {
+	if masked, ok := redact.Value(v).(map[string]interface{}); ok {
+		return masked
+	}
+	return map[string]interface{}{"payload": redact.Marker}
 }
 
 // directoryservices.leave (TrueNAS 25.10 and later) takes one argument,

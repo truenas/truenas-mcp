@@ -563,6 +563,7 @@ type ctx struct {
 	metadata    metaKind // the sensitive key describes a secret (token_ttl): scalars stay visible
 	keepNumbers bool     // numbers under this key are IDs (see keepsNumbers)
 	kerberos    bool     // inside a keytab/kerberos object
+	credential  bool     // the value of a key named "credential" (see walkTypedCredential)
 }
 
 // walk redacts v and reports whether anything changed.
@@ -582,6 +583,9 @@ func walk(v interface{}, c ctx) (interface{}, bool) {
 		return v, false
 	case map[string]interface{}:
 		if c.sensitive && len(t) > 0 {
+			if c.credential && !c.metadata.isMeta() && hasCredentialType(t) {
+				return walkTypedCredential(t, c)
+			}
 			if !c.metadata.isMeta() && isReference(t) {
 				return walkReference(t, c)
 			}
@@ -655,6 +659,7 @@ func walkMap(t map[string]interface{}, c ctx) (interface{}, bool) {
 				(userObj && nk == "hash")
 			child.metadata = meta
 			child.keepNumbers = keepsNumbers(k)
+			child.credential = nk == "credential"
 		}
 		nv, ch := walk(val, child)
 		out[k] = nv
@@ -771,6 +776,72 @@ func walkReference(t map[string]interface{}, c ctx) (interface{}, bool) {
 		out[k] = nv
 	}
 	return out, true
+}
+
+// typedCredentialVisible are the fields of a typed credential object (one
+// with a credential_type, such as the directoryservices.update credential)
+// that name who authenticates rather than hold a secret. Every other field
+// is redacted, so a field this list does not know about stays hidden.
+// client_certificate is an id or name (see walkTypedCredential).
+var typedCredentialVisible = map[string]bool{
+	"credentialtype": true, "username": true, "principal": true, "binddn": true,
+}
+
+// hasCredentialType reports whether m has a credential_type field.
+func hasCredentialType(m map[string]interface{}) bool {
+	_, ok := m["credential_type"]
+	return ok
+}
+
+// walkTypedCredential redacts the object under a "credential" key that has
+// a credential_type field. Only the allowlisted fields
+// (typedCredentialVisible), a client_certificate given as an id or name, and
+// an id or name stay visible; every other field (password, bindpw, anything
+// unknown) is redacted as if it were directly under a sensitive key.
+// Visible values are still redacted as free text, and a visible field that
+// holds an object or array, or a credential_type that is not an enum value,
+// is redacted. An object under client_certificate keeps only its scalar id
+// and name.
+func walkTypedCredential(t map[string]interface{}, c ctx) (interface{}, bool) {
+	out := make(map[string]interface{}, len(t))
+	changed := false
+	for k, val := range t {
+		nk := normalize(k)
+		var nv interface{}
+		var ch bool
+		switch m, isMap := val.(map[string]interface{}); {
+		case nk == "clientcertificate" && isMap && len(m) > 0:
+			nv, ch = walkCertificateReference(m)
+		case nk == "credentialtype" && isScalar(val) && !isReferenceField(k, val):
+			nv, ch = Marker, true // not an enum value: could hold anything
+		case isScalar(val) && (typedCredentialVisible[nk] || nk == "clientcertificate" || nk == "id" || nk == "name"):
+			nv, ch = walk(val, ctx{kerberos: c.kerberos})
+		default:
+			nv, ch = walk(val, ctx{sensitive: true, kerberos: c.kerberos})
+		}
+		out[k] = nv
+		changed = changed || ch
+	}
+	return out, changed
+}
+
+// walkCertificateReference keeps the scalar id and name of a certificate
+// object and redacts everything else in it.
+func walkCertificateReference(m map[string]interface{}) (interface{}, bool) {
+	out := make(map[string]interface{}, len(m))
+	changed := false
+	for k, val := range m {
+		var nv interface{}
+		var ch bool
+		if nk := normalize(k); (nk == "id" || nk == "name") && isScalar(val) {
+			nv, ch = walk(val, ctx{})
+		} else {
+			nv, ch = walk(val, ctx{sensitive: true})
+		}
+		out[k] = nv
+		changed = changed || ch
+	}
+	return out, changed
 }
 
 func hasReferenceField(m map[string]interface{}) bool {

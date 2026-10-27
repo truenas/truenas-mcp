@@ -112,8 +112,10 @@ func TestConfigureDirectoryServiceSchemaMatchesHandler(t *testing.T) {
 		}
 	}
 
-	// Required: what the handler insists on.
-	wantReq := []string{"service_type", "credential", "configuration"}
+	// Required: what the handler insists on for every call. service_type,
+	// credential and configuration are required only together (see
+	// TestConfigureDirectoryServiceBareDisable), so the schema leaves them out.
+	var wantReq []string
 	for k, f := range dsTopLevelFields {
 		if f.required {
 			wantReq = append(wantReq, k)
@@ -459,7 +461,16 @@ func TestConfigureDirectoryServiceValidation(t *testing.T) {
 		{"empty kerberos_realm", with(ad(), func(a obj) { a["kerberos_realm"] = "" }), "kerberos_realm must be a non-empty string"},
 		{"force not a boolean", with(ad(), func(a obj) { a["force"] = 1.0 }), "force must be a boolean"},
 		{"old top-level names", with(ad(), func(a obj) { a["bindname"] = "a"; a["domain"] = "example.com" }), `unknown field "bindname" in arguments`},
-		{"old names only", obj{"type": "activedirectory", "domain": "example.com", "enable": true}, "service_type is required"},
+		{"old names only", obj{"type": "activedirectory", "domain": "example.com", "enable": true}, `unknown field "domain" in arguments`},
+		{"enable without service_type", obj{"enable": true}, "service_type is required to enable"},
+		{"credential without service_type", obj{"enable": false, "credential": obj{"credential_type": "LDAP_ANONYMOUS"}}, "credential needs service_type"},
+		{"configuration without service_type", obj{"enable": false, "configuration": obj{"hostname": "x"}}, "configuration needs service_type"},
+		{"service_type without credential and configuration", obj{"enable": false, "service_type": "LDAP"}, "credential is required in arguments when service_type is given"},
+		{"disabled kerberos user on active directory", with(ad(), func(a obj) { a["enable"] = false }), "KERBEROS_USER credentials may not be stored for a disabled ACTIVEDIRECTORY service"},
+		{"disabled kerberos user on ipa", with(ipa(), func(a obj) {
+			a["enable"] = false
+			a["credential"] = obj{"credential_type": "KERBEROS_USER", "username": "a", "password": "b"}
+		}), "KERBEROS_USER credentials may not be stored for a disabled IPA service"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -677,8 +688,8 @@ func TestConfigureDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	if task.JobID == nil || *task.JobID != 4242 {
 		t.Errorf("task job = %v", task.JobID)
 	}
-	if task.TTL != int64((10 * time.Minute).Seconds()) {
-		t.Errorf("task TTL = %ds, want 600", task.TTL)
+	if task.TTL != int64((15 * time.Minute).Seconds()) {
+		t.Errorf("task TTL = %ds, want 900", task.TTL)
 	}
 	stored, _ := json.Marshal(task.Arguments)
 	if strings.Contains(string(stored), "s3cret") {
@@ -987,7 +998,7 @@ func TestLeaveDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	if task.JobID == nil || *task.JobID != 77 {
 		t.Errorf("task job = %v", task.JobID)
 	}
-	if want := int64((5 * time.Minute).Seconds()); task.TTL != want {
+	if want := int64((15 * time.Minute).Seconds()); task.TTL != want {
 		t.Errorf("task TTL = %ds, want %ds", task.TTL, want)
 	}
 	stored, _ := json.Marshal(task.Arguments)
