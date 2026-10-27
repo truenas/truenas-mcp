@@ -64,22 +64,25 @@ TrueNAS MCP provides comprehensive management capabilities through natural langu
 ┌────────▼───────────────────┐
 │  truenas-mcp               │ (Your Desktop)
 │  - stdio interface         │
-│  - Tool registry           │
-│  - WebSocket client        │
+│  - Tool registry + safety  │
+│  - Output redaction        │
+│  - JSON-RPC 2.0 client     │
 └────────┬───────────────────┘
-         │ Secure WebSocket (wss://)
-         │ + TrueNAS API key auth
-┌────────▼──────────────────┐
-│  TrueNAS Middleware       │
-│  - WebSocket HTTPS endpoint│
+         │ Secure WebSocket (wss://), optionally through an
+         │ HTTP CONNECT or SOCKS5 proxy (see Proxies)
+         │ + TrueNAS API key auth (auth.login_ex)
+┌────────▼───────────────────┐
+│  TrueNAS Middleware        │
+│  - JSON-RPC 2.0 endpoint   │
+│    /api/current            │
 │  - Port 443 (wss)          │
-└───────────────────────────┘
+└────────────────────────────┘
 ```
 
 **Key Benefits:**
 - ✅ No deployment to TrueNAS required
 - ✅ Runs entirely on your desktop
-- ✅ Secure WebSocket connection (wss://) to TrueNAS middleware
+- ✅ Secure WebSocket connection (wss://) to TrueNAS middleware, directly or through an HTTP/SOCKS5 proxy
 - ✅ Self-signed certificate support via `--tls-ca` (works with TrueNAS defaults)
 - ✅ Cross-platform support (macOS, Linux, Windows)
 - ✅ Simple configuration with hostname or full WebSocket URL
@@ -87,16 +90,25 @@ TrueNAS MCP provides comprehensive management capabilities through natural langu
 
 ## Building
 
+**Requirements:** Go 1.27.3 or later (the `go` directive in `go.mod`), and `make` for the targets below. With the default `GOTOOLCHAIN=auto`, a Go command that supports toolchain selection downloads the required toolchain automatically; with `GOTOOLCHAIN=local`, an older Go refuses to build.
+
 ```bash
+git clone https://github.com/truenas/truenas-mcp.git
+cd truenas-mcp
+
 # Download dependencies
 go mod download
 
-# Build for local platform
+# Build for the local platform: writes ./truenas-mcp
 make build
 
-# Build for all platforms (macOS, Linux, Windows)
+# Build for all platforms: writes truenas-mcp-darwin-arm64,
+# truenas-mcp-darwin-amd64, truenas-mcp-linux-amd64 and
+# truenas-mcp-windows-amd64.exe to the repository root
 make build-all
 ```
+
+Binaries report their version with `--version`. `make` takes the version from `git describe`; override it with `make build VERSION=1.2.3`. Without `make`, `go build -o truenas-mcp ./cmd/truenas-mcp` produces the same binary, with version `dev`. `make clean` removes the binaries.
 
 ## Installation
 
@@ -108,30 +120,52 @@ is reported as "TrueNAS 25.04 or later required".
 
 ### Step 1: Download or Build Binary
 
-Choose the appropriate binary for your platform:
+Download the archive for your platform from the
+[Releases page](https://github.com/truenas/truenas-mcp/releases), together with
+`checksums.txt`:
+
+| Platform | Release asset |
+|----------|---------------|
+| macOS (Apple Silicon) | `truenas-mcp-darwin-arm64.tar.gz` |
+| Linux (x86-64) | `truenas-mcp-linux-amd64.tar.gz` |
+| Windows (x86-64) | `truenas-mcp-windows-amd64.zip` |
+
+There is no release asset for macOS on Intel; [build it from source](#building)
+(`make build`). Each archive contains one binary named `truenas-mcp-<os>-<arch>`
+(with `.exe` on Windows). Verify the download, unpack it and put the binary on
+your `PATH` as `truenas-mcp`:
 
 **macOS (Apple Silicon):**
 ```bash
+shasum -a 256 -c checksums.txt --ignore-missing
+tar -xzf truenas-mcp-darwin-arm64.tar.gz
 sudo cp truenas-mcp-darwin-arm64 /usr/local/bin/truenas-mcp
 sudo chmod +x /usr/local/bin/truenas-mcp
 ```
 
-**macOS (Intel):**
+**macOS (Intel), built from source:**
 ```bash
-sudo cp truenas-mcp-darwin-amd64 /usr/local/bin/truenas-mcp
-sudo chmod +x /usr/local/bin/truenas-mcp
+make build
+sudo cp truenas-mcp /usr/local/bin/truenas-mcp
 ```
 
 **Linux:**
 ```bash
+sha256sum -c checksums.txt --ignore-missing
+tar -xzf truenas-mcp-linux-amd64.tar.gz
 sudo cp truenas-mcp-linux-amd64 /usr/local/bin/truenas-mcp
 sudo chmod +x /usr/local/bin/truenas-mcp
 ```
 
 **Windows:**
 ```powershell
-copy truenas-mcp-windows-amd64.exe C:\Windows\System32\truenas-mcp.exe
+Expand-Archive truenas-mcp-windows-amd64.zip -DestinationPath .
+New-Item -ItemType Directory -Force "$env:USERPROFILE\bin" | Out-Null
+copy truenas-mcp-windows-amd64.exe "$env:USERPROFILE\bin\truenas-mcp.exe"
 ```
+Add `%USERPROFILE%\bin` to your `PATH`, or use the full path to `truenas-mcp.exe`
+as the `command` in your MCP client configuration. Compare the zip's SHA-256
+(`Get-FileHash`) with `checksums.txt`.
 
 ### Step 2: Get TrueNAS API Key
 
@@ -147,7 +181,7 @@ copy truenas-mcp-windows-amd64.exe C:\Windows\System32\truenas-mcp.exe
 
 #### Claude Desktop
 
-Edit your Claude Desktop configuration file:
+Edit your Claude Desktop configuration file (a template is in [`claude_desktop_config.example.json`](claude_desktop_config.example.json)):
 
 **macOS:**
 ```bash
@@ -349,12 +383,17 @@ The proxy is chosen in this order:
 
 `HTTP_PROXY` is not used: the connection is `wss://`, which is HTTPS traffic.
 `NO_PROXY` / `no_proxy` (comma-separated hosts, domains such as
-`.example.com`, IPs, CIDRs, or `*`) applies to all of them, and the host name
-`localhost` and loopback IP addresses are always reached directly.
+`.example.com`, IPs, CIDRs, or `*`) applies to all of them. The exact host name
+`localhost` and loopback IP addresses are always reached directly; other
+spellings such as `LOCALHOST`, `localhost.` or `*.localhost` go through the proxy
+unless `NO_PROXY` lists them.
 
 To ignore inherited proxy variables, pass `--proxy none` (or set
 `TRUENAS_PROXY=none`). An empty `--proxy` / `TRUENAS_PROXY` means "not set",
-so the environment variables still apply.
+so the environment variables still apply. To bypass an inherited
+`HTTPS_PROXY` / `ALL_PROXY`, use `--proxy none` (or `TRUENAS_PROXY=none`), which
+ignores all proxy variables, or list the TrueNAS host in `NO_PROXY`, which
+exempts only that host.
 
 A proxy setting is only checked when it applies to the TrueNAS host: an
 unusable inherited value (say an `https://` proxy) does not matter if
@@ -382,6 +421,24 @@ HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.0.2.0/24 ./truenas-mcp --truenas-
 
 # Or set it explicitly, overriding the environment
 ./truenas-mcp --proxy socks5h://localhost:1055 --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
+```
+
+Desktop MCP clients usually do not inherit your shell environment, so set the
+proxy in the client's `env` block (or pass `--proxy` in `args`):
+
+```json
+{
+  "mcpServers": {
+    "truenas": {
+      "command": "truenas-mcp",
+      "args": ["--truenas-url", "truenas.tailnet-name.ts.net", "--api-user", "your-api-user"],
+      "env": {
+        "TRUENAS_API_KEY": "your-api-key",
+        "TRUENAS_PROXY": "socks5h://localhost:1055"
+      }
+    }
+  }
+}
 ```
 
 ### Troubleshooting
@@ -417,6 +474,20 @@ HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.0.2.0/24 ./truenas-mcp --truenas-
 - **API Key Storage**: Recommend using environment variables instead of command-line args
 - **Log Safety**: Credentials are redacted from all log output and error messages; full request/response bodies are only logged in debug mode (see [Debug Logging](#debug-logging))
 - **Tool Output Redaction**: Secrets are always removed from tool results and error messages before they reach the MCP client (and the model), with no opt-out. Values under credential-bearing names (`password`, `DB_PASS`, `adminPwd`, `bindpw`, `secret`, `token`, `api_key`, `private_key`, `passphrase`, `credential`, `pin`, `otp`, `cookie`, `authorization`, password hashes, a key named `key` or ending in `_key`, ...) are replaced with `[REDACTED]`; the key is kept so the model knows the field exists, and a whole object or list under such a name is replaced. `{name, value}` environment entries and `NAME=VALUE` strings are redacted by name. Free text, including strings inside JSON results such as job errors, is also scrubbed of PEM private key blocks, `key=value`/`"key": "value"` pairs, Bearer tokens and passwords in URLs. This is a safety net, not a substitute for restricting the API key's permissions
+
+**Known gaps of output redaction.** Redaction works on names and on common text shapes, so it cannot catch everything:
+
+- A secret stored under a name that does not look sensitive (for example a free-form `description` or `notes` field) is not recognised.
+- Command lines: `-p` of programs other than `sshpass` and the MySQL/MariaDB clients is left alone (it often means port or parents), and so is Samba's `net -U user%password`. A password passed as a plain positional argument (`["admin", "secret"]`, `tool user secret`) is not detected.
+- Command-line scanning is heuristic: where a command ends on a line is worked out from separators (`|`, `;`, `&`) and quotes, so unusual quoting (a separator inside a quoted argument, an unbalanced quote) can leave a later password option visible or redact the rest of the line. A quote in the middle of an unquoted option value (`--password ab"c d"`) ends that value.
+- Text right after a closing quote of a quoted value (`password='x' y`, `'token_ttl': '5'X`) is not part of the value and stays visible.
+- URLs whose password contains a raw `/`, `?`, `#`, quote or whitespace, or whose user name contains `@`, are only partly redacted. The host name stays visible by design.
+- Plain multi-line YAML scalars are not handled; single-line `key: value` pairs, block scalars (`|`, `>`) under a sensitive key and Kubernetes-style `name`/`value` entries are.
+- In JSON results, keys such as `password_file`, `token_file` or `secret_path` stay sensitive and their values are redacted, although the path itself is not a secret. Only command-line options of that shape (`--password-file /path`) are left visible.
+- Keys ending in `private` or `priv` (for example `wg_private`, `tls_private`) are redacted unless the value is a boolean. A few names that denote a flag or a network are exempt (`is_private`, `network_private`, `net_private`, ...), but another `*_private` key that holds a non-secret value, such as a network name, is redacted too.
+- Keys that name an algorithm (`*_algorithm`, `*_alg`, `*_algo`, for example `jwt_secret_algorithm`) show their value only when it looks like an identifier (letters, digits and `_ . + / -`, up to 40 characters, such as `HS256`). Any other non-empty string (a longer one, or text with spaces), object or array is redacted. Booleans, `null`, numbers, empty strings and empty objects or arrays stay visible.
+- Redaction can also hide more than the secret: a bare `key` field is always redacted (including non-secret alert keys), `password: changed` in prose loses the word after the colon, and a sensitive-looking option in prose (`use --password to ...`) loses the next word. Objects under a sensitive name that have no `id` or `name` (for example directory service `credential` objects) are replaced as a whole.
+- Only tool results, tool errors and logs are covered. Tool arguments the model sends are not redacted before they go to TrueNAS (they are redacted in logs).
 
 ### Security Best Practices
 
@@ -601,13 +672,28 @@ Returns:
 
 ## Development
 
+Go 1.27.3 or later is required (see [Building](#building)).
+
 ```bash
-# Run linters
+# Run linters (go vet, and a gofmt check)
 make lint
 
 # Run tests
 make test
 
+# Run tests with the race detector (recommended before sending a change)
+go test -race ./...
+
+# Check dependencies for known vulnerabilities (version used in CI)
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
 # Clean build artifacts
 make clean
 ```
+
+The "Build and Package" workflow runs the linters, the tests, `govulncheck`
+and builds for macOS (Apple Silicon), Linux and Windows on every pull request
+and on every push to `main`. The release workflow, which runs for version
+tags, runs the linters and tests again and publishes those three platforms. A test in
+`cmd/truenas-mcp` checks that the flags documented in this README match the
+flags the binary registers, and that the Go version above matches `go.mod`.
