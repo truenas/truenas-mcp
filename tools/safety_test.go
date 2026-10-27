@@ -627,9 +627,9 @@ func TestDeleteBootEnvironmentConfirmedRefusesProtected(t *testing.T) {
 	r := NewRegistry(client, nil)
 
 	for id, want := range map[string]string{
-		"running":       "currently running",
-		"next-boot":     "will boot on next restart",
-		"protected":     "keep flag is set",
+		"running":         "currently running",
+		"next-boot":       "will boot on next restart",
+		"protected":       "keep flag is set",
 		"running-minimal": "currently running",
 	} {
 		_, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": id, "confirm": true})
