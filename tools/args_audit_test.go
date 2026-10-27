@@ -217,12 +217,7 @@ func (s *toolSource) keysRead(handler string) map[string][]string {
 // not hide new mismatches, so the set is compared exactly: a new undeclared
 // key, or a key that was fixed, fails the test until this table is updated.
 // Once a tool is fixed, remove its entry.
-var knownSchemaMismatches = map[string][]string{
-	// Their schema and handlers are being rewritten in PR #39; keep these
-	// entries until it merges, then delete them.
-	"configure_directory_service": {"basedn", "binddn", "bindname", "bindpw", "certificate", "domain", "hostname", "netbiosname", "ssl", "type"},
-	"leave_directory_service":     {"password", "username"},
-}
+var knownSchemaMismatches = map[string][]string{}
 
 func TestHandlersOnlyReadDeclaredArguments(t *testing.T) {
 	src := loadToolSource(t)

@@ -328,3 +328,33 @@ func TestUnknownToolStillReported(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestUnknownArgsErrorKeepsDirectoryServiceMigrationHint(t *testing.T) {
+	client, fake := newFakeClient(t)
+	r := NewRegistry(client, nil)
+	_, err := r.CallTool("configure_directory_service", map[string]interface{}{"type": "activedirectory", "domain": "example.com", "bindpw": "s3cret-value", "enable": true, "confirm": true})
+	if err == nil {
+		t.Fatal("flat arguments accepted")
+	}
+	for _, want := range []string{"unknown arguments", "nothing was executed", "bindpw, domain, type are no longer top-level arguments", "Use service_type + credential + configuration"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "s3cret-value") {
+		t.Errorf("error echoes a value: %v", err)
+	}
+	if len(fake.called("directoryservices.update")) != 0 {
+		t.Error("flat arguments reached directoryservices.update")
+	}
+	// A typo that is not an old flat name gets no migration hint.
+	_, err = r.CallTool("configure_directory_service", map[string]interface{}{"enabel": true})
+	if err == nil || strings.Contains(err.Error(), "no longer top-level") {
+		t.Errorf("err = %v", err)
+	}
+	// Other tools never get the hint.
+	_, err = r.CallTool("query_pools", map[string]interface{}{"type": "x"})
+	if err == nil || strings.Contains(err.Error(), "no longer top-level") {
+		t.Errorf("err = %v", err)
+	}
+}

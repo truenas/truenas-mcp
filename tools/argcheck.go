@@ -108,3 +108,18 @@ func validateArgs(name string, tool Tool, args map[string]interface{}) error {
 	}
 	return fmt.Errorf("invalid arguments for tool %s: unknown %s%s (%s); nothing was executed", name, noun, detail, valid)
 }
+
+// withMigrationHint adds to an unknown-argument error the tool-specific
+// pointer to where a renamed argument went. configure_directory_service no
+// longer takes the flat form (type, domain, bindname, ...); naming the old
+// arguments and the new shape tells a client with a stale schema how to fix
+// the call. Only argument names from a fixed list are echoed, never values.
+func withMigrationHint(name string, args map[string]interface{}, err error) error {
+	if name != "configure_directory_service" {
+		return err
+	}
+	if flat := flatArgumentNames(args, dsUpdateTopLevelFields()); len(flat) > 0 {
+		return fmt.Errorf("%w; the arguments of configure_directory_service changed: %s are no longer top-level arguments. Use service_type + credential + configuration (see the tool description)", err, strings.Join(flat, ", "))
+	}
+	return err
+}

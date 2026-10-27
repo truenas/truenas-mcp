@@ -1934,7 +1934,7 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (result st
 	// Reject arguments the schema does not declare before anything runs,
 	// including the dry-run preview of a destructive tool.
 	if err := validateArgs(name, tool, args); err != nil {
-		return "", err
+		return "", withMigrationHint(name, args, err)
 	}
 	if safetyOf(name).Access == Destructive && requiresConfirmation(tool, args) {
 		return r.confirmationRequired(name, tool, args)
