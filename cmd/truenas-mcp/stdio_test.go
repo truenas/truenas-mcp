@@ -386,7 +386,7 @@ func sizedRequest(id, size int) io.Reader {
 // TestStdioRealLimitThroughRun uses the real 64 MiB limit: a request of
 // exactly the limit is served, one byte more is rejected, and the server
 // keeps going. It is the memory-heavy test: the line buffer grows to the
-// limit (peak about 140 MiB, about 400 MiB under -race); -short skips it.
+// limit (peak about 160 MiB, about 480 MiB under -race); -short skips it.
 func TestStdioRealLimitThroughRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("streams about 128 MiB")
