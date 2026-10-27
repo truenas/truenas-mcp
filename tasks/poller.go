@@ -186,7 +186,7 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 		if errMsg, ok := job["error"].(string); ok {
 			statusMessage = errMsg
 			if task.VerifyApp != "" {
-				statusMessage, _ = TruncateText(errMsg, MaxJobTextChars)
+				statusMessage, _ = TruncateText(errMsg, MaxJobTextBytes)
 			}
 		} else {
 			statusMessage = "Job failed"
@@ -205,24 +205,31 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 		task.Status = newStatus
 		task.StatusMessage = statusMessage
 		p.store.Update(task)
+	} else if task.VerifyApp != "" {
+		// Not a status change, but the job summary and the start of the
+		// health wait live on the task and must reach the stored copy.
+		p.store.Save(task)
 	}
 }
 
 // verifyApp decides the task status after its job succeeded, from the app's
 // live state. It returns working while the app is still coming up and the
 // timeout has not elapsed, completed once the app is RUNNING with no crashed
-// or starting container, and failed otherwise.
+// or starting container, and failed otherwise. A failure because the app was
+// still starting is worded as such: the upgrade itself succeeded and the app
+// may simply be slow, so the caller does not roll back or retry a healthy
+// upgrade.
 func (p *Poller) verifyApp(task *Task) (TaskStatus, string) {
 	if task.VerifyStartedAt.IsZero() {
 		task.VerifyStartedAt = time.Now()
 	}
 	expired := time.Since(task.VerifyStartedAt) >= task.VerifyTimeout
 
-	state, notRunning, version, err := p.appHealth(task.VerifyApp)
-	if err == nil && state == "RUNNING" && len(notRunning) == 0 {
+	h, err := p.appHealth(task.VerifyApp)
+	if err == nil && h.state == "RUNNING" && len(h.crashed) == 0 && len(h.starting) == 0 {
 		msg := fmt.Sprintf("Upgrade completed; app %s is RUNNING", task.VerifyApp)
-		if version != "" {
-			msg += " (version " + version + ")"
+		if h.version != "" {
+			msg += " (version " + h.version + ")"
 		}
 		return TaskStatusCompleted, msg
 	}
@@ -231,43 +238,66 @@ func (p *Poller) verifyApp(task *Task) (TaskStatus, string) {
 	switch {
 	case err != nil:
 		what = "unknown"
-		if state != "" {
-			what = state
+		if h.state != "" {
+			what = h.state
 		}
-	case state != "RUNNING":
-		what = state
+	case h.state != "RUNNING":
+		what = h.state
 	default:
-		what = "RUNNING with containers not healthy: " + strings.Join(notRunning, ", ")
+		what = "RUNNING with containers not healthy: " + strings.Join(append(append([]string{}, h.crashed...), h.starting...), ", ")
 	}
 	if expired {
 		if err != nil {
 			return TaskStatusFailed, fmt.Sprintf("upgrade job finished but app state could not be verified: %v", err)
+		}
+		// DEPLOYING, or RUNNING with only containers still starting (a
+		// healthcheck that has not passed yet), and nothing crashed.
+		if len(h.crashed) == 0 && (h.state == "DEPLOYING" || (h.state == "RUNNING" && len(h.starting) > 0)) {
+			return TaskStatusFailed, fmt.Sprintf(
+				"upgrade job succeeded, but app %s was still starting (%s) when the %ds health wait ended. "+
+					"This is not an upgrade failure: the app may just be slow to start. "+
+					"Check it with query_apps, or raise health_timeout_seconds (maximum 600) on upgrade_app",
+				task.VerifyApp, what, int(task.VerifyTimeout/time.Second))
 		}
 		return TaskStatusFailed, fmt.Sprintf("upgrade job finished but app is %s", what)
 	}
 	return TaskStatusWorking, fmt.Sprintf("Upgrade job finished; waiting for app %s to be RUNNING (currently %s)", task.VerifyApp, what)
 }
 
+// appHealthInfo is an app's state as seen by the health wait.
+type appHealthInfo struct {
+	state    string   // app state (RUNNING, DEPLOYING, ...)
+	crashed  []string // "service (crashed)" for each crashed container
+	starting []string // "service (starting)" for each starting container
+	version  string   // human version
+}
+
 // appHealth queries the app and returns its state, the containers that are
-// crashed or still starting, and its human version. TrueNAS exposes no container health
-// probe in app.query, so container state is the health signal.
-func (p *Poller) appHealth(appName string) (state string, notRunning []string, version string, err error) {
+// crashed or starting, and its human version. app.query reflects container
+// health itself: a running container whose healthcheck is not "healthy" is
+// reported as "starting", which also makes the app DEPLOYING rather than
+// RUNNING. The container check here is therefore a safeguard on top of the
+// app state, not a separate signal. "created" containers also make an app
+// DEPLOYING, so they cannot appear in a RUNNING app; "exited" ones (init and
+// one-shot containers) are legitimate and are not counted.
+func (p *Poller) appHealth(appName string) (appHealthInfo, error) {
+	var h appHealthInfo
 	raw, err := p.client.Call("app.query", []interface{}{
 		[]interface{}{"name", "=", appName},
 	})
 	if err != nil {
-		return "", nil, "", err
+		return h, err
 	}
 	var apps []map[string]interface{}
 	if err := json.Unmarshal(raw, &apps); err != nil {
-		return "", nil, "", err
+		return h, err
 	}
 	if len(apps) == 0 {
-		return "", nil, "", fmt.Errorf("app %s not found", appName)
+		return h, fmt.Errorf("app %s not found", appName)
 	}
 	app := apps[0]
-	state, _ = app["state"].(string)
-	version, _ = app["human_version"].(string)
+	h.state, _ = app["state"].(string)
+	h.version, _ = app["human_version"].(string)
 	if aw, ok := app["active_workloads"].(map[string]interface{}); ok {
 		details, _ := aw["container_details"].([]interface{})
 		for _, d := range details {
@@ -275,22 +305,26 @@ func (p *Poller) appHealth(appName string) (state string, notRunning []string, v
 			if !ok {
 				continue
 			}
-			// Init and one-shot containers legitimately end up "exited" or
-			// "created" in a healthy app; only crashed or still-starting
-			// containers count against it.
-			if cs, _ := c["state"].(string); cs == "crashed" || cs == "starting" {
-				name, _ := c["service_name"].(string)
-				if name == "" {
-					name = "container"
-				}
-				notRunning = append(notRunning, fmt.Sprintf("%s (%s)", name, cs))
+			cs, _ := c["state"].(string)
+			if cs != "crashed" && cs != "starting" {
+				continue
+			}
+			name, _ := c["service_name"].(string)
+			if name == "" {
+				name = "container"
+			}
+			entry := fmt.Sprintf("%s (%s)", name, cs)
+			if cs == "crashed" {
+				h.crashed = append(h.crashed, entry)
+			} else {
+				h.starting = append(h.starting, entry)
 			}
 		}
 	}
-	if state == "" {
-		return "", nil, version, fmt.Errorf("app %s reported no state", appName)
+	if h.state == "" {
+		return h, fmt.Errorf("app %s reported no state", appName)
 	}
-	return state, notRunning, version, nil
+	return h, nil
 }
 
 // updateTaskFromStatus updates task state based on custom status endpoint
