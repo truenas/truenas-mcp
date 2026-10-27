@@ -90,7 +90,7 @@ TrueNAS MCP provides comprehensive management capabilities through natural langu
 
 ## Building
 
-**Requirements:** Go 1.27.3 or later (the `go` directive in `go.mod`), and `make` for the targets below. With Go 1.21 or later and the default `GOTOOLCHAIN=auto`, the Go command downloads the required toolchain automatically; with `GOTOOLCHAIN=local`, an older Go refuses to build.
+**Requirements:** Go 1.27.3 or later (the `go` directive in `go.mod`), and `make` for the targets below. With the default `GOTOOLCHAIN=auto`, a Go command that supports toolchain selection downloads the required toolchain automatically; with `GOTOOLCHAIN=local`, an older Go refuses to build.
 
 ```bash
 git clone https://github.com/truenas/truenas-mcp.git
@@ -390,8 +390,10 @@ unless `NO_PROXY` lists them.
 
 To ignore inherited proxy variables, pass `--proxy none` (or set
 `TRUENAS_PROXY=none`). An empty `--proxy` / `TRUENAS_PROXY` means "not set",
-so the environment variables still apply, and `NO_PROXY` is the only way to
-bypass an inherited `HTTPS_PROXY` / `ALL_PROXY` for the TrueNAS host.
+so the environment variables still apply. To bypass an inherited
+`HTTPS_PROXY` / `ALL_PROXY`, use `--proxy none` (or `TRUENAS_PROXY=none`), which
+ignores all proxy variables, or list the TrueNAS host in `NO_PROXY`, which
+exempts only that host.
 
 A proxy setting is only checked when it applies to the TrueNAS host: an
 unusable inherited value (say an `https://` proxy) does not matter if
@@ -477,10 +479,13 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 
 - A secret stored under a name that does not look sensitive (for example a free-form `description` or `notes` field) is not recognised.
 - Command lines: `-p` of programs other than `sshpass` and the MySQL/MariaDB clients is left alone (it often means port or parents), and so is Samba's `net -U user%password`. A password passed as a plain positional argument (`["admin", "secret"]`, `tool user secret`) is not detected.
-- A separator (`|`, `;`, `&`) or a quote inside another quoted argument can end the command early, so a later password option on the same line (`mysql -pA -e 'x|y' -pB`) stays visible. A quote in the middle of an unquoted option value (`--password ab"c d"`) ends that value.
+- Command-line scanning is heuristic: where a command ends on a line is worked out from separators (`|`, `;`, `&`) and quotes, so unusual quoting (a separator inside a quoted argument, an unbalanced quote) can leave a later password option visible or redact the rest of the line. A quote in the middle of an unquoted option value (`--password ab"c d"`) ends that value.
 - Text right after a closing quote of a quoted value (`password='x' y`, `'token_ttl': '5'X`) is not part of the value and stays visible.
 - URLs whose password contains a raw `/`, `?`, `#`, quote or whitespace, or whose user name contains `@`, are only partly redacted. The host name stays visible by design.
 - Plain multi-line YAML scalars are not handled; single-line `key: value` pairs, block scalars (`|`, `>`) under a sensitive key and Kubernetes-style `name`/`value` entries are.
+- In JSON results, keys such as `password_file`, `token_file` or `secret_path` stay sensitive and their values are redacted, although the path itself is not a secret. Only command-line options of that shape (`--password-file /path`) are left visible.
+- Keys ending in `private` or `priv` (for example `wg_private`, `tls_private`) are redacted unless the value is a boolean. A few names that denote a flag or a network are exempt (`is_private`, `network_private`, `net_private`, ...), but another `*_private` key that holds a non-secret value, such as a network name, is redacted too.
+- Keys that name an algorithm (`*_algorithm`, `*_alg`, `*_algo`, for example `jwt_secret_algorithm`) show their value only when it looks like an identifier (letters, digits and `_ . + / -`, up to 40 characters, such as `HS256`). Any other value, including a longer string, text with spaces, an object or an array, is redacted.
 - Redaction can also hide more than the secret: a bare `key` field is always redacted (including non-secret alert keys), `password: changed` in prose loses the word after the colon, and a sensitive-looking option in prose (`use --password to ...`) loses the next word. Objects under a sensitive name that have no `id` or `name` (for example directory service `credential` objects) are replaced as a whole.
 - Only tool results, tool errors and logs are covered. Tool arguments the model sends are not redacted before they go to TrueNAS (they are redacted in logs).
 
@@ -687,7 +692,8 @@ make clean
 ```
 
 The "Build and Package" workflow runs the linters, the tests, `govulncheck`
-and builds for macOS (Apple Silicon), Linux and Windows on each pull request;
-the release workflow publishes those three platforms. A test in
+and builds for macOS (Apple Silicon), Linux and Windows on every pull request
+and on every push to `main`. The release workflow, which runs for version
+tags, runs the linters and tests again and publishes those three platforms. A test in
 `cmd/truenas-mcp` checks that the flags documented in this README match the
 flags the binary registers, and that the Go version above matches `go.mod`.

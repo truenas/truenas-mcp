@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // repoFile reads a file relative to the repository root. Tests in this
@@ -82,45 +84,102 @@ func TestREADMEFlagsMatchBinary(t *testing.T) {
 	}
 }
 
-// TestREADMEGoVersionMatchesGoMod fails when the Go version the README asks
-// for differs from the go directive in go.mod.
-func TestREADMEGoVersionMatchesGoMod(t *testing.T) {
-	m := regexp.MustCompile(`(?m)^go (\d+\.\d+(?:\.\d+)?)\s*$`).FindStringSubmatch(repoFile(t, "go.mod"))
-	if m == nil {
-		t.Fatal("go.mod has no go directive")
-	}
-	want := "Go " + m[1] + " or later"
-	if !strings.Contains(repoFile(t, "README.md"), want) {
-		t.Errorf("README.md does not say %q; go.mod requires go %s", want, m[1])
-	}
-}
-
-// TestMarkdownRelativeLinksExist checks that relative links in the README and
-// docs/ point to files that exist.
-func TestMarkdownRelativeLinksExist(t *testing.T) {
-	docs := []string{"README.md"}
+// markdownFiles lists README.md and docs/*.md, relative to the repository root.
+func markdownFiles(t *testing.T) []string {
+	t.Helper()
+	files := []string{"README.md"}
 	entries, err := os.ReadDir(filepath.Join("..", "..", "docs"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".md") {
-			docs = append(docs, "docs/"+e.Name())
+			files = append(files, "docs/"+e.Name())
 		}
 	}
+	return files
+}
+
+// TestGoVersionMentionsMatchGoMod fails when any "Go X.Y[.Z]" mentioned in
+// the README or docs differs from the go directive in go.mod, and when the
+// README does not state the requirement at all.
+func TestGoVersionMentionsMatchGoMod(t *testing.T) {
+	m := regexp.MustCompile(`(?m)^go (\d+\.\d+(?:\.\d+)?)\s*$`).FindStringSubmatch(repoFile(t, "go.mod"))
+	if m == nil {
+		t.Fatal("go.mod has no go directive")
+	}
+	want := m[1]
+	mention := regexp.MustCompile(`\bGo (\d+\.\d+(?:\.\d+)?)`)
+	for _, doc := range markdownFiles(t) {
+		for _, found := range mention.FindAllStringSubmatch(repoFile(t, doc), -1) {
+			if found[1] != want {
+				t.Errorf("%s mentions %q; go.mod requires go %s", doc, found[0], want)
+			}
+		}
+	}
+	if !strings.Contains(repoFile(t, "README.md"), "Go "+want+" or later") {
+		t.Errorf("README.md does not say %q", "Go "+want+" or later")
+	}
+}
+
+// headingAnchors returns the GitHub anchors of the headings in a markdown
+// document: lower case, punctuation removed, spaces replaced by hyphens, and
+// -1, -2, ... appended to repeated headings.
+func headingAnchors(md string) map[string]bool {
+	anchors := map[string]bool{}
+	seen := map[string]int{}
+	for _, line := range strings.Split(stripFences(md), "\n") {
+		trimmed := strings.TrimLeft(line, "#")
+		if len(trimmed) == len(line) || len(line)-len(trimmed) > 6 || !strings.HasPrefix(trimmed, " ") {
+			continue
+		}
+		var b strings.Builder
+		for _, r := range strings.ToLower(strings.TrimSpace(trimmed)) {
+			switch {
+			case r == ' ':
+				b.WriteByte('-')
+			case r == '-' || r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r):
+				b.WriteRune(r)
+			}
+		}
+		slug := b.String()
+		if n := seen[slug]; n > 0 {
+			anchors[slug+"-"+strconv.Itoa(n)] = true
+		} else {
+			anchors[slug] = true
+		}
+		seen[slug]++
+	}
+	return anchors
+}
+
+// TestMarkdownLinksResolve checks that relative links in the README and docs/
+// point to files that exist, and that #anchors point to headings.
+func TestMarkdownLinksResolve(t *testing.T) {
 	link := regexp.MustCompile(`\]\(([^)\s]+)\)`)
-	for _, doc := range docs {
+	for _, doc := range markdownFiles(t) {
 		dir := filepath.Dir(filepath.FromSlash(doc))
 		for _, m := range link.FindAllStringSubmatch(stripFences(repoFile(t, doc)), -1) {
-			target := m[1]
-			if strings.Contains(target, "://") || strings.HasPrefix(target, "#") || strings.HasPrefix(target, "mailto:") {
+			target, anchor := m[1], ""
+			if strings.Contains(target, "://") || strings.HasPrefix(target, "mailto:") {
 				continue
 			}
 			if i := strings.IndexByte(target, '#'); i >= 0 {
-				target = target[:i]
+				target, anchor = target[:i], target[i+1:]
 			}
-			if _, err := os.Stat(filepath.Join("..", "..", dir, filepath.FromSlash(target))); err != nil {
-				t.Errorf("%s links to %q, which does not exist", doc, m[1])
+			file := doc
+			if target != "" {
+				file = filepath.ToSlash(filepath.Join(dir, filepath.FromSlash(target)))
+				if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(file))); err != nil {
+					t.Errorf("%s links to %q, which does not exist", doc, m[1])
+					continue
+				}
+			}
+			if anchor == "" || !strings.HasSuffix(file, ".md") {
+				continue
+			}
+			if !headingAnchors(repoFile(t, file))[anchor] {
+				t.Errorf("%s links to %q, but %s has no heading with the anchor #%s", doc, m[1], file, anchor)
 			}
 		}
 	}
