@@ -699,6 +699,16 @@ func TestTextLongLinesLinear(t *testing.T) {
 		{"sensitive long options", line("cmd", " --password x"),
 			func(out string) bool { return !strings.Contains(out, "--password x") }},
 		{"repeated sshpass", line("", "sshpass -e "), nil},
+		{"repeated sshpass with quoted words", line("", "sshpass 'a' "), nil},
+		{"repeated sshpass, quote idiom, separator", line("", `sshpass -f 'it'\''s' x; `), nil},
+		{"repeated sshpass, quote idiom", line("", `sshpass -f 'it'\''s' x `), nil},
+		{"one sshpass, escaped separators", line("sshpass", ` -f a\\|b -p x`),
+			func(out string) bool { return !strings.Contains(out, "-p x") }},
+		{"repeated sshpass, attached escaped quotes", line("", `sshpass -p\"a b\" x `),
+			func(out string) bool { return !strings.Contains(out, "a b") }},
+		{"repeated sshpass, unclosed escaped quote", line("", `sshpass -p\"a b x `),
+			func(out string) bool { return strings.HasPrefix(out, "sshpass -p"+Marker) }},
+		{"repeated sshpass, line continuations", line("", "sshpass\\\n"), nil},
 		{"repeated mysql without -p", line("", "mysql -u root "), nil},
 		{"repeated mysql -p", line("", "mysql -u root -px "),
 			func(out string) bool { return !strings.Contains(out, "-px") }},
@@ -774,6 +784,38 @@ func TestTextLongLinesLinear(t *testing.T) {
 			func(out string) bool { return out == "cmd --password "+Marker }},
 		{"unterminated quoted option value", line("cmd --password \"", "a\\\" "),
 			func(out string) bool { return out == "cmd --password \""+Marker }},
+		{"repeated sshpass clusters", line("", "sshpass -vp x ssh h; "),
+			func(out string) bool { return !strings.Contains(out, "-vp x") }},
+		{"one sshpass, many options", line("sshpass", " -v -d 3 -f f"), nil},
+		{"one sshpass, many -p", line("sshpass", " -p x"),
+			func(out string) bool { return !strings.Contains(out, "-p x") }},
+		{"one sshpass, many quoted -p", line("sshpass", ` -p'a b'`),
+			func(out string) bool { return !strings.Contains(out, "a b") }},
+		{"repeated sshpass with open quote", line("", "sshpass -p'a "),
+			func(out string) bool { return strings.HasPrefix(out, "sshpass -p'"+Marker) }},
+		{"repeated sshpass with escaped quotes", line("", `sshpass -vp \"a b\" ssh h; `),
+			func(out string) bool { return !strings.Contains(out, "a b") }},
+		{"escaped separators then -p", line("mysql", ` -e 'a|b' \\| \\; '\\''x y'\\'' -px`),
+			func(out string) bool { return !strings.Contains(out, "-px") }},
+		{"repeated escaped separators", line("", `mysql -e 'a|b' \\| -px `),
+			func(out string) bool { return !strings.Contains(out, "-px") }},
+		{"one mysql, many escaped separators", line("mysql", ` \\| \\; \\&`), nil},
+		{"carriage returns before options", line("curl", "\r -s\r -u a:x"),
+			func(out string) bool { return !strings.Contains(out, "a:x") }},
+		{"repeated curl with carriage returns", line("", "curl\r -u\r a:x\r "),
+			func(out string) bool { return !strings.Contains(out, "a:x") }},
+		{"one curl, many carriage returns", line("curl", "\r\r\r\r -s"), nil},
+		{"option words with carriage returns", line("curl", " -a\r"), nil},
+		{"quoted values after user:", line("", "curl -u a:'x y' "),
+			func(out string) bool { return !strings.Contains(out, "x y") }},
+		{"idiom values after user:", line("", `sh -c 'curl -u a:'\''x y'\'' ' `),
+			func(out string) bool { return !strings.Contains(out, "x y") }},
+		{"repeated user: and open quote", line("", "curl -u a:' "),
+			func(out string) bool { return strings.HasPrefix(out, "curl -u a:'"+Marker) }},
+		{"one curl, many user: quotes", line("curl", " -u a:'x"),
+			func(out string) bool { return !strings.Contains(out, "a:'x") }},
+		{"one curl, many bare carriage returns", line("curl", "\r"), nil},
+		{"one curl, many carriage returns before a dash", line("curl -s", "\r"), nil},
 	}
 	for _, c := range cases {
 		start := time.Now()
@@ -788,5 +830,44 @@ func TestTextLongLinesLinear(t *testing.T) {
 		} else if !c.want(out) {
 			t.Errorf("%s: unexpected output (first 200 bytes): %q", c.name, out[:200])
 		}
+	}
+}
+
+// TestTextLargeBlob: a 5 MB text made of the shapes that are hard to scan
+// (quotes, escaped quotes, separators, carriage returns, sshpass clusters) is
+// redacted in a time that does not depend on how they nest, and a second
+// pass changes nothing.
+func TestTextLargeBlob(t *testing.T) {
+	size, budget := 5<<20, 30*time.Second
+	if raceEnabled {
+		size, budget = 1<<20, 60*time.Second
+	}
+	units := []string{
+		`sshpass -vp fake-gap-pw ssh -p 22 h; `,
+		`sh -c 'sshpass -p'\''fake gap pw'\'' ssh h' `,
+		`mysql -e 'a|b' \\| -u root -pfake-gap-pw db | `,
+		`{"cmd":"mysql -e \"a'|b\" \\; -pfake-gap-pw"} `,
+		"curl\r -s\r -u adm:fake-gap-pw https://h/ \r\n",
+		`sh -c 'curl -u adm:'\''fake gap pw'\'' https://h/' `,
+		`mysql -e \" ; ssh -p2222 h `,
+		`ipmitool -H h -P fake-gap-pw power on; `,
+		`smbclient //h/s -U adm%fake-gap-pw `,
+		`echo 'it''s' "a;b" \"c\" x=1 `,
+	}
+	var b strings.Builder
+	for i := 0; b.Len() < size; i++ {
+		b.WriteString(units[i%len(units)])
+	}
+	in := b.String()
+	start := time.Now()
+	out := Text(in)
+	if d := time.Since(start); d > budget {
+		t.Errorf("Text on a %d-byte blob took %v (budget %v)", len(in), d, budget)
+	}
+	if strings.Contains(out, "fake-gap-pw") || strings.Contains(out, "fake gap pw") {
+		t.Error("the blob still contains a secret")
+	}
+	if Text(out) != out {
+		t.Error("Text is not idempotent on the blob")
 	}
 }

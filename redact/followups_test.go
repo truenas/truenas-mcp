@@ -566,7 +566,7 @@ func TestTextQuotedSeparatorsNoOverRedaction(t *testing.T) {
 
 // TestTextQuotedSeparatorsFollowUps pins the handling of escaped quotes,
 // line continuations, separators glued to a secret, redirections, bare
-// carriage returns and the '\” idiom.
+// carriage returns and the quote idiom.
 func TestTextQuotedSeparatorsFollowUps(t *testing.T) {
 	checkText(t, []struct{ in, want string }{
 		// Escaped quotes inside an outer double-quoted string, and in raw JSON text.

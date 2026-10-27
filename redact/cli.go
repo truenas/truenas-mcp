@@ -20,11 +20,11 @@ type cliProgram struct {
 	// bob%S3CR3T); the user name stays visible and an argument without sep
 	// holds no secret.
 	sep byte
-	// valueOpts are other options that take a separate (non-secret) value.
-	valueOpts map[string]bool
-	// stopAtArg: the first non-option argument is a command the program
-	// runs (sshpass), whose options are not the program's own.
-	stopAtArg bool
+	// cluster: the options are short options that may be combined
+	// (sshpass -vp S3CR3T), and the first non-option argument is a command
+	// the program runs, whose options are not the program's own (sshpass).
+	// See sshpassOption.
+	cluster bool
 }
 
 var (
@@ -39,11 +39,8 @@ var (
 	}
 	// cliPrograms are the programs handled in argv arrays, by base name.
 	cliPrograms = map[string]*cliProgram{
-		"sshpass": {
-			next: map[string]bool{"-p": true}, attached: []string{"-p"},
-			valueOpts: map[string]bool{"-f": true, "-d": true, "-P": true}, stopAtArg: true,
-		},
-		"mysql": mysqlClient, "mysqldump": mysqlClient, "mysqladmin": mysqlClient,
+		"sshpass": {cluster: true},
+		"mysql":   mysqlClient, "mysqldump": mysqlClient, "mysqladmin": mysqlClient,
 		"mysqlimport": mysqlClient, "mysqlcheck": mysqlClient, "mysqlshow": mysqlClient,
 		"mariadb": mysqlClient, "mariadb-dump": mysqlClient, "mariadb-admin": mysqlClient,
 		"smbclient": sambaClient, "rpcclient": sambaClient, "smbcacls": sambaClient,
@@ -95,7 +92,7 @@ func looksLikeFlag(arg string) bool {
 func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 
 // secretArg returns arg with its secret redacted: all of it, or the part
-// after p.sep. Quotes around the value are kept, as is the '\” idiom
+// after p.sep. Quotes around the value are kept, as is the quote idiom
 // around it (see quoteIdiom).
 func secretArg(arg string, sep byte, meta metaKind) string {
 	if arg == "" {
@@ -111,16 +108,24 @@ func secretArg(arg string, sep byte, meta metaKind) string {
 		if i < 0 {
 			return arg // a user name alone
 		}
-		rest, closing := arg[i+1:], ""
-		if idiom && strings.HasSuffix(rest, quoteIdiom) {
+		rest, opening, closing := arg[i+1:], "", ""
+		switch {
+		case idiom && strings.HasSuffix(rest, quoteIdiom):
 			rest, closing = rest[:len(rest)-len(quoteIdiom)], quoteIdiom
-		} else if q != "" && strings.HasSuffix(rest, q) {
+		case q != "" && strings.HasSuffix(rest, q):
 			rest, closing = rest[:len(rest)-1], q
+		default:
+			// bob:'S3CR3T', or bob:'\''S3CR3T'\'' ('\'' is how sh -c '...'
+			// writes a quote), or an escaped quote: the same quote on both ends
+			if t := quoteToken(rest); t != "" && len(rest) >= 2*len(t) && strings.HasSuffix(rest, t) {
+				opening, closing = t, t
+				rest = rest[len(t) : len(rest)-len(t)]
+			}
 		}
 		if !isRedactable(rest) {
 			return arg
 		}
-		return arg[:i+1] + Marker + closing
+		return arg[:i+1] + opening + Marker + closing
 	}
 	if idiom && len(arg) >= 2*len(quoteIdiom) && strings.HasSuffix(arg, quoteIdiom) {
 		if inner := arg[len(quoteIdiom) : len(arg)-len(quoteIdiom)]; !isRedactable(inner) || meta.visible(inner) {
@@ -141,6 +146,21 @@ func secretArg(arg string, sep byte, meta metaKind) string {
 		return arg
 	}
 	return Marker
+}
+
+// quoteToken returns the quote that s starts with: the quote idiom, a quote,
+// or an escaped quote (backslashes and a double quote). Otherwise it is "".
+func quoteToken(s string) string {
+	if strings.HasPrefix(s, quoteIdiom) {
+		return quoteIdiom
+	}
+	if s != "" && (s[0] == '"' || s[0] == '\'') {
+		return s[:1]
+	}
+	if n, q := escapedQuoteRun(s, 0); n > 0 {
+		return s[:n] + string(q)
+	}
+	return ""
 }
 
 // walkArray redacts the elements of a non-sensitive array. An array of
@@ -164,14 +184,21 @@ func walkArray(t []interface{}, c ctx) (interface{}, bool) {
 				secretNext = false
 			case prog != nil && skipNext:
 				skipNext = false
+			case prog != nil && prog.cluster:
+				switch kind, off := sshpassOption(s); kind {
+				case optSecretNext:
+					secretNext = true
+				case optValueNext:
+					skipNext = true
+				case optSecretAttached:
+					red = s[:off] + secretArg(s[off:], 0, metaNone)
+				case optCommand:
+					prog = nil
+				}
 			case prog != nil && prog.next[s]:
 				secretNext = true
-			case prog != nil && prog.valueOpts[s]:
-				skipNext = true
 			case prog != nil && attachedSecret(prog, s) != s:
 				red = attachedSecret(prog, s)
-			case prog != nil && prog.stopAtArg && !strings.HasPrefix(s, "-"):
-				prog = nil
 			case i > 0 && sensitiveOption(t[i-1], s):
 				red = Marker
 			}
@@ -186,6 +213,53 @@ func walkArray(t []interface{}, c ctx) (interface{}, bool) {
 		changed = changed || ch
 	}
 	return out, changed
+}
+
+// sshpass takes the options -e, -v, -h and -V without a value, -f, -d and -P
+// with one, and -p with the password. Short options may be combined
+// (-vp S3CR3T, -ep S3CR3T) and a value may be attached (-pS3CR3T, -vf/file).
+// The first argument that is not an option is the command it runs, and the
+// options after it are that command's own.
+const (
+	sshpassFlags  = "evhV"
+	sshpassValues = "fdP"
+)
+
+type optKind int
+
+const (
+	optCommand        optKind = iota // not an option: the command sshpass runs
+	optFlags                         // options without a value
+	optValueNext                     // an option whose (non-secret) value is the next argument
+	optValueAttached                 // an option with its (non-secret) value attached
+	optSecretNext                    // -p, the password is the next argument
+	optSecretAttached                // -p with the password attached, at arg[off:]
+)
+
+// sshpassOption classifies an argument of sshpass.
+func sshpassOption(arg string) (kind optKind, off int) {
+	if len(arg) < 2 || arg[0] != '-' || arg[1] == '-' {
+		return optCommand, 0 // "-" and "--" end the options, too
+	}
+	for k := 1; k < len(arg); k++ {
+		switch c := arg[k]; {
+		case c == 'p':
+			if k+1 < len(arg) {
+				return optSecretAttached, k + 1
+			}
+			return optSecretNext, 0
+		case strings.IndexByte(sshpassValues, c) >= 0:
+			if k+1 < len(arg) {
+				return optValueAttached, 0
+			}
+			return optValueNext, 0
+		case strings.IndexByte(sshpassFlags, c) >= 0 || isLetter(c):
+			// a flag, or an option sshpass does not have: no value
+		default:
+			return optFlags, 0
+		}
+	}
+	return optFlags, 0
 }
 
 // attachedSecret redacts arg if it is one of p's options with the secret
@@ -218,31 +292,26 @@ var (
 	// "--password=S3CR3T" is a key=value pair and is handled by
 	// redactBarePairs.
 	longOption = regexp.MustCompile(`--([A-Za-z][A-Za-z0-9_-]{0,63})[ \t]+`)
-	// textPrograms match a program name. For sshpass the match extends to
-	// the end of its password option and the secret starts at the end of the
-	// match. For the others (opt is set) the match is the program name and
-	// the white space after it, and every match of opt on the same command
-	// is a password option: the secret starts at the end of the match, less
-	// back bytes (mysql -pA -pB, curl -u a:A --proxy-user b:B). The command
-	// ends at the first '|', ';', '&' or newline that is not inside a quoted
-	// string (see commandEnd).
+	// textPrograms match a program name and the white space after it, and
+	// every match of opt on the same command is a password option: the
+	// secret starts at the end of the match, less back bytes (mysql -pA
+	// -pB, curl -u a:A --proxy-user b:B). The command ends at the first '|',
+	// ';', '&' or newline that is not inside a quoted string (see
+	// commandEnd). sshpass is read by redactSshpass.
 	textPrograms = []textProgram{
-		// sshpass -p S3CR3T / -pS3CR3T, after any of its other options. Later
-		// options belong to the command sshpass runs.
-		{names: []string{"sshpass"}, re: regexp.MustCompile(`\bsshpass(?:(?:[ \t]|\\\r?\n)+(?:-[ev]|-[fdP][ \t]*(?:"(?:[^"\\\n]|\\[^\n])*"|'[^'\n]*'|[^\s"']+)))*(?:[ \t]|\\\r?\n)+-p[ \t]*`)},
 		// The attached password of the MySQL and MariaDB clients
 		// (mysql -pS3CR3T db). A separate "-p" prompts for the password and
 		// is left alone, as is "-p" for other programs, where it often means
 		// something else (port, parents).
 		programOption([]string{"mysql", "mariadb"},
-			`mysql(?:dump|admin|import|check|show)?|mariadb(?:-dump|-admin)?`, `[ \t\n]-p[^\s]`, 1, 0),
+			`mysql(?:dump|admin|import|check|show)?|mariadb(?:-dump|-admin)?`, `[ \t\r\n]-p[^\s]`, 1, 0),
 		// smbclient -U user%S3CR3T (and the other Samba clients).
 		programOption([]string{"smb", "rpcclient"},
-			`smbclient|rpcclient|smbcacls|smbcquotas|smbget|smbtree`, `[ \t\n](?:-U[ \t]*|--user(?:=|[ \t]+))`, 0, '%'),
+			`smbclient|rpcclient|smbcacls|smbcquotas|smbget|smbtree`, `[ \t\r\n](?:-U[ \t\r]*|--user(?:=|[ \t\r]+))`, 0, '%'),
 		// curl -u user:S3CR3T, --user, and the proxy forms -U/--proxy-user.
-		programOption([]string{"curl"}, `curl`, `[ \t\n](?:-[uU][ \t]*|--(?:proxy-)?user(?:=|[ \t]+))`, 0, ':'),
+		programOption([]string{"curl"}, `curl`, `[ \t\r\n](?:-[uU][ \t\r]*|--(?:proxy-)?user(?:=|[ \t\r]+))`, 0, ':'),
 		// ipmitool -P S3CR3T.
-		programOption([]string{"ipmitool"}, `ipmitool`, `[ \t\n]-P[ \t]*`, 0, 0),
+		programOption([]string{"ipmitool"}, `ipmitool`, `[ \t\r\n]-P[ \t\r]*`, 0, 0),
 	}
 )
 
@@ -258,7 +327,7 @@ type textProgram struct {
 func programOption(names []string, progs, opt string, back int, sep byte) textProgram {
 	return textProgram{
 		names: names,
-		re:    regexp.MustCompile(`\b(?:` + progs + `)[ \t]`),
+		re:    regexp.MustCompile(`\b(?:` + progs + `)[ \t\r]`),
 		opt:   regexp.MustCompile(opt),
 		back:  back, sep: sep,
 	}
@@ -331,6 +400,14 @@ func separatorAt(s string, i int) bool {
 	return false
 }
 
+// escapedSeparator reports whether s[i:] is a doubled backslash and a
+// separator character (\\|, \\;, \\&): the text may be inside another string
+// (JSON text, sh -c "..."), where it is an escaped separator, not one. See
+// commandEnd.
+func escapedSeparator(s string, i int) bool {
+	return i+2 < len(s) && s[i] == '\\' && s[i+1] == '\\' && (s[i+2] == '|' || s[i+2] == ';' || s[i+2] == '&')
+}
+
 // wordRunEnd returns the end of the run of unquoted characters at s[i]: up
 // to white space, a quote, or a line continuation, with backslash escapes,
 // and also up to an unquoted command separator if stopAtSep.
@@ -344,7 +421,9 @@ func wordRunEnd(s string, i int, stopAtSep bool) int {
 			if lineContinuation(s, j) > 0 {
 				return j
 			}
-			if j+1 < len(s) && !isLineEnd(s[j+1]) {
+			if stopAtSep && escapedSeparator(s, j) {
+				j += 2
+			} else if j+1 < len(s) && !isLineEnd(s[j+1]) {
 				j++
 			}
 		default:
@@ -369,45 +448,133 @@ func shellWordEnd(s string, i int) int {
 
 // quoteIdiom is how a single quote is written inside a single-quoted
 // string: the string is closed, a quote is added and the string is opened
-// again, as in sh -c 'mysql -p'\”S 3CR3T'\” db'.
+// again. Inside sh -c '...', the password in mysql -p'S 3CR3T' is written
+//
+//	sh -c 'mysql -p'\''S 3CR3T'\'' db'
 const quoteIdiom = `'\''`
+
+// escapedQuoteRun returns the number of backslashes and the quote at s[i:]
+// if it starts with an odd number of backslashes followed by a quote: an
+// escaped quote, as in \" or, one level of escaping deeper, \\\".
+func escapedQuoteRun(s string, i int) (n int, q byte) {
+	j := i
+	for j < len(s) && s[j] == '\\' {
+		j++
+	}
+	if n = j - i; n%2 == 1 && j < len(s) && (s[j] == '"' || s[j] == '\'') {
+		return n, s[j]
+	}
+	return 0, 0
+}
+
+// escapedRunEnd returns the end of the string that starts at the escaped
+// quote at s[i:], which is n backslashes and the quote q: just after the next
+// run of exactly n backslashes and q. A string that is not closed runs to
+// the end of the line, and closed is false.
+func escapedRunEnd(s string, i, n int, q byte) (end int, closed bool) {
+	k := i + n + 1
+	for k < len(s) && !isLineEnd(s[k]) {
+		if s[k] != '\\' {
+			k++
+			continue
+		}
+		j := k
+		for j < len(s) && s[j] == '\\' {
+			j++
+		}
+		if j < len(s) && s[j] == q && j-k == n {
+			return j + 1, true
+		}
+		k = j
+	}
+	return k, false
+}
 
 // programWordEnd returns the end of the value of a program's password
 // option at s[i]. It is like shellWordEnd, except that an unquoted value
 // ends at an unquoted command separator (mysql -pA;mysql -pB), and that a
-// value that starts with a quote written inside another quoted string
-// ('\”S 3CR3T'\” or \"S 3CR3T\") runs to the matching quote.
-func programWordEnd(s string, i int) int {
-	switch {
-	case strings.HasPrefix(s[i:], quoteIdiom):
-		k := i + len(quoteIdiom)
-		for k < len(s) && !isLineEnd(s[k]) {
-			if strings.HasPrefix(s[k:], quoteIdiom) {
-				return k + len(quoteIdiom)
-			}
+// value that starts with a quote written inside another quoted string (the
+// quote idiom or an escaped quote, \"S 3CR3T\") runs to the matching quote.
+// If sep is not zero, a value like bob:'S 3CR3T' that has a quote right
+// after the user name and sep is read to the end of that quoted string.
+func programWordEnd(s string, i int, sep byte) int {
+	end := quotedPartEnd(s, i, true)
+	if end > i {
+		return end
+	}
+	end = wordRunEnd(s, i, true)
+	if sep != 0 {
+		// the user name, then sep, then a quoted string
+		// the word is user<sep>, and then a quoted string
+		k := i
+		for k < end && s[k] != sep && s[k] != '\\' && s[k] != '\'' && s[k] != '"' {
 			k++
 		}
-		return k
-	case strings.HasPrefix(s[i:], `\"`):
-		return escapedQuoteEnd(s, i, '"')
-	case i < len(s) && (s[i] == '"' || s[i] == '\''):
-		return quotedEnd(s, i)
+		if k < end && s[k] == sep {
+			if e := quotedPartEnd(s, k+1, false); e > k+1 {
+				return e
+			}
+		}
 	}
-	return wordRunEnd(s, i, true)
+	return end
+}
+
+// quotedPartEnd returns the end of the quoted string at s[i:], or i if there
+// is none: a quoted string, the quote idiom, or a string that starts with an
+// escaped quote. An escaped quote that is not closed on the line is a quoted
+// string only if lone is set.
+func quotedPartEnd(s string, i int, lone bool) int {
+	switch {
+	case i >= len(s):
+	case strings.HasPrefix(s[i:], quoteIdiom):
+		return quoteIdiomEnd(s, i)
+	case s[i] == '"' || s[i] == '\'':
+		return quotedEnd(s, i)
+	case s[i] == '\\':
+		if n, q := escapedQuoteRun(s, i); n > 0 {
+			if end, closed := escapedRunEnd(s, i, n, q); closed || lone {
+				return end
+			}
+		}
+	}
+	return i
+}
+
+// quoteIdiomEnd returns the end of the string that starts with the quote
+// idiom at s[i:], just after the next one, or the end of the line.
+func quoteIdiomEnd(s string, i int) int {
+	k := i + len(quoteIdiom)
+	for k < len(s) && !isLineEnd(s[k]) {
+		if strings.HasPrefix(s[k:], quoteIdiom) {
+			return k + len(quoteIdiom)
+		}
+		k++
+	}
+	return k
 }
 
 // commandEnd returns the end of the command that continues at s[i]: the
 // first '|', ';', '&' (not in a redirection) or line end that is not inside
 // a quoted string and not escaped by a backslash. A backslash-newline
-// continues the command on the next line. An unbalanced quote runs to the
-// end of the line, so the rest of that line belongs to the command. A
-// quote escaped by a backslash starts a string that runs to the next
-// escaped quote, as in sh -c "mysql -e \"a;b\" -pX", unless it follows a
-// closing quote of the same kind ('\”). It reads each byte once.
+// continues the command on the next line, and so does a bare carriage
+// return before an option. An unbalanced quote runs to the end of the line,
+// so the rest of that line belongs to the command. A quote escaped by a
+// backslash starts a string that runs to the next escaped quote, as in sh -c
+// "mysql -e \"a;b\" -pX", unless it follows a closing quote of the same
+// kind (the quote idiom). A doubled backslash before a separator (\\|, \\;)
+// is read as an escaped separator, as the text may be inside another string
+// (JSON text, sh -c "..."), where it is one; in a plain shell it is a
+// backslash and a separator, which is rare. It reads each byte once.
 func commandEnd(s string, i int) int {
 	for i < len(s) {
 		c := s[i]
 		switch {
+		case c == '\r':
+			if n := crContinues(s, i); n > 0 {
+				i = n
+				continue
+			}
+			return i
 		case isLineEnd(c) || separatorAt(s, i):
 			return i
 		case c == '"' || c == '\'':
@@ -423,6 +590,10 @@ func commandEnd(s string, i int) int {
 					i = escapedQuoteEnd(s, i, q)
 					continue
 				}
+				if escapedSeparator(s, i) {
+					i += 3
+					continue
+				}
 				i++
 			}
 		}
@@ -431,11 +602,44 @@ func commandEnd(s string, i int) int {
 	return len(s)
 }
 
+// crContinues reports whether the bare carriage return at s[i] is inside a
+// command: it is not followed by a line feed, and it is between an option
+// and its value or before the next option ("curl \r -u a:S3CR3T", "curl -u
+// \r a:S3CR3T"). Any other carriage return starts a new line of output. It
+// returns where the command continues (after the white space that follows),
+// or 0 if the carriage return ends it.
+func crContinues(s string, i int) int {
+	if i+1 < len(s) && s[i+1] == '\n' {
+		return 0
+	}
+	next := skipBlanks(s, i)
+	if next < len(s) && s[next] == '-' {
+		return next
+	}
+	// the word before it is an option that has no value attached
+	j := i
+	for j > 0 && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\r') {
+		j--
+	}
+	k := j
+	for k > 0 && s[k-1] != ' ' && s[k-1] != '\t' && !isLineEnd(s[k-1]) {
+		k--
+	}
+	w := s[k:j]
+	if len(w) == 2 && w[0] == '-' || strings.HasPrefix(w, "--") && !strings.Contains(w, "=") {
+		return next
+	}
+	return 0
+}
+
 // redactOptions redacts the values of sensitive long options (--password
 // S3CR3T) and the password options of the programs in textPrograms.
 func redactOptions(s string) string {
 	if strings.Contains(s, "--") {
 		s = redactLongOptions(s)
+	}
+	if strings.Contains(s, "sshpass") {
+		s = redactSshpass(s)
 	}
 	for _, p := range textPrograms {
 		for _, n := range p.names {
@@ -486,6 +690,121 @@ func redactLongOptions(s string) string {
 	return b.String()
 }
 
+// sshpassStart matches sshpass and the white space after it.
+var sshpassStart = regexp.MustCompile(`\bsshpass(?:[ \t\r]|\\\r?\n)`)
+
+// skipBlanks returns the index of the first character at or after i that is
+// not white space, a line continuation or a bare carriage return.
+func skipBlanks(s string, i int) int {
+	for i < len(s) {
+		switch {
+		case s[i] == ' ' || s[i] == '\t' || s[i] == '\r' && !(i+1 < len(s) && s[i+1] == '\n'):
+			i++
+		case lineContinuation(s, i) > 0:
+			i += lineContinuation(s, i)
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// redactSshpass redacts the password option of each sshpass in s. It reads
+// the options of sshpass itself (see sshpassOption) up to the command it
+// runs, an unquoted separator or the end of the line, so that the options of
+// that command (ssh -p 22) are left alone and an option cluster
+// (-vp S3CR3T), a quoted value and a value after other options are found.
+func redactSshpass(s string) string {
+	var b strings.Builder
+	pos, written := 0, 0
+	redact := func(vs, end int) {
+		if w := s[vs:end]; w != "" {
+			if r := secretArg(w, 0, metaNone); r != w {
+				b.WriteString(s[written:vs])
+				b.WriteString(r)
+				written = end
+			}
+		}
+	}
+	// word returns the end of the word at i, or i if there is none.
+	word := func(i int) (int, bool) {
+		i = skipBlanks(s, i)
+		if i >= len(s) || isLineEnd(s[i]) || separatorAt(s, i) {
+			return i, false
+		}
+		return programWordEnd(s, i, 0), true
+	}
+	cmdFrom, cmdTo := 0, -1 // the command end found last: from where, to where
+	for pos < len(s) {
+		m := sshpassStart.FindStringIndex(s[pos:])
+		if m == nil {
+			break
+		}
+		// The scan starts after the white space or the line continuation.
+		i := pos + m[1]
+		from := i
+		for {
+			end, ok := word(i)
+			if !ok || end == skipBlanks(s, i) {
+				i = max(i, end)
+				break
+			}
+			start := skipBlanks(s, i)
+			i = end
+			kind, off := sshpassOption(s[start:end])
+			if kind == optCommand {
+				break
+			}
+			if kind == optSecretNext || kind == optValueNext {
+				// -p'S 3CR3T': the value is attached, and quoted
+				if qe := quotedPartEnd(s, end, true); qe > end {
+					if kind == optSecretNext {
+						redact(end, qe)
+					}
+					i = qe
+					continue
+				}
+			}
+			switch kind {
+			case optSecretAttached:
+				// -p\"S 3CR3T\": a quoted value written inside another quoted
+				// string has white space in it, so the word ended inside it.
+				if qe := quotedPartEnd(s, start+off, true); qe > end {
+					redact(start+off, qe)
+					i = qe
+					break
+				}
+				redact(start+off, end)
+			case optSecretNext, optValueNext:
+				vs := skipBlanks(s, i)
+				if ve, ok := word(i); ok {
+					if kind == optSecretNext {
+						redact(vs, ve)
+					}
+					i = ve
+				}
+			}
+		}
+		// A word that reads a quote wrongly (the quote idiom after a quoted
+		// string) may run to the end of the line, past a separator and the
+		// next sshpass: do not go beyond the end of the command. The end is
+		// kept while the next sshpass is in the same command, so that each
+		// part of the line is read once.
+		if i > from {
+			if from < cmdFrom || from > cmdTo {
+				cmdFrom, cmdTo = from, commandEnd(s, from)
+			}
+			i = min(i, cmdTo)
+		}
+		pos = max(i, pos+m[1])
+	}
+	if written == 0 {
+		return s
+	}
+	b.WriteString(s[written:])
+	return b.String()
+}
+
 // redactProgramOption redacts the word at the end of each match of p.re
 // (less p.back bytes), the value of a program's password option, and of
 // each match of p.opt after it on the same command.
@@ -493,7 +812,7 @@ func redactProgramOption(s string, p textProgram) string {
 	var b strings.Builder
 	pos, written := 0, 0
 	redactAt := func(vs int) int {
-		end := programWordEnd(s, vs)
+		end := programWordEnd(s, vs, p.sep)
 		if w := s[vs:end]; w != "" {
 			if r := secretArg(w, p.sep, metaNone); r != w {
 				b.WriteString(s[written:vs])
@@ -507,11 +826,6 @@ func redactProgramOption(s string, p textProgram) string {
 		m := p.re.FindStringIndex(s[pos:])
 		if m == nil {
 			break
-		}
-		if p.opt == nil {
-			next := pos + m[1]
-			pos = max(redactAt(next-p.back), next)
-			continue
 		}
 		// The match ends with the white space that starts the options. The
 		// command ends at the first '|', ';', '&' or newline outside quotes.
