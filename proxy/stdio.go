@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +15,7 @@ import (
 
 // StdioHandler manages stdin/stdout communication
 type StdioHandler struct {
-	stdin       *mcp.LineReader
+	stdin       *bufio.Scanner
 	stdoutMutex sync.Mutex
 	debug       bool
 }
@@ -22,20 +23,21 @@ type StdioHandler struct {
 // NewStdioHandler creates a new stdio handler
 func NewStdioHandler(debug bool) *StdioHandler {
 	return &StdioHandler{
-		stdin: mcp.NewLineReader(os.Stdin, mcp.MaxLineBytes),
+		stdin: bufio.NewScanner(os.Stdin),
 		debug: debug,
 	}
 }
 
 // ReadRequest reads a JSON-RPC request from stdin
 func (h *StdioHandler) ReadRequest() (*mcp.Request, error) {
-	line, err := h.stdin.ReadLine()
-	if err == io.EOF {
+	if !h.stdin.Scan() {
+		if err := h.stdin.Err(); err != nil {
+			return nil, fmt.Errorf("stdin read error: %w", err)
+		}
 		return nil, io.EOF
 	}
-	if err != nil {
-		return nil, fmt.Errorf("stdin read error: %w", err)
-	}
+
+	line := h.stdin.Bytes()
 	if h.debug {
 		log.Printf("[STDIN] %s", truenas.RedactJSONForLog(line))
 	}
