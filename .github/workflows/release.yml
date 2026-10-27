@@ -6,21 +6,27 @@ on:
       - 'v*.*.*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
+    # Only this job uploads the release assets.
+    permissions:
+      contents: write
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.27.3'
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
 
     - name: Download dependencies
       run: go mod download
@@ -30,6 +36,9 @@ jobs:
 
     - name: Run tests
       run: make test
+
+    - name: Run govulncheck
+      run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
     - name: Set version from tag
       run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
@@ -63,7 +72,7 @@ jobs:
         echo "Release $TAG_NAME" > release_notes.md
 
     - name: Create Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
       with:
         name: Release ${{ steps.release_notes.outputs.tag_name }}
         body_path: release_notes.md

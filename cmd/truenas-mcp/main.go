@@ -29,9 +29,14 @@ var (
 	versionFlg = flag.Bool("version", false, "Print version and exit")
 	debug      = flag.Bool("debug", false, "Enable debug logging")
 	readOnly   = flag.Bool("read-only", false, "Hide and refuse every tool that changes the system (env TRUENAS_MCP_READ_ONLY)")
-	allowTools = flag.String("allow-tools", "", "Comma-separated list of the only tools to expose (env TRUENAS_MCP_ALLOW_TOOLS)")
-	denyTools  = flag.String("deny-tools", "", "Comma-separated list of tools to hide and refuse (env TRUENAS_MCP_DENY_TOOLS)")
 )
+
+// --allow-tools and --deny-tools are read through flag.Visit in main (a passed
+// flag wins over its environment variable), so they need no variable here.
+func init() {
+	flag.String("allow-tools", "", "Comma-separated list of the only tools to expose (env TRUENAS_MCP_ALLOW_TOOLS)")
+	flag.String("deny-tools", "", "Comma-separated list of tools to hide and refuse (env TRUENAS_MCP_DENY_TOOLS)")
+}
 
 // Version is the release version, injected at build time via
 // -ldflags "-X main.Version=...". Builds without injection report "dev".
