@@ -280,6 +280,18 @@ func (h *StdioHandler) Run() error {
 }
 
 func (h *StdioHandler) handleRequest(req *mcp.Request) *mcp.Response {
+	// A message without an id is a notification: it gets no reply, and it
+	// must not run anything. (An explicit "id": null is treated the same;
+	// MCP does not allow null ids.) The ids 0 and "" are real ids.
+	if req.ID == nil {
+		switch req.Method {
+		case "initialize", "tools/list", "tools/call":
+			if h.debug {
+				log.Printf("Ignoring %s sent without an id (a notification)", req.Method)
+			}
+			return nil
+		}
+	}
 	switch req.Method {
 	case "initialize":
 		return h.handleInitialize(req)

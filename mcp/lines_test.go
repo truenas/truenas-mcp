@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -102,5 +103,20 @@ func TestLineReaderOneByteReads(t *testing.T) {
 	lines, errs := readAll(t, NewLineReader(iotest.OneByteReader(strings.NewReader("ab\r\ncd\n")), 100))
 	if len(errs) != 0 || strings.Join(lines, "|") != "ab|cd" {
 		t.Fatalf("lines = %q, errs = %v", lines, errs)
+	}
+}
+
+func TestLineReaderReusesStorageSafely(t *testing.T) {
+	// The line buffer is reused: a short line after a long one, after an
+	// oversized one, must not contain leftovers of the earlier lines.
+	in := strings.Repeat("A", 1000) + "\n" + "bb\n" + strings.Repeat("C", 5000) + "\n" + "d\r\n" + "last"
+	l := NewLineReader(strings.NewReader(in), 2000)
+	lines, errs := readAll(t, l)
+	want := []string{strings.Repeat("A", 1000), "bb", "d", "last"}
+	if !reflect.DeepEqual(lines, want) {
+		t.Errorf("lines = %q; want %q", lines, want)
+	}
+	if len(errs) != 1 || !errors.Is(errs[0], ErrLineTooLong) {
+		t.Errorf("errs = %v; want one ErrLineTooLong", errs)
 	}
 }

@@ -259,6 +259,58 @@ func TestStdioResponseKeepsFalsyIDs(t *testing.T) {
 	}
 }
 
+// callCountingRegistry counts tool calls and listings.
+type callCountingRegistry struct {
+	fakeRegistry
+	lists, calls int
+}
+
+func (c *callCountingRegistry) ListTools() []mcp.Tool { c.lists++; return c.fakeRegistry.ListTools() }
+func (c *callCountingRegistry) CallTool(name string, args map[string]interface{}) (string, error) {
+	c.calls++
+	return c.fakeRegistry.CallTool(name, args)
+}
+
+func TestStdioRequestsWithoutIDAreNotifications(t *testing.T) {
+	// initialize, tools/list and tools/call without an id are notifications:
+	// no reply, and the tool must not run. The valid requests around them
+	// (including ids 0 and "") are still served.
+	call := map[string]interface{}{"name": "echo", "arguments": map[string]interface{}{"data": "x"}}
+	in := rpcLine(t, map[string]interface{}{"method": "initialize"}) +
+		rpcLine(t, map[string]interface{}{"method": "tools/list"}) +
+		rpcLine(t, map[string]interface{}{"method": "tools/call", "params": call}) +
+		rpcLine(t, map[string]interface{}{"id": nil, "method": "tools/call", "params": call}) +
+		rpcLine(t, map[string]interface{}{"method": "notifications/initialized"}) +
+		rpcLine(t, map[string]interface{}{"method": "no/such/method"}) +
+		rpcLine(t, map[string]interface{}{"id": 0, "method": "tools/call", "params": call}) +
+		rpcLine(t, map[string]interface{}{"id": "", "method": "tools/list"}) +
+		rpcLine(t, map[string]interface{}{"id": 9, "method": "initialize"})
+	for _, debug := range []bool{false, true} {
+		reg := &callCountingRegistry{}
+		var stdout, logs bytes.Buffer
+		log.SetOutput(&logs)
+		h := newStdioHandler(reg, debug, strings.NewReader(in), &stdout)
+		err := h.Run()
+		log.SetOutput(os.Stderr)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if reg.calls != 1 {
+			t.Errorf("debug=%v: the tool ran %d times; want 1 (only the call with id 0)", debug, reg.calls)
+		}
+		if reg.lists != 1 {
+			t.Errorf("debug=%v: tools/list ran %d times; want 1 (only id \"\")", debug, reg.lists)
+		}
+		msgs := checkOnlyJSONRPC(t, stdout.Bytes())
+		if len(msgs) != 3 || msgs[0]["id"] != float64(0) || msgs[1]["id"] != "" || msgs[2]["id"] != float64(9) {
+			t.Errorf("debug=%v: responses = %v; want only ids 0, \"\" and 9", debug, msgs)
+		}
+		if got := strings.Count(logs.String(), "sent without an id"); debug && got != 4 || !debug && got != 0 {
+			t.Errorf("debug=%v: %d ignore log lines", debug, got)
+		}
+	}
+}
+
 // TestStdioHelperProcess is not a test: it is the child process of
 // TestStdioDefaultLoggingGoesToStderr, which runs the real stdio loop on the
 // real stdin and stdout with the logging setup main uses.
@@ -333,7 +385,8 @@ func sizedRequest(id, size int) io.Reader {
 
 // TestStdioRealLimitThroughRun uses the real 64 MiB limit: a request of
 // exactly the limit is served, one byte more is rejected, and the server
-// keeps going.
+// keeps going. It is the memory-heavy test: the line buffer grows to the
+// limit (peak about 140 MiB, about 400 MiB under -race); -short skips it.
 func TestStdioRealLimitThroughRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("streams about 128 MiB")
