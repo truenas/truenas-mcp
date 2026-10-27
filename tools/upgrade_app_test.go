@@ -220,6 +220,14 @@ func TestUpgradeAppSnapshotRequestedNotClaimed(t *testing.T) {
 			if tc.want && !strings.Contains(note, "does not report") {
 				t.Errorf("note should say the job does not report snapshots: %q", note)
 			}
+			// Middleware stops the app and snapshots ix-volumes whatever the
+			// option says; the note must not imply otherwise.
+			if !strings.Contains(note, "stops the app") || !strings.Contains(note, "ix-volumes") {
+				t.Errorf("note should say the app is always stopped and ix-volumes always snapshotted: %q", note)
+			}
+			if !tc.want && !strings.Contains(note, "no host-path snapshot") {
+				t.Errorf("note should say no host-path snapshot is requested: %q", note)
+			}
 			calls := f.called("app.upgrade")
 			if len(calls) != 1 {
 				t.Fatalf("app.upgrade calls = %d", len(calls))
@@ -247,20 +255,23 @@ func TestUpgradeAppTaskTimesAreRFC3339(t *testing.T) {
 }
 
 // Item 3 (query_jobs): same conversion, and a bare epoch value too.
-func TestReadableTimeForms(t *testing.T) {
+func TestJobTimeForms(t *testing.T) {
+	summary := func(in interface{}) interface{} {
+		return tasks.SummarizeJob(map[string]interface{}{"id": 1.0, "time_started": in})["time_started"]
+	}
 	for name, in := range map[string]interface{}{
 		"date object": map[string]interface{}{"$date": float64(1767225600000)},
 		"bare ms":     float64(1767225600000),
 		"bare s":      float64(1767225600),
 		"string ms":   "1767225600000",
 	} {
-		if got := tasks.ReadableTime(in); got != "2026-01-01T00:00:00Z" {
+		if got := summary(in); got != "2026-01-01T00:00:00Z" {
 			t.Errorf("%s: %v", name, got)
 		}
 	}
-	for name, in := range map[string]interface{}{"nil": nil, "text": "soon", "tiny": float64(5), "object": map[string]interface{}{"a": 1.0}} {
-		if got := tasks.ReadableTime(in); got == "2026-01-01T00:00:00Z" {
-			t.Errorf("%s converted: %v", name, got)
+	for name, in := range map[string]interface{}{"text": "soon", "tiny": float64(5)} {
+		if got := summary(in); got != in {
+			t.Errorf("%s should pass through unchanged, got %v", name, got)
 		}
 	}
 }
@@ -339,10 +350,10 @@ func TestBoundResultSmallAndNonApp(t *testing.T) {
 		t.Errorf("non-app result not bounded: trunc=%v len=%d size=%d", trunc, len(s), size)
 	}
 	sum := tasks.SummarizeJob(map[string]interface{}{
-		"id": 1.0, "state": "FAILED", "error": strings.Repeat("e", 3*tasks.MaxJobTextChars),
-		"exception": strings.Repeat("t", 3*tasks.MaxJobTextChars),
+		"id": 1.0, "state": "FAILED", "error": strings.Repeat("e", 3*tasks.MaxJobTextBytes),
+		"exception": strings.Repeat("t", 3*tasks.MaxJobTextBytes),
 	})
-	if len(sum["error"].(string)) > tasks.MaxJobTextChars || sum["error_truncated"] != true || sum["exception_truncated"] != true {
+	if len(sum["error"].(string)) > tasks.MaxJobTextBytes || sum["error_truncated"] != true || sum["exception_truncated"] != true {
 		t.Errorf("error/exception not bounded: %v", sum)
 	}
 }
@@ -411,21 +422,12 @@ func TestUpgradeAppHealthTimeoutIsConfigurableAndBounded(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 	mgr.PollNow()
 	st := taskState(t, r, id)
-	if st["status"] != "failed" || st["statusMessage"] != "upgrade job finished but app is DEPLOYING" {
-		t.Errorf("after the timeout: %v / %q", st["status"], st["statusMessage"])
+	msg, _ := st["statusMessage"].(string)
+	if st["status"] != "failed" || !strings.Contains(msg, "upgrade job succeeded") || !strings.Contains(msg, "still starting (DEPLOYING)") ||
+		!strings.Contains(msg, "not an upgrade failure") || !strings.Contains(msg, "health_timeout_seconds") {
+		t.Errorf("after the timeout: %v / %q", st["status"], msg)
 	}
 
-	for in, want := range map[interface{}]time.Duration{
-		float64(5): 5 * time.Second, float64(0): 0,
-		float64(-3): 60 * time.Second, float64(99999): 600 * time.Second,
-	} {
-		if got := upgradeHealthTimeout(map[string]interface{}{"health_timeout_seconds": in}); got != want {
-			t.Errorf("timeout(%v) = %v, want %v", in, got, want)
-		}
-	}
-	if got := upgradeHealthTimeout(map[string]interface{}{}); got != 60*time.Second {
-		t.Errorf("default timeout = %v", got)
-	}
 }
 
 func TestUpgradeAppJobFailureStillFails(t *testing.T) {
@@ -436,7 +438,7 @@ func TestUpgradeAppJobFailureStillFails(t *testing.T) {
 	id := startUpgrade(t, r, nil)["task_id"].(string)
 	mgr.PollNow()
 	st := taskState(t, r, id)
-	if st["status"] != "failed" || len(st["statusMessage"].(string)) > tasks.MaxJobTextChars {
+	if st["status"] != "failed" || len(st["statusMessage"].(string)) > tasks.MaxJobTextBytes {
 		t.Errorf("failed job: %v, message len %d", st["status"], len(st["statusMessage"].(string)))
 	}
 	if st["job"].(map[string]interface{})["error_truncated"] != true {

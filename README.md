@@ -600,8 +600,9 @@ The server implements MCP Tasks specification for operations that take time to c
 1. Write operations (like `upgrade_app`) return a `task_id` instead of blocking
 2. Tasks are automatically tracked in the background
 3. Use `tasks_get` with the task ID to check progress
-4. `upgrade_app` only reports success once the app is seen RUNNING after the upgrade job finishes (waits `health_timeout_seconds`, default 60s); job output is summarized to a bounded size with a truncation flag
-4. Tasks update automatically - no manual polling needed
+4. `upgrade_app` only reports success once the app is seen RUNNING after the upgrade job finishes. It waits `health_timeout_seconds` (an integer from 0 to 600, default 60; other values are rejected). If the app is merely still starting when the wait ends, the task fails with a message saying the upgrade itself succeeded and the app was slow to start; raise `health_timeout_seconds` for such apps. TrueNAS always stops the app during an upgrade and snapshots its ix-volumes; `snapshot_hostpaths` only controls whether host paths are also snapshotted
+5. Job output is summarized: each job summary (the `job` of `tasks_get`, each entry of `query_jobs`) is at most 4 KiB, with `*_truncated` flags when text was cut
+6. Tasks update automatically - no manual polling needed
 
 **Example:**
 ```

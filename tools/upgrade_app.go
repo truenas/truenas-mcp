@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -19,33 +21,43 @@ const (
 )
 
 // upgradeHealthTimeout returns how long a finished upgrade job may wait for
-// the app to report RUNNING: health_timeout_seconds, default 60s, capped at
-// 600s. Zero means check once without waiting.
-func upgradeHealthTimeout(args map[string]interface{}) time.Duration {
-	secs := float64(defaultUpgradeHealthTimeoutSeconds)
-	switch v := args["health_timeout_seconds"].(type) {
+// the app to report RUNNING: health_timeout_seconds, default 60s when absent.
+// Zero means check once without waiting. The value must be an integer from 0
+// to 600; anything else (a string, bool, null, fraction, negative or larger
+// number) is an error rather than being coerced.
+func upgradeHealthTimeout(args map[string]interface{}) (time.Duration, error) {
+	v, present := args["health_timeout_seconds"]
+	if !present {
+		return defaultUpgradeHealthTimeoutSeconds * time.Second, nil
+	}
+	var secs float64
+	switch n := v.(type) {
 	case float64:
-		secs = v
+		secs = n
 	case int:
-		secs = float64(v)
+		secs = float64(n)
+	case int64:
+		secs = float64(n)
+	default:
+		return 0, fmt.Errorf("health_timeout_seconds must be an integer from 0 to %d (got %v)", maxUpgradeHealthTimeoutSeconds, v)
 	}
-	if secs < 0 {
-		secs = defaultUpgradeHealthTimeoutSeconds
+	if secs != math.Trunc(secs) || secs < 0 || secs > maxUpgradeHealthTimeoutSeconds {
+		return 0, fmt.Errorf("health_timeout_seconds must be an integer from 0 to %d (got %v)", maxUpgradeHealthTimeoutSeconds, v)
 	}
-	if secs > maxUpgradeHealthTimeoutSeconds {
-		secs = maxUpgradeHealthTimeoutSeconds
-	}
-	return time.Duration(secs) * time.Second
+	return time.Duration(secs) * time.Second, nil
 }
 
 // snapshotNote explains what snapshot_requested does and does not tell the
-// caller. app.upgrade only snapshots host paths that are ZFS datasets, skips
-// ones that are not, and never reports which snapshots it took.
+// caller. Whatever snapshot_hostpaths is, middleware stops the app for the
+// upgrade and snapshots the app's ix-volumes dataset for rollback;
+// snapshot_hostpaths only requests snapshots of host paths, and of those only
+// the ones that are ZFS datasets. app.upgrade never reports what it took.
 func snapshotNote(requested bool) string {
+	const always = " Independent of this option, TrueNAS stops the app during the upgrade and snapshots the app's ix-volumes dataset for rollback."
 	if !requested {
-		return "snapshot_hostpaths was not requested; no host-path snapshot is taken by this upgrade."
+		return "snapshot_hostpaths was false: no host-path snapshot is requested." + always
 	}
-	return "Host-path snapshots were requested. TrueNAS snapshots only host paths that are ZFS datasets and the upgrade job does not report which snapshots it took, so none is claimed."
+	return "Host-path snapshots were requested. TrueNAS snapshots only host paths that are ZFS datasets and the upgrade job does not report which snapshots it took, so none is claimed." + always
 }
 
 // normalizeUpgradeSummary makes an app.upgrade_summary result safe to show:
