@@ -472,11 +472,13 @@ func TestAnalyzeMemoryCapacityExcludesArc(t *testing.T) {
 		t.Fatal(err)
 	}
 	checks := map[string]interface{}{
-		"current_utilization_pct":       "89.00",
-		"arc_bytes":                     int64(72 * gib),
-		"used_excluding_arc_bytes":      int64(17 * gib),
-		"utilization_excluding_arc_pct": "17.00",
-		"capacity_status":               "healthy",
+		"current_utilization_pct":               "17.00",
+		"current_utilization_including_arc_pct": "89.00",
+		"current_utilization_basis":             "excluding_arc",
+		"arc_bytes":                             int64(72 * gib),
+		"used_excluding_arc_bytes":              int64(17 * gib),
+		"utilization_excluding_arc_pct":         "17.00",
+		"capacity_status":                       "healthy",
 	}
 	for k, want := range checks {
 		if got := analysis[k]; got != want {

@@ -8,10 +8,14 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 
 ### System Information
 - **system_info** - Get system information (version, hostname, platform)
+  - Datetimes (`buildtime`, `boottime`, `datetime`) are ISO-8601 UTC strings (e.g. `"2026-01-01T00:00:00Z"`) instead of the middleware's `{"$date": <ms>}` objects. Values outside 2000-01-01..now+10 years are passed through raw
 - **system_health** - Check system health including alerts, active jobs, and capacity warnings
   - `alert_count` counts active (not dismissed) alerts; `critical_alert_count` counts active CRITICAL/ALERT/EMERGENCY alerts and `dismissed_alert_count` dismissed ones
-  - The memory warning is based on memory used excluding the ZFS ARC (latest available sample minus the latest ARC size) when the ARC size is known; otherwise it says the figure may include the ARC
+  - The memory warning is based on memory used excluding the ZFS ARC (latest available sample minus the latest ARC size) when the ARC size is known; otherwise it says the figure may include the ARC. If the ARC size was used but its age could not be checked (no timestamp in the reporting data), `arc_freshness_note` says so, as in `analyze_capacity`
+  - Alert datetimes are ISO-8601 UTC strings, as in `list_alerts`
+  - The CPU check skips samples without data (all-zero rows, see `get_system_metrics`)
 - **query_jobs** - Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs)
+  - `time_started` and `time_finished` are ISO-8601 UTC strings (same rules as `system_info`)
 
 ### Storage Management
 - **query_pools** - Query storage pools with status and capacity
@@ -24,11 +28,13 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Perfect for questions like "what datasets use the most space?" or "show me encrypted datasets"
 
 - **query_snapshots** - Query ZFS snapshots with intelligent filtering and sorting
-  - Returns simplified snapshot information with creation date, dataset, and holds status
-  - Filter by dataset name, pool name, or holds presence
-  - Sort by snapshot name (default, newest first), dataset, or parsed creation date
+  - Returns simplified snapshot information with creation time, sizes, dataset, and holds status
+  - Requests the ZFS `creation`, `used` and `referenced` properties and holds explicitly (`extra.properties`, `extra.holds`), since TrueNAS 27.0 returns neither by default
+  - `created` (ISO-8601 UTC) and `created_timestamp` (Unix seconds) come from the `creation` property; if it is missing, `created_date` is parsed from the snapshot name. `created_source` is `zfs_property` or `snapshot_name`
+  - `used_bytes`/`used` (space unique to the snapshot) and `referenced_bytes`/`referenced` (data it refers to), raw and human-readable
+  - Filter by dataset name, pool name, or holds presence (on 27.0 the middleware reports only its own `truenas` hold)
+  - Sort by snapshot name (default, newest first), dataset, or creation time (`created`: newest first by `created_timestamp`, then `created_date`, then name)
   - Limit results for manageable responses (default: 50, configurable)
-  - Shows snapshot names, parent datasets, creation dates (parsed from names), and holds
   - Perfect for questions like "what recent snapshots exist?" or "show snapshots with holds"
 
 - **query_shares** - Query SMB and NFS share configurations
@@ -39,17 +45,25 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Filter by VM name (partial match), state (RUNNING/STOPPED), or autostart setting
   - Sort by name (default, alphabetical), memory usage, or status (running first)
   - Shows CPU/memory config, bootloader, devices (disks, NICs, displays), and current state
+  - CPU: `sockets` (the API's `vcpus`), `cores_per_socket` (`cores`), `threads_per_core` (`threads`) and `total_vcpus` (their product, what the guest sees)
+  - Memory: `memory_mib` (the API value, in MiB), `memory_gib` (e.g. `"4.0 GiB"`) and `min_memory_mib` when set. These replace `vcpus`/`cores`/`threads` and `memory_mb`/`memory_gb`
   - Automatically excludes sensitive data like display passwords for security
   - Perfect for questions like "what VMs are running?" or "show VMs with autostart enabled"
 
 ### Alerts
 - **list_alerts** - List system alerts with filtering
+  - `datetime`, `last_occurrence` and other datetimes are ISO-8601 UTC strings
 - **dismiss_alert** / **restore_alert** - Manage system alerts (write operations; support dry-run mode)
 
 ### Performance Metrics
 - **get_system_metrics** - Get CPU, memory, and load performance metrics
+  - Each graph has a `unit` (`%CPU`, `Bytes` of available memory, `Load`, `Celsius`, `Seconds`)
+  - TrueNAS fills periods without data with zeros (common for MONTH/YEAR). Rows whose values are all 0 or null are treated as gaps: they are left out of `data_sample`, and when there are any, `aggregations` is recomputed without them (the middleware's values are kept in `aggregations_reported`) and `gap_samples_excluded`, `data_points_valid` and `gap_note` are added. `data_points_total` counts all rows. A genuine all-zero sample (e.g. zero load) is also treated as a gap
+  - `last_sample_after_end_seconds` appears when the newest sample is stamped after the graph's `end`. This is expected for long ranges: samples are averaged into aligned buckets (about 2 minutes past `end` has been seen for MONTH) and is harmless
 - **get_network_metrics** - Get network interface traffic metrics
+  - `unit` is `Kilobits/s` (series `received` and `sent`)
 - **get_disk_metrics** - Get disk I/O performance metrics
+  - `unit` is the graph's `vertical_label` from `reporting.graphs` (`Kibibytes/s` for `disk`, series `reads` and `writes`)
 - **get_arc_metrics** - Get ZFS ARC reporting metrics (e.g. `arcsize`)
   - The ARC graphs available depend on the TrueNAS version; the default is every ARC graph the server supports, discovered from `core.get_methods` and `reporting.graphs` (falls back to `arcsize`)
   - A graph that fails is reported under `errors.<graph>` while the others are returned; if every graph fails the call is an error
@@ -75,7 +89,10 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Trend detection (increasing/stable/decreasing)
   - Capacity status warnings (healthy/warning/critical at 70%/85% thresholds)
   - Growth projections when metrics are trending upward
-  - Memory: used = total - available; `capacity_status` uses memory used excluding the ZFS ARC when the latest ARC size is known and recent (`arc_bytes`, `used_excluding_arc_bytes`, `utilization_excluding_arc_pct`). current/average/peak/trend still include the ARC, and no memory projection is given in that case (`projection_note`), since only the latest ARC size is known. "Recent" means at most 15 minutes older than the newest timestamp in the NAS's own reporting data (the memory graph's latest sample or the graph `end`), so clock skew between the NAS and the MCP host does not matter; if no such timestamp is available the ARC size is used and `arc_freshness_note` says its age could not be checked
+  - CPU: samples without data (all-zero rows) are skipped
+  - Network: per interface, `received` and `sent` are analysed separately (`current_mbps`, `average_mbps`, `peak_mbps`, utilization against `link_speed_mbps`), converted from the graph's Kilobits/s
+  - Disk: per disk, `reads` and `writes` in KiB/s (`unit`)
+  - Memory: used = total - available; when the latest ARC size is known and recent, `current_utilization_pct` and `capacity_status` use memory used excluding the ZFS ARC (`current_utilization_basis: "excluding_arc"`, also `arc_bytes`, `used_excluding_arc_bytes`, `utilization_excluding_arc_pct`) and `current_utilization_including_arc_pct` gives the ARC-inclusive figure. Otherwise `current_utilization_basis` is `"including_arc"`. average/peak/trend still include the ARC, and no memory projection is given in that case (`projection_note`), since only the latest ARC size is known. "Recent" means at most 15 minutes older than the newest timestamp in the NAS's own reporting data (the memory graph's latest sample or the graph `end`), so clock skew between the NAS and the MCP host does not matter; if no such timestamp is available the ARC size is used and `arc_freshness_note` says its age could not be checked
   - Time ranges: HOUR, DAY, WEEK, MONTH, YEAR
   - Overall recommendations based on all metrics
 
