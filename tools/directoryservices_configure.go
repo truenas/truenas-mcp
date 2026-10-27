@@ -422,7 +422,8 @@ func flatArgumentNames(args map[string]interface{}, top map[string]dsField) []st
 // idmap.idmap_domain.ldap_user_dn_password and the same field in
 // trusted_domains[] are masked too, and the handler and the redactor that
 // processes the tool output agree. The credential_type and the username,
-// principal or bind DN of a credential stay visible.
+// principal or bind DN of a credential stay visible, and so does
+// attribute_maps.passwd, which only holds LDAP attribute names.
 func maskDirectoryServicePayload(v map[string]interface{}) map[string]interface{} {
 	if masked, ok := redact.Value(v).(map[string]interface{}); ok {
 		return masked

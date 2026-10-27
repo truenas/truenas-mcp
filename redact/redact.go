@@ -564,6 +564,7 @@ type ctx struct {
 	keepNumbers bool     // numbers under this key are IDs (see keepsNumbers)
 	kerberos    bool     // inside a keytab/kerberos object
 	credential  bool     // the value of a key named "credential" (see walkTypedCredential)
+	attrMaps    bool     // the object under a key named "attribute_maps" (see walkMap)
 }
 
 // walk redacts v and reports whether anything changed.
@@ -660,6 +661,17 @@ func walkMap(t map[string]interface{}, c ctx) (interface{}, bool) {
 			child.metadata = meta
 			child.keepNumbers = keepsNumbers(k)
 			child.credential = nk == "credential"
+			// LDAP attribute_maps.passwd maps passwd fields to LDAP attribute
+			// names (user_name: uid); it holds no secret although its name
+			// contains "passwd". Only that object directly under
+			// attribute_maps is exempt: its fields are still matched by
+			// name and every other key keeps the normal rules.
+			if _, isMap := val.(map[string]interface{}); isMap {
+				child.attrMaps = nk == "attributemaps"
+				if c.attrMaps && nk == "passwd" {
+					child.sensitive, child.metadata = false, metaNone
+				}
+			}
 		}
 		nv, ch := walk(val, child)
 		out[k] = nv

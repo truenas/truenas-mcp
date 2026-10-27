@@ -601,3 +601,85 @@ func TestLeaveDirectoryServicePinnedToMiddlewareModel(t *testing.T) {
 		t.Errorf("handler leave credential fields = %v, middleware %v", got, mw.CredentialFields)
 	}
 }
+
+// attribute_maps.passwd only holds LDAP attribute names, so it stays visible
+// in the preview, the response and the task arguments, while the real
+// secrets next to it (the bind password, nested credential secrets and
+// ldap_user_dn_password) stay masked.
+func TestConfigureDirectoryServiceAttributeMapsVisibleSecretsMasked(t *testing.T) {
+	ldap := fullDSExamples()["LDAP"]
+	conf := ldap["configuration"].(obj)
+	conf["attribute_maps"] = obj{
+		"passwd": obj{"user_name": "uid", "user_uid": "uidNumber", "user_shell": "loginShell"},
+		"group":  obj{"group_member": "memberUid"},
+	}
+
+	visible := []string{`"passwd"`, `"user_name": "uid"`, `"user_uid": "uidNumber"`, `"user_shell": "loginShell"`, `"group_member": "memberUid"`}
+	checkText := func(t *testing.T, what, text string) {
+		t.Helper()
+		assertNoSecrets(t, what, text)
+		for _, want := range visible {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s lacks %s:\n%s", what, want, text)
+			}
+		}
+		if strings.Contains(text, `"passwd": "[REDACTED]"`) {
+			t.Errorf("%s masks attribute_maps.passwd:\n%s", what, text)
+		}
+	}
+
+	t.Run("mask helper", func(t *testing.T) {
+		payload, err := buildDirectoryServiceUpdatePayload(ldap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		masked := maskDirectoryServicePayload(payload)
+		maps := masked["configuration"].(map[string]interface{})["attribute_maps"].(map[string]interface{})
+		passwd, ok := maps["passwd"].(map[string]interface{})
+		if !ok || passwd["user_name"] != "uid" || passwd["user_uid"] != "uidNumber" || passwd["user_shell"] != "loginShell" {
+			t.Errorf("attribute_maps.passwd = %v", maps["passwd"])
+		}
+		cred := masked["credential"].(map[string]interface{})
+		if cred["bindpw"] != redact.Marker || cred["binddn"] != "cn=admin,dc=example,dc=com" {
+			t.Errorf("credential = %v", cred)
+		}
+	})
+
+	t.Run("LDAP preview, response and task arguments", func(t *testing.T) {
+		r, _, _ := dsFake(t)
+		out, err := r.CallTool("configure_directory_service", withArgs(ldap, obj{"dry_run": true}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkText(t, "preview", out)
+		checkText(t, "redacted preview", redact.ToolOutput(out))
+		if !strings.Contains(out, `"bindpw": "[REDACTED]"`) {
+			t.Errorf("bindpw not shown as masked:\n%s", out)
+		}
+
+		r, fake, mgr := dsFake(t)
+		out, err = r.CallTool("configure_directory_service", withArgs(ldap, obj{"confirm": true}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The response does not echo the payload; it must not leak anything.
+		assertNoSecrets(t, "response", redact.ToolOutput(out))
+		calls := fake.called("directoryservices.update")
+		if len(calls) != 1 || !strings.Contains(string(calls[0].Params), "s3cret") || !strings.Contains(string(calls[0].Params), "uidNumber") {
+			t.Fatalf("params sent to TrueNAS = %v", calls)
+		}
+		var reply struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal([]byte(out), &reply); err != nil {
+			t.Fatal(err)
+		}
+		task, err := mgr.Get(reply.TaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, _ := json.MarshalIndent(task.Arguments, "", "  ")
+		checkText(t, "task arguments", redact.ToolOutput(string(stored)))
+		checkText(t, "raw task arguments", string(stored))
+	})
+}
