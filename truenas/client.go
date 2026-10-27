@@ -629,9 +629,11 @@ func (c *Client) parseEndpoint() (*url.URL, error) {
 	if strings.Contains(e, "@") {
 		return nil, errUserinfo
 	}
-	// From here on e holds no userinfo, so quoting it is safe.
-	if strings.ContainsAny(e, "/?#") {
-		return nil, fmt.Errorf("%q: a bare host cannot include a path; pass a full wss://host[:port]%s URL instead", e, apiPath)
+	// From here on e holds no userinfo. Anything from the first "/", "?" or
+	// "#" is dropped before the input is quoted, as logURL does for a parsed
+	// URL, so no path, query or fragment is ever echoed.
+	if i := strings.IndexAny(e, "/?#"); i >= 0 {
+		return nil, fmt.Errorf("%q: a bare host cannot include a path, query or fragment; pass a full wss://host[:port]%s URL instead", e[:i], apiPath)
 	}
 	host, port := e, "443"
 	if h, p, err := net.SplitHostPort(e); err == nil {

@@ -209,7 +209,7 @@ func TestInvalidEndpointGivesReason(t *testing.T) {
 		{"wss://truenas.example:0", "bad port"},
 		{"truenas.example:", "bad port"},
 		{":8443", "no host name"},
-		{"truenas.example/api/current", "a bare host cannot include a path"},
+		{"truenas.example/api/current", "a bare host cannot include a path, query or fragment"},
 	} {
 		c, err := NewClientWithOptions(tc.endpoint, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
 		if err != nil {
@@ -472,5 +472,69 @@ func TestUnsupportedSchemeEchoIsRestricted(t *testing.T) {
 				t.Errorf("%q: error echoes %q", tc.endpoint, leak)
 			}
 		}
+	}
+}
+
+// TestEndpointErrorsNeverEchoQueryFragmentOrUserinfo checks that no error from
+// the endpoint (ValidateEndpoint or a connect attempt) quotes the secret parts
+// of the input, so the README claim that the URL is logged without query or
+// fragment holds for errors too.
+func TestEndpointErrorsNeverEchoQueryFragmentOrUserinfo(t *testing.T) {
+	clearProxyEnv(t)
+	logs := logsOf(t)
+	const secret = "SECRETTOKEN"
+	for _, endpoint := range []string{
+		"h.test?token=" + secret,
+		"h.test/path?token=" + secret + "#frag" + secret,
+		"h.test#" + secret,
+		"h.test:99999?token=" + secret,
+		"h.test:443:443?token=" + secret,
+		"user:" + secret + "@h.test",
+		"user:" + secret + "@h.test?token=" + secret,
+		"wss://user:" + secret + "@h.test/api/current?token=" + secret,
+		"wss://h.test:0/api/current?token=" + secret + "#" + secret,
+		"wss://h.test:443:443/?token=" + secret,
+		"wss://?token=" + secret,
+		"wss://h.test:/?token=" + secret,
+		"ws://h.test?token=" + secret,
+		"https://h.test?token=" + secret,
+		"ftp://h.test?token=" + secret,
+		"x" + secret + ":y@z://h.test?token=" + secret,
+	} {
+		c, err := NewClientWithOptions(endpoint, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
+		if err != nil {
+			t.Fatal(err)
+		}
+		verr := c.ValidateEndpoint()
+		if verr == nil {
+			t.Errorf("%q: ValidateEndpoint = nil, want an error", endpoint)
+			continue
+		}
+		if strings.Contains(verr.Error(), secret) || strings.Contains(verr.Error(), "token=") {
+			t.Errorf("%q: error echoes the query, fragment or userinfo: %v", endpoint, verr)
+		}
+		_, cerr := c.Call("core.ping")
+		if cerr != nil && (strings.Contains(cerr.Error(), secret) || strings.Contains(cerr.Error(), "token=")) {
+			t.Errorf("%q: connect error echoes the query, fragment or userinfo: %v", endpoint, cerr)
+		}
+	}
+
+	// A valid URL with a query that fails to connect: neither the error nor
+	// the log carries the query, fragment or userinfo.
+	c2, err := NewClientWithOptions("wss://"+closedAddr(t)+"/api/current?token="+secret+"#"+secret, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Call("core.ping"); err == nil || strings.Contains(err.Error(), secret) {
+		t.Errorf("connect error = %v, want an error without the secret", err)
+	}
+	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), "token=") {
+		t.Errorf("log echoes the query, fragment or userinfo:\n%s", logs.String())
+	}
+
+	// A bare host still names the host, and only the host.
+	c, _ := NewClientWithOptions("h.test/path?token="+secret, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
+	if err := c.ValidateEndpoint(); err == nil || !strings.Contains(err.Error(), `"h.test"`) {
+		t.Errorf("error should quote the host alone, got %v", err)
 	}
 }
