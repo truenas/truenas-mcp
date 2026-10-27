@@ -702,7 +702,7 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 	r.tools["create_dataset"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "create_dataset",
-			Description: "Create a ZFS dataset (filesystem or volume) for storage. This tool is reusable for SMB shares, NFS exports, iSCSI LUNs, and application storage. Supports encryption, compression, quotas, and advanced ZFS features.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create datasets, ask these questions in order:\n\n1. **Pool Selection**: Query available pools first, ask which pool to use\n2. **Dataset Name**: Suggest format 'pool/shares/name' or 'pool/apps/name'\n3. **Dataset Type**: FILESYSTEM (default, for files) or VOLUME (for block storage/VMs)\n4. **Share Type Optimization** (if for sharing):\n   - SMB: Windows/Mac file shares (recommend for SMB shares)\n   - NFS: Unix/Linux file shares\n   - MULTIPROTOCOL: Both SMB and NFS access\n   - APPS: Application storage\n   - GENERIC: General purpose (default)\n5. **Encryption** (recommend for sensitive data):\n   - Ask: \"Is this for sensitive data?\"\n   - If yes: Recommend generate_key=true for simplicity\n   - If user wants passphrase: min 8 characters\n   - Algorithm: AES-256-GCM recommended\n6. **Compression**: LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF\n7. **Space Quota** (optional): Ask if they want to limit size\n8. **ACL Type** (for SMB): NFSV4 (recommended for SMB/Windows), POSIX (Unix)\n9. **Advanced** (usually skip unless user asks):\n   - Deduplication: Warn about RAM overhead, recommend OFF\n   - Checksum, snapdir, atime, readonly\n\n**IMPORTANT RECOMMENDATIONS:**\n- For SMB shares: share_type=SMB, acltype=NFSV4, compression=LZ4\n- For NFS exports: share_type=NFS, acltype=POSIX, compression=LZ4\n- For multi-protocol: share_type=MULTIPROTOCOL, acltype=NFSV4\n- For apps: share_type=APPS, compression=LZ4 or ZSTD\n- Always recommend compression=LZ4 unless user has specific needs\n- Warn: Deduplication uses ~5GB RAM per TB, not recommended for most users\n- Warn: Encryption cannot be removed later, only option is to copy data elsewhere\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display summary showing: name, type, optimization, compression, encryption, quota, mountpoint\n3. Get explicit user confirmation with \"Shall I proceed?\"\n4. Warn: This is a WRITE operation creating permanent storage\n5. If encryption enabled, remind user to back up the key after creation\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview, then ask for confirmation to proceed.",
+			Description: "Create a ZFS dataset (filesystem or volume) for storage. This tool is reusable for SMB shares, NFS exports, iSCSI LUNs, and application storage. Supports native ZFS encryption (encryption=true with encryption_options), compression, quotas, and advanced ZFS features.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create datasets, ask these questions in order:\n\n1. **Pool Selection**: Query available pools first, ask which pool to use\n2. **Dataset Name**: Suggest format 'pool/shares/name' or 'pool/apps/name'\n3. **Dataset Type**: FILESYSTEM (default, for files) or VOLUME (for block storage/VMs)\n4. **Share Type Optimization** (if for sharing):\n   - SMB: Windows/Mac file shares (recommend for SMB shares)\n   - NFS: Unix/Linux file shares\n   - MULTIPROTOCOL: Both SMB and NFS access\n   - APPS: Application storage\n   - GENERIC: General purpose (default)\n5. **Encryption** (recommend for sensitive data):\n   - Ask: \"Is this for sensitive data?\"\n   - If yes: set encryption=true and encryption_options with exactly ONE of generate_key=true (simplest; TrueNAS stores the key), passphrase (min 8 characters) or key (64 hex characters). encryption_options without encryption=true is rejected\n   - Algorithm is always AES-256-GCM and not configurable\n6. **Compression**: LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF\n7. **Space Quota** (optional): Ask if they want to limit size\n8. **ACL Type** (for SMB): NFSV4 (recommended for SMB/Windows), POSIX (Unix)\n9. **Advanced** (usually skip unless user asks):\n   - Deduplication: Warn about RAM overhead, recommend OFF\n   - Checksum, snapdir, atime, readonly\n\n**IMPORTANT RECOMMENDATIONS:**\n- For SMB shares: share_type=SMB, acltype=NFSV4, compression=LZ4\n- For NFS exports: share_type=NFS, acltype=POSIX, compression=LZ4\n- For multi-protocol: share_type=MULTIPROTOCOL, acltype=NFSV4\n- For apps: share_type=APPS, compression=LZ4 or ZSTD\n- Always recommend compression=LZ4 unless user has specific needs\n- Warn: Deduplication uses ~5GB RAM per TB, not recommended for most users\n- Warn: Encryption cannot be removed later, only option is to copy data elsewhere\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display summary showing: name, type, optimization, compression, encryption, quota, mountpoint\n3. Get explicit user confirmation with \"Shall I proceed?\"\n4. Warn: This is a WRITE operation creating permanent storage\n5. If encryption enabled, remind user to back up the key after creation\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview, then ask for confirmation to proceed.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -735,22 +735,29 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 						"description": "NFSV4 (recommended for SMB/Windows ACLs) or POSIX (Unix permissions)",
 						"enum":        []string{"NFSV4", "POSIX", "INHERIT"},
 					},
+					"encryption": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Create the dataset as a new ZFS encryption root (cannot be removed later). Requires encryption_options. inherit_encryption is sent as false automatically; passing inherit_encryption=true with this is rejected",
+					},
 					"encryption_options": map[string]interface{}{
 						"type":        "object",
-						"description": "Encryption configuration (cannot be removed later)",
+						"description": "Key material for a new encrypted dataset; only valid together with encryption=true. Provide exactly one of generate_key=true, passphrase or key. The passphrase and key are secrets and are masked in dry-run output",
 						"properties": map[string]interface{}{
 							"generate_key": map[string]interface{}{
 								"type":        "boolean",
-								"description": "Auto-generate encryption key (recommended for simplicity)",
+								"description": "Let TrueNAS generate and store the key (simplest option)",
 							},
 							"passphrase": map[string]interface{}{
 								"type":        "string",
-								"description": "User passphrase (min 8 chars) - alternative to generate_key",
+								"description": "Passphrase, at least 8 characters",
 							},
-							"algorithm": map[string]interface{}{
+							"key": map[string]interface{}{
 								"type":        "string",
-								"description": "Encryption algorithm (default: AES-256-GCM recommended)",
-								"enum":        []string{"AES-128-CCM", "AES-192-CCM", "AES-256-CCM", "AES-128-GCM", "AES-192-GCM", "AES-256-GCM"},
+								"description": "Raw encryption key as exactly 64 hexadecimal characters. A key-encrypted dataset cannot be created under a passphrase-encrypted parent",
+							},
+							"pbkdf2iters": map[string]interface{}{
+								"type":        "integer",
+								"description": "PBKDF2 iterations for a passphrase (optional; only with passphrase; minimum 100000, TrueNAS 27.0 requires at least 1300000). Omit to use the TrueNAS default",
 							},
 						},
 					},

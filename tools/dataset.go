@@ -3,9 +3,12 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
@@ -102,16 +105,17 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 		payload["atime"] = atime
 	}
 
-	// Encryption options
-	if encOpts, ok := args["encryption_options"].(map[string]interface{}); ok && len(encOpts) > 0 {
-		if err := validateEncryptionOptions(encOpts); err != nil {
-			return "", err
-		}
-		payload["encryption_options"] = encOpts
+	// Encryption. The middleware only honours encryption_options together
+	// with encryption=true, and requires inherit_encryption=false then.
+	encrypted, encOpts, err := parseDatasetEncryption(args)
+	if err != nil {
+		return "", err
 	}
-
-	// Inherit encryption
-	if inheritEnc, ok := args["inherit_encryption"].(bool); ok {
+	if encrypted {
+		payload["encryption"] = true
+		payload["encryption_options"] = encOpts
+		payload["inherit_encryption"] = false
+	} else if inheritEnc, ok := args["inherit_encryption"].(bool); ok {
 		payload["inherit_encryption"] = inheritEnc
 	}
 
@@ -126,7 +130,7 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 		preview := map[string]interface{}{
 			"dry_run":        true,
 			"operation":      "pool.dataset.create",
-			"payload":        payload,
+			"payload":        maskDatasetPayload(payload),
 			"note":           "This is a preview. No dataset has been created.",
 			"next_step":      "Remove dry_run parameter or set to false to execute",
 			"estimated_path": fmt.Sprintf("/mnt/%s", name),
@@ -210,37 +214,172 @@ func validateDatasetName(name string) error {
 	return nil
 }
 
-// validateEncryptionOptions validates encryption configuration
+// parseDatasetEncryption validates the encryption, encryption_options and
+// inherit_encryption arguments the way the middleware's pool.dataset.create
+// does (TrueNAS 25.10 and 27.0) and returns whether a new encryption root is
+// requested together with the options to send. Error messages never include
+// the passphrase or key.
+func parseDatasetEncryption(args map[string]interface{}) (bool, map[string]interface{}, error) {
+	encrypted := false
+	if v, present := args["encryption"]; present {
+		b, ok := v.(bool)
+		if !ok {
+			return false, nil, fmt.Errorf("encryption must be a boolean")
+		}
+		encrypted = b
+	}
+
+	var opts map[string]interface{}
+	if v, present := args["encryption_options"]; present {
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			return false, nil, fmt.Errorf("encryption_options must be an object")
+		}
+		opts = m
+	}
+
+	if !encrypted {
+		// TrueNAS would ignore the options and silently create an
+		// unencrypted dataset, so refuse instead.
+		if len(opts) > 0 {
+			return false, nil, fmt.Errorf("encryption_options requires encryption=true; without it TrueNAS ignores the options and creates an unencrypted dataset")
+		}
+		return false, nil, nil
+	}
+
+	if inherit, ok := args["inherit_encryption"].(bool); ok && inherit {
+		return false, nil, fmt.Errorf("inherit_encryption must be false (or omitted) when encryption is true")
+	}
+	if err := validateEncryptionOptions(opts); err != nil {
+		return false, nil, err
+	}
+
+	// Send only the fields that were provided.
+	out := map[string]interface{}{}
+	for _, k := range []string{"generate_key", "passphrase", "key"} {
+		if v, ok := opts[k]; ok && v != nil && v != false && v != "" {
+			out[k] = v
+		}
+	}
+	if v, ok := opts["pbkdf2iters"]; ok && v != nil {
+		out["pbkdf2iters"] = int64(v.(float64))
+	}
+	return true, out, nil
+}
+
+// minPBKDF2Iters is the lowest pbkdf2iters any supported TrueNAS version
+// accepts (25.10); 27.0 raised the minimum to 1300000 and the middleware
+// enforces that itself.
+const minPBKDF2Iters = 100000
+
+// validateEncryptionOptions validates the encryption_options object for a new
+// encrypted dataset: exactly one of generate_key=true, passphrase (at least 8
+// characters) or key (64 hex characters), plus an optional pbkdf2iters that is
+// only meaningful with a passphrase. Unknown fields are rejected; algorithm is
+// not configurable (TrueNAS always uses AES-256-GCM, and 27.0 rejects the
+// field). Secret values are never echoed.
 func validateEncryptionOptions(encOpts map[string]interface{}) error {
-	genKey, hasGenKey := encOpts["generate_key"].(bool)
-	passphrase, hasPassphrase := encOpts["passphrase"].(string)
-
-	// Must specify either generate_key or passphrase, not both
-	if hasGenKey && genKey && hasPassphrase && passphrase != "" {
-		return fmt.Errorf("cannot specify both generate_key and passphrase - choose one encryption method")
-	}
-
-	if !hasGenKey && !hasPassphrase {
-		return fmt.Errorf("encryption_options requires either generate_key=true or passphrase")
-	}
-
-	// Validate passphrase length
-	if hasPassphrase && passphrase != "" {
-		if len(passphrase) < 8 {
-			return fmt.Errorf("passphrase must be at least 8 characters")
+	for k := range encOpts {
+		switch k {
+		case "generate_key", "passphrase", "key", "pbkdf2iters":
+		case "algorithm":
+			return fmt.Errorf("encryption_options.algorithm is not supported: TrueNAS always uses AES-256-GCM for new encrypted datasets")
+		default:
+			if plainFieldName.MatchString(k) {
+				return fmt.Errorf("unknown encryption_options field %q (allowed: generate_key, passphrase, key, pbkdf2iters)", k)
+			}
+			return fmt.Errorf("unknown encryption_options field with invalid characters (allowed: generate_key, passphrase, key, pbkdf2iters)")
 		}
 	}
 
-	// Validate algorithm if specified
-	if algo, ok := encOpts["algorithm"].(string); ok {
-		validAlgos := map[string]bool{
-			"AES-128-CCM": true, "AES-192-CCM": true, "AES-256-CCM": true,
-			"AES-128-GCM": true, "AES-192-GCM": true, "AES-256-GCM": true,
+	genKey := false
+	if v, ok := encOpts["generate_key"]; ok && v != nil {
+		b, isBool := v.(bool)
+		if !isBool {
+			return fmt.Errorf("encryption_options.generate_key must be a boolean")
 		}
-		if !validAlgos[algo] {
-			return fmt.Errorf("invalid encryption algorithm: %s", algo)
-		}
+		genKey = b
+	}
+	passphrase, hasPassphrase, err := optionalSecretString(encOpts, "passphrase")
+	if err != nil {
+		return err
+	}
+	key, hasKey, err := optionalSecretString(encOpts, "key")
+	if err != nil {
+		return err
 	}
 
+	provided := 0
+	if genKey {
+		provided++
+	}
+	if hasPassphrase {
+		provided++
+	}
+	if hasKey {
+		provided++
+	}
+	switch {
+	case provided == 0:
+		return fmt.Errorf("encryption_options requires exactly one of generate_key=true, passphrase or key")
+	case provided > 1:
+		return fmt.Errorf("encryption_options accepts only one of generate_key=true, passphrase or key, not several")
+	}
+
+	if hasPassphrase && utf8.RuneCountInString(passphrase) < 8 {
+		return fmt.Errorf("passphrase must be at least 8 characters")
+	}
+	if hasKey && !hexKey64.MatchString(key) {
+		return fmt.Errorf("key must be exactly 64 hexadecimal characters")
+	}
+
+	if v, ok := encOpts["pbkdf2iters"]; ok && v != nil {
+		if !hasPassphrase {
+			return fmt.Errorf("pbkdf2iters applies only to passphrase encryption")
+		}
+		n, isNum := v.(float64)
+		if !isNum || n != math.Trunc(n) || n < minPBKDF2Iters || n > math.MaxInt32 {
+			return fmt.Errorf("pbkdf2iters must be an integer of at least %d (TrueNAS 27.0 requires at least 1300000)", minPBKDF2Iters)
+		}
+	}
 	return nil
+}
+
+var hexKey64 = regexp.MustCompile(`^[0-9A-Fa-f]{64}$`)
+
+// plainFieldName matches field names that are safe to echo in an error.
+var plainFieldName = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// optionalSecretString reads a string field that is absent when missing, null
+// or empty, without ever including its value in an error.
+func optionalSecretString(m map[string]interface{}, field string) (string, bool, error) {
+	v, ok := m[field]
+	if !ok || v == nil {
+		return "", false, nil
+	}
+	s, isStr := v.(string)
+	if !isStr {
+		return "", false, fmt.Errorf("encryption_options.%s must be a string", field)
+	}
+	return s, s != "", nil
+}
+
+// maskDatasetPayload returns a copy of a pool.dataset.create payload that is
+// safe to show: the passphrase and key in encryption_options are replaced.
+func maskDatasetPayload(payload map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		out[k] = v
+	}
+	if opts, ok := payload["encryption_options"].(map[string]interface{}); ok {
+		masked := make(map[string]interface{}, len(opts))
+		for k, v := range opts {
+			if k == "passphrase" || k == "key" {
+				v = redact.Marker
+			}
+			masked[k] = v
+		}
+		out["encryption_options"] = masked
+	}
+	return out
 }
