@@ -340,6 +340,13 @@ func (h *StdioHandler) handleToolsCall(req *mcp.Request) *mcp.Response {
 		}
 	}
 
+	// A tool that deliberately reveals a secret (export_dataset_key) keeps
+	// exactly its key field; the rest of its result is still redacted.
+	output := redact.ToolOutput(result)
+	if rs, ok := h.registry.(interface{ RevealsSecret(name string) bool }); ok && rs.RevealsSecret(params.Name) {
+		output = redact.ToolOutputKeeping(result, tools.ExportedKeyField)
+	}
+
 	return &mcp.Response{
 		JSONRPC: "2.0",
 		ID:      req.ID,
@@ -347,7 +354,7 @@ func (h *StdioHandler) handleToolsCall(req *mcp.Request) *mcp.Response {
 			Content: []mcp.ContentBlock{
 				{
 					Type: "text",
-					Text: redact.ToolOutput(result),
+					Text: output,
 				},
 			},
 		},

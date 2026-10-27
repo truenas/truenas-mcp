@@ -163,7 +163,7 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"delete_app": Destructive, "leave_directory_service": Destructive, "delete_scrub_schedule": Destructive,
 		"stop_app": Destructive, "upgrade_app": Destructive, "configure_directory_service": Destructive,
 		"download_update": Write, "install_app": Write, "update_app": Write,
-		"start_app": Write, "refresh_directory_cache": Write,
+		"start_app": Write, "refresh_directory_cache": Write, "export_dataset_key": Write,
 		"create_dataset": Write, "create_smb_share": Write, "create_nfs_share": Write,
 		"create_scrub_schedule": Write, "run_scrub": Write, "dismiss_alert": Write, "restore_alert": Write,
 	}
@@ -354,7 +354,7 @@ func TestAnnotationsPresent(t *testing.T) {
 			t.Errorf("%s annotations %+v do not match %v", tool.Name, *a, s.Access)
 		}
 		props := tool.InputSchema["properties"].(map[string]interface{})
-		if _, ok := props["confirm"]; ok != (s.Access == Destructive) {
+		if _, ok := props["confirm"]; ok != (s.Access == Destructive || s.RevealsSecret) {
 			t.Errorf("%s: confirm parameter present=%v", tool.Name, ok)
 		}
 		if s.Access == Destructive {

@@ -473,7 +473,7 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - **Network**: Client-only (no listening ports, all connections outbound)
 - **API Key Storage**: Recommend using environment variables instead of command-line args
 - **Log Safety**: Credentials are redacted from all log output and error messages; full request/response bodies are only logged in debug mode (see [Debug Logging](#debug-logging))
-- **Tool Output Redaction**: Secrets are always removed from tool results and error messages before they reach the MCP client (and the model), with no opt-out. Values under credential-bearing names (`password`, `DB_PASS`, `adminPwd`, `bindpw`, `secret`, `token`, `api_key`, `private_key`, `passphrase`, `credential`, `pin`, `otp`, `cookie`, `authorization`, password hashes, a key named `key` or ending in `_key`, ...) are replaced with `[REDACTED]`; the key is kept so the model knows the field exists, and a whole object or list under such a name is replaced. `{name, value}` environment entries and `NAME=VALUE` strings are redacted by name. Free text, including strings inside JSON results such as job errors, is also scrubbed of PEM private key blocks, `key=value`/`"key": "value"` pairs, Bearer tokens and passwords in URLs. This is a safety net, not a substitute for restricting the API key's permissions
+- **Tool Output Redaction**: Secrets are always removed from tool results and error messages before they reach the MCP client (and the model), with no opt-out. The one deliberate exception is the `key` field of the `export_dataset_key` result, which only that tool's own successful response may carry (see [Revealing a dataset key](#revealing-a-dataset-key)); every other tool, and every error, stays fully redacted. Values under credential-bearing names (`password`, `DB_PASS`, `adminPwd`, `bindpw`, `secret`, `token`, `api_key`, `private_key`, `passphrase`, `credential`, `pin`, `otp`, `cookie`, `authorization`, password hashes, a key named `key` or ending in `_key`, ...) are replaced with `[REDACTED]`; the key is kept so the model knows the field exists, and a whole object or list under such a name is replaced. `{name, value}` environment entries and `NAME=VALUE` strings are redacted by name. Free text, including strings inside JSON results such as job errors, is also scrubbed of PEM private key blocks, `key=value`/`"key": "value"` pairs, Bearer tokens and passwords in URLs. This is a safety net, not a substitute for restricting the API key's permissions
 
 **Known gaps of output redaction.** Redaction works on names and on common text shapes, so it cannot catch everything:
 
@@ -559,6 +559,29 @@ derived from the same table, so clients can apply their own approval prompts.
 which replaces app configuration in place but does not need `confirm`.
 Annotations were added in MCP 2025-03-26; this server still reports protocol
 `2024-11-05`, and older clients ignore the extra field.
+
+### Revealing a dataset key
+
+`export_dataset_key` returns the stored encryption key of a key-encrypted
+(`generate_key` or raw `key`) dataset so an operator can back it up. It is a
+write-class tool that **reveals a secret**, so it is deliberately conservative:
+
+- It needs `"confirm": true`. Without it (or with `"dry_run": true`) it only
+  returns a preview naming the dataset and saying the key will be revealed; the
+  key is never fetched for a preview.
+- It refuses passphrase datasets (TrueNAS does not store passphrases), datasets
+  that are not encrypted, and children that inherit encryption from another
+  encryption root (export the root instead).
+- The key appears only in that one successful tool response, together with a
+  warning to store it offline. It is never written to logs (including debug
+  logs), is never part of an error, and is not shown by `query_jobs` or any
+  other tool. Anything that records the conversation (the MCP client, the model
+  provider, transcripts) will see it, so only use the tool with clients you
+  trust with the key.
+- It needs an API key with the dataset write role. `--read-only` hides and
+  refuses it; use `--deny-tools export_dataset_key` to disable it while keeping
+  other write tools.
+- Exporting keys for a whole pool (`pool.dataset.export_keys`) is not exposed.
 
 ## Example Usage
 

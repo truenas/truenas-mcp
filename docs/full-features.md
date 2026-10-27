@@ -120,6 +120,10 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Dry-run mode to preview before creating
   - Wizard-style guidance for SMB/NFS/iSCSI setup
 
+- **export_dataset_key** - Reveal the stored encryption key of a key-encrypted dataset so it can be backed up (**reveals a secret**: needs `confirm: true`; the default is a preview that does not fetch the key)
+  - Refuses passphrase datasets (not stored by TrueNAS), unencrypted datasets and children that inherit encryption
+  - The key appears only in that one response and is never logged; see [Revealing a dataset key](../README.md#revealing-a-dataset-key)
+
 ### Share Management
 - **create_smb_share** - Create SMB shares for Windows/macOS file sharing
   - Interactive wizard walks through share configuration

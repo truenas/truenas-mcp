@@ -48,6 +48,12 @@ type Safety struct {
 	// non-additive updates") without requiring confirm. Destructive tools
 	// always advertise destructiveHint.
 	Overwrites bool
+	// RevealsSecret marks a tool whose successful result deliberately
+	// carries secret material (an encryption key) to the client. Like a
+	// destructive tool it requires confirm=true, and the stdio handler
+	// exempts its ExportedKeyField from output redaction. Only the tool's
+	// own result is exempt; logs, errors and every other tool stay redacted.
+	RevealsSecret bool
 }
 
 // toolSafety classifies every registered tool. A tool missing from this
@@ -90,6 +96,7 @@ var toolSafety = map[string]Safety{
 	"query_shares":              {Access: Read},
 	"query_vms":                 {Access: Read},
 	"create_dataset":            {Access: Write},
+	"export_dataset_key":        {Access: Write, Idempotent: true, RevealsSecret: true},
 	"create_smb_share":          {Access: Write},
 	"create_nfs_share":          {Access: Write},
 	"analyze_capacity":          {Access: Read},
@@ -189,6 +196,14 @@ func (r *Registry) SetPolicy(p Policy) error {
 	return nil
 }
 
+// RevealsSecret reports whether a tool deliberately returns secret material
+// in its result (see Safety.RevealsSecret); the output redactor exempts
+// ExportedKeyField for exactly these tools.
+func (r *Registry) RevealsSecret(name string) bool {
+	_, registered := r.tools[name]
+	return registered && safetyOf(name).RevealsSecret
+}
+
 // checkPolicy reports why a registered tool may not be listed or called.
 func (r *Registry) checkPolicy(name string) error {
 	switch {
@@ -213,18 +228,24 @@ func (r *Registry) applySafety() {
 			IdempotentHint:  s.Access == Read || s.Idempotent,
 			OpenWorldHint:   false,
 		}
-		if s.Access == Destructive {
+		if s.Access == Destructive || s.RevealsSecret {
 			props, _ := tool.Definition.InputSchema["properties"].(map[string]interface{})
 			if props == nil {
 				props = map[string]interface{}{}
 				tool.Definition.InputSchema["properties"] = props
 			}
+			confirmDesc := "Required to execute: set to true only after the user has explicitly approved this destructive operation. Without it the server returns a preview and changes nothing."
+			descSuffix := " **DESTRUCTIVE: requires confirm=true.** Without confirm the server only returns a preview; show it to the user and get their explicit approval before calling again with confirm=true."
+			if s.Access != Destructive {
+				confirmDesc = "Required to execute: set to true only after the user has explicitly approved revealing this secret in the conversation. Without it the server returns a preview and reveals nothing."
+				descSuffix = " **REVEALS A SECRET: requires confirm=true.** Without confirm the server only returns a preview; show it to the user and get their explicit approval before calling again with confirm=true."
+			}
 			props["confirm"] = map[string]interface{}{
 				"type":        "boolean",
-				"description": "Required to execute: set to true only after the user has explicitly approved this destructive operation. Without it the server returns a preview and changes nothing.",
+				"description": confirmDesc,
 				"default":     false,
 			}
-			tool.Definition.Description += " **DESTRUCTIVE: requires confirm=true.** Without confirm the server only returns a preview; show it to the user and get their explicit approval before calling again with confirm=true."
+			tool.Definition.Description += descSuffix
 		}
 		r.tools[name] = tool
 	}
@@ -258,6 +279,10 @@ func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]
 		"executed": false,
 		"message": fmt.Sprintf("%s is a destructive operation and was NOT executed. Show the user what it will do, "+
 			"ask them to explicitly approve it, and only then call %s again with the same arguments plus confirm=true.", name, name),
+	}
+	if safetyOf(name).RevealsSecret {
+		reply["message"] = fmt.Sprintf("%s reveals a secret and was NOT executed: nothing has been revealed. Tell the user the secret will be shown in this conversation "+
+			"(the model's context and any client logs), ask them to explicitly approve it, and only then call %s again with the same arguments plus confirm=true.", name, name)
 	}
 	if hasParam(tool, "dry_run") {
 		preview := make(map[string]interface{}, len(args)+1)

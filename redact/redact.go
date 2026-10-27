@@ -871,6 +871,46 @@ func ToolOutput(s string) string {
 	return string(enc)
 }
 
+// ToolOutputKeeping is ToolOutput for a tool that deliberately returns one
+// secret: the string value of the top-level field `field` of a JSON object
+// result is passed through unchanged, and everything else is redacted
+// exactly as ToolOutput does. It is for the result of a single, explicitly
+// confirmed tool (an encryption key export) and must never be applied
+// because of what a result contains. A result that is not a JSON object with
+// a string `field` gets plain ToolOutput treatment, so nothing is exempted
+// by accident. The re-encoded object has its keys sorted.
+func ToolOutputKeeping(s, field string) string {
+	v, ok := decode([]byte(s))
+	if !ok {
+		return ToolOutput(s)
+	}
+	obj, ok := v.(map[string]interface{})
+	if !ok {
+		return ToolOutput(s)
+	}
+	kept, ok := obj[field].(string)
+	if !ok {
+		return ToolOutput(s)
+	}
+	rest := make(map[string]interface{}, len(obj))
+	for k, val := range obj {
+		if k != field {
+			rest[k] = val
+		}
+	}
+	out, _ := walk(rest, ctx{})
+	redacted, ok := out.(map[string]interface{})
+	if !ok {
+		return ToolOutput(s)
+	}
+	redacted[field] = kept
+	enc, err := encode(redacted, strings.Contains(s, "\n"))
+	if err != nil {
+		return ToolOutput(s)
+	}
+	return string(enc)
+}
+
 // maxScalarText is the length of the longest value isScalarText accepts.
 const maxScalarText = 40
 

@@ -43,6 +43,7 @@ func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
 		tools:       make(map[string]Tool),
 	}
 	r.registerTools()
+	r.registerDatasetKeyTools()
 	r.applySafety()
 	return r
 }
@@ -1839,7 +1840,7 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (result st
 	if err := r.checkPolicy(name); err != nil {
 		return "", err
 	}
-	if safetyOf(name).Access == Destructive && requiresConfirmation(tool, args) {
+	if s := safetyOf(name); (s.Access == Destructive || s.RevealsSecret) && requiresConfirmation(tool, args) {
 		return r.confirmationRequired(name, tool, args)
 	}
 
