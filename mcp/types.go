@@ -10,10 +10,12 @@ type Request struct {
 }
 
 type Response struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id,omitempty"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   *Error      `json:"error,omitempty"`
+	JSONRPC string `json:"jsonrpc"`
+	// ID is always encoded: JSON-RPC 2.0 requires "id": null in an error
+	// reply to a request whose id could not be determined.
+	ID     interface{} `json:"id"`
+	Result interface{} `json:"result,omitempty"`
+	Error  *Error      `json:"error,omitempty"`
 }
 
 type Error struct {

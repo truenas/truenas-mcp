@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"strings"
 	"time"
 
+	"github.com/truenas/truenas-mcp/internal/safego"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
@@ -15,6 +18,10 @@ type Poller struct {
 	client *truenas.Client
 	store  *TaskStore
 	config PollerConfig
+
+	// pollTask polls one task; nil means the default. Tests replace it to
+	// inject failures.
+	pollTask func(*Task)
 }
 
 // NewPoller creates a new poller
@@ -36,9 +43,21 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.pollAllTasks()
+			p.pollAllTasksSafely()
 		}
 	}
+}
+
+// pollAllTasksSafely runs one polling pass. A panic must not end the loop
+// (and with it all task updates, or the whole process): it is logged to
+// stderr and the next tick polls again.
+func (p *Poller) pollAllTasksSafely() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("task poller panicked: %s\n%s", safego.Describe(r), debug.Stack())
+		}
+	}()
+	p.pollAllTasks()
 }
 
 // pollAllTasks polls all active tasks
@@ -46,12 +65,31 @@ func (p *Poller) pollAllTasks() {
 	activeTasks := p.store.GetActive()
 
 	for _, task := range activeTasks {
-		switch task.OperationType {
-		case OperationTypeJob:
-			p.pollJobTask(task)
-		case OperationTypeStatus:
-			p.pollStatusTask(task)
+		p.pollOne(task)
+	}
+}
+
+// pollOne polls a single task. If that panics, the task is marked failed so
+// it is not retried (and does not panic again) on every tick, and the
+// remaining tasks are still polled.
+func (p *Poller) pollOne(task *Task) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("task poller panicked on task %s: %s\n%s", task.TaskID, safego.Describe(r), debug.Stack())
+			task.Status = TaskStatusFailed
+			task.StatusMessage = "Internal error while polling this task; its state on TrueNAS is unknown"
+			p.store.Update(task)
 		}
+	}()
+	if p.pollTask != nil {
+		p.pollTask(task)
+		return
+	}
+	switch task.OperationType {
+	case OperationTypeJob:
+		p.pollJobTask(task)
+	case OperationTypeStatus:
+		p.pollStatusTask(task)
 	}
 }
 
