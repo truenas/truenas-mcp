@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/truenas/truenas-mcp/internal/safego"
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/truenas"
@@ -3364,14 +3365,31 @@ func supportedArcGraphs(client *truenas.Client) []string {
 	return graphs
 }
 
+// recoverDiscovery is deferred by the ARC graph discovery goroutines.
+func recoverDiscovery(source string) {
+	if r := recover(); r != nil {
+		log.Printf("ARC graph discovery (%s) panicked: %s\n%s", source, safego.Describe(r), debug.Stack())
+	}
+}
+
 // discoverArcGraphs returns the supported ARC graphs and whether discovery
 // was complete (both sources answered and at least one ARC graph matched).
 func discoverArcGraphs(client *truenas.Client) ([]string, bool) {
 	var accepted, offered []string
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); accepted = getDataAcceptedGraphs(client) }()
-	go func() { defer wg.Done(); offered = reportingGraphNames(client) }()
+	// CallTool's recover does not cover these goroutines. A panic in either
+	// is logged and leaves that source unanswered (nil), like an API error.
+	go func() {
+		defer wg.Done()
+		defer recoverDiscovery("get_data schema")
+		accepted = getDataAcceptedGraphs(client)
+	}()
+	go func() {
+		defer wg.Done()
+		defer recoverDiscovery("reporting.graphs")
+		offered = reportingGraphNames(client)
+	}()
 	wg.Wait()
 
 	var names []string

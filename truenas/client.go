@@ -9,8 +9,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/truenas/truenas-mcp/internal/safego"
 	"github.com/truenas/truenas-mcp/redact"
 )
 
@@ -71,6 +74,10 @@ type Client struct {
 	pongWait     time.Duration
 
 	legacyWarning sync.Once
+
+	// frameHook, if set, sees every decoded frame before it is routed.
+	// Tests use it to inject a panic into the read loop.
+	frameHook func(*rpcResponse)
 
 	// writeMu protects concurrent WebSocket writes
 	writeMu sync.Mutex
@@ -341,6 +348,14 @@ func (c *Client) connect() error {
 // keepalive pings conn until done is closed. WriteControl may be called
 // concurrently with other writes.
 func (c *Client) keepalive(conn *websocket.Conn, done <-chan struct{}) {
+	defer func() {
+		// A panic here must not take down the process. Pings stop; the
+		// read deadline then expires and readLoop drops the connection, so
+		// the next call reconnects.
+		if r := recover(); r != nil {
+			log.Printf("keepalive panicked: %s\n%s", safego.Describe(r), debug.Stack())
+		}
+	}()
 	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
 	for {
@@ -359,6 +374,16 @@ func (c *Client) keepalive(conn *websocket.Conn, done <-chan struct{}) {
 // via the pending map. Runs as a goroutine for the lifetime of the connection.
 func (c *Client) readLoop(conn *websocket.Conn, done chan struct{}) {
 	defer close(done)
+	defer func() {
+		// A panic while handling a frame must not take down the process, nor
+		// leave callers waiting on a connection nobody reads any more: drop
+		// the connection and fail its requests like any read error. The
+		// next call reconnects and logs in again.
+		if r := recover(); r != nil {
+			log.Printf("read loop panicked: %s\n%s", safego.Describe(r), debug.Stack())
+			c.dropConn(conn, errors.New("failed to read response: internal error in the read loop"))
+		}
+	}()
 	for {
 		var resp rpcResponse
 		err := conn.ReadJSON(&resp)
@@ -366,17 +391,12 @@ func (c *Client) readLoop(conn *websocket.Conn, done chan struct{}) {
 			conn.SetReadDeadline(time.Now().Add(c.pongWait))
 		}
 		if err != nil {
-			// Clear the connection BEFORE failing waiters, so their retry
-			// reconnects instead of reusing this dead socket.
-			c.connMu.Lock()
-			if c.conn == conn {
-				c.conn = nil
-				c.authedConn = nil
-			}
-			c.connMu.Unlock()
-			conn.Close()
-			c.failPending(conn, fmt.Errorf("failed to read response: %w", err))
+			c.dropConn(conn, fmt.Errorf("failed to read response: %w", err))
 			return
+		}
+
+		if c.frameHook != nil {
+			c.frameHook(&resp)
 		}
 
 		key := responseKey(resp.ID)
@@ -425,6 +445,21 @@ func (c *Client) readLoop(conn *websocket.Conn, done chan struct{}) {
 			log.Printf("Warning: received response for unknown request ID %s (may have timed out)", key)
 		}
 	}
+}
+
+// dropConn forgets conn, closes it and fails the requests in flight on it
+// with err.
+func (c *Client) dropConn(conn *websocket.Conn, err error) {
+	// Clear the connection BEFORE failing waiters, so their retry
+	// reconnects instead of reusing this dead socket.
+	c.connMu.Lock()
+	if c.conn == conn {
+		c.conn = nil
+		c.authedConn = nil
+	}
+	c.connMu.Unlock()
+	conn.Close()
+	c.failPending(conn, err)
 }
 
 // failPending delivers err to every request in flight on conn (called when
@@ -505,6 +540,20 @@ func (c *Client) endpointURL() (*url.URL, error) {
 		if u.Hostname() == "" {
 			return nil, fmt.Errorf("TrueNAS URL has no host")
 		}
+		if strings.HasSuffix(u.Host, ":") {
+			return nil, fmt.Errorf("invalid TrueNAS URL: empty port after the host's colon")
+		}
+		if strings.Contains(u.Hostname(), ":") && !strings.HasPrefix(u.Host, "[") {
+			// url.Parse accepts "host:443:443" and splits at the last colon.
+			return nil, fmt.Errorf("invalid TrueNAS URL: the host is not a host name or bracketed IPv6 address")
+		}
+		if port := u.Port(); port != "" {
+			n, err := parsePort(port)
+			if err != nil {
+				return nil, fmt.Errorf("invalid TrueNAS URL: %w", err)
+			}
+			u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(n)) // "0443" -> "443"
+		}
 		u.Path, u.RawPath = strings.TrimRight(u.Path, "/"), ""
 		switch u.Path {
 		case "":
@@ -533,10 +582,37 @@ func (c *Client) endpointURL() (*url.URL, error) {
 	if host == "" || strings.ContainsAny(host, "[]") {
 		return nil, fmt.Errorf("invalid TrueNAS host %q: no host", e)
 	}
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return nil, fmt.Errorf("invalid TrueNAS host %q: bad port %q", e, port)
+	if strings.Contains(host, ":") && !validIPv6(host) {
+		// More than one colon and not an IPv6 address, e.g. "host:443:443".
+		return nil, fmt.Errorf("invalid TrueNAS host %q: not a host name or IPv6 address (write IPv6 as [addr]:port)", e)
 	}
+	n, err := parsePort(port)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TrueNAS host %q: %w", e, err)
+	}
+	port = strconv.Itoa(n)
 	return &url.URL{Scheme: "wss", Host: net.JoinHostPort(host, port), Path: apiPath}, nil
+}
+
+// parsePort parses a TCP port written as plain decimal digits, 1-65535.
+// strconv.Atoi alone would also accept "+443" and "-1".
+func parsePort(s string) (int, error) {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("bad port %q", s)
+		}
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > 65535 {
+		return 0, fmt.Errorf("bad port %q", s)
+	}
+	return n, nil
+}
+
+// validIPv6 reports whether s is an IPv6 address, with an optional zone.
+func validIPv6(s string) bool {
+	a, err := netip.ParseAddr(s)
+	return err == nil && a.Is6()
 }
 
 // Authenticate connects if needed and logs in with auth.login_ex.

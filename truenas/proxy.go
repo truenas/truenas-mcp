@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"golang.org/x/net/http/httpproxy"
@@ -65,7 +66,7 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 		raw = "http://" + raw
 	}
 	p, err := url.Parse(raw)
-	if err != nil || p.Hostname() == "" {
+	if err != nil || p.Hostname() == "" || (strings.Contains(p.Hostname(), ":") && !strings.HasPrefix(p.Host, "[")) {
 		return nil, fmt.Errorf("invalid proxy URL in %s", source)
 	}
 	p.Scheme = strings.ToLower(p.Scheme)
@@ -81,6 +82,10 @@ func (c *Client) proxyFor(target *url.URL) (*proxyChoice, error) {
 	}
 	if p.Port() == "" {
 		p.Host = net.JoinHostPort(p.Hostname(), port)
+	} else if n, err := parsePort(p.Port()); err != nil {
+		return nil, fmt.Errorf("invalid proxy port in %s: the port must be 1-65535", source)
+	} else {
+		p.Host = net.JoinHostPort(p.Hostname(), strconv.Itoa(n)) // ":08080" -> ":8080"
 	}
 	return &proxyChoice{url: p, source: source}, nil
 }
