@@ -12,12 +12,14 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 
@@ -117,6 +119,20 @@ const apiPath = "/api/current"
 // legacyPath is the old DDP-style endpoint. URLs naming it are rewritten to
 // apiPath so existing configurations keep working.
 const legacyPath = "/websocket"
+
+// ConnectError is returned when the connection to TrueNAS could not be
+// established (name resolution, dial, proxy, TLS or WebSocket handshake), as
+// opposed to a failed login on a connection that was established. Err is the
+// underlying cause, including any hint on how to fix it. LoginAttempted is
+// true if a login had already been sent on an earlier connection of the same
+// attempt, which then dropped: the failed connection was a reconnect.
+type ConnectError struct {
+	Err            error
+	LoginAttempted bool
+}
+
+func (e *ConnectError) Error() string { return "connection failed: " + e.Err.Error() }
+func (e *ConnectError) Unwrap() error { return e.Err }
 
 // errNotSent marks a request that never reached the socket. Only such
 // requests are retried: once written, the server may already have acted on it.
@@ -256,6 +272,13 @@ func tlsHint(err error, host string) string {
 	return ""
 }
 
+// logURL is u as it may appear in logs and error text: scheme, host and path
+// only. The query and fragment can carry tokens, and user info is a
+// credential, so none of them is ever logged.
+func logURL(u *url.URL) string {
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
+}
+
 // wsDial performs the WebSocket handshake. Tests may replace it.
 var wsDial = func(d *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
 	return d.Dial(urlStr, nil)
@@ -302,14 +325,14 @@ func (c *Client) connect() error {
 		via = " via proxy " + proxy.String()
 	}
 
-	log.Printf("Connecting to %s%s...", u.Redacted(), via)
+	log.Printf("Connecting to %s%s...", logURL(u), via)
 	conn, resp, err := safeDial(&wsDialer, u.String())
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			if u.Path == apiPath {
-				err = fmt.Errorf("%w (HTTP 404 for %s: TrueNAS 25.04 or later required)", err, u.Redacted())
+				err = fmt.Errorf("%w (HTTP 404 for %s: TrueNAS 25.04 or later required)", err, logURL(u))
 			} else {
-				err = fmt.Errorf("%w (HTTP 404 for %s: check the path; the JSON-RPC endpoint is %s, and TrueNAS 25.04 or later required)", err, u.Redacted(), apiPath)
+				err = fmt.Errorf("%w (HTTP 404 for %s: check the path; the JSON-RPC endpoint is %s, and TrueNAS 25.04 or later required)", err, logURL(u), apiPath)
 			}
 		} else if hint := tlsHint(err, u.Hostname()); hint != "" {
 			err = fmt.Errorf("%w (%s)", err, hint)
@@ -317,8 +340,7 @@ func (c *Client) connect() error {
 			// Through a proxy, the only TCP dial is to the proxy itself.
 			err = fmt.Errorf("connecting via proxy %s from %s: proxy unreachable: %w", proxy, proxy.source, err)
 		}
-		log.Printf("Connection failed: %v", err)
-		return fmt.Errorf("connection failed: %w", err)
+		return &ConnectError{Err: err}
 	}
 
 	// Set read limit to handle large responses (e.g., large upgrade summaries)
@@ -341,7 +363,7 @@ func (c *Client) connect() error {
 	// Start the read loop to multiplex concurrent responses
 	go c.readLoop(conn, done)
 
-	log.Printf("Successfully connected to %s%s", u.Redacted(), via)
+	log.Printf("Successfully connected to %s%s", logURL(u), via)
 	return nil
 }
 
@@ -513,6 +535,38 @@ var errUserinfo = errors.New("TrueNAS URL must not contain user info (user:passw
 // /websocket path is replaced with /api/current, so existing configurations
 // keep working. Errors never quote input that could hold credentials.
 func (c *Client) endpointURL() (*url.URL, error) {
+	u, err := c.parseEndpoint()
+	if err != nil {
+		return nil, &EndpointError{Err: err}
+	}
+	return u, nil
+}
+
+// EndpointError is returned when the TrueNAS host or URL is unusable: a bad
+// host name, port or scheme, user info in the URL, and so on. It is a
+// configuration error, not a failure to connect. The message never quotes
+// input that could hold credentials.
+type EndpointError struct{ Err error }
+
+func (e *EndpointError) Error() string { return "invalid TrueNAS host or URL: " + e.Err.Error() }
+func (e *EndpointError) Unwrap() error { return e.Err }
+
+// ValidateEndpoint checks the TrueNAS host or URL without connecting, so a
+// bad value fails at startup with an *EndpointError.
+func (c *Client) ValidateEndpoint() error {
+	_, err := c.endpointURL()
+	return err
+}
+
+// schemeRE matches what may be quoted back as a URL scheme: short and made
+// of scheme characters only, so it cannot hold user info or other input.
+var schemeRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]{0,15}$`)
+
+// validScheme reports whether s looks like a URL scheme, so that it is safe
+// to quote.
+func validScheme(s string) bool { return schemeRE.MatchString(s) }
+
+func (c *Client) parseEndpoint() (*url.URL, error) {
 	e := strings.TrimSpace(c.endpoint)
 	if i := strings.Index(e, "://"); i >= 0 {
 		switch strings.ToLower(e[:i]) {
@@ -520,37 +574,47 @@ func (c *Client) endpointURL() (*url.URL, error) {
 		case "ws":
 			// SECURITY: TrueNAS revokes API keys used over unencrypted connections
 			return nil, fmt.Errorf("SECURITY ERROR: ws:// (unencrypted) connections are not allowed. TrueNAS will revoke API keys used over ws://. Use wss:// instead")
+		case "http", "https":
+			// Not mapped to wss://: the scheme is refused, with the fix spelled out.
+			return nil, fmt.Errorf("the %s:// scheme is not accepted; use the host name alone (for example truenas.local) or a wss://host[:port] URL", strings.ToLower(e[:i]))
 		default:
-			return nil, fmt.Errorf("unsupported URL scheme: pass a hostname or a wss:// URL")
+			if !validScheme(e[:i]) {
+				// Not a scheme at all, and may hold user info; do not quote it.
+				return nil, errors.New("not a host name or a wss://host[:port] URL")
+			}
+			return nil, fmt.Errorf("unsupported URL scheme %q: use the host name alone or a wss://host[:port] URL", e[:i])
 		}
 		u, err := url.Parse("wss" + e[i:])
 		if err != nil {
-			var urlErr *url.Error
-			if errors.As(err, &urlErr) {
-				err = urlErr.Err // drop the URL itself from the message
-			}
 			if strings.Contains(e, "@") {
 				return nil, errUserinfo
 			}
-			return nil, fmt.Errorf("invalid TrueNAS URL: %w", err)
+			// url.Parse errors quote parts of the input (a bad port, an
+			// escape), so only a fixed reason is given.
+			return nil, fmt.Errorf("malformed URL: %s", proxyParseReason(err))
 		}
 		if u.User != nil {
 			return nil, errUserinfo
 		}
 		if u.Hostname() == "" {
-			return nil, fmt.Errorf("TrueNAS URL has no host")
+			return nil, errors.New("the URL has no host")
+		}
+		if strings.IndexFunc(u.Hostname(), func(r rune) bool { return !bareHostRune(r) }) >= 0 {
+			// url.Parse accepts ";", "," and similar in a host. They end up
+			// in the dial error and the log, so refuse them without echoing.
+			return nil, errors.New("the host is not a host name or IPv6 address (it has characters that cannot be part of one)")
 		}
 		if strings.HasSuffix(u.Host, ":") {
-			return nil, fmt.Errorf("invalid TrueNAS URL: empty port after the host's colon")
+			return nil, errors.New("empty port after the host's colon")
 		}
 		if strings.Contains(u.Hostname(), ":") && !strings.HasPrefix(u.Host, "[") {
 			// url.Parse accepts "host:443:443" and splits at the last colon.
-			return nil, fmt.Errorf("invalid TrueNAS URL: the host is not a host name or bracketed IPv6 address")
+			return nil, errors.New("the host is not a host name or bracketed IPv6 address")
 		}
 		if port := u.Port(); port != "" {
 			n, err := parsePort(port)
 			if err != nil {
-				return nil, fmt.Errorf("invalid TrueNAS URL: %w", err)
+				return nil, err
 			}
 			u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(n)) // "0443" -> "443"
 		}
@@ -569,9 +633,11 @@ func (c *Client) endpointURL() (*url.URL, error) {
 	if strings.Contains(e, "@") {
 		return nil, errUserinfo
 	}
-	// From here on e holds no userinfo, so quoting it is safe.
-	if strings.ContainsAny(e, "/?#") {
-		return nil, fmt.Errorf("invalid TrueNAS host %q: a bare host cannot include a path; pass a full wss://host[:port]%s URL instead", e, apiPath)
+	// From here on e holds no userinfo. "/", "?", "#", ";" and "\" start a
+	// path, query or parameters, so only what comes before the first of them
+	// is quoted. Everything echoed below is cut by hostPrefix in the same way.
+	if i := strings.IndexAny(e, `/?#;\`); i >= 0 {
+		return nil, fmt.Errorf("%q: a bare host cannot include a path, query or fragment; pass a full wss://host[:port]%s URL instead", hostPrefix(e[:i]), apiPath)
 	}
 	host, port := e, "443"
 	if h, p, err := net.SplitHostPort(e); err == nil {
@@ -580,18 +646,36 @@ func (c *Client) endpointURL() (*url.URL, error) {
 		host = e[1 : len(e)-1] // bracketed IPv6 without a port
 	} // otherwise a name or an unbracketed IPv6 address, without a port
 	if host == "" || strings.ContainsAny(host, "[]") {
-		return nil, fmt.Errorf("invalid TrueNAS host %q: no host", e)
+		return nil, fmt.Errorf("%q: no host name", hostPrefix(e))
+	}
+	if i := strings.IndexFunc(host, func(r rune) bool { return !bareHostRune(r) }); i >= 0 {
+		return nil, fmt.Errorf("%q: not a host name or IPv6 address (write IPv6 as [addr]:port)", hostPrefix(e))
 	}
 	if strings.Contains(host, ":") && !validIPv6(host) {
 		// More than one colon and not an IPv6 address, e.g. "host:443:443".
-		return nil, fmt.Errorf("invalid TrueNAS host %q: not a host name or IPv6 address (write IPv6 as [addr]:port)", e)
+		return nil, fmt.Errorf("%q: not a host name or IPv6 address (write IPv6 as [addr]:port)", hostPrefix(e))
 	}
 	n, err := parsePort(port)
 	if err != nil {
-		return nil, fmt.Errorf("invalid TrueNAS host %q: %w", e, err)
+		return nil, fmt.Errorf("%q: %w", hostPrefix(e), err)
 	}
 	port = strconv.Itoa(n)
 	return &url.URL{Scheme: "wss", Host: net.JoinHostPort(host, port), Path: apiPath}, nil
+}
+
+// bareHostRune reports whether r may appear in a bare host: letters, digits,
+// and the punctuation of names, ports and IPv6 addresses ("[fe80::1%eth0]:443").
+func bareHostRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(".-_:[]%", r)
+}
+
+// hostPrefix returns the leading part of s that is made of host characters,
+// the only part of a bare-host input that error messages may quote.
+func hostPrefix(s string) string {
+	if i := strings.IndexFunc(s, func(r rune) bool { return !bareHostRune(r) }); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // parsePort parses a TCP port written as plain decimal digits, 1-65535.
@@ -599,14 +683,24 @@ func (c *Client) endpointURL() (*url.URL, error) {
 func parsePort(s string) (int, error) {
 	for _, r := range s {
 		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("bad port %q", s)
+			return 0, badPort(s)
 		}
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 1 || n > 65535 {
-		return 0, fmt.Errorf("bad port %q", s)
+		return 0, badPort(s)
 	}
 	return n, nil
+}
+
+// badPort describes a bad port. The text is quoted only when it is made of
+// digits and signs ("+443", "99999"); anything else may be part of a query
+// or other input, so it is not echoed.
+func badPort(s string) error {
+	if len(s) <= 8 && strings.Trim(s, "0123456789+-") == "" {
+		return fmt.Errorf("bad port %q", s)
+	}
+	return errors.New("bad port: not a number")
 }
 
 // validIPv6 reports whether s is an IPv6 address, with an optional zone.
@@ -617,7 +711,7 @@ func validIPv6(s string) bool {
 
 // Authenticate connects if needed and logs in with auth.login_ex.
 func (c *Client) Authenticate() error {
-	_, _, err := c.session(true)
+	_, _, err := c.session(true, true)
 	return err
 }
 
@@ -625,7 +719,7 @@ func (c *Client) Authenticate() error {
 // generation of the current session. It changes on every reconnect or new
 // login, so callers can key per-session caches by it.
 func (c *Client) SessionGeneration() (uint64, error) {
-	_, gen, err := c.session(false)
+	_, gen, err := c.session(false, false)
 	return gen, err
 }
 
@@ -653,7 +747,10 @@ func (c *Client) forgetSession(conn *websocket.Conn, gen uint64) {
 // session returns a logged-in connection, connecting and logging in first
 // if needed. authMu serializes this, so concurrent callers share one login.
 // force logs in again even if the current connection is already logged in.
-func (c *Client) session(force bool) (*websocket.Conn, uint64, error) {
+//
+// A failure to connect is logged here unless quiet is set, for callers that
+// report the returned error themselves (startup), so it is logged once.
+func (c *Client) session(force, quiet bool) (*websocket.Conn, uint64, error) {
 	if !force {
 		if conn, gen := c.authedSession(); conn != nil {
 			return conn, gen, nil
@@ -674,6 +771,17 @@ func (c *Client) session(force bool) (*websocket.Conn, uint64, error) {
 		conn := c.conn
 		c.connMu.Unlock()
 		if err != nil {
+			var ce *ConnectError
+			if errors.As(err, &ce) {
+				if !quiet {
+					log.Printf("Connection failed: %v", ce.Err)
+				}
+				if attempt > 0 {
+					// Reconnecting after a connection dropped mid-login:
+					// a login was attempted, just not on this connection.
+					err = &ConnectError{Err: ce.Err, LoginAttempted: true}
+				}
+			}
 			return nil, 0, err
 		}
 
@@ -755,7 +863,7 @@ func (c *Client) CallWithTimeout(timeout time.Duration, method string, params ..
 	}
 	for attempt := 0; ; attempt++ {
 		retry := attempt == 0
-		conn, gen, err := c.session(false)
+		conn, gen, err := c.session(false, false)
 		if err != nil {
 			return nil, err
 		}

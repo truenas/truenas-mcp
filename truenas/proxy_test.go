@@ -484,6 +484,30 @@ func TestProxyForSelection(t *testing.T) {
 	}
 }
 
+func TestUnsupportedProxySchemeEchoIsCapped(t *testing.T) {
+	target := &url.URL{Scheme: "wss", Host: "truenas.example:443"}
+	for _, tc := range []struct {
+		option string
+		want   string // a substring of the error
+		absent string // must not appear
+	}{
+		{"socks4://h:1", `unsupported proxy scheme "socks4" in --proxy`, ""},
+		{"a23456789012345://h:1", `unsupported proxy scheme "a23456789012345" in --proxy`, ""},  // 15 chars after the first: allowed
+		{"a2345678901234567://h:1", "unsupported proxy scheme in --proxy", "a2345678901234567"}, // 18 chars: too long
+		{"averyverylongschemenamethatkeepsgoing+token.X://h:1", "unsupported proxy scheme in --proxy", "token"},
+	} {
+		clearProxyEnv(t)
+		_, err := (&Client{proxy: tc.option}).proxyFor(target)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q: got %v, want it to contain %q", tc.option, err, tc.want)
+			continue
+		}
+		if tc.absent != "" && strings.Contains(err.Error(), tc.absent) {
+			t.Errorf("%q: error echoes the scheme: %v", tc.option, err)
+		}
+	}
+}
+
 func TestValidateProxy(t *testing.T) {
 	for _, tc := range []struct {
 		endpoint string
