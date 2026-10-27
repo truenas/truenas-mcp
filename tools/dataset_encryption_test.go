@@ -381,7 +381,7 @@ func TestKeyBackupGuidancePerMode(t *testing.T) {
 		opts map[string]interface{}
 		want []string
 	}{
-		{map[string]interface{}{"generate_key": true}, []string{"key database", "not returned", "TrueNAS UI"}},
+		{map[string]interface{}{"generate_key": true}, []string{"key database", "not returned", "export_dataset_key", "TrueNAS UI"}},
 		{map[string]interface{}{"passphrase": testPassphrase}, []string{"does not store the passphrase", "data on this dataset is lost"}},
 		{map[string]interface{}{"key": testKeyHex}, []string{"must keep a copy", "does not return"}},
 	} {
@@ -470,7 +470,7 @@ func TestCreateDatasetMiddlewareErrorScrubsLiteralSecrets(t *testing.T) {
 func TestCreateDatasetEncryptionGuidanceText(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	desc := r.tools["create_dataset"].Definition.Description
-	for _, want := range []string{"do not default to one", "key database", "TrueNAS does not store it", "must keep it",
+	for _, want := range []string{"do not default to one", "key database", "export_dataset_key", "TrueNAS does not store it", "must keep it",
 		"passphrase-encrypted parent", "not configurable through this tool", "AES-256-GCM"} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("create_dataset description missing %q", want)

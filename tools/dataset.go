@@ -294,7 +294,7 @@ func encryptionMode(opts map[string]interface{}) string {
 func keyBackupGuidance(mode string) string {
 	switch mode {
 	case "generate_key":
-		return "IMPORTANT: TrueNAS generated this dataset's key and stored it in its key database; it is not returned by this tool. Back it up by exporting the dataset key from the TrueNAS UI and keep the copy somewhere other than this system, because the key is lost if the system or its configuration database is lost."
+		return "IMPORTANT: TrueNAS generated this dataset's key and stored it in its key database; it is not returned by this tool. Back it up with the export_dataset_key tool (it asks for explicit confirmation and shows the key once, if that tool is enabled on this server) or by exporting the dataset key from the TrueNAS UI, and keep the copy somewhere other than this system, because the key is lost if the system or its configuration database is lost."
 	case "passphrase":
 		return "IMPORTANT: TrueNAS does not store the passphrase and it cannot be recovered. If it is lost, the data on this dataset is lost."
 	case "key":
