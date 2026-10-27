@@ -1244,7 +1244,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["query_apps"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_apps",
-			Description: "Query installed applications with their status, versions, and available updates",
+			Description: "Query installed applications with their status, versions, and available updates. upgrade_available tells whether an upgrade exists; latest_version is the newest catalog version (always set, in catalog form, not comparable to human_version)",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1771,8 +1771,10 @@ Returns task_id for tracking progress with tasks_get.
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state filter) when more exist than were returned. Each job entry is at most 4 KiB.",
+						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state filter) when more exist than were returned. Each job entry is at most 4 KiB. Values above 9999 are capped at 9999.",
 						"default":     50,
+						"minimum":     1,
+						"maximum":     maxQueryJobsLimit,
 					},
 				},
 			},
@@ -3905,14 +3907,12 @@ func handleQueryApps(client *truenas.Client, args map[string]interface{}) (strin
 			"upgrade_available": app["upgrade_available"],
 		}
 
-		// What an upgrade would go to. app.query reports it as
-		// latest_version (null when there is no newer one); older releases
-		// used latest_app_version.
-		latest := app["latest_version"]
-		if latest == nil {
-			latest = app["latest_app_version"]
-		}
-		summary["latest_version"] = latest
+		// latest_version is the newest catalog version of the app. app.query
+		// always sets it, also when it equals the installed one, and in the
+		// catalog form (e.g. "1.2.0"), not the human_version form
+		// ("<app>_<chart>"), so the two cannot be compared directly.
+		// upgrade_available is what tells whether an upgrade exists.
+		summary["latest_version"] = app["latest_version"]
 
 		// Include portals (web URLs) if available
 		if portals, ok := app["portals"].([]interface{}); ok && len(portals) > 0 {
@@ -4487,6 +4487,10 @@ func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 	}, nil
 }
 
+// maxQueryJobsLimit is the largest query_jobs limit: one below the
+// middleware's 10000-row maximum, as one extra row is requested.
+const maxQueryJobsLimit = 9999
+
 func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (string, error) {
 	state := "RUNNING"
 	if s, ok := args["state"].(string); ok && s != "" {
@@ -4495,7 +4499,7 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 
 	limit := 50
 	if l, ok := args["limit"].(float64); ok && l >= 1 {
-		limit = int(l)
+		limit = int(math.Min(l, maxQueryJobsLimit))
 	}
 
 	// Build query filters based on state
@@ -4509,7 +4513,9 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 	}
 
 	// Build options
-	// One row more than asked for tells whether the list was cut.
+	// One row more than asked for tells whether the list was cut. limit is
+	// capped at maxQueryJobsLimit so this stays within the middleware's
+	// 10000-row maximum.
 	options := map[string]interface{}{
 		"limit":    limit + 1,
 		"order_by": []string{"-time_started"}, // Most recent first

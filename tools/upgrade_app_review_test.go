@@ -435,7 +435,7 @@ func TestQueryAppsShowsVersions(t *testing.T) {
 	upgradable["latest_version"] = "1.2.0"
 	upgradable["upgrade_available"] = true
 	current := appEntry("nginx", "RUNNING")
-	current["latest_version"] = nil
+	current["latest_version"] = "1.2.0" // always set, even with no upgrade
 	fake := &fakeMiddleware{results: map[string]interface{}{"app.query": []interface{}{upgradable, current}}}
 	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
@@ -458,7 +458,7 @@ func TestQueryAppsShowsVersions(t *testing.T) {
 		t.Errorf("plex: %v", p)
 	}
 	n := byName["nginx"]
-	if n["upgrade_available"] != false || n["latest_version"] != nil || n["human_version"] != "2.0.0_1.2.0" {
+	if n["upgrade_available"] != false || n["latest_version"] != "1.2.0" || n["human_version"] != "2.0.0_1.2.0" {
 		t.Errorf("nginx: %v", n)
 	}
 }
@@ -489,5 +489,29 @@ func TestTasksGetJobSummaryFollowsRunningJob(t *testing.T) {
 	mgr.PollNow()
 	if percent() != 60.0 {
 		t.Errorf("job summary is stale: percent = %v, want 60", percent())
+	}
+}
+
+// At the largest limit query_jobs must not ask the middleware for more than
+// its 10000-row maximum.
+func TestQueryJobsLimitCappedAtMiddlewareMax(t *testing.T) {
+	for _, l := range []float64{9999, 10000, 50000} {
+		resp, fake := queryJobs(t, numberedJobs(3), 3, map[string]interface{}{"state": "all", "limit": l})
+		if resp["limit"] != 9999.0 {
+			t.Errorf("limit %v: reported limit %v, want 9999", l, resp["limit"])
+		}
+		calls := fake.called("core.get_jobs")
+		if len(calls) == 0 {
+			t.Fatalf("limit %v: no core.get_jobs call", l)
+		}
+		var raw []json.RawMessage
+		_ = json.Unmarshal(calls[0].Params, &raw)
+		var opts map[string]interface{}
+		if len(raw) < 2 || json.Unmarshal(raw[1], &opts) != nil {
+			t.Fatalf("limit %v: bad params %s", l, calls[0].Params)
+		}
+		if opts["limit"] != 10000.0 {
+			t.Errorf("limit %v: sent options.limit %v, want 10000", l, opts["limit"])
+		}
 	}
 }

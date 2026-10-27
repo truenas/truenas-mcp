@@ -71,7 +71,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - A graph that fails is reported under `errors.<graph>` while the others are returned; if every graph fails the call is an error
 
 ### Applications
-- **query_apps** - List installed applications with status, `human_version`, and `upgrade_available` / `latest_version` (what an upgrade would go to)
+- **query_apps** - List installed applications with status, `human_version`, and `upgrade_available` (whether an upgrade exists) and `latest_version` (newest catalog version, always set, in catalog form rather than `human_version` form)
 - **search_app_catalog** - Search TrueNAS app catalog by name, category, or keyword
   - Search across all catalog trains (stable, enterprise, community)
   - Filter by category (media, productivity, database, etc.)

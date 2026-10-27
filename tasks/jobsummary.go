@@ -102,6 +102,10 @@ func boundText(v interface{}, max int) interface{} {
 		cut, _ := TruncateText(s, max)
 		return cut
 	}
+	if b, err := json.Marshal(v); err == nil && len(b) > max {
+		cut, _ := TruncateText(string(b), max)
+		return cut
+	}
 	return v
 }
 
@@ -231,7 +235,11 @@ func FitJobSummary(m map[string]interface{}) map[string]interface{} {
 	}
 	// Only identity fields are left; bound them too.
 	for _, k := range []string{"method", "state", "id", "time_started", "time_finished"} {
-		m[k] = boundText(m[k], 64)
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		m[k] = boundText(v, 64)
 		if summarySize(m) <= MaxJobResultBytes {
 			return m
 		}

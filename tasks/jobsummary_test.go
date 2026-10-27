@@ -139,3 +139,21 @@ func TestFitJobSummaryFlagsCutText(t *testing.T) {
 		t.Errorf("too big: %d", jobSize(t, out))
 	}
 }
+
+// The last-resort cut does not add identity keys the job did not have, and
+// bounds non-string id/state values too.
+func TestFitJobSummaryIdentityFallback(t *testing.T) {
+	huge := []interface{}{}
+	for i := 0; i < 2000; i++ {
+		huge = append(huge, strings.Repeat("s", 4))
+	}
+	out := FitJobSummary(map[string]interface{}{"id": huge, "description": strings.Repeat("d", 6000)})
+	for _, k := range []string{"method", "state", "time_started", "time_finished"} {
+		if _, has := out[k]; has {
+			t.Errorf("absent key %q added: %v", k, out[k])
+		}
+	}
+	if jobSize(t, out) > MaxJobResultBytes {
+		t.Errorf("too big: %d", jobSize(t, out))
+	}
+}
