@@ -402,3 +402,96 @@ func TestTextURLWithEscapedSlashes(t *testing.T) {
 		{"postgres://u:p@fake-db-pw@db.example/app", "postgres://u:" + Marker + "@db.example/app"},
 	})
 }
+
+// TestTextQuotedSeparators: a '|', ';', '&' or newline inside a quoted
+// argument of another option does not end the command, so a password option
+// after it is still redacted, for every supported program.
+func TestTextQuotedSeparators(t *testing.T) {
+	checkText(t, []struct{ in, want string }{
+		// mysql / mariadb
+		{"mysql -pfake-db-pw -e 'x|y' -pfake-user-pw", "mysql -p" + Marker + " -e 'x|y' -p" + Marker},
+		{`mysql -e "a;b" -pfake-db-pw`, `mysql -e "a;b" -p` + Marker},
+		{`mysql -e "a&b" -pfake-db-pw db`, `mysql -e "a&b" -p` + Marker + ` db`},
+		{`mariadb -e "a\"|b" -pfake-db-pw`, `mariadb -e "a\"|b" -p` + Marker},
+		{"mysql -e 'a\\' -pfake-db-pw", "mysql -e 'a\\' -p" + Marker},
+		{"mysqldump -r 'a|b' -r \"c;d\" -pfake-db-pw db", "mysqldump -r 'a|b' -r \"c;d\" -p" + Marker + " db"},
+		{`mysql -e "a;b" -p"fake db pw" db`, `mysql -e "a;b" -p"` + Marker + `" db`},
+		{`mysql -e "a;b" -p'x|y' -e 'c|d' -pfake-user-pw`, `mysql -e "a;b" -p'` + Marker + `' -e 'c|d' -p` + Marker},
+		// smbclient, curl, ipmitool
+		{"smbclient //srv/share -c 'ls|more' -U bob%fake-smb-pw", "smbclient //srv/share -c 'ls|more' -U bob%" + Marker},
+		{`rpcclient -c "a;b" -Ubob%fake-smb-pw srv`, `rpcclient -c "a;b" -Ubob%` + Marker + ` srv`},
+		{`smbclient -c "a&b" --user=bob%fake-smb-pw`, `smbclient -c "a&b" --user=bob%` + Marker},
+		{`curl -H "X: a;b" -u bob:fake-user-pw https://h/`, `curl -H "X: a;b" -u bob:` + Marker + ` https://h/`},
+		{`curl -d 'a=1&b=2' --proxy-user bob:fake-user-pw https://h/`, `curl -d 'a=1&b=2' --proxy-user bob:` + Marker + ` https://h/`},
+		{`curl -d "a|b" --user=bob:fake-user-pw https://h/`, `curl -d "a|b" --user=bob:` + Marker + ` https://h/`},
+		{`curl -d 'a|b' -ubob:fake-user-pw -d 'c;d' -U bob:fake-db-pw`, `curl -d 'a|b' -ubob:` + Marker + ` -d 'c;d' -U bob:` + Marker},
+		{`ipmitool -H 'h;1' -P fake-user-pw chassis status`, `ipmitool -H 'h;1' -P ` + Marker + ` chassis status`},
+		{`ipmitool -I "lan|plus" -Pfake-user-pw`, `ipmitool -I "lan|plus" -P` + Marker},
+		// sshpass: quoted values of its own options, and -p inside the command's quotes
+		{`sshpass -f '/tmp/a;b' -p fake-ssh-pw ssh h`, `sshpass -f '/tmp/a;b' -p ` + Marker + ` ssh h`},
+		{`sshpass -P "pass;word" -pfake-ssh-pw ssh h`, `sshpass -P "pass;word" -p` + Marker + ` ssh h`},
+		// the program itself inside quotes
+		{`ssh h "mysql -e 'x|y' -pfake-db-pw"`, `ssh h "mysql -e 'x|y' -p` + Marker + `"`},
+		{`sh -c 'mysql -e "a;b" -pfake-db-pw'`, `sh -c 'mysql -e "a;b" -p` + Marker + `'`},
+		// long options with quoted separators around them
+		{"cmd --note 'a|b' --password fake-user-pw --other 'c;d'", "cmd --note 'a|b' --password " + Marker + " --other 'c;d'"},
+		{`cmd --password "a;b|c" --note 'x'`, `cmd --password "` + Marker + `" --note 'x'`},
+		// separators outside quotes still end the command
+		{"mysql -e 'x' | grep -pfake-db-pw", "mysql -e 'x' | grep -pfake-db-pw"},
+		{`mysql -e "a" ; grep -pfake-db-pw`, `mysql -e "a" ; grep -pfake-db-pw`},
+		{"mysql -e 'a' && grep -px", "mysql -e 'a' && grep -px"},
+		{"mysql -e 'a\nb'\ngrep -px", "mysql -e 'a\nb'\ngrep -px"},
+		{`mysql -e a\;b -pfake-db-pw`, `mysql -e a\;b -p` + Marker},
+		{"curl -d 'a' https://h/ | curl -u bob https://h/ ; grep -u x:y", "curl -d 'a' https://h/ | curl -u bob https://h/ ; grep -u x:y"},
+		// a later command is still found after quoted separators
+		{`mysql -e "a;b" db; mysql -pfake-db-pw`, `mysql -e "a;b" db; mysql -p` + Marker},
+	})
+}
+
+// TestTextUnbalancedQuotes: a quote that is never closed runs to the end
+// of the line, so everything after it on that line is part of the command
+// (and a password option there is redacted), but the next line is not.
+func TestTextUnbalancedQuotes(t *testing.T) {
+	checkText(t, []struct{ in, want string }{
+		{"mysql -e 'a|b -pfake-db-pw", "mysql -e 'a|b -p" + Marker},
+		{`mysql -e "a;b -pfake-db-pw -pfake-user-pw`, `mysql -e "a;b -p` + Marker + ` -p` + Marker},
+		{"mysql -e 'a|b -pfake-db-pw\nmysql -pfake-user-pw", "mysql -e 'a|b -p" + Marker + "\nmysql -p" + Marker},
+		{"mysql -e 'a|b\ngrep -px", "mysql -e 'a|b\ngrep -px"},
+		{`curl -d "a|b -u bob:fake-user-pw`, `curl -d "a|b -u bob:` + Marker},
+		{`smbclient -c "a\" -U bob%fake-smb-pw`, `smbclient -c "a\" -U bob%` + Marker},
+		// an apostrophe in text before the program does not hide it
+		{"it's: mysql -pfake-db-pw", "it's: mysql -p" + Marker},
+		{`echo "don't" ; mysql -pfake-db-pw`, `echo "don't" ; mysql -p` + Marker},
+		// a quote that closes a quoted command leaves later commands visible to the scan
+		{"sh -c 'mysql -pfake-db-pw' ; mysql -pfake-user-pw", "sh -c 'mysql -p" + Marker + "' ; mysql -p" + Marker},
+		{"sh -c 'curl -u a:fake-user-pw' ; curl -u b:fake-db-pw", "sh -c 'curl -u a:" + Marker + "' ; curl -u b:" + Marker},
+		// an unbalanced quote in a password option's own value
+		{`mysql -p"fake-db-pw -e x | y`, `mysql -p"` + Marker},
+		{`curl -u 'bob:fake user pw -d a|b`, `curl -u 'bob:` + Marker},
+	})
+}
+
+// TestTextQuotedSeparatorsNoOverRedaction: ordinary text with quotes and
+// separators is left alone.
+func TestTextQuotedSeparatorsNoOverRedaction(t *testing.T) {
+	for _, in := range []string{
+		`mysql -e "select 1; select 2" db`,
+		`mysql -e 'a|b' -p`,
+		`mysql -e 'a|b' -p db`,
+		`mysql -u root -e "show tables" | grep -p x`,
+		`curl -s -H 'Accept: a;b' https://h/ | jq .`,
+		`curl -d 'a=1&b=2' -u bob https://h/`,
+		`smbclient //srv/share -c 'ls; pwd' -U bob`,
+		`ipmitool -H 'h;1' -E chassis status`,
+		`sshpass -f '/tmp/a;b' ssh h -p 22`,
+		`sshpass -e ssh -o 'ProxyCommand=nc %h %p|cat' h`,
+		`echo "mysql is a database; -px is not an option" | wc`,
+		`echo 'the curl; command -u x:y' done`,
+		`grep -e 'a|b' -pfake file; mysql -e "x;y" db`,
+		"the quote ' in 'text' and \" more | mysql -e x",
+	} {
+		if got := Text(in); got != in {
+			t.Errorf("Text(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}

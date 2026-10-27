@@ -208,15 +208,18 @@ var (
 	// "--password=S3CR3T" is a key=value pair and is handled by
 	// redactBarePairs.
 	longOption = regexp.MustCompile(`--([A-Za-z][A-Za-z0-9_-]{0,63})[ \t]+`)
-	// textPrograms match a program name, then (on the same command, before
-	// any '|', ';', '&' or newline) its password option; the secret starts at
-	// the end of the match, less back bytes. If opt is set, every further
-	// match of opt on the same command is a password option too
-	// (mysql -pA -pB, curl -u a:A --proxy-user b:B).
+	// textPrograms match a program name. For sshpass the match extends to
+	// the end of its password option and the secret starts at the end of the
+	// match. For the others (opt is set) the match is the program name and
+	// the white space after it, and every match of opt on the same command
+	// is a password option: the secret starts at the end of the match, less
+	// back bytes (mysql -pA -pB, curl -u a:A --proxy-user b:B). The command
+	// ends at the first '|', ';', '&' or newline that is not inside a quoted
+	// string (see commandEnd).
 	textPrograms = []textProgram{
 		// sshpass -p S3CR3T / -pS3CR3T, after any of its other options. Later
 		// options belong to the command sshpass runs.
-		{names: []string{"sshpass"}, re: regexp.MustCompile(`\bsshpass(?:[ \t]+(?:-[ev]|-[fdP][ \t]*[^\s"']+))*[ \t]+-p[ \t]*`)},
+		{names: []string{"sshpass"}, re: regexp.MustCompile(`\bsshpass(?:[ \t]+(?:-[ev]|-[fdP][ \t]*(?:"(?:[^"\\\n]|\\[^\n])*"|'[^'\n]*'|[^\s"']+)))*[ \t]+-p[ \t]*`)},
 		// The attached password of the MySQL and MariaDB clients
 		// (mysql -pS3CR3T db). A separate "-p" prompts for the password and
 		// is left alone, as is "-p" for other programs, where it often means
@@ -245,30 +248,38 @@ type textProgram struct {
 func programOption(names []string, progs, opt string, back int, sep byte) textProgram {
 	return textProgram{
 		names: names,
-		re:    regexp.MustCompile(`\b(?:` + progs + `)(?:[ \t][^\n|;&]*?)??` + opt),
+		re:    regexp.MustCompile(`\b(?:` + progs + `)[ \t]`),
 		opt:   regexp.MustCompile(opt),
 		back:  back, sep: sep,
 	}
 }
 
-// shellWordEnd returns the end of the shell-style word starting at s[i]:
-// a quoted string (with backslash escapes inside double quotes) up to its
-// closing quote, or a run of characters up to whitespace or a quote, with
-// backslash escapes. An unterminated quote runs to the end of the line.
-func shellWordEnd(s string, i int) int {
-	if i < len(s) && (s[i] == '"' || s[i] == '\'') {
-		q := s[i]
-		k := i + 1
-		for k < len(s) && s[k] != q && s[k] != '\n' && s[k] != '\r' {
-			if q == '"' && s[k] == '\\' && k+1 < len(s) && s[k+1] != '\n' {
-				k++
-			}
+// quotedEnd returns the end of the quoted string starting at s[i], a single
+// or double quote: just after its closing quote, with backslash escapes
+// inside double quotes. A string that is not closed runs to the end of the
+// line, so an unbalanced quote never hides the rest of the line from the
+// redaction.
+func quotedEnd(s string, i int) int {
+	q := s[i]
+	k := i + 1
+	for k < len(s) && s[k] != q && s[k] != '\n' && s[k] != '\r' {
+		if q == '"' && s[k] == '\\' && k+1 < len(s) && s[k+1] != '\n' {
 			k++
 		}
-		if k < len(s) && s[k] == q {
-			return k + 1
-		}
-		return k
+		k++
+	}
+	if k < len(s) && s[k] == q {
+		return k + 1
+	}
+	return k
+}
+
+// shellWordEnd returns the end of the shell-style word starting at s[i]:
+// a quoted string (see quotedEnd), or a run of characters up to white space
+// or a quote, with backslash escapes.
+func shellWordEnd(s string, i int) int {
+	if i < len(s) && (s[i] == '"' || s[i] == '\'') {
+		return quotedEnd(s, i)
 	}
 	j := i
 	for j < len(s) {
@@ -283,6 +294,29 @@ func shellWordEnd(s string, i int) int {
 		j++
 	}
 	return j
+}
+
+// commandEnd returns the end of the command that continues at s[i]: the
+// first '|', ';', '&' or newline that is not inside a single- or
+// double-quoted string and not escaped by a backslash. An unbalanced quote
+// runs to the end of the line, so the rest of that line belongs to the
+// command. It reads each byte once.
+func commandEnd(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case '\n', '|', ';', '&':
+			return i
+		case '"', '\'':
+			i = quotedEnd(s, i)
+			continue
+		case '\\':
+			if i+1 < len(s) && s[i+1] != '\n' {
+				i++
+			}
+		}
+		i++
+	}
+	return len(s)
 }
 
 // redactOptions redacts the values of sensitive long options (--password
@@ -357,41 +391,32 @@ func redactProgramOption(s string, p textProgram) string {
 		}
 		return end
 	}
-	// commandEnd returns the end of the command that continues at s[i].
-	commandEnd := func(i int) int {
-		if k := strings.IndexAny(s[i:], "\n|;&"); k >= 0 {
-			return i + k
-		}
-		return len(s)
-	}
 	for pos < len(s) {
 		m := p.re.FindStringIndex(s[pos:])
 		if m == nil {
 			break
 		}
-		next := pos + m[1]
 		if p.opt == nil {
+			next := pos + m[1]
 			pos = max(redactAt(next-p.back), next)
 			continue
 		}
-		// The command ends at the first '|', ';', '&' or newline, unless it is
-		// inside a quoted value. An unquoted value that runs past one
-		// (-pA;b) is redacted whole, and ends the command.
-		cmdEnd := commandEnd(next - p.back)
+		// The match ends with the white space that starts the options. The
+		// command ends at the first '|', ';', '&' or newline outside quotes.
+		// An unquoted value that runs past one (-pA;b) is redacted whole,
+		// and ends the command.
+		pos += m[1] - 1
+		cmdEnd := commandEnd(s, pos)
 		for {
-			vs := next - p.back
-			pos = max(redactAt(vs), next)
-			if pos > cmdEnd {
-				if s[vs] != '"' && s[vs] != '\'' {
-					break
-				}
-				cmdEnd = commandEnd(pos)
-			}
-			m := p.opt.FindStringIndex(s[pos:cmdEnd])
-			if m == nil {
+			om := p.opt.FindStringIndex(s[pos:cmdEnd])
+			if om == nil {
 				break
 			}
-			next = pos + m[1]
+			next := pos + om[1]
+			pos = max(redactAt(next-p.back), next)
+			if pos > cmdEnd {
+				break
+			}
 		}
 		pos = max(pos, cmdEnd)
 	}
