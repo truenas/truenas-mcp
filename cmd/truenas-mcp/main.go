@@ -236,7 +236,9 @@ func (h *StdioHandler) Run() error {
 		}
 		if errors.Is(err, mcp.ErrLineTooLong) {
 			log.Printf("Rejected a request longer than %d bytes", mcp.MaxLineBytes)
-			h.sendError(nil, -32600, fmt.Sprintf("Request too large: the limit is %d bytes", mcp.MaxLineBytes))
+			if err := h.sendError(nil, -32600, fmt.Sprintf("Request too large: the limit is %d bytes", mcp.MaxLineBytes)); err != nil {
+				return err
+			}
 			continue
 		}
 		if err != nil {
@@ -251,7 +253,9 @@ func (h *StdioHandler) Run() error {
 			if h.debug {
 				log.Printf("Parse error: %v", err)
 			}
-			h.sendError(nil, -32700, fmt.Sprintf("Parse error: %v", err))
+			if err := h.sendError(nil, -32700, fmt.Sprintf("Parse error: %v", err)); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -263,6 +267,9 @@ func (h *StdioHandler) Run() error {
 		// Only send response if not nil (notifications don't get responses)
 		if resp != nil {
 			if err := h.sendResponse(resp); err != nil {
+				if errors.Is(err, errStdoutWrite) {
+					return err // the client is gone: stop rather than drop every later response
+				}
 				log.Printf("Failed to send response: %v", err)
 			}
 		}
@@ -382,6 +389,10 @@ func (h *StdioHandler) createErrorResponse(id interface{}, code int, message str
 	}
 }
 
+// errStdoutWrite marks a failure to write to stdout, after which no response
+// can reach the client.
+var errStdoutWrite = errors.New("failed to write to stdout")
+
 func (h *StdioHandler) sendResponse(resp *mcp.Response) error {
 	h.stdoutMutex.Lock()
 	defer h.stdoutMutex.Unlock()
@@ -397,14 +408,20 @@ func (h *StdioHandler) sendResponse(resp *mcp.Response) error {
 
 	// One write per message, so a line is never split by another writer.
 	if _, err := h.stdout.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("failed to write to stdout: %w", err)
+		return fmt.Errorf("%w: %w", errStdoutWrite, err)
 	}
 	return nil
 }
 
-func (h *StdioHandler) sendError(id interface{}, code int, message string) {
+// sendError sends an error reply. It returns an error only when stdout can no
+// longer be written to.
+func (h *StdioHandler) sendError(id interface{}, code int, message string) error {
 	resp := h.createErrorResponse(id, code, message)
 	if err := h.sendResponse(resp); err != nil {
+		if errors.Is(err, errStdoutWrite) {
+			return err
+		}
 		log.Printf("Failed to send error response: %v", err)
 	}
+	return nil
 }

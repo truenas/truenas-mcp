@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -147,16 +148,40 @@ type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
 
-func TestStdioWriteErrorIsReported(t *testing.T) {
-	var logs bytes.Buffer
-	log.SetOutput(&logs)
-	defer log.SetOutput(os.Stderr)
-	h := newStdioHandler(fakeRegistry{}, false, strings.NewReader(rpcLine(t, map[string]interface{}{"id": 1, "method": "tools/list"})), failWriter{})
-	if err := h.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !strings.Contains(logs.String(), "broken pipe") {
-		t.Errorf("write failure was not logged: %q", logs.String())
+// countingRegistry counts tool listings, to show whether requests are still
+// being served after stdout failed.
+type countingRegistry struct {
+	fakeRegistry
+	lists *int
+}
+
+func (c countingRegistry) ListTools() []mcp.Tool { *c.lists++; return c.fakeRegistry.ListTools() }
+
+func TestStdioWriteErrorStopsServer(t *testing.T) {
+	// A broken stdout means no response can be delivered: Run must return the
+	// error and not keep executing requests (which may have side effects).
+	req := rpcLine(t, map[string]interface{}{"id": 1, "method": "tools/list"})
+	for name, tc := range map[string]struct {
+		in        string
+		limit     int
+		wantLists int // requests executed: only the one whose reply failed
+	}{
+		"response":       {req + req + req, mcp.MaxLineBytes, 1},
+		"parse error":    {"{bad\n" + req + req, mcp.MaxLineBytes, 0},
+		"oversize reply": {strings.Repeat("z", 100) + "\n" + req + req, 50, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lists := 0
+			h := newStdioHandler(countingRegistry{lists: &lists}, false, strings.NewReader(tc.in), failWriter{})
+			h.stdin = mcp.NewLineReader(strings.NewReader(tc.in), tc.limit)
+			err := h.Run()
+			if err == nil || !strings.Contains(err.Error(), "broken pipe") || !errors.Is(err, errStdoutWrite) {
+				t.Fatalf("Run = %v; want a stdout write error", err)
+			}
+			if lists != tc.wantLists {
+				t.Errorf("%d requests were executed; want %d", lists, tc.wantLists)
+			}
+		})
 	}
 }
 
@@ -270,5 +295,71 @@ func TestStdioDefaultLoggingGoesToStderr(t *testing.T) {
 		if strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout contains log text %q", want)
 		}
+	}
+}
+
+// repeatReader yields n copies of b without holding them in memory.
+type repeatReader struct {
+	b byte
+	n int
+}
+
+func (r *repeatReader) Read(p []byte) (int, error) {
+	if r.n == 0 {
+		return 0, io.EOF
+	}
+	if len(p) > r.n {
+		p = p[:r.n]
+	}
+	for i := range p {
+		p[i] = r.b
+	}
+	r.n -= len(p)
+	return len(p), nil
+}
+
+// sizedRequest streams one tools/list request line of exactly size bytes
+// (excluding the newline), padded with an unknown member that json.Unmarshal
+// skips, so the test does not allocate a second copy of the padding.
+func sizedRequest(id, size int) io.Reader {
+	prefix := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/list","pad":"`, id)
+	const suffix = `"}`
+	return io.MultiReader(
+		strings.NewReader(prefix),
+		&repeatReader{b: 'z', n: size - len(prefix) - len(suffix)},
+		strings.NewReader(suffix+"\n"),
+	)
+}
+
+// TestStdioRealLimitThroughRun uses the real 64 MiB limit: a request of
+// exactly the limit is served, one byte more is rejected, and the server
+// keeps going.
+func TestStdioRealLimitThroughRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("streams about 128 MiB")
+	}
+	in := io.MultiReader(
+		sizedRequest(1, mcp.MaxLineBytes),
+		sizedRequest(2, mcp.MaxLineBytes+1),
+		strings.NewReader(rpcLine(t, map[string]interface{}{"id": 3, "method": "tools/list"})),
+	)
+	var stdout bytes.Buffer
+	h := newStdioHandler(fakeRegistry{}, false, in, &stdout)
+	if err := h.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
+	if len(msgs) != 3 {
+		t.Fatalf("got %d responses: %s", len(msgs), stdout.String())
+	}
+	if msgs[0]["id"] != float64(1) || msgs[0]["error"] != nil || msgs[0]["result"] == nil {
+		t.Errorf("request of exactly the limit: %v", msgs[0])
+	}
+	if e, _ := msgs[1]["error"].(map[string]interface{}); e == nil || e["code"] != float64(-32600) {
+		t.Errorf("request one byte over the limit: %v", msgs[1])
+	}
+	assertIDNull(t, stdout.Bytes(), 1)
+	if msgs[2]["id"] != float64(3) || msgs[2]["result"] == nil {
+		t.Errorf("request after the oversized one: %v", msgs[2])
 	}
 }

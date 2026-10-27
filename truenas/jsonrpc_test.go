@@ -326,6 +326,10 @@ func TestEndpointURLHostAndPort(t *testing.T) {
 		"wss://[::1]:8443":            "wss://[::1]:8443/api/current",
 		"wss://truenas.example:65535": "wss://truenas.example:65535/api/current",
 		"wss://truenas.example:8443/": "wss://truenas.example:8443/api/current",
+		"wss://truenas.example:0443":  "wss://truenas.example:443/api/current", // ports are normalised
+		"wss://[::1]:08443":           "wss://[::1]:8443/api/current",
+		"wss://[fe80::1%25eth0]:0443": "wss://[fe80::1%25eth0]:443/api/current",
+		"truenas.example:0443":        "wss://truenas.example:443/api/current",
 	}
 	for in, want := range ok {
 		c := &Client{endpoint: in}
@@ -337,23 +341,26 @@ func TestEndpointURLHostAndPort(t *testing.T) {
 		}
 	}
 	refused := map[string]string{
-		"truenas.example:+443":        "bad port",
-		"truenas.example:-1":          "bad port",
-		"truenas.example:0":           "bad port",
-		"truenas.example:65536":       "bad port",
-		"truenas.example:4 43":        "bad port",
-		"truenas.example:443:443":     "not a host name or IPv6 address",
-		"10.0.0.1:443:443":            "not a host name or IPv6 address",
-		"[::1]:+443":                  "bad port",
-		"[::1]:99999":                 "bad port",
-		"[::1":                        "no host",
-		"::1]":                        "no host",
-		"wss://truenas.example:":      "empty port",
-		"wss://truenas.example:0":     "bad port",
-		"wss://truenas.example:65536": "bad port",
-		"wss://truenas.example:99999": "bad port",
-		"wss://[::1]:":                "empty port",
-		"wss://[::1]:0":               "bad port",
+		"truenas.example:+443":               "bad port",
+		"truenas.example:-1":                 "bad port",
+		"truenas.example:0":                  "bad port",
+		"truenas.example:65536":              "bad port",
+		"truenas.example:4 43":               "bad port",
+		"truenas.example:443:443":            "not a host name or IPv6 address",
+		"10.0.0.1:443:443":                   "not a host name or IPv6 address",
+		"[::1]:+443":                         "bad port",
+		"[::1]:99999":                        "bad port",
+		"[::1":                               "no host",
+		"::1]":                               "no host",
+		"wss://truenas.example:":             "empty port",
+		"wss://truenas.example:0":            "bad port",
+		"wss://truenas.example:65536":        "bad port",
+		"wss://truenas.example:99999":        "bad port",
+		"wss://truenas.example:443:443":      "not a host name",
+		"wss://10.0.0.1:443:443/api/current": "not a host name",
+		"wss://[::1]:443:443":                "invalid port",
+		"wss://[::1]:":                       "empty port",
+		"wss://[::1]:0":                      "bad port",
 	}
 	for in, mention := range refused {
 		c := &Client{endpoint: in}

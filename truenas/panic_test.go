@@ -33,8 +33,7 @@ func TestReadLoopPanicIsRecovered(t *testing.T) {
 	var armed atomic.Bool
 	c.frameHook = func(*rpcResponse) {
 		if armed.CompareAndSwap(true, false) {
-			var m map[string]int
-			m["boom"] = 1 // nil map write: a runtime panic
+			nilMapWrite(nil) // a runtime panic
 		}
 	}
 	armed.Store(true)
@@ -81,3 +80,7 @@ func TestKeepalivePanicIsRecovered(t *testing.T) {
 		t.Errorf("panic was not logged: %s", logs.String())
 	}
 }
+
+// nilMapWrite panics with a runtime error. The map is a parameter so that
+// static analysis does not flag the deliberate nil write.
+func nilMapWrite(m map[string]int) { m["boom"] = 1 }

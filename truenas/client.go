@@ -543,10 +543,16 @@ func (c *Client) endpointURL() (*url.URL, error) {
 		if strings.HasSuffix(u.Host, ":") {
 			return nil, fmt.Errorf("invalid TrueNAS URL: empty port after the host's colon")
 		}
+		if strings.Contains(u.Hostname(), ":") && !strings.HasPrefix(u.Host, "[") {
+			// url.Parse accepts "host:443:443" and splits at the last colon.
+			return nil, fmt.Errorf("invalid TrueNAS URL: the host is not a host name or bracketed IPv6 address")
+		}
 		if port := u.Port(); port != "" {
-			if _, err := parsePort(port); err != nil {
+			n, err := parsePort(port)
+			if err != nil {
 				return nil, fmt.Errorf("invalid TrueNAS URL: %w", err)
 			}
+			u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(n)) // "0443" -> "443"
 		}
 		u.Path, u.RawPath = strings.TrimRight(u.Path, "/"), ""
 		switch u.Path {
