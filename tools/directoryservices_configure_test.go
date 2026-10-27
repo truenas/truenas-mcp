@@ -703,3 +703,134 @@ func TestConfigureDirectoryServiceReportsMiddlewareError(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func dsStatus(dsType, status interface{}) obj {
+	return obj{"directoryservices.status": obj{"type": dsType, "status": status, "status_msg": nil}}
+}
+
+func leaveFake(t *testing.T, results obj) (*Registry, *fakeMiddleware, *tasks.Manager) {
+	t.Helper()
+	fake := &fakeMiddleware{results: results}
+	client, fake := newFakeClientFrom(t, fake)
+	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
+	return NewRegistry(client, mgr), fake, mgr
+}
+
+// onlyMethods fails the test if the fake middleware saw any method outside
+// the allowed list.
+func onlyMethods(t *testing.T, fake *fakeMiddleware, allowed ...string) {
+	t.Helper()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	for _, c := range fake.calls {
+		ok := false
+		for _, a := range allowed {
+			ok = ok || c.Method == a
+		}
+		if !ok {
+			t.Errorf("unexpected middleware call %s %s", c.Method, c.Params)
+		}
+	}
+}
+
+func TestLeaveDirectoryServiceDryRunPastPreChecks(t *testing.T) {
+	r, fake, _ := leaveFake(t, dsStatus("ACTIVEDIRECTORY", "HEALTHY"))
+	out, err := r.CallTool("leave_directory_service", obj{"dry_run": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got DryRunResult
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	want := DryRunResult{
+		Tool: "leave_directory_service",
+		CurrentState: obj{
+			"directory_type": "ACTIVEDIRECTORY",
+			"enabled":        true,
+			"healthy":        true,
+		},
+		PlannedActions: []PlannedAction{
+			{Step: 1, Description: "Leave ACTIVEDIRECTORY domain/server", Operation: "leave", Target: "ACTIVEDIRECTORY"},
+			{Step: 2, Description: "Disable ACTIVEDIRECTORY integration", Operation: "disable", Target: "ACTIVEDIRECTORY"},
+		},
+		Warnings: []string{
+			"System will leave the ACTIVEDIRECTORY domain/server",
+			"Domain users will no longer be able to authenticate",
+			"Shares with domain ACLs may become inaccessible",
+			"This operation cannot be undone automatically - rejoin will be required",
+			"No credentials provided - will attempt force leave (may leave stale objects in directory)",
+		},
+		Requirements: &Requirements{Conditions: []string{
+			"Connectivity to ACTIVEDIRECTORY servers (if authenticated leave)",
+			"Proper DNS configuration (if authenticated leave)",
+		}},
+		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 60, Note: "Time varies based on network and domain controller response"},
+	}
+	gotJSON, _ := json.Marshal(got)
+	wantJSON, _ := json.Marshal(want)
+	if !jsonEqual(t, gotJSON, wantJSON) {
+		t.Errorf("dry run\n got %s\nwant %s", gotJSON, wantJSON)
+	}
+
+	// Only status queries; nothing that leaves or changes the configuration.
+	onlyMethods(t, fake, "auth.login_ex", "directoryservices.status")
+	if len(fake.called("directoryservices.status")) == 0 {
+		t.Error("dry run did not query directoryservices.status")
+	}
+}
+
+func TestLeaveDirectoryServiceDryRunPreChecks(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  obj
+		wantErr string
+	}{
+		{"nothing configured", dsStatus(nil, nil), "no directory service is currently configured"},
+		{"configured but disabled", dsStatus("LDAP", "DISABLED"), "LDAP is configured but not enabled"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, fake, _ := leaveFake(t, tc.status)
+			for _, args := range []obj{{"dry_run": true}, {"confirm": true}} {
+				if _, err := r.CallTool("leave_directory_service", args); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("%v: err = %v, want %q", args, err, tc.wantErr)
+				}
+			}
+			onlyMethods(t, fake, "auth.login_ex", "directoryservices.status")
+		})
+	}
+}
+
+func TestLeaveDirectoryServiceTaskTTL(t *testing.T) {
+	results := dsStatus("ACTIVEDIRECTORY", "HEALTHY")
+	results["directoryservices.leave"] = 77
+	r, fake, mgr := leaveFake(t, results)
+
+	out, err := r.CallTool("leave_directory_service", obj{"confirm": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(fake.called("directoryservices.leave")); n != 1 {
+		t.Fatalf("directoryservices.leave called %d times", n)
+	}
+	var reply struct {
+		Success bool   `json:"success"`
+		JobID   int    `json:"job_id"`
+		TaskID  string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(out), &reply); err != nil {
+		t.Fatal(err)
+	}
+	if !reply.Success || reply.JobID != 77 || reply.TaskID == "" {
+		t.Fatalf("reply = %s", out)
+	}
+	task, err := mgr.Get(reply.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64((5 * time.Minute).Seconds()); task.TTL != want {
+		t.Errorf("task TTL = %ds, want %ds", task.TTL, want)
+	}
+}

@@ -471,6 +471,11 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		fallback interface{}
 	}{
 		{"null results", nil, nil},
+		// An enabled directory service, so leave_directory_service and
+		// configure_directory_service previews run past their pre-checks.
+		{"directory service enabled", map[string]interface{}{
+			"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
+		}, nil},
 		{"null version", map[string]interface{}{"system.info": map[string]interface{}{"hostname": "nas", "version": nil}}, nil},
 		{"missing version", map[string]interface{}{"system.info": map[string]interface{}{}}, nil},
 		{"numeric version", map[string]interface{}{"system.info": map[string]interface{}{"version": 42}}, nil},

@@ -32,17 +32,6 @@ type DirectoryServiceConfig struct {
 	Configuration map[string]interface{} `json:"configuration,omitempty"`
 }
 
-type SimplifiedDirectoryConfig struct {
-	Type     string `json:"type"`
-	Enabled  bool   `json:"enabled"`
-	Domain   string `json:"domain,omitempty"`
-	Hostname string `json:"hostname,omitempty"`
-	Basedn   string `json:"basedn,omitempty"`
-	SSL      string `json:"ssl,omitempty"`
-	HasCert  bool   `json:"has_cert"`
-	Kerberos bool   `json:"kerberos_enabled"`
-}
-
 // Helper functions
 
 func getDirectoryServiceStatus(ctx context.Context, client *truenas.Client) (*DirectoryServiceStatus, error) {
@@ -105,51 +94,6 @@ func maskCredentials(config map[string]interface{}) map[string]interface{} {
 		}
 	}
 	return masked
-}
-
-func simplifyDirectoryConfig(config map[string]interface{}, dsType string) SimplifiedDirectoryConfig {
-	simple := SimplifiedDirectoryConfig{
-		Type: dsType,
-	}
-
-	if enabled, ok := config["enable"].(bool); ok {
-		simple.Enabled = enabled
-	}
-
-	if dsType == "activedirectory" {
-		if domain, ok := config["domainname"].(string); ok {
-			simple.Domain = domain
-		}
-		if kerberos, ok := config["kerberos_realm"].(float64); ok && kerberos > 0 {
-			simple.Kerberos = true
-		}
-		if ssl, ok := config["ssl"].(string); ok {
-			simple.SSL = ssl
-		}
-		if certID, ok := config["certificate"].(float64); ok && certID > 0 {
-			simple.HasCert = true
-		}
-	} else if dsType == "ldap" {
-		if basedn, ok := config["basedn"].(string); ok {
-			simple.Basedn = basedn
-		}
-		if hostname, ok := config["hostname"].([]interface{}); ok && len(hostname) > 0 {
-			if host, ok := hostname[0].(string); ok {
-				simple.Hostname = host
-			}
-		}
-		if ssl, ok := config["ssl"].(string); ok {
-			simple.SSL = ssl
-		}
-		if certID, ok := config["certificate"].(float64); ok && certID > 0 {
-			simple.HasCert = true
-		}
-		if kerberosRealm, ok := config["kerberos_realm"].(float64); ok && kerberosRealm > 0 {
-			simple.Kerberos = true
-		}
-	}
-
-	return simple
 }
 
 func checkDirectoryServiceForShareWarnings(ctx context.Context, client *truenas.Client) []string {
@@ -424,7 +368,7 @@ func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[
 			"leave_directory_service",
 			args,
 			jobID,
-			5*60*1000, // 5 minutes
+			5*time.Minute,
 		)
 		if err != nil {
 			return "", fmt.Errorf("failed to create task: %w", err)
@@ -652,13 +596,4 @@ func (r *Registry) handleConfigureDirectoryServiceWithDryRun(client *truenas.Cli
 
 func (r *Registry) handleLeaveDirectoryServiceWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
 	return ExecuteWithDryRun(client, args, &leaveDirectoryServiceDryRun{}, r.handleLeaveDirectoryService)
-}
-
-// Helper functions for dry-run
-
-func getOptionalInt(args map[string]interface{}, key string, defaultVal int) int {
-	if val, ok := args[key].(float64); ok {
-		return int(val)
-	}
-	return defaultVal
 }
