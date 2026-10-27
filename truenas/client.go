@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/truenas/truenas-mcp/redact"
 )
 
 // debugLogging controls whether full request/response bodies are written to
@@ -688,67 +690,29 @@ func (c *Client) Call(method string, params ...interface{}) (json.RawMessage, er
 	}
 }
 
-// sensitiveKeyFragments match JSON object keys whose values must never be
-// written to logs or error messages (e.g. bindpw in directoryservices.update).
-var sensitiveKeyFragments = []string{"password", "passwd", "bindpw", "secret", "api_key", "apikey", "token", "credential"}
-
-func isSensitiveKey(key string) bool {
-	k := strings.ToLower(key)
-	for _, fragment := range sensitiveKeyFragments {
-		if strings.Contains(k, fragment) {
-			return true
-		}
-	}
-	return false
-}
-
-// redactValue returns a deep copy of v with values under sensitive keys masked.
+// redactValue returns a deep copy of v with secrets masked. Redaction rules
+// live in the redact package, which is also applied to every tool result.
 func redactValue(v interface{}) interface{} {
-	switch t := v.(type) {
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(t))
-		for k, val := range t {
-			if isSensitiveKey(k) {
-				out[k] = "[REDACTED]"
-			} else {
-				out[k] = redactValue(val)
-			}
-		}
-		return out
-	case []interface{}:
-		out := make([]interface{}, len(t))
-		for i, val := range t {
-			out[i] = redactValue(val)
-		}
-		return out
-	default:
-		return v
-	}
+	return redact.Value(v)
 }
 
-// RedactJSONForLog returns raw with values under credential-bearing keys
-// (password, bindpw, secret, ...) replaced by "[REDACTED]". Intended for
-// sanitizing JSON messages before writing them to logs. Returns raw unchanged
-// if it is not valid JSON.
+// RedactJSONForLog returns raw with secrets (values under credential-bearing
+// keys such as password, bindpw, secret, token or private_key, and PEM
+// private keys) replaced by redact.Marker. Intended for sanitizing JSON
+// messages before writing them to logs. Input that is not valid JSON is
+// redacted as text.
 func RedactJSONForLog(raw []byte) []byte {
-	var v interface{}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return raw
-	}
-	out, err := json.Marshal(redactValue(v))
-	if err != nil {
-		return raw
-	}
-	return out
+	return redact.JSON(raw)
 }
 
 // scrubSecrets removes the client's API key from server-supplied text (error
-// messages, traces, response bodies) in case the server echoes it back.
+// messages, traces, response bodies) in case the server echoes it back, and
+// redacts other secrets embedded in the text (see redact.Text).
 func (c *Client) scrubSecrets(s string) string {
-	if c.apiKey == "" {
-		return s
+	if c.apiKey != "" {
+		s = strings.ReplaceAll(s, c.apiKey, redact.Marker)
 	}
-	return strings.ReplaceAll(s, c.apiKey, "[REDACTED]")
+	return redact.Text(s)
 }
 
 // redactParams returns a copy of params that is safe for logging. Auth methods
@@ -759,7 +723,7 @@ func redactParams(method string, params []interface{}) []interface{} {
 	if strings.HasPrefix(method, "auth.") {
 		redacted := make([]interface{}, len(params))
 		for i := range redacted {
-			redacted[i] = "[REDACTED]"
+			redacted[i] = redact.Marker
 		}
 		return redacted
 	}

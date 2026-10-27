@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/truenas/truenas-mcp/mcp"
+	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/tools"
 	"github.com/truenas/truenas-mcp/truenas"
@@ -314,7 +315,9 @@ func (h *StdioHandler) handleToolsCall(req *mcp.Request) *mcp.Response {
 		return h.createErrorResponse(req.ID, -32602, fmt.Sprintf("Invalid params: %v", err))
 	}
 
-	// Call the tool
+	// Call the tool. Every result and error is redacted before it reaches
+	// the client: TrueNAS returns secrets (passwords, keys, tokens) in many
+	// query results.
 	result, err := h.registry.CallTool(params.Name, params.Arguments)
 	if err != nil {
 		return &mcp.Response{
@@ -324,7 +327,7 @@ func (h *StdioHandler) handleToolsCall(req *mcp.Request) *mcp.Response {
 				Content: []mcp.ContentBlock{
 					{
 						Type: "text",
-						Text: fmt.Sprintf("Error: %v", err),
+						Text: "Error: " + redact.Text(err.Error()),
 					},
 				},
 				IsError: true,
@@ -339,7 +342,7 @@ func (h *StdioHandler) handleToolsCall(req *mcp.Request) *mcp.Response {
 			Content: []mcp.ContentBlock{
 				{
 					Type: "text",
-					Text: result,
+					Text: redact.ToolOutput(result),
 				},
 			},
 		},
