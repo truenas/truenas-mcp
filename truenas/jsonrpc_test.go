@@ -92,7 +92,7 @@ func TestEndpointURL(t *testing.T) {
 		"HTTPS://truenas.example":          "scheme",
 		"wss://u:p@truenas.example":        "user info",
 		"u:p@truenas.example":              "user info",
-		"wss://truenas.example:abc":        "invalid TrueNAS URL",
+		"wss://truenas.example:abc":        "malformed URL",
 	}
 	for in, mention := range refused {
 		c := &Client{endpoint: in}
@@ -302,5 +302,72 @@ func TestReconnectReauthenticates(t *testing.T) {
 	}
 	if logins != 2 {
 		t.Errorf("auth.login_ex sent %d times, want 2 (one per connection)", logins)
+	}
+}
+
+// TestEndpointURLHostAndPort covers host:port parsing: the default port,
+// IPv6 brackets, and ports that are not plain decimal digits in 1-65535.
+func TestEndpointURLHostAndPort(t *testing.T) {
+	ok := map[string]string{
+		"truenas.example":             "wss://truenas.example:443/api/current",
+		"truenas.example:8443":        "wss://truenas.example:8443/api/current",
+		"truenas.example:08443":       "wss://truenas.example:8443/api/current", // normalised
+		"truenas.example:65535":       "wss://truenas.example:65535/api/current",
+		"10.0.0.1":                    "wss://10.0.0.1:443/api/current",
+		"10.0.0.1:8443":               "wss://10.0.0.1:8443/api/current",
+		"::1":                         "wss://[::1]:443/api/current", // bare IPv6, default port
+		"2001:db8::1":                 "wss://[2001:db8::1]:443/api/current",
+		"2001:db8::1:443":             "wss://[2001:db8::1:443]:443/api/current", // all of it is the address
+		"[::1]":                       "wss://[::1]:443/api/current",
+		"[::1]:8443":                  "wss://[::1]:8443/api/current",
+		"[2001:db8::1]:8443":          "wss://[2001:db8::1]:8443/api/current",
+		"[fe80::1%eth0]:8443":         "wss://[fe80::1%25eth0]:8443/api/current",
+		"wss://[::1]":                 "wss://[::1]/api/current",
+		"wss://[::1]:8443":            "wss://[::1]:8443/api/current",
+		"wss://truenas.example:65535": "wss://truenas.example:65535/api/current",
+		"wss://truenas.example:8443/": "wss://truenas.example:8443/api/current",
+		"wss://truenas.example:0443":  "wss://truenas.example:443/api/current", // ports are normalised
+		"wss://[::1]:08443":           "wss://[::1]:8443/api/current",
+		"wss://[fe80::1%25eth0]:0443": "wss://[fe80::1%25eth0]:443/api/current",
+		"truenas.example:0443":        "wss://truenas.example:443/api/current",
+	}
+	for in, want := range ok {
+		c := &Client{endpoint: in}
+		u, err := c.endpointURL()
+		if err != nil {
+			t.Errorf("endpointURL(%q): %v", in, err)
+		} else if got := u.String(); got != want {
+			t.Errorf("endpointURL(%q) = %s; want %s", in, got, want)
+		}
+	}
+	refused := map[string]string{
+		"truenas.example:+443":               "bad port",
+		"truenas.example:-1":                 "bad port",
+		"truenas.example:0":                  "bad port",
+		"truenas.example:65536":              "bad port",
+		"truenas.example:4 43":               "bad port",
+		"truenas.example:443:443":            "not a host name or IPv6 address",
+		"10.0.0.1:443:443":                   "not a host name or IPv6 address",
+		"[::1]:+443":                         "bad port",
+		"[::1]:99999":                        "bad port",
+		"[::1":                               "no host",
+		"::1]":                               "no host",
+		"wss://truenas.example:":             "empty port",
+		"wss://truenas.example:0":            "bad port",
+		"wss://truenas.example:65536":        "bad port",
+		"wss://truenas.example:99999":        "bad port",
+		"wss://truenas.example:443:443":      "not a host name",
+		"wss://10.0.0.1:443:443/api/current": "not a host name",
+		"wss://[::1]:443:443":                "the port is not a number",
+		"wss://[::1]:":                       "empty port",
+		"wss://[::1]:0":                      "bad port",
+	}
+	for in, mention := range refused {
+		c := &Client{endpoint: in}
+		if u, err := c.endpointURL(); err == nil {
+			t.Errorf("endpointURL(%q) = %v; want refusal", in, u)
+		} else if !strings.Contains(err.Error(), mention) {
+			t.Errorf("endpointURL(%q) error %q should mention %q", in, err, mention)
+		}
 	}
 }

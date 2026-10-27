@@ -3,9 +3,12 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/truenas/truenas-mcp/internal/safego"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
@@ -17,6 +20,10 @@ type Manager struct {
 	config PollerConfig
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// cleanExpired removes expired tasks; nil means the store's. Tests
+	// replace it to inject failures.
+	cleanExpired func()
 }
 
 // NewManager creates a new task manager
@@ -60,9 +67,24 @@ func (m *Manager) cleanupLoop() {
 		case <-m.ctx.Done():
 			return
 		case <-ticker.C:
-			m.store.CleanExpired()
+			m.cleanOnce()
 		}
 	}
+}
+
+// cleanOnce runs one cleanup pass. A panic is logged to stderr and the next
+// tick tries again, so the loop never dies silently.
+func (m *Manager) cleanOnce() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("task cleanup panicked: %s\n%s", safego.Describe(r), debug.Stack())
+		}
+	}()
+	if m.cleanExpired != nil {
+		m.cleanExpired()
+		return
+	}
+	m.store.CleanExpired()
 }
 
 // CreateJobTask creates a task for a job-based operation

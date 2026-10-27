@@ -462,8 +462,10 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		"delete_app":              {"app_name": "plex", "remove_images": true},
 		"stop_app":                {"app_name": "plex"},
 		"upgrade_app":             {"app_name": "plex", "version": "2.0.0", "snapshot_hostpaths": false},
-		"leave_directory_service": {},
-		"delete_scrub_schedule":   {"id": 1.0},
+		"leave_directory_service": {
+			"credential": map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"},
+		},
+		"delete_scrub_schedule": {"id": 1.0},
 		"configure_directory_service": {
 			"service_type": "ACTIVEDIRECTORY", "enable": true,
 			"credential":    map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"},
@@ -476,6 +478,11 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		fallback interface{}
 	}{
 		{"null results", nil, nil},
+		// An enabled directory service, so leave_directory_service and
+		// configure_directory_service previews run past their pre-checks.
+		{"directory service enabled", map[string]interface{}{
+			"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
+		}, nil},
 		{"null version", map[string]interface{}{"system.info": map[string]interface{}{"hostname": "nas", "version": nil}}, nil},
 		{"missing version", map[string]interface{}{"system.info": map[string]interface{}{}}, nil},
 		{"numeric version", map[string]interface{}{"system.info": map[string]interface{}{"version": 42}}, nil},
@@ -485,6 +492,13 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		{"list of empty objects", nil, []interface{}{map[string]interface{}{}}},
 		{"empty list", nil, []interface{}{}},
 		{"empty object", nil, map[string]interface{}{}},
+		// A well-formed boot environment list, so delete_boot_environment's
+		// preview gets past its lookup instead of stopping at "not found".
+		// If its handler stopped honouring dry_run, boot.environment.destroy
+		// would reach the fake and the query-only check below would fail.
+		{"plausible boot environments", map[string]interface{}{
+			"boot.environment.query": []interface{}{map[string]interface{}{"id": "25.04.1", "active": false, "activated": false, "keep": false}},
+		}, nil},
 		{"object of wrong types", nil, map[string]interface{}{
 			"config": 1, "schedule": "x", "state": 3, "name": 4, "version": nil, "enable": "yes",
 			"service_type": 5, "status": []interface{}{1}, "active": "no", "activated": 1,
@@ -509,10 +523,14 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 				}
 				argSets := []map[string]interface{}{nil, {}, valid[name]}
 				if name == "configure_directory_service" {
-					// The fields its handler and dry run read today.
+					// Schema-conformant LDAP, and arguments in the old (handler-only) names.
 					argSets = append(argSets,
-						map[string]interface{}{"type": "activedirectory", "domain": "example.com", "enable": false},
-						map[string]interface{}{"type": "ldap", "basedn": "dc=x", "hostname": []interface{}{"ldap"}, "bindpw": 1})
+						map[string]interface{}{
+							"service_type": "LDAP", "enable": false,
+							"credential":    map[string]interface{}{"credential_type": "LDAP_PLAIN", "binddn": "cn=a,dc=x", "bindpw": "pw"},
+							"configuration": map[string]interface{}{"server_urls": []interface{}{"ldaps://ldap"}, "basedn": "dc=x"},
+						},
+						map[string]interface{}{"type": "activedirectory", "domain": "example.com", "enable": false})
 				}
 				props, _ := tool.Definition.InputSchema["properties"].(map[string]interface{})
 				for _, bad := range []interface{}{nil, "x", -1.5, true, []interface{}{1}, map[string]interface{}{"a": 1}} {
@@ -551,5 +569,91 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS drives delete_boot_environment
+// past its lookup, so the dry-run path itself is exercised: a preview (explicit
+// dry_run or no confirm) never sends boot.environment.destroy, while a
+// confirmed call does.
+func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
+	bootEnvs := []interface{}{
+		map[string]interface{}{"id": "25.04.1", "active": false, "activated": false, "keep": false, "used_bytes": 1048576.0},
+		map[string]interface{}{"id": "running", "active": true, "activated": false, "keep": false},
+		map[string]interface{}{"id": "protected", "active": false, "activated": false, "keep": true},
+	}
+	client, fake := newFakeClientWith(t, map[string]interface{}{"boot.environment.query": bootEnvs}, nil)
+	r := NewRegistry(client, nil)
+
+	// Previews: explicit dry_run and the default unconfirmed call.
+	for _, args := range []map[string]interface{}{
+		{"id": "25.04.1", "dry_run": true},
+		{"id": "25.04.1"},
+	} {
+		out, err := r.CallTool("delete_boot_environment", args)
+		if err != nil {
+			t.Fatalf("delete_boot_environment(%v): %v", args, err)
+		}
+		for _, want := range []string{`"tool": "delete_boot_environment"`, "Delete boot environment '25.04.1'", "PERMANENT", `"deletion_allowed": true`} {
+			if !strings.Contains(out, want) {
+				t.Errorf("delete_boot_environment(%v) preview lacks %q:\n%s", args, want, out)
+			}
+		}
+	}
+	if calls := fake.called("boot.environment.destroy"); len(calls) != 0 {
+		t.Fatalf("a preview sent boot.environment.destroy: %v", calls)
+	}
+
+	// Boot environments that cannot be deleted are reported as blocked in
+	// the preview, with no planned action.
+	for id, want := range map[string]string{"running": "currently running", "protected": "keep flag is set"} {
+		out, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": id, "dry_run": true})
+		if err != nil {
+			t.Fatalf("delete_boot_environment(%s) dry run: %v", id, err)
+		}
+		if !strings.Contains(out, "BLOCKED") || !strings.Contains(out, want) || !strings.Contains(out, `"deletion_allowed": false`) || strings.Contains(out, "Delete boot environment") {
+			t.Errorf("delete_boot_environment(%s) preview:\n%s", id, out)
+		}
+	}
+	if calls := fake.called("boot.environment.destroy"); len(calls) != 0 {
+		t.Fatalf("a preview sent boot.environment.destroy: %v", calls)
+	}
+
+	// Confirmed: the real handler runs and destroys exactly that environment.
+	if _, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": "25.04.1", "confirm": true}); err != nil {
+		t.Fatal(err)
+	}
+	calls := fake.called("boot.environment.destroy")
+	if len(calls) != 1 || !strings.Contains(string(calls[0].Params), `"25.04.1"`) {
+		t.Fatalf("boot.environment.destroy calls = %v, want one for 25.04.1", calls)
+	}
+}
+
+// TestDeleteBootEnvironmentConfirmedRefusesProtected checks that a confirmed
+// delete_boot_environment still refuses the running, the next-boot and the
+// protected boot environment, and never sends boot.environment.destroy.
+func TestDeleteBootEnvironmentConfirmedRefusesProtected(t *testing.T) {
+	bootEnvs := []interface{}{
+		map[string]interface{}{"id": "running", "active": true, "activated": false, "keep": false},
+		map[string]interface{}{"id": "next-boot", "active": false, "activated": true, "keep": false},
+		map[string]interface{}{"id": "protected", "active": false, "activated": false, "keep": true},
+		map[string]interface{}{"id": "running-minimal", "active": true},
+	}
+	client, fake := newFakeClientWith(t, map[string]interface{}{"boot.environment.query": bootEnvs}, nil)
+	r := NewRegistry(client, nil)
+
+	for id, want := range map[string]string{
+		"running":         "currently running",
+		"next-boot":       "will boot on next restart",
+		"protected":       "keep flag is set",
+		"running-minimal": "currently running",
+	} {
+		_, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": id, "confirm": true})
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("confirmed delete of %q: err = %v, want an error containing %q", id, err, want)
+		}
+	}
+	if calls := fake.called("boot.environment.destroy"); len(calls) != 0 {
+		t.Fatalf("a refused delete sent boot.environment.destroy: %v", calls)
 	}
 }
