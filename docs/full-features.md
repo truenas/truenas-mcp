@@ -9,6 +9,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 ### System Information
 - **system_info** - Get system information (version, hostname, platform)
 - **system_health** - Check system health including alerts, active jobs, and capacity warnings
+  - `alert_count` counts active (not dismissed) alerts; `critical_alert_count` counts active CRITICAL/ALERT/EMERGENCY alerts and `dismissed_alert_count` dismissed ones
+  - The memory warning is based on memory used excluding the ZFS ARC (latest available sample minus the latest ARC size) when the ARC size is known; otherwise it says the figure may include the ARC
 - **query_jobs** - Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs)
 
 ### Storage Management
@@ -48,6 +50,9 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 - **get_system_metrics** - Get CPU, memory, and load performance metrics
 - **get_network_metrics** - Get network interface traffic metrics
 - **get_disk_metrics** - Get disk I/O performance metrics
+- **get_arc_metrics** - Get ZFS ARC reporting metrics (e.g. `arcsize`)
+  - The ARC graphs available depend on the TrueNAS version; the default is every ARC graph the server supports, discovered from `core.get_methods` and `reporting.graphs` (falls back to `arcsize`)
+  - A graph that fails is reported under `errors.<graph>` while the others are returned; if every graph fails the call is an error
 
 ### Applications
 - **query_apps** - List installed applications with status and available updates
@@ -70,6 +75,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Trend detection (increasing/stable/decreasing)
   - Capacity status warnings (healthy/warning/critical at 70%/85% thresholds)
   - Growth projections when metrics are trending upward
+  - Memory: used = total - available; `capacity_status` uses memory used excluding the ZFS ARC when the latest ARC size is known and recent (`arc_bytes`, `used_excluding_arc_bytes`, `utilization_excluding_arc_pct`). current/average/peak/trend still include the ARC, and no memory projection is given in that case (`projection_note`), since only the latest ARC size is known. "Recent" means at most 15 minutes older than the newest timestamp in the NAS's own reporting data (the memory graph's latest sample or the graph `end`), so clock skew between the NAS and the MCP host does not matter; if no such timestamp is available the ARC size is used and `arc_freshness_note` says its age could not be checked
   - Time ranges: HOUR, DAY, WEEK, MONTH, YEAR
   - Overall recommendations based on all metrics
 
@@ -356,6 +362,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Sort by name, creation date (default), or size
   - Shows which are active/activated/protected/deletable
   - Displays deletion blockers and storage summary
+  - `created` is ISO-8601 UTC (with `created_timestamp` in Unix seconds) when the server's value parses to a time between 2000-01-01 and 10 years from now; any other value is shown raw with `created_timestamp` 0
   - Perfect for "what old boot environments can I clean up?"
 
 - **delete_boot_environment** - Delete a boot environment (**destructive**)

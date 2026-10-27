@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -225,30 +226,49 @@ func clearProxyEnv(t *testing.T) {
 // proxiedClient talks to the fake as https://example.com:<port>, a name the
 // fake's certificate covers but that only the test proxies route to it. The
 // certificate is verified, so TLS must run end to end through the proxy.
-func proxiedClient(t *testing.T, f *fakeTrueNAS, host string, opts Options) (*Client, *bytes.Buffer) {
+func proxiedClient(t *testing.T, f *fakeTrueNAS, host string, opts Options) (*Client, *syncBuffer) {
 	t.Helper()
 	pool := x509.NewCertPool()
 	pool.AddCert(f.Certificate())
 	return proxiedClientTLS(t, f, host, opts, &tls.Config{RootCAs: pool})
 }
 
-func proxiedClientTLS(t *testing.T, f *fakeTrueNAS, host string, opts Options, cfg *tls.Config) (*Client, *bytes.Buffer) {
+func proxiedClientTLS(t *testing.T, f *fakeTrueNAS, host string, opts Options, cfg *tls.Config) (*Client, *syncBuffer) {
 	t.Helper()
 	opts.APIUser = testAPIUser
 	c, err := NewClientWithOptions(f.wsURL(host), testAPIKey, cfg, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
+	buf := &syncBuffer{}
+	log.SetOutput(buf)
 	t.Cleanup(func() {
 		c.Close()
 		log.SetOutput(os.Stderr)
 	})
-	return c, &buf
+	return c, buf
 }
 
-func assertNoLeak(t *testing.T, p *testProxy, err error, logs *bytes.Buffer) {
+// syncBuffer is a log destination that is safe to read while server and
+// client goroutines are still logging to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func assertNoLeak(t *testing.T, p *testProxy, err error, logs fmt.Stringer) {
 	t.Helper()
 	for _, secret := range []string{p.user, p.password} {
 		if secret == "" {
@@ -336,8 +356,8 @@ func TestNoProxyBypassesProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	var logs bytes.Buffer
-	log.SetOutput(&logs)
+	logs := &syncBuffer{}
+	log.SetOutput(logs)
 	defer log.SetOutput(os.Stderr)
 	if _, err := c.Call("system.info"); err != nil {
 		t.Fatalf("direct Call for a NO_PROXY host: %v", err)
