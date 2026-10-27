@@ -180,6 +180,58 @@ func TestStdioOversizedRequestIsRejected(t *testing.T) {
 	if msgs[1]["id"] != float64(7) {
 		t.Errorf("second response = %v", msgs[1])
 	}
+	// JSON-RPC 2.0: an error reply to a request with an unknown id carries
+	// "id": null, not a missing member.
+	assertIDNull(t, stdout.Bytes(), 0)
+}
+
+// assertIDNull checks the raw JSON of output line n has an "id" member that
+// is null (json.Unmarshal into a map alone cannot tell null from absent).
+func assertIDNull(t *testing.T, out []byte, n int) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if n >= len(lines) {
+		t.Fatalf("no output line %d in %q", n, out)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(lines[n]), &raw); err != nil {
+		t.Fatalf("line %d is not JSON: %v", n, err)
+	}
+	id, ok := raw["id"]
+	if !ok || string(id) != "null" {
+		t.Errorf("line %d = %s; want \"id\":null", n, lines[n])
+	}
+}
+
+func TestStdioParseErrorHasNullID(t *testing.T) {
+	var stdout bytes.Buffer
+	h := newStdioHandler(fakeRegistry{}, false, strings.NewReader("{not json\n"), &stdout)
+	if err := h.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
+	if len(msgs) != 1 {
+		t.Fatalf("got %d responses", len(msgs))
+	}
+	if e, _ := msgs[0]["error"].(map[string]interface{}); e == nil || e["code"] != float64(-32700) {
+		t.Errorf("response = %v; want -32700", msgs[0])
+	}
+	assertIDNull(t, stdout.Bytes(), 0)
+}
+
+func TestStdioResponseKeepsFalsyIDs(t *testing.T) {
+	// ids 0 and "" are real ids and must be echoed, not turned into null.
+	var stdout bytes.Buffer
+	in := rpcLine(t, map[string]interface{}{"id": 0, "method": "tools/list"}) +
+		rpcLine(t, map[string]interface{}{"id": "", "method": "tools/list"})
+	h := newStdioHandler(fakeRegistry{}, false, strings.NewReader(in), &stdout)
+	if err := h.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
+	if len(msgs) != 2 || msgs[0]["id"] != float64(0) || msgs[1]["id"] != "" {
+		t.Errorf("responses = %v", msgs)
+	}
 }
 
 // TestStdioHelperProcess is not a test: it is the child process of

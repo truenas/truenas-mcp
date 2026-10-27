@@ -329,6 +329,8 @@ The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 2. **Verifies certificates by default**: trust the TrueNAS self-signed certificate with `--tls-ca` (see [TLS with a self-signed certificate](#step-3-configure-your-mcp-client))
 3. **Authenticates via API key**: Logs in with `auth.login_ex` (`API_KEY_PLAIN` mechanism, user from `--api-user`)
 
+The connection and login happen once, at startup, before the server reads any MCP request. If TrueNAS cannot be reached, or the login fails, the server logs the reason to stderr (for example `Failed to authenticate with TrueNAS: ...`) and exits with a non-zero status instead of starting without a working connection. This is intentional: the MCP client then shows the server as failed, and its log holds that message. Fix the cause (host, port, proxy, certificate or API key, see [Troubleshooting](#troubleshooting)) and restart the client.
+
 ### ⚠️ Security Requirement
 
 **IMPORTANT**: TrueNAS **requires** encrypted connections (`wss://`) for API key authentication. Using unencrypted `ws://` will cause your API key to be **revoked** as a security measure. This binary defaults to `wss://` to protect your credentials.
