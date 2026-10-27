@@ -32,6 +32,13 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 		return "", fmt.Errorf("type must be FILESYSTEM or VOLUME, got: %s", dsType)
 	}
 
+	if err := validateVolblocksize(args, dsType); err != nil {
+		return "", err
+	}
+	if err := validateUserProperties(args); err != nil {
+		return "", err
+	}
+
 	// Build the payload
 	payload := map[string]interface{}{
 		"name": name,
@@ -46,8 +53,7 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 		}
 		payload["volsize"] = int64(volsize)
 
-		// Optional volblocksize
-		if volblocksize, ok := args["volblocksize"].(string); ok && volblocksize != "" {
+		if volblocksize, ok := args["volblocksize"].(string); ok {
 			payload["volblocksize"] = volblocksize
 		}
 	}
@@ -169,6 +175,8 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 
 	if keyLoaded, ok := dataset["key_loaded"].(bool); ok && keyLoaded {
 		response["key_loaded"] = keyLoaded
+	}
+	if encrypted, ok := dataset["encrypted"].(bool); ok && encrypted {
 		response["encryption_warning"] = "IMPORTANT: Back up your encryption key from Storage > Pools"
 	}
 
@@ -207,6 +215,63 @@ func validateDatasetName(name string) error {
 		return fmt.Errorf("dataset name cannot contain consecutive slashes")
 	}
 
+	return nil
+}
+
+// volblocksizes are the volume block sizes the middleware's
+// pool.dataset.create accepts (TrueNAS 25.10 and 27.0).
+var volblocksizes = []string{"512", "512B", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K"}
+
+// validateVolblocksize rejects a volblocksize that the middleware would
+// reject (or, for FILESYSTEM, that the handler would otherwise ignore).
+func validateVolblocksize(args map[string]interface{}, dsType string) error {
+	v, present := args["volblocksize"]
+	if !present {
+		return nil
+	}
+	if dsType != "VOLUME" {
+		return fmt.Errorf("volblocksize applies only to VOLUME datasets, not %s", dsType)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("volblocksize must be a string, one of %s", strings.Join(volblocksizes, ", "))
+	}
+	for _, allowed := range volblocksizes {
+		if s == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("volblocksize must be one of %s", strings.Join(volblocksizes, ", "))
+}
+
+// validateUserProperties checks user_properties the way the middleware does:
+// a list of {key, value} objects whose key is in namespace:property form
+// (contains a colon) and whose value is a string. Values are never echoed.
+func validateUserProperties(args map[string]interface{}) error {
+	v, present := args["user_properties"]
+	if !present {
+		return nil
+	}
+	list, ok := v.([]interface{})
+	if !ok {
+		return fmt.Errorf("user_properties must be an array of {key, value} objects")
+	}
+	for i, item := range list {
+		prop, ok := item.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("user_properties[%d] must be an object with string fields key and value", i)
+		}
+		key, ok := prop["key"].(string)
+		if !ok || !strings.Contains(key, ":") {
+			return fmt.Errorf("user_properties[%d].key must be a string in namespace:property form (it must contain a colon), e.g. org:note", i)
+		}
+		if _, ok := prop["value"].(string); !ok {
+			return fmt.Errorf("user_properties[%d].value must be a string", i)
+		}
+		if len(prop) != 2 {
+			return fmt.Errorf("user_properties[%d] must contain only the fields key and value", i)
+		}
+	}
 	return nil
 }
 
