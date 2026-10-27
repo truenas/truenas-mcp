@@ -138,7 +138,7 @@ func headingAnchors(md string) map[string]bool {
 			switch {
 			case r == ' ':
 				b.WriteByte('-')
-			case r == '-' || r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r):
+			case r == '-' || r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r):
 				b.WriteRune(r)
 			}
 		}
@@ -151,6 +151,23 @@ func headingAnchors(md string) map[string]bool {
 		seen[slug]++
 	}
 	return anchors
+}
+
+// TestHeadingAnchors pins the anchor rules, including the emoji variation
+// selector (U+FE0F), which GitHub keeps in the anchor while it drops the emoji.
+func TestHeadingAnchors(t *testing.T) {
+	md := "# Title\n## Step 1: Download or Build Binary\n## \u26a0\ufe0f Security Requirement\n## Repeat\n## Repeat\n```\n# not a heading\n```\n"
+	got := headingAnchors(md)
+	for _, want := range []string{
+		"title", "step-1-download-or-build-binary", "\ufe0f-security-requirement", "repeat", "repeat-1",
+	} {
+		if !got[want] {
+			t.Errorf("missing anchor %q in %v", want, got)
+		}
+	}
+	if got["not-a-heading"] || got["-security-requirement"] {
+		t.Errorf("unexpected anchors in %v", got)
+	}
 }
 
 // TestMarkdownLinksResolve checks that relative links in the README and docs/
