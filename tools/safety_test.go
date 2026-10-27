@@ -480,6 +480,13 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		{"list of empty objects", nil, []interface{}{map[string]interface{}{}}},
 		{"empty list", nil, []interface{}{}},
 		{"empty object", nil, map[string]interface{}{}},
+		// A well-formed boot environment list, so delete_boot_environment's
+		// preview gets past its lookup instead of stopping at "not found".
+		// If its handler stopped honouring dry_run, boot.environment.destroy
+		// would reach the fake and the query-only check below would fail.
+		{"plausible boot environments", map[string]interface{}{
+			"boot.environment.query": []interface{}{map[string]interface{}{"id": "25.04.1", "active": false, "activated": false, "keep": false}},
+		}, nil},
 		{"object of wrong types", nil, map[string]interface{}{
 			"config": 1, "schedule": "x", "state": 3, "name": 4, "version": nil, "enable": "yes",
 			"service_type": 5, "status": []interface{}{1}, "active": "no", "activated": 1,
@@ -546,5 +553,62 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS drives delete_boot_environment
+// past its lookup, so the dry-run path itself is exercised: a preview (explicit
+// dry_run or no confirm) never sends boot.environment.destroy, while a
+// confirmed call does.
+func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
+	bootEnvs := []interface{}{
+		map[string]interface{}{"id": "25.04.1", "active": false, "activated": false, "keep": false, "used_bytes": 1048576.0},
+		map[string]interface{}{"id": "running", "active": true, "activated": false, "keep": false},
+		map[string]interface{}{"id": "protected", "active": false, "activated": false, "keep": true},
+	}
+	client, fake := newFakeClientWith(t, map[string]interface{}{"boot.environment.query": bootEnvs}, nil)
+	r := NewRegistry(client, nil)
+
+	// Previews: explicit dry_run and the default unconfirmed call.
+	for _, args := range []map[string]interface{}{
+		{"id": "25.04.1", "dry_run": true},
+		{"id": "25.04.1"},
+	} {
+		out, err := r.CallTool("delete_boot_environment", args)
+		if err != nil {
+			t.Fatalf("delete_boot_environment(%v): %v", args, err)
+		}
+		for _, want := range []string{`"tool": "delete_boot_environment"`, "Delete boot environment '25.04.1'", "PERMANENT", `"deletion_allowed": true`} {
+			if !strings.Contains(out, want) {
+				t.Errorf("delete_boot_environment(%v) preview lacks %q:\n%s", args, want, out)
+			}
+		}
+	}
+	if calls := fake.called("boot.environment.destroy"); len(calls) != 0 {
+		t.Fatalf("a preview sent boot.environment.destroy: %v", calls)
+	}
+
+	// Boot environments that cannot be deleted are reported as blocked in
+	// the preview, with no planned action.
+	for id, want := range map[string]string{"running": "currently running", "protected": "keep flag is set"} {
+		out, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": id, "dry_run": true})
+		if err != nil {
+			t.Fatalf("delete_boot_environment(%s) dry run: %v", id, err)
+		}
+		if !strings.Contains(out, "BLOCKED") || !strings.Contains(out, want) || !strings.Contains(out, `"deletion_allowed": false`) || strings.Contains(out, "Delete boot environment") {
+			t.Errorf("delete_boot_environment(%s) preview:\n%s", id, out)
+		}
+	}
+	if calls := fake.called("boot.environment.destroy"); len(calls) != 0 {
+		t.Fatalf("a preview sent boot.environment.destroy: %v", calls)
+	}
+
+	// Confirmed: the real handler runs and destroys exactly that environment.
+	if _, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": "25.04.1", "confirm": true}); err != nil {
+		t.Fatal(err)
+	}
+	calls := fake.called("boot.environment.destroy")
+	if len(calls) != 1 || !strings.Contains(string(calls[0].Params), `"25.04.1"`) {
+		t.Fatalf("boot.environment.destroy calls = %v, want one for 25.04.1", calls)
 	}
 }
