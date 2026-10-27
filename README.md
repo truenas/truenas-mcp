@@ -390,6 +390,7 @@ HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.0.2.0/24 ./truenas-mcp --truenas-
 ### Troubleshooting
 
 **Connection Issues:**
+- "invalid TrueNAS host or URL: ...": `--truenas-url` / `TRUENAS_URL` is unusable (bad port, user info in the URL, `https://`, ...); the message says why. Use the host name alone (`truenas.local`, `truenas.local:8443`, `[fd00::1]:8443`) or a `wss://host[:port]` URL
 - "Could not connect to TrueNAS (no login was attempted)" means the TCP, proxy, TLS or WebSocket step failed; "Failed to authenticate with TrueNAS" means the connection worked and the login was rejected
 - Verify TrueNAS is accessible from your machine
 - Check firewall allows port 443 (wss), or the port you configured

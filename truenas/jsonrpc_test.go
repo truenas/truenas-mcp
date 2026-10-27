@@ -92,7 +92,7 @@ func TestEndpointURL(t *testing.T) {
 		"HTTPS://truenas.example":          "scheme",
 		"wss://u:p@truenas.example":        "user info",
 		"u:p@truenas.example":              "user info",
-		"wss://truenas.example:abc":        "invalid TrueNAS URL",
+		"wss://truenas.example:abc":        "malformed URL",
 	}
 	for in, mention := range refused {
 		c := &Client{endpoint: in}

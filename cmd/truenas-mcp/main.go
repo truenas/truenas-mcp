@@ -149,6 +149,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create TrueNAS client: %v", err)
 	}
+	if err := client.ValidateEndpoint(); err != nil {
+		log.Fatalf("%v (check --truenas-url / TRUENAS_URL)", err)
+	}
 	if err := client.ValidateProxy(); err != nil {
 		log.Fatalf("Invalid proxy configuration: %v", err)
 	}
@@ -402,6 +405,10 @@ func insecureWarning(caIgnored bool) string {
 // connection that could not be established is not an authentication failure
 // and says so; only a rejected or failed login is reported as one.
 func startupAuthError(err error) string {
+	var ee *truenas.EndpointError
+	if errors.As(err, &ee) {
+		return ee.Error()
+	}
 	var ce *truenas.ConnectError
 	if errors.As(err, &ce) {
 		return fmt.Sprintf("Could not connect to TrueNAS (no login was attempted): %v", ce.Err)

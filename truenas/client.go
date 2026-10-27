@@ -487,6 +487,47 @@ var errUserinfo = errors.New("TrueNAS URL must not contain user info (user:passw
 // /websocket path is replaced with /api/current, so existing configurations
 // keep working. Errors never quote input that could hold credentials.
 func (c *Client) endpointURL() (*url.URL, error) {
+	u, err := c.parseEndpoint()
+	if err != nil {
+		return nil, &EndpointError{Err: err}
+	}
+	return u, nil
+}
+
+// EndpointError is returned when the TrueNAS host or URL is unusable: a bad
+// host name, port or scheme, user info in the URL, and so on. It is a
+// configuration error, not a failure to connect. The message never quotes
+// input that could hold credentials.
+type EndpointError struct{ Err error }
+
+func (e *EndpointError) Error() string { return "invalid TrueNAS host or URL: " + e.Err.Error() }
+func (e *EndpointError) Unwrap() error { return e.Err }
+
+// ValidateEndpoint checks the TrueNAS host or URL without connecting, so a
+// bad value fails at startup with an *EndpointError.
+func (c *Client) ValidateEndpoint() error {
+	_, err := c.endpointURL()
+	return err
+}
+
+// validScheme reports whether s looks like a URL scheme, so that it is safe
+// to quote.
+func validScheme(s string) bool {
+	if s == "" || len(s) > 16 {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case i > 0 && (r >= '0' && r <= '9' || r == '+' || r == '-' || r == '.'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) parseEndpoint() (*url.URL, error) {
 	e := strings.TrimSpace(c.endpoint)
 	if i := strings.Index(e, "://"); i >= 0 {
 		switch strings.ToLower(e[:i]) {
@@ -494,8 +535,15 @@ func (c *Client) endpointURL() (*url.URL, error) {
 		case "ws":
 			// SECURITY: TrueNAS revokes API keys used over unencrypted connections
 			return nil, fmt.Errorf("SECURITY ERROR: ws:// (unencrypted) connections are not allowed. TrueNAS will revoke API keys used over ws://. Use wss:// instead")
+		case "http", "https":
+			// Not mapped to wss://: the scheme is refused, with the fix spelled out.
+			return nil, fmt.Errorf("the %s:// scheme is not accepted; use the host name alone (for example truenas.local) or a wss://host[:port] URL", strings.ToLower(e[:i]))
 		default:
-			return nil, fmt.Errorf("unsupported URL scheme: pass a hostname or a wss:// URL")
+			if !validScheme(e[:i]) {
+				// Not a scheme at all, and may hold user info; do not quote it.
+				return nil, errors.New("not a host name or a wss://host[:port] URL")
+			}
+			return nil, fmt.Errorf("unsupported URL scheme %q: use the host name alone or a wss://host[:port] URL", e[:i])
 		}
 		u, err := url.Parse("wss" + e[i:])
 		if err != nil {
@@ -506,13 +554,13 @@ func (c *Client) endpointURL() (*url.URL, error) {
 			if strings.Contains(e, "@") {
 				return nil, errUserinfo
 			}
-			return nil, fmt.Errorf("invalid TrueNAS URL: %w", err)
+			return nil, fmt.Errorf("malformed URL: %w", err)
 		}
 		if u.User != nil {
 			return nil, errUserinfo
 		}
 		if u.Hostname() == "" {
-			return nil, fmt.Errorf("TrueNAS URL has no host")
+			return nil, errors.New("the URL has no host")
 		}
 		u.Path, u.RawPath = strings.TrimRight(u.Path, "/"), ""
 		switch u.Path {
@@ -531,7 +579,7 @@ func (c *Client) endpointURL() (*url.URL, error) {
 	}
 	// From here on e holds no userinfo, so quoting it is safe.
 	if strings.ContainsAny(e, "/?#") {
-		return nil, fmt.Errorf("invalid TrueNAS host %q: a bare host cannot include a path; pass a full wss://host[:port]%s URL instead", e, apiPath)
+		return nil, fmt.Errorf("%q: a bare host cannot include a path; pass a full wss://host[:port]%s URL instead", e, apiPath)
 	}
 	host, port := e, "443"
 	if h, p, err := net.SplitHostPort(e); err == nil {
@@ -540,10 +588,10 @@ func (c *Client) endpointURL() (*url.URL, error) {
 		host = e[1 : len(e)-1] // bracketed IPv6 without a port
 	} // otherwise a name or an unbracketed IPv6 address, without a port
 	if host == "" || strings.ContainsAny(host, "[]") {
-		return nil, fmt.Errorf("invalid TrueNAS host %q: no host", e)
+		return nil, fmt.Errorf("%q: no host name", e)
 	}
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return nil, fmt.Errorf("invalid TrueNAS host %q: bad port %q", e, port)
+		return nil, fmt.Errorf("%q: bad port %q (must be 1-65535)", e, port)
 	}
 	return &url.URL{Scheme: "wss", Host: net.JoinHostPort(host, port), Path: apiPath}, nil
 }

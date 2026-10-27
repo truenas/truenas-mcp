@@ -184,3 +184,59 @@ func TestInvalidProxyURLGivesReason(t *testing.T) {
 		}
 	}
 }
+
+// A bad host or URL is an *EndpointError with a reason, caught by
+// ValidateEndpoint, and never echoes credentials.
+func TestInvalidEndpointGivesReason(t *testing.T) {
+	for _, tc := range []struct {
+		endpoint string
+		reason   string
+	}{
+		{"https://truenas.example", "https:// scheme is not accepted; use the host name alone (for example truenas.local) or a wss://host[:port] URL"},
+		{"http://truenas.example", "http:// scheme is not accepted"},
+		{"https://alice:s3cretpw@truenas.example", "https:// scheme is not accepted"},
+		{"ftp://alice:s3cretpw@truenas.example", `unsupported URL scheme "ftp"`},
+		{"alice:s3cretpw@host://x", "not a host name or a wss://host[:port] URL"},
+		{"ws://alice:s3cretpw@truenas.example", "ws:// (unencrypted)"},
+		{"wss://alice:s3cretpw@truenas.example", "user info"},
+		{"alice:s3cretpw@truenas.example:99999", "user info"},
+		{"wss://truenas.example:abc", "malformed URL"},
+		{"wss://", "no host"},
+		{"truenas.example:99999", "bad port"},
+		{"truenas.example:", "bad port"},
+		{":8443", "no host name"},
+		{"truenas.example/api/current", "a bare host cannot include a path"},
+	} {
+		c, err := NewClientWithOptions(tc.endpoint, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = c.ValidateEndpoint()
+		var ee *EndpointError
+		if !errors.As(err, &ee) {
+			t.Errorf("%q: ValidateEndpoint = %v (%T), want *EndpointError", tc.endpoint, err, err)
+			continue
+		}
+		msg := err.Error()
+		if !strings.HasPrefix(msg, "invalid TrueNAS host or URL: ") || !strings.Contains(msg, tc.reason) {
+			t.Errorf("%q: error %q lacks prefix or reason %q", tc.endpoint, msg, tc.reason)
+		}
+		for _, leak := range []string{"alice", "s3cretpw"} {
+			if strings.Contains(msg, leak) {
+				t.Errorf("%q: error echoes credentials: %s", tc.endpoint, msg)
+			}
+		}
+		// Connecting reports the same error, not a connection failure.
+		var ce *ConnectError
+		if cerr := c.Authenticate(); !errors.As(cerr, &ee) || errors.As(cerr, &ce) {
+			t.Errorf("%q: Authenticate = %v", tc.endpoint, cerr)
+		}
+	}
+	// Valid values pass.
+	for _, ok := range []string{"truenas.example", "truenas.example:8443", "[::1]:8443", "wss://truenas.example/api/current"} {
+		c, _ := NewClientWithOptions(ok, testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser})
+		if err := c.ValidateEndpoint(); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+}

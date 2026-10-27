@@ -32,6 +32,11 @@ func TestStartupErrorDistinguishesConnectFromAuth(t *testing.T) {
 		t.Errorf("connect failure worded as %q", got)
 	}
 
+	bad := &truenas.EndpointError{Err: errors.New("bad port")}
+	if got := startupAuthError(bad); got != "invalid TrueNAS host or URL: bad port" {
+		t.Errorf("endpoint error worded as %q", got)
+	}
+
 	auth := startupAuthError(errors.New("authentication failed: response_type=AUTH_ERR"))
 	if want := "Failed to authenticate with TrueNAS: authentication failed: response_type=AUTH_ERR"; auth != want {
 		t.Errorf("auth failure worded as %q, want %q", auth, want)
