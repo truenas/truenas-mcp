@@ -120,3 +120,29 @@ func TestLineReaderReusesStorageSafely(t *testing.T) {
 		t.Errorf("errs = %v; want one ErrLineTooLong", errs)
 	}
 }
+
+func TestLineReaderDropsLargeBuffer(t *testing.T) {
+	// A small line keeps its buffer for reuse; a line over maxRetainedBytes
+	// does not stay allocated after it has been read.
+	in := "small\n" + strings.Repeat("L", maxRetainedBytes+1) + "\n" + "after\n"
+	l := NewLineReader(strings.NewReader(in), 4*maxRetainedBytes)
+
+	if b, err := l.ReadLine(); err != nil || string(b) != "small" {
+		t.Fatalf("first line = %q, %v", b, err)
+	}
+	if l.buf == nil {
+		t.Error("buffer not kept after a small line")
+	}
+	if b, err := l.ReadLine(); err != nil || len(b) != maxRetainedBytes+1 {
+		t.Fatalf("large line = %d bytes, %v", len(b), err)
+	}
+	if l.buf != nil {
+		t.Errorf("buffer of %d bytes still held after a large line", cap(l.buf))
+	}
+	if b, err := l.ReadLine(); err != nil || string(b) != "after" {
+		t.Fatalf("line after the large one = %q, %v", b, err)
+	}
+	if cap(l.buf) > maxRetainedBytes {
+		t.Errorf("buffer of %d bytes held", cap(l.buf))
+	}
+}

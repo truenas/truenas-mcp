@@ -22,11 +22,15 @@ var ErrLineTooLong = errors.New("line too long")
 type LineReader struct {
 	r   *bufio.Reader
 	max int
-	// buf is the line storage, reused between calls so that a run of large
-	// lines allocates once. It keeps the capacity of the longest line read
-	// so far (at most about max), which is the cost of not reallocating.
+	// buf is the line storage, reused between calls so a run of ordinary
+	// lines does not allocate. It is dropped after a line longer than
+	// maxRetainedBytes, so one large request does not pin up to max bytes.
 	buf []byte
 }
+
+// maxRetainedBytes is the largest line buffer a LineReader keeps between
+// calls.
+const maxRetainedBytes = 1 << 20
 
 // NewLineReader returns a LineReader over r that accepts lines of up to max
 // bytes (excluding the line terminator).
@@ -62,7 +66,11 @@ func (l *LineReader) ReadLine() ([]byte, error) {
 		if tooLong {
 			return nil, ErrLineTooLong
 		}
-		l.buf = line
+		if cap(line) > maxRetainedBytes {
+			l.buf = nil
+		} else {
+			l.buf = line
+		}
 		line = trimEOL(line)
 		if len(line) > l.max {
 			return nil, ErrLineTooLong
