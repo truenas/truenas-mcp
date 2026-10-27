@@ -262,7 +262,10 @@ func TestDestructiveToolsRequireConfirm(t *testing.T) {
 		if safetyOf(name).Access != Destructive {
 			continue
 		}
-		args := map[string]interface{}{"app_name": "plex"}
+		args := map[string]interface{}{}
+		if hasParam(r.tools[name], "app_name") {
+			args["app_name"] = "plex"
+		}
 		out, err := r.CallTool(name, args)
 		if err != nil {
 			t.Fatalf("%s without confirm: %v", name, err)
@@ -401,8 +404,10 @@ func TestDryRunOnlyCountsWhereDeclared(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	ran := 0
 	// Unclassified, so treated as destructive, and without a dry_run param.
+	// The schema is permissive so that argument validation lets dry_run
+	// through and the confirmation gate itself is what is tested.
 	r.tools["test_unclassified"] = Tool{
-		Definition: mcp.Tool{Name: "test_unclassified", InputSchema: map[string]interface{}{"type": "object"}},
+		Definition: mcp.Tool{Name: "test_unclassified", InputSchema: map[string]interface{}{"type": "object", "additionalProperties": true}},
 		Handler: func(*truenas.Client, map[string]interface{}) (string, error) {
 			ran++
 			return "done", nil

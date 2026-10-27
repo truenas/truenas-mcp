@@ -94,6 +94,14 @@ func (r *Registry) registerTools() {
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
+					"train": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: update train the caller expects. Reported back in the response only; the download always uses the system's configured train",
+					},
+					"version": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: version the caller expects. Used to recognise an already-downloaded update and reported back in the response; the download itself fetches whatever update the configured train offers",
+					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
 						"description": "Preview changes without executing (default: false)",
@@ -790,6 +798,32 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 						"type":        "string",
 						"description": "File access time tracking: ON or OFF (OFF improves performance)",
 						"enum":        []string{"ON", "OFF", "INHERIT"},
+					},
+					"volblocksize": map[string]interface{}{
+						"type":        "string",
+						"description": "VOLUME type only: block size of the volume, e.g. '16K' (optional; the TrueNAS default applies when omitted)",
+					},
+					"inherit_encryption": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Inherit the parent dataset's encryption settings (optional; TrueNAS defaults to true, set false together with encryption_options to create an independently encrypted dataset)",
+					},
+					"user_properties": map[string]interface{}{
+						"type":        "array",
+						"description": "Optional ZFS user properties to set on the dataset, each as an object with 'key' and 'value' strings",
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"key": map[string]interface{}{
+									"type":        "string",
+									"description": "User property name (contains a colon, e.g. 'org:note')",
+								},
+								"value": map[string]interface{}{
+									"type":        "string",
+									"description": "User property value",
+								},
+							},
+							"required": []string{"key", "value"},
+						},
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -1837,6 +1871,11 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (result st
 	// Enforce the policy here, not only in ListTools: clients may call tools
 	// they were never shown.
 	if err := r.checkPolicy(name); err != nil {
+		return "", err
+	}
+	// Reject arguments the schema does not declare before anything runs,
+	// including the dry-run preview of a destructive tool.
+	if err := validateArgs(name, tool, args); err != nil {
 		return "", err
 	}
 	if safetyOf(name).Access == Destructive && requiresConfirmation(tool, args) {
