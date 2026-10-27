@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"time"
 
 	"github.com/truenas/truenas-mcp/truenas"
 )
@@ -150,41 +150,6 @@ func simplifyDirectoryConfig(config map[string]interface{}, dsType string) Simpl
 	}
 
 	return simple
-}
-
-func validateDirectoryCredentials(args map[string]interface{}, dsType string) error {
-	if dsType == "activedirectory" {
-		domain, hasDomain := args["domain"].(string)
-		if !hasDomain || domain == "" {
-			return fmt.Errorf("domain is required for Active Directory")
-		}
-
-		bindname, hasBindname := args["bindname"].(string)
-		bindpw, hasBindpw := args["bindpw"].(string)
-
-		if (hasBindname && bindname != "") != (hasBindpw && bindpw != "") {
-			return fmt.Errorf("both bindname and bindpw must be provided together")
-		}
-	} else if dsType == "ldap" {
-		basedn, hasBasedn := args["basedn"].(string)
-		if !hasBasedn || basedn == "" {
-			return fmt.Errorf("basedn is required for LDAP")
-		}
-
-		hostname, hasHostname := args["hostname"].([]interface{})
-		if !hasHostname || len(hostname) == 0 {
-			return fmt.Errorf("hostname is required for LDAP")
-		}
-
-		binddn, hasBinddn := args["binddn"].(string)
-		bindpw, hasBindpw := args["bindpw"].(string)
-
-		if (hasBinddn && binddn != "") != (hasBindpw && bindpw != "") {
-			return fmt.Errorf("both binddn and bindpw must be provided together")
-		}
-	}
-
-	return nil
 }
 
 func checkDirectoryServiceForShareWarnings(ctx context.Context, client *truenas.Client) []string {
@@ -370,121 +335,48 @@ func handleRefreshDirectoryCache(client *truenas.Client, args map[string]interfa
 // Registry write handlers
 
 func (r *Registry) handleConfigureDirectoryService(client *truenas.Client, args map[string]interface{}) (string, error) {
-	dsType, ok := args["type"].(string)
-	if !ok || (dsType != "activedirectory" && dsType != "ldap") {
-		return "", fmt.Errorf("type must be 'activedirectory' or 'ldap'")
-	}
-
-	// Validate credentials
-	if err := validateDirectoryCredentials(args, dsType); err != nil {
+	payload, err := buildDirectoryServiceUpdatePayload(args)
+	if err != nil {
 		return "", err
 	}
+	serviceType, _ := payload["service_type"].(string)
 
-	// Build payload based on type
-	payload := make(map[string]interface{})
-
-	if dsType == "activedirectory" {
-		domain, _ := args["domain"].(string)
-		payload["domainname"] = domain
-
-		if bindname, ok := args["bindname"].(string); ok && bindname != "" {
-			payload["bindname"] = bindname
-		}
-		if bindpw, ok := args["bindpw"].(string); ok && bindpw != "" {
-			payload["bindpw"] = bindpw
-		}
-		if netbiosname, ok := args["netbiosname"].(string); ok && netbiosname != "" {
-			payload["netbiosname"] = netbiosname
-		}
-		if kerberosRealm, ok := args["kerberos_realm"].(float64); ok && kerberosRealm > 0 {
-			payload["kerberos_realm"] = int(kerberosRealm)
-		}
-		if ssl, ok := args["ssl"].(string); ok && ssl != "" {
-			payload["ssl"] = ssl
-		}
-		if certID, ok := args["certificate"].(float64); ok && certID > 0 {
-			payload["certificate"] = int(certID)
-		}
-		if enabled, ok := args["enable"].(bool); ok {
-			payload["enable"] = enabled
-		} else {
-			payload["enable"] = true
-		}
-	} else if dsType == "ldap" {
-		basedn, _ := args["basedn"].(string)
-		payload["basedn"] = basedn
-
-		if hostname, ok := args["hostname"].([]interface{}); ok && len(hostname) > 0 {
-			payload["hostname"] = hostname
-		}
-		if binddn, ok := args["binddn"].(string); ok && binddn != "" {
-			payload["binddn"] = binddn
-		}
-		if bindpw, ok := args["bindpw"].(string); ok && bindpw != "" {
-			payload["bindpw"] = bindpw
-		}
-		if ssl, ok := args["ssl"].(string); ok && ssl != "" {
-			payload["ssl"] = ssl
-		}
-		if certID, ok := args["certificate"].(float64); ok && certID > 0 {
-			payload["certificate"] = int(certID)
-		}
-		if kerberosRealm, ok := args["kerberos_realm"].(float64); ok && kerberosRealm > 0 {
-			payload["kerberos_realm"] = int(kerberosRealm)
-		}
-		if enabled, ok := args["enable"].(bool); ok {
-			payload["enable"] = enabled
-		} else {
-			payload["enable"] = true
-		}
-	}
-
-	// Add service_type to payload for the unified API
-	payload["service_type"] = strings.ToUpper(dsType)
-
-	// Call unified update method
+	// directoryservices.update is a job: the call returns its job ID.
 	result, err := client.Call("directoryservices.update", payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to configure %s: %w", dsType, err)
+		return "", fmt.Errorf("failed to configure %s: %w", serviceType, err)
 	}
 
-	var config map[string]interface{}
-	if err := json.Unmarshal(result, &config); err != nil {
-		return "", fmt.Errorf("failed to parse result: %w", err)
-	}
-
-	// Find the recent job for this operation
-	jobID, err := findRecentJob(client, "directoryservices.update")
-	if err != nil {
-		// Job tracking is optional
-		jobID = 0
-	}
-
-	var taskID string
-	if jobID > 0 {
-		// Create task for tracking
-		task, err := r.taskManager.CreateJobTask(
-			"configure_directory_service",
-			args,
-			jobID,
-			10*60*1000, // 10 minutes
-		)
-		if err != nil {
-			return "", fmt.Errorf("failed to create task: %w", err)
+	var jobID int
+	if err := json.Unmarshal(result, &jobID); err != nil {
+		var jobIDs []int
+		if err2 := json.Unmarshal(result, &jobIDs); err2 == nil && len(jobIDs) > 0 {
+			jobID = jobIDs[0]
 		}
-		taskID = task.TaskID
 	}
 
 	response := map[string]interface{}{
 		"success":        true,
-		"directory_type": dsType,
+		"directory_type": serviceType,
 		"enabled":        payload["enable"],
-		"message":        fmt.Sprintf("%s has been configured. May take a few moments to join domain.", dsType),
+		"message":        fmt.Sprintf("%s configuration was submitted to TrueNAS. Enabling it for the first time joins the domain, which may take a few minutes.", serviceType),
 	}
 
-	if taskID != "" {
-		response["task_id"] = taskID
+	if jobID > 0 {
+		// Never keep the credential values in the stored task arguments.
+		task, err := r.taskManager.CreateJobTask(
+			"configure_directory_service",
+			maskDirectoryServicePayload(args),
+			jobID,
+			10*time.Minute,
+		)
+		if err != nil {
+			return "", fmt.Errorf("directoryservices.update was submitted as job %d but task creation failed: %w", jobID, err)
+		}
+		response["task_id"] = task.TaskID
 		response["job_id"] = jobID
+	} else {
+		response["warning"] = "TrueNAS did not return a job ID, so progress cannot be tracked; check get_directory_service_status."
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -559,41 +451,6 @@ func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[
 	return string(formatted), nil
 }
 
-// Helper function to find recent job
-
-func findRecentJob(client *truenas.Client, method string) (int, error) {
-	result, err := client.Call("core.get_jobs", []interface{}{
-		[]interface{}{"method", "=", method},
-	})
-	if err != nil {
-		return 0, fmt.Errorf("failed to query jobs: %w", err)
-	}
-
-	var jobs []map[string]interface{}
-	if err := json.Unmarshal(result, &jobs); err != nil {
-		return 0, fmt.Errorf("failed to parse jobs: %w", err)
-	}
-
-	if len(jobs) == 0 {
-		return 0, fmt.Errorf("no job found for method %s", method)
-	}
-
-	// Return most recent job
-	latestJob := jobs[0]
-	for _, job := range jobs {
-		if timeStarted, ok := job["time_started"].(map[string]interface{}); ok {
-			if latestStarted, ok := latestJob["time_started"].(map[string]interface{}); ok {
-				if timeStarted["$date"].(float64) > latestStarted["$date"].(float64) {
-					latestJob = job
-				}
-			}
-		}
-	}
-
-	jobID, _ := latestJob["id"].(float64)
-	return int(jobID), nil
-}
-
 // DryRunnable implementations
 
 type configureDirectoryServiceDryRun struct{}
@@ -601,14 +458,15 @@ type configureDirectoryServiceDryRun struct{}
 func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	ctx := context.Background()
 
-	dsType, ok := args["type"].(string)
-	if !ok || (dsType != "activedirectory" && dsType != "ldap") {
-		return nil, fmt.Errorf("type must be 'activedirectory' or 'ldap'")
-	}
-
-	// Validate credentials
-	if err := validateDirectoryCredentials(args, dsType); err != nil {
+	payload, err := buildDirectoryServiceUpdatePayload(args)
+	if err != nil {
 		return nil, err
+	}
+	serviceType, _ := payload["service_type"].(string)
+	enabled, _ := payload["enable"].(bool)
+	credType := ""
+	if cred, ok := payload["credential"].(map[string]interface{}); ok {
+		credType, _ = cred["credential_type"].(string)
 	}
 
 	// Get current status
@@ -618,39 +476,42 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, 
 	}
 
 	warnings := []string{}
-	enabled := getOptionalBool(args, "enable", true)
 
-	if status.Type != "none" && status.Type != dsType {
+	if status.Type != "none" && status.Type != serviceType {
 		warnings = append(warnings,
-			fmt.Sprintf("CONFLICT: %s is currently configured and will be replaced by %s", status.Type, dsType))
+			fmt.Sprintf("CONFLICT: %s is currently configured and will be replaced by %s", status.Type, serviceType))
 	}
 
 	if enabled {
 		warnings = append(warnings,
-			fmt.Sprintf("Directory service will be enabled and system will attempt to join %s", dsType))
+			fmt.Sprintf("Directory service will be enabled; if TrueNAS has not joined this %s domain/server yet it will attempt to join", serviceType))
 		warnings = append(warnings,
 			"Network connectivity to domain controllers/LDAP servers is required")
 		warnings = append(warnings,
 			"DNS must be properly configured to resolve domain/LDAP servers")
+		if serviceType != "LDAP" && credType != "KERBEROS_USER" {
+			warnings = append(warnings,
+				"The first join of an Active Directory or IPA domain requires a KERBEROS_USER credential with administrator privileges")
+		}
 	}
-
-	credFields := getCredentialFields(args, dsType)
-	if len(credFields) > 0 {
+	if force, _ := payload["force"].(bool); force {
 		warnings = append(warnings,
-			fmt.Sprintf("Credentials provided for: %v", credFields))
-	} else {
-		warnings = append(warnings,
-			"No credentials provided - anonymous bind will be attempted (may fail)")
+			"force=true bypasses the check for an existing server with this hostname registered in the domain; it can replace that server")
 	}
+	warnings = append(warnings,
+		fmt.Sprintf("Credential type %s will be sent; secret values are masked in this preview", credType))
 
 	actions := []PlannedAction{
 		{
 			Step:        1,
-			Description: fmt.Sprintf("Configure %s settings", dsType),
+			Description: fmt.Sprintf("Call directoryservices.update to configure %s", serviceType),
 			Operation:   "configure",
-			Target:      dsType,
+			Target:      serviceType,
 			Details: map[string]interface{}{
+				"method":  "directoryservices.update",
 				"enabled": enabled,
+				// Exactly what will be sent to TrueNAS, with secret values masked.
+				"payload": maskDirectoryServicePayload(payload),
 			},
 		},
 	}
@@ -658,19 +519,17 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, 
 	if enabled {
 		actions = append(actions, PlannedAction{
 			Step:        2,
-			Description: fmt.Sprintf("Join %s domain/server", dsType),
+			Description: fmt.Sprintf("Join %s domain/server if not already joined", serviceType),
 			Operation:   "join",
-			Target:      dsType,
+			Target:      serviceType,
 		})
 	}
 
 	conditions := []string{
-		fmt.Sprintf("Connectivity to %s servers", dsType),
+		fmt.Sprintf("Connectivity to %s servers", serviceType),
 		"Proper DNS configuration",
 		"Firewall rules allowing directory service traffic",
-	}
-	if len(credFields) > 0 {
-		conditions = append(conditions, fmt.Sprintf("Valid credentials: %v", credFields))
+		fmt.Sprintf("Valid %s credentials", credType),
 	}
 
 	requirements := &Requirements{
@@ -796,35 +655,6 @@ func (r *Registry) handleLeaveDirectoryServiceWithDryRun(client *truenas.Client,
 }
 
 // Helper functions for dry-run
-
-func getCredentialFields(args map[string]interface{}, dsType string) []string {
-	fields := []string{}
-
-	if dsType == "activedirectory" {
-		if bindname, ok := args["bindname"].(string); ok && bindname != "" {
-			fields = append(fields, "bindname")
-		}
-		if bindpw, ok := args["bindpw"].(string); ok && bindpw != "" {
-			fields = append(fields, "bindpw")
-		}
-	} else if dsType == "ldap" {
-		if binddn, ok := args["binddn"].(string); ok && binddn != "" {
-			fields = append(fields, "binddn")
-		}
-		if bindpw, ok := args["bindpw"].(string); ok && bindpw != "" {
-			fields = append(fields, "bindpw")
-		}
-	}
-
-	return fields
-}
-
-func getOptionalBool(args map[string]interface{}, key string, defaultVal bool) bool {
-	if val, ok := args[key].(bool); ok {
-		return val
-	}
-	return defaultVal
-}
 
 func getOptionalInt(args map[string]interface{}, key string, defaultVal int) int {
 	if val, ok := args[key].(float64); ok {

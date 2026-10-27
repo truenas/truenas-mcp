@@ -504,10 +504,14 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 				}
 				argSets := []map[string]interface{}{nil, {}, valid[name]}
 				if name == "configure_directory_service" {
-					// The fields its handler and dry run read today.
+					// Schema-conformant LDAP, and arguments in the old (handler-only) names.
 					argSets = append(argSets,
-						map[string]interface{}{"type": "activedirectory", "domain": "example.com", "enable": false},
-						map[string]interface{}{"type": "ldap", "basedn": "dc=x", "hostname": []interface{}{"ldap"}, "bindpw": 1})
+						map[string]interface{}{
+							"service_type": "LDAP", "enable": false,
+							"credential":    map[string]interface{}{"credential_type": "LDAP_PLAIN", "binddn": "cn=a,dc=x", "bindpw": "pw"},
+							"configuration": map[string]interface{}{"server_urls": []interface{}{"ldaps://ldap"}, "basedn": "dc=x"},
+						},
+						map[string]interface{}{"type": "activedirectory", "domain": "example.com", "enable": false})
 				}
 				props, _ := tool.Definition.InputSchema["properties"].(map[string]interface{})
 				for _, bad := range []interface{}{nil, "x", -1.5, true, []interface{}{1}, map[string]interface{}{"a": 1}} {
