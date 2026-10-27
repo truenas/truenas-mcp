@@ -749,11 +749,11 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 						"properties": map[string]interface{}{
 							"generate_key": map[string]interface{}{
 								"type":        "boolean",
-								"description": "Auto-generate encryption key (recommended for simplicity)",
+								"description": "Not effective yet: this tool cannot enable encryption, so this option is ignored by TrueNAS",
 							},
 							"passphrase": map[string]interface{}{
 								"type":        "string",
-								"description": "User passphrase (min 8 chars) - alternative to generate_key",
+								"description": "Not effective yet: this tool cannot enable encryption, so this option is ignored by TrueNAS",
 							},
 							"algorithm": map[string]interface{}{
 								"type":        "string",
@@ -810,7 +810,7 @@ For IPA: {hostname: "ipa.example.com", domain: "example.com", ...}
 					},
 					"user_properties": map[string]interface{}{
 						"type":        "array",
-						"description": "Optional ZFS user properties to set on the dataset, each an object with a 'key' containing a colon in namespace:property form (e.g. 'org:note') and a string 'value'. Do not use namespaces that TrueNAS manages itself, such as 'org.truenas:'",
+						"description": "Optional ZFS user properties to set on the dataset, each an object with a 'key' containing a colon in namespace:property form (e.g. 'org:note') and a string 'value'. Property names should use only lowercase letters, digits and ': . _ -' (newer TrueNAS versions reject anything else) and must not repeat within the list. Do not set properties TrueNAS manages itself (org.freenas:description, org.freenas:quota_warning, org.freenas:quota_critical, org.freenas:refquota_warning, org.freenas:refquota_critical, org.truenas:managedby); use the dedicated fields (comments, quota_warning, ...) instead",
 						"items": map[string]interface{}{
 							"type": "object",
 							"properties": map[string]interface{}{

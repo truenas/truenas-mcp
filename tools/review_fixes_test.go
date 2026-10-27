@@ -227,3 +227,58 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 		}
 	})
 }
+
+func TestCreateDatasetEncryptionWarningRequiresEncrypted(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		dataset  map[string]interface{}
+		wantWarn bool
+		wantLoad bool
+	}{
+		{"encrypted and loaded", map[string]interface{}{"encrypted": true, "key_loaded": true}, true, true},
+		{"encrypted, key not loaded", map[string]interface{}{"encrypted": true, "key_loaded": false}, true, false},
+		{"not encrypted", map[string]interface{}{"encrypted": false, "key_loaded": true}, false, true},
+		{"no encryption fields", map[string]interface{}{}, false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ds := map[string]interface{}{"id": "tank/x", "name": "tank/x", "type": "FILESYSTEM", "pool": "tank"}
+			for k, v := range tt.dataset {
+				ds[k] = v
+			}
+			client, _ := newFakeClientWith(t, map[string]interface{}{"pool.dataset.create": ds}, nil)
+			out, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/x"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var resp map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if _, got := resp["encryption_warning"]; got != tt.wantWarn {
+				t.Errorf("encryption_warning present = %v, want %v (%s)", got, tt.wantWarn, out)
+			}
+			if _, got := resp["key_loaded"]; got != tt.wantLoad {
+				t.Errorf("key_loaded present = %v, want %v", got, tt.wantLoad)
+			}
+		})
+	}
+}
+
+func TestCreateDatasetUserPropertiesDescriptionNamesManagedKeys(t *testing.T) {
+	r := NewRegistry(nil, nil)
+	props := r.tools["create_dataset"].Definition.InputSchema["properties"].(map[string]interface{})
+	desc := props["user_properties"].(map[string]interface{})["description"].(string)
+	for _, want := range []string{"org.freenas:description", "org.freenas:quota_warning", "org.freenas:quota_critical",
+		"org.freenas:refquota_warning", "org.freenas:refquota_critical", "org.truenas:managedby", "lowercase", "must not repeat"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("user_properties description missing %q", want)
+		}
+	}
+	opts := props["encryption_options"].(map[string]interface{})["properties"].(map[string]interface{})
+	for _, k := range []string{"generate_key", "passphrase"} {
+		d := opts[k].(map[string]interface{})["description"].(string)
+		if !strings.HasPrefix(d, "Not effective yet") || strings.Contains(d, "recommended") {
+			t.Errorf("encryption_options.%s description = %q", k, d)
+		}
+	}
+}

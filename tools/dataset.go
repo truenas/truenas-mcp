@@ -175,6 +175,8 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 
 	if keyLoaded, ok := dataset["key_loaded"].(bool); ok && keyLoaded {
 		response["key_loaded"] = keyLoaded
+	}
+	if encrypted, ok := dataset["encrypted"].(bool); ok && encrypted {
 		response["encryption_warning"] = "IMPORTANT: Back up your encryption key from Storage > Pools"
 	}
 
