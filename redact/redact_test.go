@@ -128,8 +128,12 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 			input: `[{"id": 7, "path": "/mnt/tank/data", "credentials": {"id": 4, "name": "ftp",
 				"provider": {"type": "FTP", "host": "192.0.2.10", "user": "backup", "pass": "fake-ftp-pw"}}}]`,
 			checks: []check{
-				// An object under a sensitive key is redacted wholesale.
-				redacted(0, "credentials"), kept("/mnt/tank/data", 0, "path"), kept(json.Number("7"), 0, "id"),
+				// A credential reference under a sensitive key keeps its
+				// id, name and type; everything else is redacted.
+				kept(json.Number("4"), 0, "credentials", "id"), kept("ftp", 0, "credentials", "name"),
+				kept("FTP", 0, "credentials", "provider", "type"), redacted(0, "credentials", "provider", "pass"),
+				redacted(0, "credentials", "provider", "user"), redacted(0, "credentials", "provider", "host"),
+				kept("/mnt/tank/data", 0, "path"), kept(json.Number("7"), 0, "id"),
 			},
 		},
 		{
@@ -150,7 +154,9 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 				"type": "SSH_CREDENTIALS", "attributes": {"host": "192.0.2.20", "username": "root",
 				"private_key": 1, "password": "fake-ssh-pw"}}}]`,
 			checks: []check{
-				redacted(0, "ssh_credentials"), kept("SSH", 0, "transport"), kept("tank->backup", 0, "name"),
+				kept(json.Number("2"), 0, "ssh_credentials", "id"), kept("repl-conn", 0, "ssh_credentials", "name"),
+				kept("SSH_CREDENTIALS", 0, "ssh_credentials", "type"), redacted(0, "ssh_credentials", "attributes"),
+				kept("SSH", 0, "transport"), kept("tank->backup", 0, "name"),
 			},
 		},
 		{
@@ -654,16 +660,17 @@ func TestTextBareValueExtent(t *testing.T) {
 }
 
 // TestTextLongLinesLinear guards against redaction that is quadratic in the
-// length of a line: each input is a single 1 MB line, which takes well under
-// a second when the work is linear and minutes to hours when it is not. The
-// time budget is deliberately generous so that it is not flaky on slow or
-// instrumented (-race, coverage) runs.
+// length of a line: each input is a single 1 MB line (or 1 MB of short
+// lines), which takes well under a second when the work is linear and
+// minutes to hours when it is not. The time budget is deliberately generous
+// so that it is not flaky on slow, loaded or instrumented (-race, coverage)
+// runs.
 func TestTextLongLinesLinear(t *testing.T) {
-	size, budget := 1<<20, 2*time.Second
+	size, budget := 1<<20, 10*time.Second
 	if raceEnabled {
 		// The race detector slows this down about 15x; a quarter of the size
 		// would still take minutes if the work were quadratic.
-		size, budget = 1<<18, 10*time.Second
+		size, budget = 1<<18, 60*time.Second
 	}
 	line := func(prefix, unit string) string {
 		return prefix + strings.Repeat(unit, (size-len(prefix))/len(unit))
@@ -685,6 +692,19 @@ func TestTextLongLinesLinear(t *testing.T) {
 		{"repeated open quotes", line("", "pw='"),
 			func(out string) bool { return out == "pw='"+Marker+"'" }},
 		{"Python repr with URLs", line("Error(", "http://x: y, "), nil},
+		{"long options", line("cmd", " --name x --verbose"), nil},
+		{"sensitive long options", line("cmd", " --password x"),
+			func(out string) bool { return !strings.Contains(out, "--password x") }},
+		{"repeated sshpass", line("", "sshpass -e "), nil},
+		{"repeated mysql without -p", line("", "mysql -u root "), nil},
+		{"repeated mysql -p", line("", "mysql -u root -px "),
+			func(out string) bool { return !strings.Contains(out, "-px") }},
+		{"flow name/value pairs", line("", "{name: a, value: b} "), nil},
+		{"value without name", line("", "value: b c "), nil},
+		{"YAML env list", line("env:\n", "- name: DB_PASS\n  value: x\n"),
+			func(out string) bool { return !strings.Contains(out, "value: x") }},
+		{"YAML block scalars", line("", "a: |\n  b: c\n"), nil},
+		{"YAML values before names", line("", "- value: x\n"), nil},
 	}
 	for _, c := range cases {
 		start := time.Now()

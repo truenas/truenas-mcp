@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/json"
+
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/redact"
 )
 
-// redactResponse returns resp with secrets removed from tool call content
-// and error messages, the same redaction the server applies in
+// redactResponse returns resp with secrets removed from tool call results
+// (text content and structuredContent) and error messages, the same redaction the server applies in
 // handleToolsCall. Other results (initialize, tools/list) carry no TrueNAS
 // data and are left untouched, so tool input schemas that mention
 // "password" are not altered. resp is not modified.
@@ -24,27 +27,14 @@ func redactResponse(resp *mcp.Response) *mcp.Response {
 			out.Result = &red
 		}
 	case map[string]interface{}:
-		if content, ok := r["content"].([]interface{}); ok {
-			m := make(map[string]interface{}, len(r))
-			for k, v := range r {
-				m[k] = v
+		if red, ok := redactToolCallMap(r); ok {
+			out.Result = red
+		}
+	case json.RawMessage:
+		if v, ok := decodeResult(r); ok {
+			if red, ok := redactToolCallMap(v); ok {
+				out.Result = red
 			}
-			blocks := make([]interface{}, len(content))
-			for i, b := range content {
-				blocks[i] = b
-				if block, ok := b.(map[string]interface{}); ok {
-					if text, ok := block["text"].(string); ok {
-						nb := make(map[string]interface{}, len(block))
-						for k, v := range block {
-							nb[k] = v
-						}
-						nb["text"] = redact.ToolOutput(text)
-						blocks[i] = nb
-					}
-				}
-			}
-			m["content"] = blocks
-			out.Result = m
 		}
 	}
 	if resp.Error != nil {
@@ -66,4 +56,55 @@ func redactToolCallResult(r mcp.ToolCallResult) mcp.ToolCallResult {
 	}
 	r.Content = content
 	return r
+}
+
+// redactToolCallMap redacts a tool call result decoded as a generic map: the
+// text of its content blocks, as in redactToolCallResult, and every other
+// field (structuredContent, _meta ...) structurally. It reports false, and
+// leaves r alone, if r is not a tool call result. r is not modified.
+func redactToolCallMap(r map[string]interface{}) (map[string]interface{}, bool) {
+	content, hasContent := r["content"].([]interface{})
+	_, hasStructured := r["structuredContent"]
+	if !hasContent && !hasStructured {
+		return nil, false
+	}
+	m := make(map[string]interface{}, len(r))
+	for k, v := range r {
+		switch k {
+		case "content", "isError":
+			m[k] = v
+		default:
+			m[k] = redact.Value(v)
+		}
+	}
+	if hasContent {
+		blocks := make([]interface{}, len(content))
+		for i, b := range content {
+			blocks[i] = b
+			if block, ok := b.(map[string]interface{}); ok {
+				if text, ok := block["text"].(string); ok {
+					nb := make(map[string]interface{}, len(block))
+					for k, v := range block {
+						nb[k] = v
+					}
+					nb["text"] = redact.ToolOutput(text)
+					blocks[i] = nb
+				}
+			}
+		}
+		m["content"] = blocks
+	}
+	return m, true
+}
+
+// decodeResult decodes a raw JSON result that is an object, keeping numbers
+// exact.
+func decodeResult(raw json.RawMessage) (map[string]interface{}, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var m map[string]interface{}
+	if err := dec.Decode(&m); err != nil || m == nil {
+		return nil, false
+	}
+	return m, true
 }
