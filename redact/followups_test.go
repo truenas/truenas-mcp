@@ -77,7 +77,9 @@ func TestCredentialReferences(t *testing.T) {
 			kept(json.Number("2"), "ssh_credentials", "id"), kept("repl-conn", "ssh_credentials", "name"),
 			kept("SSH_CREDENTIALS", "ssh_credentials", "type"), redacted("ssh_credentials", "attributes"),
 			// Not references (no id or name): redacted wholesale.
-			redacted("credential"), redacted("token"),
+			redacted("token"),
+			// A typed credential keeps credential_type; see TestTypedCredential.
+			kept("LDAP_PLAIN", "credential", "credential_type"), redacted("credential", "bindpw"),
 			kept("db", "secrets", "name"), redacted("secrets", "password"), kept(true, "secrets", "enabled"),
 			redacted("secrets", "length"),
 		})
@@ -401,6 +403,72 @@ func TestTextURLWithEscapedSlashes(t *testing.T) {
 		{`postgres:\/\/u:p@fake-db-pw@db.example\/app`, `postgres:\/\/u:` + Marker + `@db.example\/app`},
 		{"postgres://u:p@fake-db-pw@db.example/app", "postgres://u:" + Marker + "@db.example/app"},
 	})
+}
+
+// TestTypedCredential: the object under a "credential" key that has a
+// credential_type shows only its allowlisted non-secret fields; every other
+// field is redacted. Any other value under a credential key keeps being
+// redacted wholesale.
+func TestTypedCredential(t *testing.T) {
+	runChecks(t, `{
+		"user": {"credential": {"credential_type":"KERBEROS_USER","username":"admin","password":"fake-user-pw"}},
+		"principal": {"credential": {"credential_type":"KERBEROS_PRINCIPAL","principal":"host/nas.example.com@EXAMPLE.COM"}},
+		"plain": {"credential": {"credential_type":"LDAP_PLAIN","binddn":"cn=admin,dc=example,dc=com","bindpw":"fake-bind-pw"}},
+		"anon": {"credential": {"credential_type":"LDAP_ANONYMOUS"}},
+		"mtls_id": {"credential": {"credential_type":"LDAP_MTLS","client_certificate":7}},
+		"mtls_name": {"credential": {"credential_type":"LDAP_MTLS","client_certificate":"nas-cert"}},
+		"mtls_obj": {"credential": {"credential_type":"LDAP_MTLS","client_certificate":{"id":7,"name":"nas-cert","privatekey":"fake-hex-key-0000","certificate":"fake-b2-key"}}},
+		"unknown": {"credential": {"credential_type":"LDAP_PLAIN","binddn":"cn=a","extra":"fake-oauth-token","count":5,"nested":{"x":"fake-client-secret"},"list":["fake-ssh-pw"],"flag":true,"empty":""}},
+		"badtype": {"credential": {"credential_type":"fake-totp-secret with spaces","username":"admin"}},
+		"obj_username": {"credential": {"credential_type":"KERBEROS_USER","username":{"v":"fake-db-pw"}}},
+		"inline_text": {"credential": {"credential_type":"KERBEROS_USER","username":"admin password=fake-smb-pw"}},
+		"with_id": {"credential": {"credential_type":"KERBEROS_USER","id":3,"name":"svc","username":"admin","password":"fake-vnc-pw"}},
+		"other": {"auth_credential": {"credential_type":"KERBEROS_USER","username":"admin","password":"fake-ftp-pw"}},
+		"no_type": {"credential": {"username":"admin","password":"fake-user-pw"}},
+		"string": {"credential": "fake-passphrase"},
+		"list": {"credential": [{"credential_type":"KERBEROS_USER","username":"admin"}]},
+		"empty": {"credential": {}}}`,
+		[]check{
+			kept("KERBEROS_USER", "user", "credential", "credential_type"), kept("admin", "user", "credential", "username"),
+			redacted("user", "credential", "password"),
+			kept("KERBEROS_PRINCIPAL", "principal", "credential", "credential_type"),
+			kept("host/nas.example.com@EXAMPLE.COM", "principal", "credential", "principal"),
+			kept("cn=admin,dc=example,dc=com", "plain", "credential", "binddn"), redacted("plain", "credential", "bindpw"),
+			kept("LDAP_ANONYMOUS", "anon", "credential", "credential_type"),
+			kept(json.Number("7"), "mtls_id", "credential", "client_certificate"),
+			kept("nas-cert", "mtls_name", "credential", "client_certificate"),
+			kept(json.Number("7"), "mtls_obj", "credential", "client_certificate", "id"),
+			kept("nas-cert", "mtls_obj", "credential", "client_certificate", "name"),
+			redacted("mtls_obj", "credential", "client_certificate", "privatekey"),
+			redacted("mtls_obj", "credential", "client_certificate", "certificate"),
+			// Unknown inner fields stay redacted; booleans and empty strings are not secrets.
+			kept("LDAP_PLAIN", "unknown", "credential", "credential_type"), kept("cn=a", "unknown", "credential", "binddn"),
+			redacted("unknown", "credential", "extra"), redacted("unknown", "credential", "count"),
+			redacted("unknown", "credential", "nested"), redacted("unknown", "credential", "list"),
+			kept(true, "unknown", "credential", "flag"), kept("", "unknown", "credential", "empty"),
+			// A credential_type that is not an enum value, or an allowlisted field that is not
+			// a scalar, is redacted; allowlisted text is still scrubbed.
+			redacted("badtype", "credential", "credential_type"), kept("admin", "badtype", "credential", "username"),
+			redacted("obj_username", "credential", "username"),
+			kept("admin password="+Marker, "inline_text", "credential", "username"),
+			kept(json.Number("3"), "with_id", "credential", "id"), kept("svc", "with_id", "credential", "name"),
+			redacted("with_id", "credential", "password"),
+			// Other shapes keep today's behaviour.
+			redacted("other", "auth_credential"), redacted("no_type", "credential"), redacted("string", "credential"), redacted("list", "credential"),
+			kept(map[string]interface{}{}, "empty", "credential"),
+		})
+}
+
+// TestTypedCredentialJSONString: a JSON document held in a string is
+// redacted the same way.
+func TestTypedCredentialJSONString(t *testing.T) {
+	out := ToolOutput(`{"args":"{\"credential\":{\"credential_type\":\"KERBEROS_USER\",\"username\":\"admin\",\"password\":\"fake-user-pw\"}}"}`)
+	assertNoSecrets(t, out)
+	for _, want := range []string{"KERBEROS_USER", "admin"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%q missing from %s", want, out)
+		}
+	}
 }
 
 // TestTextQuotedSeparators: a '|', ';', '&' or newline inside a quoted

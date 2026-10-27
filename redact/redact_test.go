@@ -207,7 +207,8 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 				"binddn": "cn=admin,dc=example,dc=com", "bindpw": "fake-bind-pw"},
 				"configuration": {"server_urls": ["ldaps://ldap.example.com"], "kerberos_keytab": "fake-keytab-b64"}}`,
 			checks: []check{
-				redacted("credential"), kept("LDAP", "service_type"), kept(true, "enable"),
+				kept("LDAP_PLAIN", "credential", "credential_type"), kept("cn=admin,dc=example,dc=com", "credential", "binddn"),
+				redacted("credential", "bindpw"), kept("LDAP", "service_type"), kept(true, "enable"),
 				kept("ldaps://ldap.example.com", "configuration", "server_urls", 0), redacted("configuration", "kerberos_keytab"),
 			},
 		},
@@ -217,7 +218,9 @@ func TestToolOutputRealisticShapes(t *testing.T) {
 				{"credential_type": "KERBEROS_USER", "username": "admin", "password": "fake-bind-pw"}}]},
 				{"id": 10, "method": "user.create", "arguments": [{"username": "bob", "password": "fake-user-pw"}]}]`,
 			checks: []check{
-				redacted(0, "arguments", 0, "credential"), kept("directoryservices.update", 0, "method"),
+				kept("KERBEROS_USER", 0, "arguments", 0, "credential", "credential_type"),
+				kept("admin", 0, "arguments", 0, "credential", "username"),
+				redacted(0, "arguments", 0, "credential", "password"), kept("directoryservices.update", 0, "method"),
 				redacted(1, "arguments", 0, "password"), kept("bob", 1, "arguments", 0, "username"),
 			},
 		},

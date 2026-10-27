@@ -457,8 +457,10 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		"delete_app":              {"app_name": "plex", "remove_images": true},
 		"stop_app":                {"app_name": "plex"},
 		"upgrade_app":             {"app_name": "plex", "version": "2.0.0", "snapshot_hostpaths": false},
-		"leave_directory_service": {},
-		"delete_scrub_schedule":   {"id": 1.0},
+		"leave_directory_service": {
+			"credential": map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"},
+		},
+		"delete_scrub_schedule": {"id": 1.0},
 		"configure_directory_service": {
 			"service_type": "ACTIVEDIRECTORY", "enable": true,
 			"credential":    map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"},
@@ -471,6 +473,11 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		fallback interface{}
 	}{
 		{"null results", nil, nil},
+		// An enabled directory service, so leave_directory_service and
+		// configure_directory_service previews run past their pre-checks.
+		{"directory service enabled", map[string]interface{}{
+			"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
+		}, nil},
 		{"null version", map[string]interface{}{"system.info": map[string]interface{}{"hostname": "nas", "version": nil}}, nil},
 		{"missing version", map[string]interface{}{"system.info": map[string]interface{}{}}, nil},
 		{"numeric version", map[string]interface{}{"system.info": map[string]interface{}{"version": 42}}, nil},
@@ -511,10 +518,14 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 				}
 				argSets := []map[string]interface{}{nil, {}, valid[name]}
 				if name == "configure_directory_service" {
-					// The fields its handler and dry run read today.
+					// Schema-conformant LDAP, and arguments in the old (handler-only) names.
 					argSets = append(argSets,
-						map[string]interface{}{"type": "activedirectory", "domain": "example.com", "enable": false},
-						map[string]interface{}{"type": "ldap", "basedn": "dc=x", "hostname": []interface{}{"ldap"}, "bindpw": 1})
+						map[string]interface{}{
+							"service_type": "LDAP", "enable": false,
+							"credential":    map[string]interface{}{"credential_type": "LDAP_PLAIN", "binddn": "cn=a,dc=x", "bindpw": "pw"},
+							"configuration": map[string]interface{}{"server_urls": []interface{}{"ldaps://ldap"}, "basedn": "dc=x"},
+						},
+						map[string]interface{}{"type": "activedirectory", "domain": "example.com", "enable": false})
 				}
 				props, _ := tool.Definition.InputSchema["properties"].(map[string]interface{})
 				for _, bad := range []interface{}{nil, "x", -1.5, true, []interface{}{1}, map[string]interface{}{"a": 1}} {

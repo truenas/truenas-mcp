@@ -1,0 +1,46 @@
+{
+  "_origin": "Field names copied by hand from the TrueNAS middleware API models in src/middlewared/middlewared/api/v25_10_0/directory_services.py and v27_0_0/directory_services.py (the models of directoryservices.update and directoryservices.leave are identical in both versions; the other differences concern status, keytab sync and docstrings). Source: github.com/truenas/middleware. When a newer middleware version changes these models, update this file from the source first, then the tool: tools/directoryservices_followups_test.go (TestDirectoryServiceSchemaPinnedToMiddlewareModel and TestLeaveDirectoryServicePinnedToMiddlewareModel) fails if the tool's schema and handler drift from it.",
+  "update": {
+    "_model": "DirectoryServicesUpdateArgs (DirectoryServicesEntry without id, plus force; every field optional, ForUpdateMetaclass)",
+    "fields": ["service_type", "credential", "enable", "enable_account_cache", "enable_dns_updates", "timeout", "kerberos_realm", "configuration", "force"],
+    "service_types": ["ACTIVEDIRECTORY", "IPA", "LDAP"],
+    "timeout": {"ge": 5, "le": 60},
+    "credential_types": {
+      "KERBEROS_USER": {"fields": ["username", "password"], "secret": ["password"]},
+      "KERBEROS_PRINCIPAL": {"fields": ["principal"], "secret": []},
+      "LDAP_PLAIN": {"fields": ["binddn", "bindpw"], "secret": ["bindpw"]},
+      "LDAP_ANONYMOUS": {"fields": [], "secret": []},
+      "LDAP_MTLS": {"fields": ["client_certificate"], "secret": []}
+    },
+    "configuration": {
+      "ACTIVEDIRECTORY": {
+        "_model": "ActiveDirectoryConfig (service_type is excluded from the payload)",
+        "fields": ["hostname", "domain", "idmap", "site", "computer_account_ou", "use_default_domain", "enable_trusted_domains", "trusted_domains"],
+        "required": ["hostname", "domain"]
+      },
+      "IPA": {
+        "_model": "IPAConfig",
+        "fields": ["target_server", "hostname", "domain", "basedn", "smb_domain", "validate_certificates"],
+        "required": ["target_server", "hostname", "domain", "basedn"]
+      },
+      "LDAP": {
+        "_model": "LDAPConfig (ldap_schema has the alias schema)",
+        "fields": ["server_urls", "basedn", "starttls", "validate_certificates", "schema", "search_bases", "attribute_maps", "auxiliary_parameters"],
+        "required": ["server_urls", "basedn"],
+        "schema_values": ["RFC2307", "RFC2307BIS"]
+      }
+    },
+    "_idmap_secret_fields": "Secret[...] fields of the idmap models nested in ActiveDirectoryConfig.idmap.idmap_domain and ActiveDirectoryConfig.trusted_domains[], by idmap_backend",
+    "idmap_secret_fields": {
+      "LDAP": ["ldap_user_dn_password"],
+      "RFC2307": ["ldap_user_dn_password"]
+    }
+  },
+  "leave": {
+    "_model": "DirectoryServicesLeaveArgs",
+    "fields": ["credential"],
+    "credential_type": "KERBEROS_USER",
+    "credential_fields": ["username", "password"],
+    "service_types": ["ACTIVEDIRECTORY", "IPA"]
+  }
+}
