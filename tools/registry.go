@@ -1309,7 +1309,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["upgrade_app"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "upgrade_app",
-			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress; the task completes only once the app is observed RUNNING after the upgrade job finishes (otherwise it fails with the app's state; if the app was merely still starting when health_timeout_seconds ran out, the message says the upgrade itself succeeded and the wait can be raised). TrueNAS always stops the app during the upgrade and snapshots its ix-volumes dataset for rollback. This is a write operation that modifies the system.",
+			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress; the task completes only once the app is observed RUNNING after the upgrade job finishes (otherwise it fails with the app's state; if the app was merely still starting when health_timeout_seconds ran out, the message says the upgrade itself succeeded and the wait can be raised). TrueNAS always stops the app during the upgrade and snapshots its ix-volumes dataset for rollback. A job state of SUCCESS only means the upgrade job finished, not that the app is healthy: use tasks_get or query_apps for the app state. Task IDs are kept in this server's memory only; after a server restart, list jobs with query_jobs (method app.upgrade narrows the list) and find the entry whose id matches the returned job_id. This is a write operation that modifies the system.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1801,7 +1801,7 @@ Returns task_id for tracking progress with tasks_get.
 	r.tools["query_jobs"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_jobs",
-			Description: "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, app upgrades, etc.), most recent first. Returns jobs in every state unless state is given; method narrows to one job method (e.g. app.upgrade). state is case-insensitive, including all; with no state or all the response reports state_filter \"ALL\". Reports has_more and total when the list was cut by limit; long results and error text are truncated with a flag.",
+			Description: "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, app upgrades, etc.), most recent first. Returns jobs in every state unless state is given; method narrows to one job method (e.g. app.upgrade). state is case-insensitive, including all; with no state or all the response reports state_filter \"ALL\". Reports has_more and total when the list was cut by limit; long results and error text are truncated with a flag. A job state of SUCCESS means the job finished, not that the app or service it acted on is healthy: an app embedded in a job result is a copy from when the job ended. Use tasks_get or query_apps for the current app state.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
