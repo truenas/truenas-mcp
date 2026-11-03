@@ -32,6 +32,9 @@ func TestUpgradeAppEstimatedTimeFollowsHealthTimeout(t *testing.T) {
 				if want := float64(maxUpgradeJobSeconds + tc.health); maxS != want {
 					t.Errorf("max_seconds = %v, want %v", maxS, want)
 				}
+				if minS != minUpgradeJobSeconds {
+					t.Errorf("min_seconds = %v, want %d", minS, minUpgradeJobSeconds)
+				}
 				if maxS < float64(tc.health) || minS > maxS {
 					t.Errorf("inconsistent estimate: min %v, max %v, health wait %d", minS, maxS, tc.health)
 				}
