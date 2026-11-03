@@ -1919,7 +1919,12 @@ Returns task_id for tracking progress with tasks_get.
 func (r *Registry) ListTools() []mcp.Tool {
 	tools := make([]mcp.Tool, 0, len(r.tools))
 	for name, tool := range r.tools {
-		if r.checkPolicy(name) == nil {
+		if r.checkPolicy(name) != nil {
+			continue
+		}
+		if r.readOnly && readOnlyDryRunTools[name] {
+			tools = append(tools, readOnlyDryRunDefinition(tool.Definition))
+		} else {
 			tools = append(tools, tool.Definition)
 		}
 	}
@@ -1949,6 +1954,9 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (result st
 	// Enforce the policy here, not only in ListTools: clients may call tools
 	// they were never shown.
 	if err := r.checkPolicy(name); err != nil {
+		return "", err
+	}
+	if err := r.checkReadOnlyDryRun(name, args); err != nil {
 		return "", err
 	}
 	// Reject arguments the schema does not declare before anything runs,

@@ -224,7 +224,7 @@ func main() {
 		log.Fatalf("Invalid tool safety settings: %v", err)
 	}
 	if policy.ReadOnly {
-		log.Println("Read-only mode: tools that change the system are disabled")
+		log.Println("Read-only mode: tools that change the system are disabled (upgrade_app is available for dry runs only)")
 	}
 
 	// Start stdio handler
