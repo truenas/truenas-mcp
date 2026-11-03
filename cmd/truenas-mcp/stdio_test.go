@@ -416,3 +416,38 @@ func TestStdioRealLimitThroughRun(t *testing.T) {
 		t.Errorf("request after the oversized one: %v", msgs[2])
 	}
 }
+
+// ping is answered with an empty result object (MCP basic/utilities/ping),
+// with or without params, before and after initialize; a ping without an
+// id is a notification and gets no reply.
+func TestStdioPing(t *testing.T) {
+	in := rpcLine(t, map[string]interface{}{"id": 1, "method": "ping"}) +
+		rpcLine(t, map[string]interface{}{"method": "ping"}) +
+		rpcLine(t, map[string]interface{}{"id": 2, "method": "initialize"}) +
+		rpcLine(t, map[string]interface{}{"id": "p", "method": "ping", "params": map[string]interface{}{}}) +
+		rpcLine(t, map[string]interface{}{"id": 0, "method": "ping", "params": map[string]interface{}{"_meta": map[string]interface{}{"k": "v"}}})
+	var stdout bytes.Buffer
+	h := newStdioHandler(fakeRegistry{}, false, strings.NewReader(in), &stdout)
+	if err := h.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
+	if len(msgs) != 4 {
+		t.Fatalf("got %d responses, want 4: %v", len(msgs), msgs)
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	for i, want := range []interface{}{float64(1), "p", float64(0)} {
+		idx := []int{0, 2, 3}[i]
+		m := msgs[idx]
+		if m["id"] != want {
+			t.Errorf("response %d id = %v, want %v", idx, m["id"], want)
+		}
+		res, ok := m["result"].(map[string]interface{})
+		if !ok || len(res) != 0 {
+			t.Errorf("ping %v: result = %#v, want {}", want, m["result"])
+		}
+		if !strings.Contains(lines[idx], `"result":{}`) {
+			t.Errorf("ping %v: wire response %s, want \"result\":{}", want, lines[idx])
+		}
+	}
+}
