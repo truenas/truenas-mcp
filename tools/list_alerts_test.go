@@ -63,13 +63,70 @@ func TestListAlertsDismissedFilter(t *testing.T) {
 		})
 	}
 
-	for _, args := range []map[string]interface{}{
-		{"dismissed": true, "include_dismissed": false},
-		{"dismissed": false, "include_dismissed": true},
+}
+
+// Invalid arguments are rejected with a fixed message that does not echo the
+// values, before alert.list is called.
+func TestListAlertsRejectsInvalidArguments(t *testing.T) {
+	const (
+		badDismissed  = "invalid arguments for tool list_alerts: dismissed must be a boolean (true or false); nothing was executed"
+		badInclude    = "invalid arguments for tool list_alerts: include_dismissed must be a boolean (true or false); nothing was executed"
+		onlyDismissed = "invalid arguments for tool list_alerts: dismissed=true lists only dismissed alerts and cannot be combined with include_dismissed=false; nothing was executed"
+		onlyActive    = "invalid arguments for tool list_alerts: dismissed=false lists only active alerts and cannot be combined with include_dismissed=true; nothing was executed"
+	)
+	for _, tc := range []struct {
+		name string
+		args map[string]interface{}
+		want string
+	}{
+		{"dismissed string true", map[string]interface{}{"dismissed": "true"}, badDismissed},
+		{"dismissed string false", map[string]interface{}{"dismissed": "false"}, badDismissed},
+		{"dismissed number 1", map[string]interface{}{"dismissed": float64(1)}, badDismissed},
+		{"dismissed number 0", map[string]interface{}{"dismissed": float64(0)}, badDismissed},
+		{"dismissed object", map[string]interface{}{"dismissed": map[string]interface{}{}}, badDismissed},
+		{"dismissed array", map[string]interface{}{"dismissed": []interface{}{true}}, badDismissed},
+		{"include_dismissed string true", map[string]interface{}{"include_dismissed": "true"}, badInclude},
+		{"include_dismissed number 1", map[string]interface{}{"include_dismissed": float64(1)}, badInclude},
+		{"include_dismissed int 1", map[string]interface{}{"include_dismissed": 1}, badInclude},
+		{"include_dismissed empty string", map[string]interface{}{"include_dismissed": ""}, badInclude},
+		{"wrong type with a valid dismissed", map[string]interface{}{"dismissed": true, "include_dismissed": "yes"}, badInclude},
+		{"dismissed true, include false", map[string]interface{}{"dismissed": true, "include_dismissed": false}, onlyDismissed},
+		{"dismissed false, include true", map[string]interface{}{"dismissed": false, "include_dismissed": true}, onlyActive},
 	} {
-		if _, err := handleListAlerts(client, args); err == nil || !strings.Contains(err.Error(), "contradicts") {
-			t.Errorf("%v: err = %v, want a contradiction error", args, err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			client, fake := newFakeClientWith(t, map[string]interface{}{"alert.list": []interface{}{}}, nil)
+			_, err := handleListAlerts(client, tc.args)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err = %v\nwant %s", err, tc.want)
+			}
+			if calls := fake.called("alert.list"); len(calls) != 0 {
+				t.Errorf("alert.list called %d times for rejected arguments", len(calls))
+			}
+			for _, v := range []string{"yes", "\"true\"", "\"false\""} {
+				if strings.Contains(err.Error(), v) {
+					t.Errorf("error echoes the value %s: %v", v, err)
+				}
+			}
+		})
+	}
+
+	// Through CallTool too: the schema check does not convert the value.
+	client, fake := newFakeClientWith(t, map[string]interface{}{"alert.list": []interface{}{}}, nil)
+	r := NewRegistry(client, nil)
+	if _, err := r.CallTool("list_alerts", map[string]interface{}{"include_dismissed": "true"}); err == nil || !strings.Contains(err.Error(), badInclude) {
+		t.Errorf("CallTool err = %v, want %q", err, badInclude)
+	}
+	if calls := fake.called("alert.list"); len(calls) != 0 {
+		t.Errorf("CallTool: alert.list called %d times for rejected arguments", len(calls))
+	}
+
+	// JSON null means the argument is not set.
+	client, fake = newFakeClientWith(t, map[string]interface{}{"alert.list": []interface{}{}}, nil)
+	if _, err := handleListAlerts(client, map[string]interface{}{"dismissed": nil, "include_dismissed": nil}); err != nil {
+		t.Errorf("null arguments: %v", err)
+	}
+	if len(fake.called("alert.list")) != 1 {
+		t.Error("alert.list not called for valid arguments")
 	}
 }
 

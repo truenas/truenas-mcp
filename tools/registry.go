@@ -3066,6 +3066,31 @@ func sortVMs(vms []map[string]interface{}, orderBy string) {
 // Alert management handlers
 
 func handleListAlerts(client *truenas.Client, args map[string]interface{}) (string, error) {
+	// Validate every argument before calling the API. A value that is not a
+	// boolean is rejected rather than ignored, and values are not echoed.
+	dismissed, hasDismissed := false, false
+	if v, present := args["dismissed"]; present && v != nil {
+		b, ok := v.(bool)
+		if !ok {
+			return "", fmt.Errorf("invalid arguments for tool list_alerts: dismissed must be a boolean (true or false); nothing was executed")
+		}
+		dismissed, hasDismissed = b, true
+	}
+	includeDismissed, hasInclude := false, false
+	if v, present := args["include_dismissed"]; present && v != nil {
+		b, ok := v.(bool)
+		if !ok {
+			return "", fmt.Errorf("invalid arguments for tool list_alerts: include_dismissed must be a boolean (true or false); nothing was executed")
+		}
+		includeDismissed, hasInclude = b, true
+	}
+	if hasDismissed && hasInclude && dismissed != includeDismissed {
+		if dismissed {
+			return "", fmt.Errorf("invalid arguments for tool list_alerts: dismissed=true lists only dismissed alerts and cannot be combined with include_dismissed=false; nothing was executed")
+		}
+		return "", fmt.Errorf("invalid arguments for tool list_alerts: dismissed=false lists only active alerts and cannot be combined with include_dismissed=true; nothing was executed")
+	}
+
 	// alert.list doesn't take filter parameters in the same way as other queries
 	// It just returns all alerts, so we'll filter in post-processing if needed
 	result, err := client.Call("alert.list")
@@ -3078,13 +3103,9 @@ func handleListAlerts(client *truenas.Client, args map[string]interface{}) (stri
 		return "", fmt.Errorf("failed to parse alerts: %w", err)
 	}
 
-	// Post-filter by dismissed status. An explicit dismissed filter wins;
-	// otherwise dismissed alerts are excluded unless include_dismissed=true.
-	dismissed, hasDismissed := args["dismissed"].(bool)
-	includeDismissed, hasInclude := args["include_dismissed"].(bool)
-	if hasDismissed && hasInclude && dismissed != includeDismissed {
-		return "", fmt.Errorf("dismissed=%t contradicts include_dismissed=%t: set dismissed to filter by status, or include_dismissed=true to list all alerts", dismissed, includeDismissed)
-	}
+	// Post-filter by dismissed status. An explicit dismissed filter wins and
+	// keeps only alerts whose dismissed field matches it; otherwise only
+	// alerts marked dismissed are excluded unless include_dismissed=true.
 	switch {
 	case hasDismissed:
 		filtered := make([]map[string]interface{}, 0)

@@ -53,7 +53,9 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 
 ### Alerts
 - **list_alerts** - List system alerts with filtering
-  - Lists only active alerts by default: dismissed alerts are excluded. `include_dismissed: true` lists all alerts; `dismissed: true` lists only dismissed alerts and `dismissed: false` only active ones (a contradictory combination such as `dismissed: true, include_dismissed: false` is rejected)
+  - **Default changed:** without arguments, only active alerts are listed and dismissed alerts are excluded (previously all alerts were listed). `include_dismissed: true` lists all alerts; `dismissed: true` lists only dismissed alerts and `dismissed: false` only active ones
+  - Alerts that have no `dismissed` field are kept by the default view, but an explicit `dismissed: false` (like `dismissed: true`) keeps only alerts whose `dismissed` field matches, so it drops them
+  - `dismissed` and `include_dismissed` must be JSON booleans (`"true"` or `1` is rejected), and a contradictory combination such as `dismissed: true, include_dismissed: false` is rejected; in both cases the call fails before anything is queried
   - `datetime`, `last_occurrence` and other datetimes are ISO-8601 UTC strings
 - **dismiss_alert** / **restore_alert** - Manage system alerts (write operations; support dry-run mode)
 
