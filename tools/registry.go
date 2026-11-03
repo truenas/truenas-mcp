@@ -1456,8 +1456,8 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"train": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"stable", "enterprise", "community", "all"},
-						"description": "Filter by catalog train (default: stable)",
-						"default":     "stable",
+						"description": "Filter by catalog train (default: all trains). Each result includes its train.",
+						"default":     "all",
 					},
 					"category": map[string]interface{}{
 						"type":        "string",
@@ -1489,8 +1489,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"train": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"stable", "enterprise", "community"},
-						"description": "Catalog train (default: stable)",
-						"default":     "stable",
+						"description": "Catalog train (optional). When omitted, the train that has the app is looked up in the catalog; if several do, stable is preferred, then enterprise, then community. The response reports the train used.",
 					},
 				},
 				"required": []string{"app_name"},
@@ -1817,7 +1816,7 @@ Returns task_id for tracking progress with tasks_get.
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state and method filters) when more exist than were returned. Each job entry is at most 4 KiB. Values above 9999 are capped at 9999.",
+						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state and method filters) when more exist than were returned. Each job entry is at most 4 KiB. Must be an integer from 1 to 9999; other values are rejected with an error and nothing is queried.",
 						"default":     50,
 						"minimum":     1,
 						"maximum":     maxQueryJobsLimit,
@@ -4028,6 +4027,9 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 		"app_version": version,
 	})
 	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(client, appName))
+		}
 		return "", fmt.Errorf("failed to get upgrade summary: %w", err)
 	}
 
@@ -4046,6 +4048,9 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 
 	result, err := client.Call("app.upgrade", appName, upgradeOptions)
 	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(client, appName))
+		}
 		return "", fmt.Errorf("failed to upgrade app: %w", err)
 	}
 
@@ -4155,6 +4160,9 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		"app_version": version,
 	})
 	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			return nil, noUpgradeAvailableError(appName, version, currentApp)
+		}
 		return nil, fmt.Errorf("failed to get upgrade summary: %w", err)
 	}
 
@@ -4608,9 +4616,15 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 		method = m
 	}
 
+	// limit must be a whole number from 1 to maxQueryJobsLimit; anything
+	// else is rejected rather than coerced, and the value is not echoed.
 	limit := 50
-	if l, ok := args["limit"].(float64); ok && l >= 1 {
-		limit = int(math.Min(l, maxQueryJobsLimit))
+	if v, present := args["limit"]; present && v != nil {
+		l, ok := toInt(v)
+		if !ok || l < 1 || l > maxQueryJobsLimit {
+			return "", fmt.Errorf("invalid arguments for tool query_jobs: limit must be an integer from 1 to %d; nothing was executed", maxQueryJobsLimit)
+		}
+		limit = l
 	}
 
 	// Filter server-side so limit, has_more and total apply to the
