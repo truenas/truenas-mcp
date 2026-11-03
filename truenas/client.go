@@ -364,6 +364,10 @@ func (c *Client) connect() error {
 		} else if opErr := (*net.OpError)(nil); proxy != nil && errors.As(err, &opErr) && opErr.Op == "dial" {
 			// Through a proxy, the only TCP dial is to the proxy itself.
 			err = fmt.Errorf("connecting via proxy %s from %s: proxy unreachable: %w", proxy, proxy.source, err)
+		} else if proxy != nil {
+			if reason, ok := socksReplyFailure(err); ok {
+				err = socksReplyError(proxy, u, reason)
+			}
 		}
 		return &ConnectError{Err: err}
 	}

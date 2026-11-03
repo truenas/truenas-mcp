@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -120,7 +121,17 @@ func serveHTTPConnect(p *testProxy, conn net.Conn) {
 	p.tunnel(conn, br)
 }
 
-func serveSOCKS5(p *testProxy, conn net.Conn) {
+func serveSOCKS5(p *testProxy, conn net.Conn) { serveSOCKS5Reply(p, conn, 0) }
+
+// socksReplying returns a SOCKS5 proxy that answers every CONNECT request
+// with reply code rep (RFC 1928 section 6) and closes the connection.
+func socksReplying(rep byte) func(*testProxy, net.Conn) {
+	return func(p *testProxy, conn net.Conn) { serveSOCKS5Reply(p, conn, rep) }
+}
+
+// serveSOCKS5Reply serves one SOCKS5 connection, answering its CONNECT
+// request with reply code rep; 0 (succeeded) tunnels to the backend.
+func serveSOCKS5Reply(p *testProxy, conn net.Conn, rep byte) {
 	br := bufio.NewReader(conn)
 	fail := func() { conn.Close() }
 	hdr := make([]byte, 2)
@@ -177,7 +188,11 @@ func serveSOCKS5(p *testProxy, conn net.Conn) {
 	p.addrType = req[3]
 	p.mu.Unlock()
 	p.record(net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(port)))))
-	conn.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
+	conn.Write([]byte{5, rep, 0, 1, 0, 0, 0, 0, 0, 0})
+	if rep != 0 {
+		fail()
+		return
+	}
 	p.tunnel(conn, br)
 }
 
@@ -566,6 +581,80 @@ func TestUnreachableProxyIsNamed(t *testing.T) {
 			t.Errorf("%s: got %v, want it to contain %q", tc.env, err, want)
 		}
 		assertNoLeak(t, &testProxy{user: "proxyuser", password: "proxysecret7"}, err, logs)
+	}
+}
+
+// A proxy that is up but cannot reach TrueNAS answers with a SOCKS5 failure
+// reply. The error must say the proxy itself was reached, name the TrueNAS
+// host and port, and suggest what to check, rather than just "general
+// failure".
+func TestSOCKS5ReplyFailureExplained(t *testing.T) {
+	f := newFakeTrueNAS(t, nil)
+	port := strconv.Itoa(f.Listener.Addr().(*net.TCPAddr).Port)
+	reachHint := "the proxy is reachable but could not connect to the TrueNAS host truenas.example.com:" + port + " through it. " +
+		"Check the TrueNAS host address and port, that the TrueNAS system is up, and that the proxy's network (for example a VPN) can route to it"
+	for _, tc := range []struct {
+		rep        byte
+		reason     string
+		wantPrefix string
+	}{
+		{1, "general failure", reachHint},
+		{3, "network unreachable", reachHint},
+		{4, "host unreachable", reachHint},
+		{5, "connection refused", reachHint},
+		{6, "TTL expired", reachHint},
+		{0x42, "unknown error", reachHint},
+		{2, "connection forbidden", "the proxy is reachable but its rules do not allow connections to the TrueNAS host truenas.example.com:" + port},
+		{7, "command not supported", "the proxy is reachable but does not support connecting to the TrueNAS host truenas.example.com:" + port},
+	} {
+		clearProxyEnv(t)
+		p := startProxy(t, f, socksReplying(tc.rep))
+		t.Setenv("ALL_PROXY", p.url("socks5h", true))
+		c, logs := proxiedClient(t, f, "truenas.example.com", Options{})
+		err := c.Authenticate()
+		var ce *ConnectError
+		if !errors.As(err, &ce) || ce.LoginAttempted {
+			t.Fatalf("reply %d: got %#v, want a *ConnectError with no login attempted", tc.rep, err)
+		}
+		want := "connecting via proxy socks5h://redacted@" + p.Addr().String() + " from ALL_PROXY: " + tc.wantPrefix
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("reply %d: got %q\nwant it to contain %q", tc.rep, err, want)
+		}
+		if !strings.HasSuffix(err.Error(), "(SOCKS5 proxy reply: "+tc.reason+")") {
+			t.Errorf("reply %d: got %q, want the SOCKS5 reply %q at the end", tc.rep, err, tc.reason)
+		}
+		if strings.Contains(err.Error(), "proxy unreachable") {
+			t.Errorf("reply %d: a reachable proxy is reported as unreachable: %v", tc.rep, err)
+		}
+		if got := p.seen(); len(got) != 1 || got[0] != "truenas.example.com:"+port {
+			t.Errorf("reply %d: proxy saw %v, want one request for truenas.example.com:%s", tc.rep, got, port)
+		}
+		assertNoLeak(t, p, err, logs)
+	}
+}
+
+// Without a port in the TrueNAS URL, the error names the default wss port.
+func TestSOCKS5ReplyErrorDefaultPort(t *testing.T) {
+	u, _ := url.Parse("wss://truenas.example.com/api/current")
+	pc := &proxyChoice{url: &url.URL{Scheme: "socks5h", Host: "proxy.example.com:1080"}, source: "--proxy"}
+	err := socksReplyError(pc, u, "host unreachable")
+	if want := "could not connect to the TrueNAS host truenas.example.com:443 through it"; !strings.Contains(err.Error(), want) {
+		t.Errorf("got %q, want it to contain %q", err, want)
+	}
+}
+
+func TestSOCKS5ReplyFailureMatch(t *testing.T) {
+	for in, want := range map[string]string{
+		"proxy: SOCKS5 proxy at proxy.example.com:1080 failed to connect: general failure":     "general failure",
+		"proxy: SOCKS5 proxy at [2001:db8::1]:1080 failed to connect: TTL expired":             "TTL expired",
+		"proxy: SOCKS5 proxy at proxy.example.com:1080 rejected username/password":             "",
+		"proxy: failed to read connect reply from SOCKS5 proxy at proxy.example.com:1080: EOF": "",
+		"dial tcp 192.0.2.1:1080: connect: connection refused":                                 "",
+	} {
+		got, ok := socksReplyFailure(errors.New(in))
+		if got != want || ok != (want != "") {
+			t.Errorf("socksReplyFailure(%q) = %q, %v; want %q", in, got, ok, want)
+		}
 	}
 }
 
