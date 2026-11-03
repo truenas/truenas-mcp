@@ -270,6 +270,8 @@ func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]
 			return "", fmt.Errorf("%s was NOT executed. Preview failed: %w. Resolve this before confirming; "+
 				"the user must see a successful preview and explicitly approve it first", name, err)
 		}
+		// The preview is a dry run: say so explicitly, next to executed.
+		reply["dry_run"] = true
 		if json.Valid([]byte(out)) {
 			reply["preview"] = json.RawMessage(out)
 		} else {

@@ -1309,7 +1309,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["upgrade_app"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "upgrade_app",
-			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress; the task completes only once the app is observed RUNNING after the upgrade job finishes (otherwise it fails with the app's state; if the app was merely still starting when health_timeout_seconds ran out, the message says the upgrade itself succeeded and the wait can be raised). TrueNAS always stops the app during the upgrade and snapshots its ix-volumes dataset for rollback. This is a write operation that modifies the system.",
+			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress; the task completes only once the app is observed RUNNING after the upgrade job finishes (otherwise it fails with the app's state; if the app was merely still starting when health_timeout_seconds ran out, the message says the upgrade itself succeeded and the wait can be raised). TrueNAS always stops the app during the upgrade and snapshots its ix-volumes dataset for rollback. The changelog and version details shown come from the middleware's app.upgrade_summary and may be empty. This is a write operation that modifies the system.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -4084,6 +4084,8 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 		// report which snapshots, if any, it took.
 		"snapshot_requested": snapshotHostpaths,
 		"snapshot_note":      snapshotNote(snapshotHostpaths),
+		"dry_run":            false,
+		"executed":           true,
 		"message": fmt.Sprintf("Upgrade started. Track progress with tasks_get using task_id: %s. "+
 			"The task completes only after the app is RUNNING (waits up to %ds after the job finishes).",
 			task.TaskID, int(healthTimeout/time.Second)),
@@ -4166,7 +4168,11 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		"state":   currentApp["state"],
 	}
 
-	// Build planned actions
+	target := upgradeTargetDescription(version, summary)
+
+	// Build planned actions. Middleware stops the app, snapshots its
+	// ix-volumes dataset (and, when requested, host paths that are ZFS
+	// datasets) and then upgrades it.
 	actions := []PlannedAction{
 		{
 			Step:        1,
@@ -4176,25 +4182,39 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		},
 		{
 			Step:        2,
-			Description: fmt.Sprintf("Upgrade from %v to %v", currentApp["human_version"], version),
+			Description: upgradeSnapshotStep(snapshotHostpaths),
+			Operation:   "snapshot",
+			Target:      appName,
+			Details: map[string]interface{}{
+				"snapshot_hostpaths": snapshotHostpaths,
+				"note":               snapshotNote(snapshotHostpaths),
+			},
+		},
+		{
+			Step:        3,
+			Description: fmt.Sprintf("Upgrade from %v to %s", currentApp["human_version"], target),
 			Operation:   "upgrade",
 			Target:      appName,
 			Details:     summary,
 		},
 		{
-			Step:        3,
+			Step:        4,
 			Description: "Start application with new version",
 			Operation:   "start",
 			Target:      appName,
 		},
 		{
-			Step:        4,
+			Step:        5,
 			Description: fmt.Sprintf("Verify the app reports RUNNING after the job finishes (waits up to %ds); otherwise the task fails with the app's state", int(healthTimeout/time.Second)),
 			Operation:   "verify",
 			Target:      appName,
+			Details: map[string]interface{}{
+				"health_timeout_seconds": int(healthTimeout / time.Second),
+			},
 		},
 	}
 
+	dryRun, executed := true, false
 	result := &DryRunResult{
 		Tool:           "upgrade_app",
 		CurrentState:   currentState,
@@ -4204,6 +4224,8 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 			MaxSeconds: 300,
 			Note:       "Time varies based on image size and network speed",
 		},
+		DryRun:   &dryRun,
+		Executed: &executed,
 	}
 
 	// Add warnings if no snapshot

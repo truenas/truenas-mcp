@@ -60,6 +60,46 @@ func snapshotNote(requested bool) string {
 	return "Host-path snapshots were requested. TrueNAS snapshots only host paths that are ZFS datasets and the upgrade job does not report which snapshots it took, so none is claimed." + always
 }
 
+// upgradeSnapshotStep describes the snapshot step of the upgrade plan. It
+// names what is snapshotted, never a snapshot name: app.upgrade does not
+// report which snapshots it took.
+func upgradeSnapshotStep(hostpaths bool) string {
+	if hostpaths {
+		return "Snapshot the app's ix-volumes dataset and its host paths (those that are ZFS datasets) before the upgrade, for rollback"
+	}
+	return "Snapshot the app's ix-volumes dataset before the upgrade, for rollback (host paths are not snapshotted: snapshot_hostpaths is false)"
+}
+
+// upgradeTargetDescription names the version an upgrade will install. An
+// explicit version is used as given; for "latest" the version is resolved
+// from the app.upgrade_summary result (upgrade_* first, then latest_*), and
+// only if the summary names none is "the latest available version" used.
+func upgradeTargetDescription(version string, summary interface{}) string {
+	if version != "latest" {
+		return version
+	}
+	s, _ := summary.(map[string]interface{})
+	if l, ok := summary.([]interface{}); ok && len(l) > 0 {
+		s, _ = l[0].(map[string]interface{})
+	}
+	str := func(key string) string {
+		v, _ := s[key].(string)
+		return strings.TrimSpace(v)
+	}
+	for _, pair := range [][2]string{{"upgrade_human_version", "upgrade_version"}, {"latest_human_version", "latest_version"}} {
+		human, catalog := str(pair[0]), str(pair[1])
+		switch {
+		case human != "" && catalog != "" && human != catalog:
+			return fmt.Sprintf("%s (catalog version %s, latest)", human, catalog)
+		case human != "":
+			return human + " (latest)"
+		case catalog != "":
+			return catalog + " (latest)"
+		}
+	}
+	return "the latest available version (app.upgrade_summary did not name it)"
+}
+
 // normalizeUpgradeSummary makes an app.upgrade_summary result safe to show:
 // a null or blank changelog becomes "no changelog provided" instead of null,
 // a very long changelog is truncated (changelog_truncated, changelog_length),

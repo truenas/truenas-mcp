@@ -634,37 +634,25 @@ Add `"dry_run": true` to any write operation to preview what would happen withou
 **Example:**
 ```
 Tool: upgrade_app
-Args: {"app_name": "plex", "dry_run": true}
+Args: {"app_name": "plex", "dry_run": true, "health_timeout_seconds": 300}
 
 Returns:
 {
   "tool": "upgrade_app",
+  "dry_run": true,
+  "executed": false,
   "current_state": {
     "name": "plex",
-    "version": "1.32.5.7349",
+    "version": "1.40.0_1.2.0",
     "state": "RUNNING"
   },
   "planned_actions": [
-    {
-      "step": 1,
-      "description": "Stop application containers",
-      "operation": "stop",
-      "target": "plex"
-    },
-    {
-      "step": 2,
-      "description": "Upgrade from 1.32.5.7349 to latest",
-      "operation": "upgrade",
-      "target": "plex"
-    },
-    {
-      "step": 3,
-      "description": "Start application with new version",
-      "operation": "start",
-      "target": "plex"
-    }
+    {"step": 1, "operation": "stop", "description": "Stop application containers", ...},
+    {"step": 2, "operation": "snapshot", "description": "Snapshot the app's ix-volumes dataset and its host paths (those that are ZFS datasets) before the upgrade, for rollback", ...},
+    {"step": 3, "operation": "upgrade", "description": "Upgrade from 1.40.0_1.2.0 to 1.41.0_1.2.1 (catalog version 1.2.1, latest)", "details": {...upgrade_summary...}},
+    {"step": 4, "operation": "start", "description": "Start application with new version", ...},
+    {"step": 5, "operation": "verify", "description": "Verify the app reports RUNNING after the job finishes (waits up to 300s); ...", "details": {"health_timeout_seconds": 300}}
   ],
-  "warnings": [],
   "estimated_time": {
     "min_seconds": 30,
     "max_seconds": 300,
@@ -672,6 +660,8 @@ Returns:
   }
 }
 ```
+
+`upgrade_app` previews carry `"dry_run": true, "executed": false` (also on the `confirmation_required` reply returned without `confirm`); a started upgrade carries `"dry_run": false, "executed": true`. When no `version` is given, the upgrade step names the version the middleware resolved "latest" to. The changelog and version details come from the middleware's `app.upgrade_summary` and may be empty.
 
 **Benefits:**
 - See exactly what will change before committing
