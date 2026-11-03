@@ -1456,8 +1456,8 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"train": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"stable", "enterprise", "community", "all"},
-						"description": "Filter by catalog train (default: stable)",
-						"default":     "stable",
+						"description": "Filter by catalog train (default: all trains). Each result includes its train.",
+						"default":     "all",
 					},
 					"category": map[string]interface{}{
 						"type":        "string",
@@ -1489,8 +1489,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"train": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"stable", "enterprise", "community"},
-						"description": "Catalog train (default: stable)",
-						"default":     "stable",
+						"description": "Catalog train (optional). When omitted, the train that has the app is looked up in the catalog; if several do, stable is preferred, then enterprise, then community. The response reports the train used.",
 					},
 				},
 				"required": []string{"app_name"},
