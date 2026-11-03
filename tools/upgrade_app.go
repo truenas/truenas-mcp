@@ -48,12 +48,13 @@ func upgradeHealthTimeout(args map[string]interface{}) (time.Duration, error) {
 }
 
 // snapshotNote explains what snapshot_requested does and does not tell the
-// caller. Whatever snapshot_hostpaths is, middleware stops the app for the
-// upgrade and snapshots the app's ix-volumes dataset for rollback;
+// caller. Whatever snapshot_hostpaths is, for a version upgrade middleware
+// stops the app and snapshots its ix-volumes dataset (if it has one);
 // snapshot_hostpaths only requests snapshots of host paths, and of those only
-// the ones that are ZFS datasets. app.upgrade never reports what it took.
+// the ones that are ZFS datasets. Custom apps and image-only updates take no
+// snapshot at all. app.upgrade never reports what it took.
 func snapshotNote(requested bool) string {
-	const always = " Independent of this option, TrueNAS stops the app during the upgrade and snapshots the app's ix-volumes dataset for rollback."
+	const always = " Independent of this option, for a version upgrade TrueNAS stops the app and snapshots its ix-volumes dataset (if it has one) for rollback; custom apps and image-only updates are instead redeployed with updated images, without a stop or any snapshot."
 	if !requested {
 		return "snapshot_hostpaths was false: no host-path snapshot is requested." + always
 	}
@@ -65,9 +66,31 @@ func snapshotNote(requested bool) string {
 // report which snapshots it took.
 func upgradeSnapshotStep(hostpaths bool) string {
 	if hostpaths {
-		return "Snapshot the app's ix-volumes dataset and its host paths (those that are ZFS datasets) before the upgrade, for rollback"
+		return "Snapshot the app's ix-volumes dataset (if it has one) and its host paths (those that are ZFS datasets) before the upgrade, for rollback"
 	}
-	return "Snapshot the app's ix-volumes dataset before the upgrade, for rollback (host paths are not snapshotted: snapshot_hostpaths is false)"
+	return "Snapshot the app's ix-volumes dataset (if it has one) before the upgrade, for rollback (host paths are not snapshotted: snapshot_hostpaths is false)"
+}
+
+// upgradeIsImageOnly reports whether app.upgrade will only pull updated
+// images and redeploy the app. Middleware takes that path for custom apps,
+// and for catalog apps whose only update is new images; it then does not
+// stop the app, takes no snapshot and ignores snapshot_hostpaths. On that
+// path app.upgrade_summary names the app's current version as the target,
+// which is how an image-only catalog update is recognised here.
+func upgradeIsImageOnly(app map[string]interface{}, summary interface{}) (bool, string) {
+	if custom, _ := app["custom_app"].(bool); custom {
+		return true, "this is a custom app"
+	}
+	s, _ := summary.(map[string]interface{})
+	if l, ok := summary.([]interface{}); ok && len(l) > 0 {
+		s, _ = l[0].(map[string]interface{})
+	}
+	target, _ := s["upgrade_version"].(string)
+	current, _ := app["version"].(string)
+	if target = strings.TrimSpace(target); target != "" && target == strings.TrimSpace(current) {
+		return true, "this is an image-only update with no new app version"
+	}
+	return false, ""
 }
 
 // upgradeTargetDescription names the version an upgrade will install. An

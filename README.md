@@ -605,7 +605,7 @@ The server implements MCP Tasks specification for operations that take time to c
 1. Write operations (like `upgrade_app`) return a `task_id` instead of blocking
 2. Tasks are automatically tracked in the background
 3. Use `tasks_get` with the task ID to check progress
-4. `upgrade_app` only reports success once the app is seen RUNNING after the upgrade job finishes. It waits `health_timeout_seconds` (an integer from 0 to 600, default 60; other values are rejected). If the app is merely still starting when the wait ends, the task fails with a message saying the upgrade itself succeeded and the app was slow to start; raise `health_timeout_seconds` for such apps. TrueNAS always stops the app during an upgrade and snapshots its ix-volumes; `snapshot_hostpaths` only controls whether host paths are also snapshotted
+4. `upgrade_app` only reports success once the app is seen RUNNING after the upgrade job finishes. It waits `health_timeout_seconds` (an integer from 0 to 600, default 60; other values are rejected). If the app is merely still starting when the wait ends, the task fails with a message saying the upgrade itself succeeded and the app was slow to start; raise `health_timeout_seconds` for such apps. For a version upgrade TrueNAS stops the app and snapshots its ix-volumes dataset (if it has one); `snapshot_hostpaths` only controls whether host paths are also snapshotted. Custom apps and image-only updates are instead redeployed with updated images, without a stop or any snapshot, and the preview shows a single `redeploy` step saying so
 5. Job output is summarized: each job summary (the `job` of `tasks_get`, each entry of `query_jobs`) is at most 4 KiB, with `*_truncated` flags when text was cut
 6. Tasks update automatically - no manual polling needed
 
@@ -648,7 +648,7 @@ Returns:
   },
   "planned_actions": [
     {"step": 1, "operation": "stop", "description": "Stop application containers", ...},
-    {"step": 2, "operation": "snapshot", "description": "Snapshot the app's ix-volumes dataset and its host paths (those that are ZFS datasets) before the upgrade, for rollback", ...},
+    {"step": 2, "operation": "snapshot", "description": "Snapshot the app's ix-volumes dataset (if it has one) and its host paths (those that are ZFS datasets) before the upgrade, for rollback", ...},
     {"step": 3, "operation": "upgrade", "description": "Upgrade from 1.40.0_1.2.0 to 1.41.0_1.2.1 (catalog version 1.2.1, latest)", "details": {...upgrade_summary...}},
     {"step": 4, "operation": "start", "description": "Start application with new version", ...},
     {"step": 5, "operation": "verify", "description": "Verify the app reports RUNNING after the job finishes (waits up to 300s); ...", "details": {"health_timeout_seconds": 300}}
@@ -661,7 +661,7 @@ Returns:
 }
 ```
 
-`upgrade_app` previews carry `"dry_run": true, "executed": false` (also on the `confirmation_required` reply returned without `confirm`); a started upgrade carries `"dry_run": false, "executed": true`. When no `version` is given, the upgrade step names the version the middleware resolved "latest" to. The changelog and version details come from the middleware's `app.upgrade_summary` and may be empty.
+`upgrade_app` previews carry `"dry_run": true, "executed": false` (also on the `confirmation_required` reply returned without `confirm`); a started upgrade carries `"dry_run": false, "executed": true`. When no `version` is given, the upgrade step names the version the middleware resolved "latest" to. For a custom app, or a catalog app whose only update is new images, the plan is instead `redeploy` (pull updated images and redeploy; no snapshot is taken) followed by `verify`, with a warning that there is no rollback point. A preview of a STOPPED app warns that TrueNAS rejects upgrading it. The changelog and version details come from the middleware's `app.upgrade_summary` and may be empty.
 
 **Benefits:**
 - See exactly what will change before committing

@@ -1309,7 +1309,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["upgrade_app"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "upgrade_app",
-			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress; the task completes only once the app is observed RUNNING after the upgrade job finishes (otherwise it fails with the app's state; if the app was merely still starting when health_timeout_seconds ran out, the message says the upgrade itself succeeded and the wait can be raised). TrueNAS always stops the app during the upgrade and snapshots its ix-volumes dataset for rollback. The changelog and version details shown come from the middleware's app.upgrade_summary and may be empty. This is a write operation that modifies the system.",
+			Description: "Upgrade an application to a newer version. Supports dry-run mode to preview changes. Returns a task ID for tracking progress; the task completes only once the app is observed RUNNING after the upgrade job finishes (otherwise it fails with the app's state; if the app was merely still starting when health_timeout_seconds ran out, the message says the upgrade itself succeeded and the wait can be raised). For a version upgrade TrueNAS stops the app and snapshots its ix-volumes dataset (if it has one) for rollback; custom apps and image-only updates are instead redeployed with updated images, without a stop or any snapshot (the preview says which applies). The changelog and version details shown come from the middleware's app.upgrade_summary and may be empty. This is a write operation that modifies the system.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1324,7 +1324,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					},
 					"snapshot_hostpaths": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Also request snapshots of the app's host paths before the upgrade (default: true for safety). This only affects host paths: TrueNAS always stops the app and snapshots its ix-volumes dataset regardless. It is a request, not a confirmation: only host paths that are ZFS datasets are snapshotted and the upgrade job does not report which snapshots it took.",
+						"description": "Also request snapshots of the app's host paths before the upgrade (default: true for safety). This only affects host paths: for a version upgrade TrueNAS stops the app and snapshots its ix-volumes dataset (if it has one) regardless. It is ignored for custom apps and image-only updates, which take no snapshot. It is a request, not a confirmation: only host paths that are ZFS datasets are snapshotted and the upgrade job does not report which snapshots it took.",
 						"default":     true,
 					},
 					"health_timeout_seconds": map[string]interface{}{
@@ -4168,50 +4168,73 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		"state":   currentApp["state"],
 	}
 
-	target := upgradeTargetDescription(version, summary)
+	verify := PlannedAction{
+		Description: fmt.Sprintf("Verify the app reports RUNNING after the job finishes (waits up to %ds); otherwise the task fails with the app's state", int(healthTimeout/time.Second)),
+		Operation:   "verify",
+		Target:      appName,
+		Details: map[string]interface{}{
+			"health_timeout_seconds": int(healthTimeout / time.Second),
+		},
+	}
 
-	// Build planned actions. Middleware stops the app, snapshots its
-	// ix-volumes dataset (and, when requested, host paths that are ZFS
-	// datasets) and then upgrades it.
-	actions := []PlannedAction{
-		{
-			Step:        1,
-			Description: "Stop application containers",
-			Operation:   "stop",
-			Target:      appName,
-		},
-		{
-			Step:        2,
-			Description: upgradeSnapshotStep(snapshotHostpaths),
-			Operation:   "snapshot",
-			Target:      appName,
-			Details: map[string]interface{}{
-				"snapshot_hostpaths": snapshotHostpaths,
-				"note":               snapshotNote(snapshotHostpaths),
+	var actions []PlannedAction
+	var warnings []string
+	if imageOnly, reason := upgradeIsImageOnly(currentApp, summary); imageOnly {
+		// Middleware pulls the images and redeploys, then returns: no
+		// stop, no snapshot, snapshot_hostpaths is ignored, and
+		// app.upgrade_summary reports the current version as the target.
+		actions = []PlannedAction{
+			{
+				Description: fmt.Sprintf("Pull updated images and redeploy; no snapshot is taken (%s; the app stays at version %v)", reason, currentApp["human_version"]),
+				Operation:   "redeploy",
+				Target:      appName,
+				Details:     summary,
 			},
-		},
-		{
-			Step:        3,
-			Description: fmt.Sprintf("Upgrade from %v to %s", currentApp["human_version"], target),
-			Operation:   "upgrade",
-			Target:      appName,
-			Details:     summary,
-		},
-		{
-			Step:        4,
-			Description: "Start application with new version",
-			Operation:   "start",
-			Target:      appName,
-		},
-		{
-			Step:        5,
-			Description: fmt.Sprintf("Verify the app reports RUNNING after the job finishes (waits up to %ds); otherwise the task fails with the app's state", int(healthTimeout/time.Second)),
-			Operation:   "verify",
-			Target:      appName,
-			Details: map[string]interface{}{
-				"health_timeout_seconds": int(healthTimeout / time.Second),
+			verify,
+		}
+		warnings = append(warnings, fmt.Sprintf("WARNING: no snapshot is taken (%s): TrueNAS pulls updated images and redeploys the app without stopping it or snapshotting it, so there is no rollback point. snapshot_hostpaths has no effect here.", reason))
+	} else {
+		target := upgradeTargetDescription(version, summary)
+		// Middleware stops the app, snapshots its ix-volumes dataset (if
+		// it has one) and, when requested, host paths that are ZFS
+		// datasets, and then upgrades it.
+		actions = []PlannedAction{
+			{
+				Description: "Stop application containers",
+				Operation:   "stop",
+				Target:      appName,
 			},
-		},
+			{
+				Description: upgradeSnapshotStep(snapshotHostpaths),
+				Operation:   "snapshot",
+				Target:      appName,
+				Details: map[string]interface{}{
+					"snapshot_hostpaths": snapshotHostpaths,
+					"note":               snapshotNote(snapshotHostpaths),
+				},
+			},
+			{
+				Description: fmt.Sprintf("Upgrade from %v to %s", currentApp["human_version"], target),
+				Operation:   "upgrade",
+				Target:      appName,
+				Details:     summary,
+			},
+			{
+				Description: "Start application with new version",
+				Operation:   "start",
+				Target:      appName,
+			},
+			verify,
+		}
+		if !snapshotHostpaths {
+			warnings = append(warnings, "WARNING: snapshot_hostpaths is disabled, so no host-path snapshot is requested. TrueNAS still stops the app and snapshots its ix-volumes dataset (if it has one) for rollback; data on host paths is not covered.")
+		}
+	}
+	for i := range actions {
+		actions[i].Step = i + 1
+	}
+	if state, _ := currentApp["state"].(string); state == "STOPPED" {
+		warnings = append(warnings, "WARNING: the app is STOPPED and TrueNAS rejects upgrading a stopped app, so this upgrade will fail. Start the app first.")
 	}
 
 	dryRun, executed := true, false
@@ -4226,13 +4249,7 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		},
 		DryRun:   &dryRun,
 		Executed: &executed,
-	}
-
-	// Add warnings if no snapshot
-	if !snapshotHostpaths {
-		result.Warnings = []string{
-			"WARNING: snapshot_hostpaths is disabled, so no host-path snapshot is requested. TrueNAS still stops the app and snapshots its ix-volumes dataset for rollback; data on host paths is not covered.",
-		}
+		Warnings: warnings,
 	}
 
 	return result, nil
