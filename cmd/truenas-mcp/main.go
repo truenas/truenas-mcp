@@ -333,6 +333,13 @@ func (h *StdioHandler) handleRequest(req *mcp.Request) *mcp.Response {
 		return h.handleToolsList(req)
 	case "tools/call":
 		return h.handleToolsCall(req)
+	case "ping":
+		// MCP requires an empty result for ping; any params are ignored.
+		// A ping without an id is a notification and gets no reply.
+		if req.ID == nil {
+			return nil
+		}
+		return &mcp.Response{JSONRPC: "2.0", ID: req.ID, Result: struct{}{}}
 	default:
 		// Only return error if this is a request (has an ID)
 		if req.ID != nil {
