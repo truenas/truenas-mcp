@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	runtimedebug "runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -38,9 +39,33 @@ func init() {
 	flag.String("deny-tools", "", "Comma-separated list of tools to hide and refuse (env TRUENAS_MCP_DENY_TOOLS)")
 }
 
-// Version is the release version, injected at build time via
-// -ldflags "-X main.Version=...". Builds without injection report "dev".
+// Version is the release version reported by --version and in the MCP
+// serverInfo. Release builds (make, CI) inject it at build time with
+// -ldflags "-X main.Version=..." from the git tag or git describe. Without
+// injection it falls back to the module version Go records in the binary
+// (set by go install module@version, and by go build in a tagged git
+// checkout), and otherwise to "dev".
 var Version = "dev"
+
+func init() {
+	info, ok := runtimedebug.ReadBuildInfo()
+	Version = resolveVersion(Version, info, ok)
+}
+
+// resolveVersion returns the injected version unless it is empty or "dev",
+// then the main module version from the build info without its "v", and
+// finally "dev".
+func resolveVersion(injected string, info *runtimedebug.BuildInfo, ok bool) string {
+	if injected != "" && injected != "dev" {
+		return injected
+	}
+	if ok && info != nil {
+		if v := info.Main.Version; v != "" && v != "(devel)" {
+			return strings.TrimPrefix(v, "v")
+		}
+	}
+	return "dev"
+}
 
 // checkRequired reports any required setting that is missing.
 func checkRequired(truenasURL, apiKey, apiUser string) error {
