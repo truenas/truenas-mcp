@@ -226,6 +226,7 @@ func (p *Poller) verifyApp(task *Task) (TaskStatus, string) {
 	expired := time.Since(task.VerifyStartedAt) >= task.VerifyTimeout
 
 	h, err := p.appHealth(task.VerifyApp)
+	refreshJobApp(task, h, err)
 	if err == nil && h.state == "RUNNING" && len(h.crashed) == 0 && len(h.starting) == 0 {
 		msg := fmt.Sprintf("Upgrade completed; app %s is RUNNING", task.VerifyApp)
 		if h.version != "" {
@@ -264,12 +265,41 @@ func (p *Poller) verifyApp(task *Task) (TaskStatus, string) {
 	return TaskStatusWorking, fmt.Sprintf("Upgrade job finished; waiting for app %s to be RUNNING (currently %s)", task.VerifyApp, what)
 }
 
+// refreshJobApp replaces the app copy in the job summary with the live app
+// just read by the health wait. The job result of app.upgrade is the app as
+// it was when the job finished, typically still DEPLOYING with containers
+// starting, which contradicts a task that has since seen the app RUNNING.
+// app_source says where job.app came from; result_truncated and
+// result_size_bytes keep describing the job's own result, which is still not
+// returned in full. If the app could not be read, the job's copy is kept and
+// labelled as such. task.Job is replaced, not modified: stored copies share it.
+func refreshJobApp(task *Task, h appHealthInfo, err error) {
+	if task.Job == nil {
+		return
+	}
+	job := make(map[string]interface{}, len(task.Job)+2)
+	for k, v := range task.Job {
+		job[k] = v
+	}
+	if err == nil && h.app != nil {
+		job["app"] = SummarizeApp(h.app)
+		job["app_source"] = "app.query"
+		job["app_checked_at"] = time.Now().UTC().Format(time.RFC3339)
+	} else if _, ok := job["app"]; ok {
+		job["app_source"] = "job result (the live app state could not be read)"
+		delete(job, "app_checked_at")
+	}
+	task.Job = FitJobSummary(job)
+	task.Result = task.Job
+}
+
 // appHealthInfo is an app's state as seen by the health wait.
 type appHealthInfo struct {
-	state    string   // app state (RUNNING, DEPLOYING, ...)
-	crashed  []string // "service (crashed)" for each crashed container
-	starting []string // "service (starting)" for each starting container
-	version  string   // human version
+	state    string                 // app state (RUNNING, DEPLOYING, ...)
+	crashed  []string               // "service (crashed)" for each crashed container
+	starting []string               // "service (starting)" for each starting container
+	version  string                 // human version
+	app      map[string]interface{} // the app.query entry, when found
 }
 
 // appHealth queries the app and returns its state, the containers that are
@@ -296,6 +326,7 @@ func (p *Poller) appHealth(appName string) (appHealthInfo, error) {
 		return h, fmt.Errorf("app %s not found", appName)
 	}
 	app := apps[0]
+	h.app = app
 	h.state, _ = app["state"].(string)
 	h.version, _ = app["human_version"].(string)
 	if aw, ok := app["active_workloads"].(map[string]interface{}); ok {
