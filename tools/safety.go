@@ -125,6 +125,17 @@ var toolSafety = map[string]Safety{
 	"tasks_get":  {Access: Read},
 }
 
+// readOnlyDryRunTools are the write and destructive tools that --read-only
+// still lists, for dry runs only: a call without dry_run=true is refused
+// before anything runs. A tool belongs here only if its dry-run path queries
+// the system and never changes it (TestReadOnlyDryRunMakesNoWrites).
+var readOnlyDryRunTools = map[string]bool{
+	"upgrade_app": true, // dry run: app.query and app.upgrade_summary only
+}
+
+// destructiveNote is appended to the description of every destructive tool.
+const destructiveNote = " **DESTRUCTIVE: requires confirm=true.** Without confirm the server only returns a preview; show it to the user and get their explicit approval before calling again with confirm=true."
+
 // safetyOf returns a tool's classification, failing closed for tools that
 // are missing from the table.
 func safetyOf(name string) Safety {
@@ -136,7 +147,8 @@ func safetyOf(name string) Safety {
 
 // Policy restricts which tools the server exposes.
 type Policy struct {
-	// ReadOnly hides and refuses every write and destructive tool.
+	// ReadOnly hides and refuses every write and destructive tool, except
+	// that readOnlyDryRunTools stay listed for dry runs only.
 	ReadOnly bool
 	// Allow, when non-empty, exposes only the named tools.
 	Allow []string
@@ -162,7 +174,7 @@ func (r *Registry) SetPolicy(p Policy) error {
 	for _, n := range p.Allow {
 		if _, ok := r.tools[n]; !ok {
 			unknown = append(unknown, n)
-		} else if p.ReadOnly && safetyOf(n).Access != Read {
+		} else if p.ReadOnly && safetyOf(n).Access != Read && !readOnlyDryRunTools[n] {
 			readOnlyConflict = append(readOnlyConflict, n)
 		}
 		allow[n] = true
@@ -192,7 +204,7 @@ func (r *Registry) SetPolicy(p Policy) error {
 // checkPolicy reports why a registered tool may not be listed or called.
 func (r *Registry) checkPolicy(name string) error {
 	switch {
-	case r.readOnly && safetyOf(name).Access != Read:
+	case r.readOnly && safetyOf(name).Access != Read && !readOnlyDryRunTools[name]:
 		return fmt.Errorf("tool %s is disabled: the server is running in read-only mode (--read-only / TRUENAS_MCP_READ_ONLY)", name)
 	case r.allow != nil && !r.allow[name]:
 		return fmt.Errorf("tool %s is disabled: it is not in --allow-tools / TRUENAS_MCP_ALLOW_TOOLS", name)
@@ -200,6 +212,59 @@ func (r *Registry) checkPolicy(name string) error {
 		return fmt.Errorf("tool %s is disabled by --deny-tools / TRUENAS_MCP_DENY_TOOLS", name)
 	}
 	return nil
+}
+
+// checkReadOnlyDryRun refuses a call to a readOnlyDryRunTools tool in
+// read-only mode unless it is an explicit dry run (dry_run is the boolean
+// true). It runs before anything else, so a refused call executes nothing.
+func (r *Registry) checkReadOnlyDryRun(name string, args map[string]interface{}) error {
+	if !r.readOnly || !readOnlyDryRunTools[name] {
+		return nil
+	}
+	if dryRun, _ := args["dry_run"].(bool); dryRun {
+		return nil
+	}
+	return fmt.Errorf("tool %s was NOT executed: the server is running in read-only mode (--read-only / TRUENAS_MCP_READ_ONLY), which allows only dry runs of %s; call it with dry_run=true to preview the change", name, name)
+}
+
+// readOnlyDryRunDefinition is how a readOnlyDryRunTools tool is listed in
+// read-only mode: dry_run is required and must be true, confirm is dropped,
+// the description says only dry runs are allowed, and the annotations
+// describe what the server will actually do (read only).
+func readOnlyDryRunDefinition(def mcp.Tool) mcp.Tool {
+	schema := make(map[string]interface{}, len(def.InputSchema))
+	for k, v := range def.InputSchema {
+		schema[k] = v
+	}
+	oldProps, _ := def.InputSchema["properties"].(map[string]interface{})
+	props := make(map[string]interface{}, len(oldProps))
+	for k, v := range oldProps {
+		props[k] = v
+	}
+	delete(props, "confirm")
+	props["dry_run"] = map[string]interface{}{
+		"type":        "boolean",
+		"const":       true,
+		"description": "Must be true: the server is in read-only mode and only previews the change without executing it.",
+	}
+	schema["properties"] = props
+	required := []string{}
+	switch req := def.InputSchema["required"].(type) {
+	case []string:
+		required = append(required, req...)
+	case []interface{}:
+		for _, v := range req {
+			if s, ok := v.(string); ok {
+				required = append(required, s)
+			}
+		}
+	}
+	schema["required"] = append(required, "dry_run")
+	def.InputSchema = schema
+	def.Description = "**READ-ONLY MODE: only dry runs are allowed.** Call with dry_run=true to preview; any other call is refused and nothing is executed. " +
+		strings.TrimSuffix(def.Description, destructiveNote)
+	def.Annotations = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true}
+	return def
 }
 
 // applySafety adds MCP annotations to every tool and the confirm parameter
@@ -224,7 +289,7 @@ func (r *Registry) applySafety() {
 				"description": "Required to execute: set to true only after the user has explicitly approved this destructive operation. Without it the server returns a preview and changes nothing.",
 				"default":     false,
 			}
-			tool.Definition.Description += " **DESTRUCTIVE: requires confirm=true.** Without confirm the server only returns a preview; show it to the user and get their explicit approval before calling again with confirm=true."
+			tool.Definition.Description += destructiveNote
 		}
 		r.tools[name] = tool
 	}

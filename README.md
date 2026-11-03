@@ -516,7 +516,14 @@ Every tool is classified as **read**, **write** or **destructive** in one table
 **Read-only mode.** `--read-only` (or `TRUENAS_MCP_READ_ONLY` set to `1`, `true`,
 `yes`, `on`, ...) removes every write and destructive tool from `tools/list`,
 and `tools/call` refuses them with an error, even if a client calls a tool it
-was never shown. Dry runs of write tools are refused too.
+was never shown. Dry runs of write tools are refused too, with one explicit
+exception: `upgrade_app` stays listed for dry runs only, so you can preview an
+upgrade (current version, target version, changelog, planned steps) from a
+read-only server. In read-only mode its schema requires `"dry_run": true`, its
+description says only dry runs are allowed, and the preview only queries the
+system (`app.query`, `app.upgrade_summary`). Any other call (`dry_run` false
+or absent, with or without `confirm`) is refused with a read-only error and
+nothing is executed.
 
 **Tool allowlist and denylist.** `--allow-tools` / `TRUENAS_MCP_ALLOW_TOOLS`
 takes a comma-separated list; only those tools are listed and callable.
@@ -524,7 +531,7 @@ takes a comma-separated list; only those tools are listed and callable.
 A flag overrides its environment variable. The server refuses to start if a
 list names an unknown tool, if `--allow-tools` is set but names no tools (for
 example `","`), or if `--allow-tools` names a write tool while `--read-only`
-is set.
+is set (`upgrade_app` may be named; it stays limited to dry runs).
 
 ```bash
 # Monitoring only
@@ -578,8 +585,14 @@ Once connected via an MCP client, ask questions in natural language:
 
 **Monitoring:**
 - "What version of TrueNAS is running?"
-- "Are there any system alerts?"
+- "Are there any system alerts?" (`list_alerts` lists active alerts; dismissed ones need `include_dismissed: true`)
 - "Show me CPU and memory usage over the past day"
+
+> **Behaviour change:** `list_alerts` called without arguments now lists only
+> active alerts; dismissed alerts are no longer included. Pass
+> `"include_dismissed": true` to list all alerts as before, or
+> `"dismissed": true` for dismissed alerts only. `dismissed` and
+> `include_dismissed` must be JSON booleans; any other value is rejected.
 
 **Storage:**
 - "Show me all storage pools and their health status"
