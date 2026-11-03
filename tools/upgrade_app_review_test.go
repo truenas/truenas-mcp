@@ -493,9 +493,10 @@ func TestTasksGetJobSummaryFollowsRunningJob(t *testing.T) {
 }
 
 // At the largest limit query_jobs must not ask the middleware for more than
-// its 10000-row maximum.
+// its 10000-row maximum. Larger limits are rejected (see
+// TestQueryJobsRejectsBadLimit).
 func TestQueryJobsLimitCappedAtMiddlewareMax(t *testing.T) {
-	for _, l := range []float64{9999, 10000, 50000} {
+	for _, l := range []float64{9999} {
 		resp, fake := queryJobs(t, numberedJobs(3), 3, map[string]interface{}{"state": "all", "limit": l})
 		if resp["limit"] != 9999.0 {
 			t.Errorf("limit %v: reported limit %v, want 9999", l, resp["limit"])
