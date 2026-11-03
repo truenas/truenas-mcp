@@ -10,7 +10,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 - **system_info** - Get system information (version, hostname, platform)
   - Datetimes (`buildtime`, `boottime`, `datetime`) are ISO-8601 UTC strings (e.g. `"2026-01-01T00:00:00Z"`) instead of the middleware's `{"$date": <ms>}` objects. Values outside 2000-01-01..now+10 years are passed through raw
 - **system_health** - Check system health including alerts, active jobs, and capacity warnings
-  - `alerts` lists only active (not dismissed) alerts. `alert_count` counts them; `critical_alert_count` counts active CRITICAL/ALERT/EMERGENCY alerts and `dismissed_alert_count` dismissed ones, which are not listed (use `list_alerts` to see them)
+  - `alerts` lists only active (not dismissed) alerts. `alert_count` counts them; `critical_alert_count` counts active CRITICAL/ALERT/EMERGENCY alerts and `dismissed_alert_count` dismissed ones, which are not listed (use `list_alerts` with `dismissed: true` or `include_dismissed: true` to see them)
   - The memory warning is based on memory used excluding the ZFS ARC (latest complete available sample minus the latest ARC size) when the ARC size is known; otherwise it says the figure may include the ARC. If the ARC size was used but its age could not be checked (no timestamp in the reporting data), `arc_freshness_note` says so, as in `analyze_capacity`
   - Alert datetimes are ISO-8601 UTC strings, as in `list_alerts`
   - The CPU check uses the legend series `cpu` (column 1 if absent) and skips samples without data (all-zero rows, see `get_system_metrics`)
@@ -53,6 +53,9 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 
 ### Alerts
 - **list_alerts** - List system alerts with filtering
+  - **Default changed:** without arguments, only active alerts are listed and dismissed alerts are excluded (previously all alerts were listed). `include_dismissed: true` lists all alerts; `dismissed: true` lists only dismissed alerts and `dismissed: false` only active ones
+  - Alerts that have no `dismissed` field are kept by the default view, but an explicit `dismissed: false` (like `dismissed: true`) keeps only alerts whose `dismissed` field matches, so it drops them
+  - `dismissed` and `include_dismissed` must be JSON booleans (`"true"` or `1` is rejected), and a contradictory combination such as `dismissed: true, include_dismissed: false` is rejected; in both cases the call fails before anything is queried
   - `datetime`, `last_occurrence` and other datetimes are ISO-8601 UTC strings
 - **dismiss_alert** / **restore_alert** - Manage system alerts (write operations; support dry-run mode)
 

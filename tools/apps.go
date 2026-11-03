@@ -2,8 +2,10 @@ package tools
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,7 +31,9 @@ func handleSearchAppCatalog(client *truenas.Client, args map[string]interface{})
 		query = q
 	}
 
-	train := "stable"
+	// Without a train every train is searched, so apps that are only in
+	// the community (or enterprise) train are found too.
+	train := "all"
 	if t, ok := args["train"].(string); ok && t != "" {
 		train = t
 	}
@@ -55,6 +59,12 @@ func handleSearchAppCatalog(client *truenas.Client, args map[string]interface{})
 	// Add category filter if provided
 	if category != "" {
 		filters = append(filters, []interface{}{"categories", "~", category})
+	}
+
+	// Filter by train in the middleware too, so limit counts only apps in
+	// the requested train.
+	if train != "all" {
+		filters = append(filters, []interface{}{"train", "=", train})
 	}
 
 	// Build options
@@ -141,9 +151,19 @@ func handleGetAppCatalogDetails(client *truenas.Client, args map[string]interfac
 		return "", fmt.Errorf("app_name is required")
 	}
 
-	train := "stable"
+	// Without a train, look up which train has the app instead of assuming
+	// stable: community apps are not in the stable train.
+	train := ""
 	if t, ok := args["train"].(string); ok && t != "" {
 		train = t
+	}
+	var trains []string
+	if train == "" {
+		var err error
+		train, trains, err = resolveCatalogTrain(client, appName)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// Call catalog.get_app_details API
@@ -151,6 +171,10 @@ func handleGetAppCatalogDetails(client *truenas.Client, args map[string]interfac
 		"train": train,
 	})
 	if err != nil {
+		var apiErr *truenas.APICallError
+		if errors.As(err, &apiErr) && strings.Contains(apiErr.Message, "[ENOENT]") {
+			return "", fmt.Errorf("app %q was not found in the %s catalog train; use search_app_catalog to find the app and its train, then pass that train", appName, train)
+		}
 		return "", fmt.Errorf("failed to get app details: %w", err)
 	}
 
@@ -170,9 +194,58 @@ func handleGetAppCatalogDetails(client *truenas.Client, args map[string]interfac
 	schema := extractAppSchema(appDetails)
 
 	// Format output
-	formatted := formatAppDetails(appDetails, storageHints, schema)
+	formatted := formatAppDetails(appDetails, train, trains, storageHints, schema)
 
 	return formatted, nil
+}
+
+// catalogTrainPreference orders the trains tried when an app is in more
+// than one: stable (the former default) first. Trains not listed here come
+// after these, in alphabetical order.
+var catalogTrainPreference = []string{"stable", "enterprise", "community"}
+
+// resolveCatalogTrain looks up which catalog trains have appName and returns
+// the preferred one plus all of them (sorted by preference). If the lookup
+// itself fails it falls back to stable, the previous default.
+func resolveCatalogTrain(client *truenas.Client, appName string) (string, []string, error) {
+	result, err := client.Call("app.available",
+		[]interface{}{[]interface{}{"name", "=", appName}},
+		map[string]interface{}{},
+	)
+	if err != nil {
+		return "stable", nil, nil
+	}
+	var apps []map[string]interface{}
+	if err := json.Unmarshal(result, &apps); err != nil {
+		return "stable", nil, nil
+	}
+	seen := map[string]bool{}
+	var trains []string
+	for _, app := range apps {
+		if t, ok := app["train"].(string); ok && t != "" && !seen[t] {
+			seen[t] = true
+			trains = append(trains, t)
+		}
+	}
+	if len(trains) == 0 {
+		return "", nil, fmt.Errorf("app %q was not found in any catalog train; use search_app_catalog to find available apps", appName)
+	}
+	rank := func(t string) int {
+		for i, p := range catalogTrainPreference {
+			if t == p {
+				return i
+			}
+		}
+		return len(catalogTrainPreference)
+	}
+	sort.Slice(trains, func(i, j int) bool {
+		ri, rj := rank(trains[i]), rank(trains[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return trains[i] < trains[j]
+	})
+	return trains[0], trains, nil
 }
 
 // parseAppREADMEForStorageHints extracts storage volume hints from app README
@@ -213,14 +286,19 @@ func parseAppREADMEForStorageHints(readme string) []string {
 }
 
 // formatAppDetails formats app details for display
-func formatAppDetails(details map[string]interface{}, storageHints []string, schema map[string]interface{}) string {
+func formatAppDetails(details map[string]interface{}, train string, trains []string, storageHints []string, schema map[string]interface{}) string {
 	output := map[string]interface{}{
 		"name":           details["name"],
 		"title":          details["title"],
 		"description":    details["description"],
+		"train":          train,
 		"latest_version": details["latest_version"],
 		"categories":     details["categories"],
 		"maintainers":    details["maintainers"],
+	}
+	if len(trains) > 1 {
+		output["available_trains"] = trains
+		output["train_note"] = fmt.Sprintf("App is in several catalog trains; showing the %s train. Pass train to see another.", train)
 	}
 
 	if len(storageHints) > 0 {

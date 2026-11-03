@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -181,6 +182,43 @@ func (c *Client) ValidateProxy() error {
 	}
 	_, err = c.proxyFor(u)
 	return err
+}
+
+// socksReplyRE matches the error gorilla/websocket's SOCKS5 dialer returns
+// when the proxy answers a CONNECT request with a failure reply (RFC 1928
+// section 6). The proxy was reached, and accepted any credentials, by then.
+var socksReplyRE = regexp.MustCompile(`proxy: SOCKS5 proxy at \S+ failed to connect: (.+)$`)
+
+// socksReplyFailure returns the SOCKS5 reply text (e.g. "host unreachable")
+// if err is a failure reply from a SOCKS5 proxy.
+func socksReplyFailure(err error) (string, bool) {
+	m := socksReplyRE.FindStringSubmatch(err.Error())
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// socksReplyError explains a SOCKS5 failure reply: unlike an unreachable
+// proxy, the proxy is up but could not open a connection to TrueNAS, so the
+// fix is usually on the far side of the proxy.
+func socksReplyError(p *proxyChoice, target *url.URL, reason string) error {
+	host := target.Host
+	if target.Port() == "" {
+		host = net.JoinHostPort(target.Hostname(), "443")
+	}
+	var why string
+	switch reason {
+	case "connection forbidden":
+		why = fmt.Sprintf("the proxy is reachable but its rules do not allow connections to the TrueNAS host %s. Check the proxy's access rules (or VPN ACLs) for that host and port", host)
+	case "command not supported", "address type not supported":
+		why = fmt.Sprintf("the proxy is reachable but does not support connecting to the TrueNAS host %s this way. Check that it is a SOCKS5 proxy that allows outbound TCP connections; with an IPv6 address, try a host name or IPv4 address", host)
+	default:
+		// general failure, network or host unreachable, connection refused,
+		// TTL expired, or a reply code the dialer does not know.
+		why = fmt.Sprintf("the proxy is reachable but could not connect to the TrueNAS host %s through it. Check the TrueNAS host address and port, that the TrueNAS system is up, and that the proxy's network (for example a VPN) can route to it", host)
+	}
+	return fmt.Errorf("connecting via proxy %s from %s: %s (SOCKS5 proxy reply: %s)", p, p.source, why, reason)
 }
 
 // dialerProxy converts p for gorilla/websocket. Its built-in SOCKS5 dialer
