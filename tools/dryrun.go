@@ -19,6 +19,10 @@ type DryRunResult struct {
 	Warnings       []string        `json:"warnings,omitempty"`
 	Requirements   *Requirements   `json:"requirements,omitempty"`
 	EstimatedTime  *EstimatedTime  `json:"estimated_time,omitempty"`
+	// DryRun and Executed mark the result explicitly as a preview. They are
+	// optional so tools that do not set them keep their output unchanged.
+	DryRun   *bool `json:"dry_run,omitempty"`
+	Executed *bool `json:"executed,omitempty"`
 }
 
 // PlannedAction describes a single step in the operation
