@@ -657,8 +657,8 @@ Returns:
   ],
   "estimated_time": {
     "min_seconds": 30,
-    "max_seconds": 300,
-    "note": "Time varies based on image size and network speed"
+    "max_seconds": 600,
+    "note": "Time varies based on image size and network speed: up to 300s for the upgrade job, plus up to 300s waiting for the app to report RUNNING (health_timeout_seconds)"
   }
 }
 ```

@@ -4254,14 +4254,10 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		Tool:           "upgrade_app",
 		CurrentState:   currentState,
 		PlannedActions: actions,
-		EstimatedTime: &EstimatedTime{
-			MinSeconds: 30,
-			MaxSeconds: 300,
-			Note:       "Time varies based on image size and network speed",
-		},
-		DryRun:   &dryRun,
-		Executed: &executed,
-		Warnings: warnings,
+		EstimatedTime:  upgradeEstimatedTime(healthTimeout),
+		DryRun:         &dryRun,
+		Executed:       &executed,
+		Warnings:       warnings,
 	}
 
 	return result, nil

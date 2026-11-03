@@ -16,6 +16,12 @@ const (
 	defaultUpgradeHealthTimeoutSeconds = 60
 	maxUpgradeHealthTimeoutSeconds     = 600
 
+	// minUpgradeJobSeconds and maxUpgradeJobSeconds bound the app.upgrade
+	// job itself (stop, snapshot, image pull, redeploy), before the health
+	// check that follows it.
+	minUpgradeJobSeconds = 30
+	maxUpgradeJobSeconds = 300
+
 	noChangelogText = "no changelog provided"
 	// maxChangelogBytes bounds the changelog (release notes can be very long).
 	maxChangelogBytes = 4000
@@ -48,6 +54,18 @@ func upgradeHealthTimeout(args map[string]interface{}) (time.Duration, error) {
 		return 0, fmt.Errorf("health_timeout_seconds must be an integer from 0 to %d (got %v)", maxUpgradeHealthTimeoutSeconds, v)
 	}
 	return time.Duration(secs) * time.Second, nil
+}
+
+// upgradeEstimatedTime is the upgrade_app time estimate: the upgrade job
+// plus, at most, the health check wait of healthTimeout after it.
+func upgradeEstimatedTime(healthTimeout time.Duration) *EstimatedTime {
+	health := int(healthTimeout / time.Second)
+	return &EstimatedTime{
+		MinSeconds: minUpgradeJobSeconds,
+		MaxSeconds: maxUpgradeJobSeconds + health,
+		Note: fmt.Sprintf("Time varies based on image size and network speed: up to %ds for the upgrade job, plus up to %ds waiting for the app to report RUNNING (health_timeout_seconds)",
+			maxUpgradeJobSeconds, health),
+	}
 }
 
 // snapshotNote explains what snapshot_requested does and does not tell the
