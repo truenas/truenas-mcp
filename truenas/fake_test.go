@@ -33,6 +33,7 @@ type fakeTrueNAS struct {
 	holdMethod string                            // hold replies to this method ("*" = every method) until release is closed
 	release    chan struct{}
 	noPong     bool // ignore websocket pings, like a half-open connection
+	maxMessage int  // close with 1009 on a frame larger than this, as TrueNAS does (0 = no limit)
 
 	mu         sync.Mutex
 	frames     []string
@@ -97,6 +98,12 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.frames = append(f.frames, string(raw))
 		f.mu.Unlock()
+		if f.maxMessage > 0 && len(raw) > f.maxMessage {
+			writeMu.Lock()
+			conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "Max message length is 64 kB"), time.Now().Add(time.Second))
+			writeMu.Unlock()
+			return
+		}
 
 		var req struct {
 			ID     json.RawMessage `json:"id"`
