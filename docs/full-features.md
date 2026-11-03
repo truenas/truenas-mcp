@@ -14,7 +14,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - The memory warning is based on memory used excluding the ZFS ARC (latest complete available sample minus the latest ARC size) when the ARC size is known; otherwise it says the figure may include the ARC. If the ARC size was used but its age could not be checked (no timestamp in the reporting data), `arc_freshness_note` says so, as in `analyze_capacity`
   - Alert datetimes are ISO-8601 UTC strings, as in `list_alerts`
   - The CPU check uses the legend series `cpu` (column 1 if absent) and skips samples without data (all-zero rows, see `get_system_metrics`)
-- **query_jobs** - Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs). Returns every state by default; `state` and `method` (exact job method, e.g. `app.upgrade`) narrow the list. Reports `has_more` and `total` when the list was cut by `limit` (default 50); each entry is at most 4 KiB
+- **query_jobs** - Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs). Returns every state by default; `state` (case-insensitive) and `method` (exact job method, e.g. `app.upgrade`) narrow the list. Reports `has_more` and `total` when the list was cut by `limit` (default 50); each entry is at most 4 KiB
   - `time_started` and `time_finished` are ISO-8601 UTC strings (same rules as `system_info`)
 
 ### Storage Management

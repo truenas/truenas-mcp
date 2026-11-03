@@ -1801,14 +1801,14 @@ Returns task_id for tracking progress with tasks_get.
 	r.tools["query_jobs"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_jobs",
-			Description: "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, app upgrades, etc.), most recent first. Returns jobs in every state unless state is given; method narrows to one job method (e.g. app.upgrade). Reports has_more and total when the list was cut by limit; long results and error text are truncated with a flag.",
+			Description: "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, app upgrades, etc.), most recent first. Returns jobs in every state unless state is given; method narrows to one job method (e.g. app.upgrade). state is case-insensitive, including all; with no state or all the response reports state_filter \"ALL\". Reports has_more and total when the list was cut by limit; long results and error text are truncated with a flag.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"state": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"RUNNING", "WAITING", "SUCCESS", "FAILED", "ABORTED", "all"},
-						"description": "Filter by job state (default: all states)",
+						"description": "Filter by job state, case-insensitive (default: all states; all is reported as state_filter \"ALL\")",
 						"default":     "all",
 					},
 					"method": map[string]interface{}{
@@ -4542,13 +4542,36 @@ func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 // middleware's 10000-row maximum, as one extra row is requested.
 const maxQueryJobsLimit = 9999
 
+// jobStates are the TrueNAS middleware job states query_jobs filters on.
+var jobStates = map[string]bool{"WAITING": true, "RUNNING": true, "SUCCESS": true, "FAILED": true, "ABORTED": true}
+
+const validJobStatesText = "RUNNING, WAITING, SUCCESS, FAILED, ABORTED, or all (case-insensitive)"
+
 func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (string, error) {
-	// No state (or "all") means every state, reported as "ALL".
+	// No state (or "all", any case) means every state, reported as "ALL".
+	// Values are checked before anything is sent; they are not echoed.
 	state := "ALL"
-	if s, ok := args["state"].(string); ok && s != "" && !strings.EqualFold(s, "all") {
-		state = s
+	if v, present := args["state"]; present && v != nil {
+		s, ok := v.(string)
+		if !ok {
+			return "", fmt.Errorf("invalid arguments for tool query_jobs: state must be a string, one of %s; nothing was executed", validJobStatesText)
+		}
+		s = strings.ToUpper(strings.TrimSpace(s))
+		if s != "" && s != "ALL" {
+			if !jobStates[s] {
+				return "", fmt.Errorf("invalid arguments for tool query_jobs: unknown state (valid: %s); nothing was executed", validJobStatesText)
+			}
+			state = s
+		}
 	}
-	method, _ := args["method"].(string)
+	method := ""
+	if v, present := args["method"]; present && v != nil {
+		m, ok := v.(string)
+		if !ok {
+			return "", fmt.Errorf("invalid arguments for tool query_jobs: method must be a string, an exact job method name such as app.upgrade; nothing was executed")
+		}
+		method = m
+	}
 
 	limit := 50
 	if l, ok := args["limit"].(float64); ok && l >= 1 {

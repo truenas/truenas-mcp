@@ -2,7 +2,11 @@ package tools
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/truenas/truenas-mcp/tasks"
 )
 
 // jobsQueries returns the filters and options of each core.get_jobs call.
@@ -18,8 +22,13 @@ func jobsQueries(t *testing.T, fake *fakeMiddleware) (filters []string, opts []m
 			t.Fatalf("bad options %s", raw[1])
 		}
 		var f interface{}
-		_ = json.Unmarshal(raw[0], &f)
-		norm, _ := json.Marshal(f)
+		if err := json.Unmarshal(raw[0], &f); err != nil {
+			t.Fatalf("bad filters %s: %v", raw[0], err)
+		}
+		norm, err := json.Marshal(f)
+		if err != nil {
+			t.Fatal(err)
+		}
 		filters = append(filters, string(norm))
 		opts = append(opts, o)
 	}
@@ -33,6 +42,7 @@ func TestQueryJobsDefaultsToAllStates(t *testing.T) {
 		{},
 		{"state": "all"},
 		{"state": "ALL"},
+		{"state": "All"},
 		{"state": ""},
 	} {
 		resp, fake := queryJobs(t, numberedJobs(3), 3, args)
@@ -62,6 +72,9 @@ func TestQueryJobsStateAndMethodFilters(t *testing.T) {
 		wantMethod  interface{}
 	}{
 		{map[string]interface{}{"state": "RUNNING"}, `[["state","=","RUNNING"]]`, "RUNNING", nil},
+		{map[string]interface{}{"state": "running"}, `[["state","=","RUNNING"]]`, "RUNNING", nil},
+		{map[string]interface{}{"state": "Failed", "method": "app.upgrade"},
+			`[["state","=","FAILED"],["method","=","app.upgrade"]]`, "FAILED", "app.upgrade"},
 		{map[string]interface{}{"method": "app.upgrade"}, `[["method","=","app.upgrade"]]`, "ALL", "app.upgrade"},
 		{map[string]interface{}{"state": "FAILED", "method": "app.upgrade"},
 			`[["state","=","FAILED"],["method","=","app.upgrade"]]`, "FAILED", "app.upgrade"},
@@ -117,5 +130,68 @@ func TestQueryJobsSchema(t *testing.T) {
 	}
 	if s := props["state"].(map[string]interface{}); s["default"] != "all" {
 		t.Errorf("state default = %v, want all", s["default"])
+	}
+}
+
+// Bad state or method values are rejected before anything is sent, and the
+// value itself is not echoed.
+func TestQueryJobsRejectsBadStateAndMethod(t *testing.T) {
+	for _, c := range []struct {
+		args map[string]interface{}
+		want []string
+	}{
+		{map[string]interface{}{"state": "DONE-s3cret"}, []string{"unknown state", "RUNNING, WAITING, SUCCESS, FAILED, ABORTED, or all"}},
+		{map[string]interface{}{"state": "pending"}, []string{"unknown state"}},
+		{map[string]interface{}{"state": 1.0}, []string{"state must be a string"}},
+		{map[string]interface{}{"method": 42.0}, []string{"method must be a string"}},
+		{map[string]interface{}{"method": []interface{}{"app.upgrade"}}, []string{"method must be a string"}},
+		{map[string]interface{}{"method": map[string]interface{}{"x": "y"}}, []string{"method must be a string"}},
+	} {
+		fake := &fakeMiddleware{handle: jobsHandle(numberedJobs(3), 3)}
+		client, _ := newFakeClientFrom(t, fake)
+		mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
+		_, err := NewRegistry(client, mgr).CallTool("query_jobs", c.args)
+		mgr.Shutdown()
+		if err == nil {
+			t.Errorf("%v: no error", c.args)
+			continue
+		}
+		msg := err.Error()
+		for _, w := range append(c.want, "invalid arguments for tool query_jobs", "nothing was executed") {
+			if !strings.Contains(msg, w) {
+				t.Errorf("%v: error %q lacks %q", c.args, msg, w)
+			}
+		}
+		if strings.Contains(msg, "s3cret") {
+			t.Errorf("%v: error echoes the value: %q", c.args, msg)
+		}
+		if n := len(fake.called("core.get_jobs")); n != 0 {
+			t.Errorf("%v: core.get_jobs called %d times, want 0", c.args, n)
+		}
+	}
+}
+
+// query_jobs never asks for raw_result and never passes one through, even
+// when the middleware includes it.
+func TestQueryJobsNeverReturnsRawResult(t *testing.T) {
+	jobs := []interface{}{map[string]interface{}{"id": 1.0, "method": "app.upgrade", "state": "SUCCESS",
+		"result": "ok", "raw_result": map[string]interface{}{"blob": "raw-only-marker"}}}
+	for _, args := range []map[string]interface{}{{}, {"method": "app.upgrade", "state": "success", "limit": 1.0}} {
+		fake := &fakeMiddleware{handle: jobsHandle(jobs, 1)}
+		client, _ := newFakeClientFrom(t, fake)
+		mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
+		out, err := NewRegistry(client, mgr).CallTool("query_jobs", args)
+		mgr.Shutdown()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, "raw_result") || strings.Contains(out, "raw-only-marker") {
+			t.Errorf("%v: output contains raw_result: %s", args, out)
+		}
+		for _, c := range fake.called("core.get_jobs") {
+			if strings.Contains(string(c.Params), "raw_result") || strings.Contains(string(c.Params), "extra") {
+				t.Errorf("%v: core.get_jobs params request extra data: %s", args, c.Params)
+			}
+		}
 	}
 }
