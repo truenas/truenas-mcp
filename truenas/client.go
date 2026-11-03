@@ -105,6 +105,31 @@ const (
 	defaultPongWait     = 75 * time.Second
 )
 
+// maxRequestBytes is the largest JSON-RPC message the TrueNAS API accepts
+// on an authenticated connection (64 KiB). The middleware closes the
+// connection with code 1009 (message too big) on anything larger, without
+// running the request, so larger requests are refused before sending.
+const maxRequestBytes = 64 * 1024
+
+// errRequestTooLarge explains a request over maxRequestBytes.
+func errRequestTooLarge(method string, size int) error {
+	return fmt.Errorf("request too large for the TrueNAS API: the %s request is %.1f KiB, over the %d KiB limit for a single API message; "+
+		"nothing was sent to TrueNAS and nothing was executed. Reduce the size of the input and try again",
+		method, float64(size)/1024, maxRequestBytes/1024)
+}
+
+// readError words a read failure that drops the connection. A close with
+// code 1009 means TrueNAS refused a message over its size limit; the raw
+// "websocket: close 1009 (message too big)" text does not say what to do.
+func readError(err error) error {
+	if websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+		return fmt.Errorf("TrueNAS closed the connection because a request was too large for its API (limit %d KiB per message); "+
+			"the oversized request was not executed. Reduce the size of the input and try again; the connection is re-established on the next request (%w)",
+			maxRequestBytes/1024, err)
+	}
+	return fmt.Errorf("failed to read response: %w", err)
+}
+
 type responseResult struct {
 	resp *rpcResponse
 	err  error
@@ -339,6 +364,10 @@ func (c *Client) connect() error {
 		} else if opErr := (*net.OpError)(nil); proxy != nil && errors.As(err, &opErr) && opErr.Op == "dial" {
 			// Through a proxy, the only TCP dial is to the proxy itself.
 			err = fmt.Errorf("connecting via proxy %s from %s: proxy unreachable: %w", proxy, proxy.source, err)
+		} else if proxy != nil {
+			if reason, ok := socksReplyFailure(err); ok {
+				err = socksReplyError(proxy, u, reason)
+			}
 		}
 		return &ConnectError{Err: err}
 	}
@@ -413,7 +442,7 @@ func (c *Client) readLoop(conn *websocket.Conn, done chan struct{}) {
 			conn.SetReadDeadline(time.Now().Add(c.pongWait))
 		}
 		if err != nil {
-			c.dropConn(conn, fmt.Errorf("failed to read response: %w", err))
+			c.dropConn(conn, readError(err))
 			return
 		}
 
@@ -950,6 +979,10 @@ func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interfa
 	frame, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode request for %s: %w", method, err)
+	}
+	// TrueNAS would drop the connection rather than run an oversized request.
+	if len(frame) > maxRequestBytes {
+		return nil, errRequestTooLarge(method, len(frame))
 	}
 
 	// Register the response channel BEFORE writing, to avoid a race where
