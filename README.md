@@ -577,8 +577,14 @@ Once connected via an MCP client, ask questions in natural language:
 
 **Monitoring:**
 - "What version of TrueNAS is running?"
-- "Are there any system alerts?"
+- "Are there any system alerts?" (`list_alerts` lists active alerts; dismissed ones need `include_dismissed: true`)
 - "Show me CPU and memory usage over the past day"
+
+> **Behaviour change:** `list_alerts` called without arguments now lists only
+> active alerts; dismissed alerts are no longer included. Pass
+> `"include_dismissed": true` to list all alerts as before, or
+> `"dismissed": true` for dismissed alerts only. `dismissed` and
+> `include_dismissed` must be JSON booleans; any other value is rejected.
 
 **Storage:**
 - "Show me all storage pools and their health status"
