@@ -382,14 +382,11 @@ func Text(s string) string {
 //     ')', '}', ']' or the end of the line. A quote inside the value
 //     ("it's") therefore does not end it early. If there is no such quote,
 //     the value runs to the end of the line.
-//   - Any other value is a single word followed by the next key=value /
-//     key: value pair ("password=S3CR3T user=bob"), or else runs to the end
-//     of the line, trailing whitespace excluded (see unquotedValueEnd). ',',
-//     ';', '}' and ')' do not end it: they also occur inside secrets and
-//     error text ("Invalid value, got 'X'"). A value of several words, one
-//     with a quote in it, or one that is not followed by a pair is redacted
-//     to the end of the line: over-redacting later pairs is preferred to
-//     leaking.
+//   - Any other value runs to the end of the line, trailing whitespace
+//     excluded. ',', ';', '}' and ')' do not end it: they also occur inside
+//     secrets and error text ("Invalid value, got 'X'"), so the rest of the
+//     line is redacted instead. This can over-redact later pairs on the same
+//     line, which is preferred to leaking.
 //   - The one exception is a URL query string: the value ends before
 //     "&name=", so later parameters are checked on their own.
 //   - A value never crosses a newline, so following lines stay visible.
@@ -445,56 +442,12 @@ func redactBarePairs(s string) string {
 		if loc := queryNext.FindStringIndex(val); loc != nil {
 			val = val[:loc[0]]
 		}
-		if end := unquotedValueEnd(s, valStart, valStart+len(val), lineEnd); end >= 0 {
-			val = s[valStart:end]
-		}
 		val = strings.TrimRight(val, " \t")
 		b.WriteString(redactUnquoted(val))
 		pos = valStart + len(val)
 	}
 	b.WriteString(s[pos:])
 	return b.String()
-}
-
-// nextBarePair matches, at the start of the text, the key and separator of
-// a key=value pair or a "key: value" pair (a space after the colon, so that
-// user:pass@host and scheme:// are not taken for one).
-var nextBarePair = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,63}(?:[ \t]*=|[ \t]*:[ \t])`)
-
-// unquotedValueEnd returns the end of the unquoted value that starts at
-// s[start] when it can be shown to end before limit, the end of the value
-// otherwise (the end of the line or the next query parameter): the value is
-// a single word (backslash escapes such as "\ " included) that contains no
-// quote, escaped or not, is not an auth scheme, and is followed by white
-// space and then another key=value or "key: value" pair on the same line,
-// which ends at lineEnd. In every other case it returns -1 and the value
-// runs to limit, so "password=correct horse other=x" and
-// "password=a"b c" other=x" are redacted to the end of the line.
-func unquotedValueEnd(s string, start, limit, lineEnd int) int {
-	i := start
-	for i < limit && s[i] != ' ' && s[i] != '\t' {
-		switch s[i] {
-		case '"', '\'', '`':
-			return -1
-		case '\\':
-			if i+1 < limit && strings.IndexByte("\"'`", s[i+1]) >= 0 {
-				return -1
-			}
-			i++ // the escaped character is part of the word
-		}
-		i++
-	}
-	if i == start || i >= limit || authSchemes[strings.ToLower(s[start:i])] {
-		return -1
-	}
-	j := i
-	for j < lineEnd && (s[j] == ' ' || s[j] == '\t') {
-		j++
-	}
-	if !nextBarePair.MatchString(s[j:lineEnd]) {
-		return -1
-	}
-	return i
 }
 
 // scalarAt reports whether the value starting at s[i], up to the next

@@ -6,69 +6,89 @@ import (
 	"testing"
 )
 
-// The value of a sensitive key=value / key: value pair in free text is
-// redacted, and the pairs after it on the same line stay visible, when the
-// value can be shown to end: a quoted value at its closing quote, an unquoted
-// value at the white space before the next pair. When the end is unclear
-// (several words, quotes, no pair after it) the rest of the line is
-// redacted.
+// Free text is redacted fail closed. A quoted value of a sensitive
+// key=value / key: value pair ends at its closing quote, so the pairs after
+// it stay visible. The end of an unquoted value cannot be proven
+// ("password=ab cd=ef" may be the one secret "ab cd=ef"), so it is redacted
+// to the end of the line, later pairs included.
 func TestTextNarrowRedaction(t *testing.T) {
 	cases := []struct{ name, in, want string }{
-		{"issue example", "nopool password=FAKEPW other=x", "nopool password=" + Marker + " other=x"},
+		// Quoted values end at their closing quote.
 		{"double-quoted value with spaces", `nopool password="a b c" other=x`, `nopool password="` + Marker + `" other=x`},
 		{"single-quoted value with spaces", `nopool password='a b c' other=x`, `nopool password='` + Marker + `' other=x`},
 		{"escaped double quote inside double quotes", `x password="fa\"ke pw" other=x`, `x password="` + Marker + `" other=x`},
 		{"escaped quote and backslash inside double quotes", `x password="fa\\\" ke" other=x`, `x password="` + Marker + `" other=x`},
-		{"backslash-escaped spaces", `x password=fake\ pw\ word other=x`, "x password=" + Marker + " other=x"},
-		{"backslash-escaped space at the end of the value", `x password=fakepw\  other=x`, "x password=" + Marker + "  other=x"},
-		{"trailing backslash", `x password=fakepw\`, "x password=" + Marker},
-		{"unterminated double quote", `x password="fake pw other=x`, "x password=" + Marker},
-		{"unterminated single quote", `x password='fake pw other=x`, "x password=" + Marker},
-		{"unterminated quote stops at the end of the line", "x password=\"fake pw other=x\nnext=1", "x password=" + Marker + "\nnext=1"},
-		{"empty value", "x password= other=x", "x password= " + Marker},
-		{"empty value at the end of the line", "x password=\nnext", "x password=\nnext"},
+		{"quoted value then an empty tail pair", `x password='a b' K= hotel`, `x password='` + Marker + `' K= hotel`},
 		{"empty quoted value", `x password="" other=x`, `x password="" other=x`},
-		{"multiple secrets", "x password=FAKE1 token=FAKE2 secret=FAKE3 other=x",
-			"x password=" + Marker + " token=" + Marker + " secret=" + Marker + " other=x"},
-		{"multiple secrets, quoted and unquoted", `x passphrase='FAKE 1' api_key=FAKE2 user=bob`,
-			"x passphrase='" + Marker + "' api_key=" + Marker + " user=bob"},
-		{"passphrase", "x passphrase=FAKE other=x", "x passphrase=" + Marker + " other=x"},
-		{"secret", "x secret=FAKE other=x", "x secret=" + Marker + " other=x"},
-		{"token", "x token=FAKE other=x", "x token=" + Marker + " other=x"},
-		{"key", "x key=FAKE other=x", "x key=" + Marker + " other=x"},
-		{"api_key", "x api_key=FAKE other=x", "x api_key=" + Marker + " other=x"},
-		{"client_secret", "x client_secret=FAKE other=x", "x client_secret=" + Marker + " other=x"},
-		{"passwd", "x passwd=FAKE other=x", "x passwd=" + Marker + " other=x"},
-		{"upper case key", "x PASSWORD=FAKE other=x", "x PASSWORD=" + Marker + " other=x"},
-		{"mixed case key", "x PassWord=FAKE Other=x", "x PassWord=" + Marker + " Other=x"},
-		{"key: value", "error: password: FAKE other: x", "error: password: " + Marker + " other: x"},
-		{"key: value then key=value", "x password: FAKE other=x", "x password: " + Marker + " other=x"},
-		{"spaces around =", "x password = FAKE other = x", "x password = " + Marker + " other = x"},
-		{"tab before the next pair", "x password=FAKE\tother=x", "x password=" + Marker + "\tother=x"},
-		{"--password=value", "cmd --password=FAKE other=x", "cmd --password=" + Marker + " other=x"},
-		{"--password value", "cmd --password FAKE other=x", "cmd --password " + Marker + " other=x"},
-		{"--password=value then an option", "cmd --password=FAKE --verbose", "cmd --password=" + Marker},
+		{"multiple secrets, quoted then unquoted", `x passphrase='FAKE 1' api_key=FAKE2 user=bob`,
+			"x passphrase='" + Marker + "' api_key=" + Marker},
 		{"JSON-like pair", `x "password":"FAKE" other=x`, `x "password":"` + Marker + `" other=x`},
 		{"JSON-like pair with space", `{"password": "FAKE pw", "other": "x"}`, `{"password": "` + Marker + `", "other": "x"}`},
 		{"URL userinfo", "x https://user:FAKE@host/path other=x", "x https://user:" + Marker + "@host/path other=x"},
 		{"URL userinfo with @ in the password", "x https://user:FA@KE@host other=x", "x https://user:" + Marker + "@host other=x"},
 		{"query parameter", "GET /a?token=FAKE&page=2 other=x", "GET /a?token=" + Marker + "&page=2 other=x"},
+		{"--password value", "cmd --password FAKE other=x", "cmd --password " + Marker + " other=x"},
+		{"empty value at the end of the line", "x password=\nnext", "x password=\nnext"},
 
-		// Fail closed: the end of the value is not clear.
+		// Fail closed: an unquoted value runs to the end of the line.
+		{"issue example", "nopool password=FAKEPW other=x", "nopool password=" + Marker},
+		{"space then name=", "x password=ab cd=ef", "x password=" + Marker},
 		{"several words", "x password=fake pw word other=x", "x password=" + Marker},
 		{"no pair after the value", "x password=FAKE trailing words", "x password=" + Marker},
+		{"backslash-escaped spaces", `x password=fake\ pw\ word other=x`, "x password=" + Marker},
+		{"backslash-escaped space at the end of the value", `x password=fakepw\  other=x`, "x password=" + Marker},
+		{"trailing backslash", `x password=fakepw\`, "x password=" + Marker},
+		{"unterminated double quote", `x password="fake pw other=x`, "x password=" + Marker},
+		{"unterminated single quote", `x password='fake pw other=x`, "x password=" + Marker},
+		{"unterminated quote stops at the end of the line", "x password=\"fake pw other=x\nnext=1", "x password=" + Marker + "\nnext=1"},
+		{"empty value", "x password= other=x", "x password= " + Marker},
+		{"multiple secrets", "x password=FAKE1 token=FAKE2 secret=FAKE3 other=x", "x password=" + Marker},
+		{"passphrase", "x passphrase=FAKE other=x", "x passphrase=" + Marker},
+		{"secret", "x secret=FAKE other=x", "x secret=" + Marker},
+		{"token", "x token=FAKE other=x", "x token=" + Marker},
+		{"key", "x key=FAKE other=x", "x key=" + Marker},
+		{"api_key", "x api_key=FAKE other=x", "x api_key=" + Marker},
+		{"client_secret", "x client_secret=FAKE other=x", "x client_secret=" + Marker},
+		{"passwd", "x passwd=FAKE other=x", "x passwd=" + Marker},
+		{"upper case key", "x PASSWORD=FAKE other=x", "x PASSWORD=" + Marker},
+		{"mixed case key", "x PassWord=FAKE Other=x", "x PassWord=" + Marker},
+		{"prefixed key", "x MYSQL_ROOT_PASSWORD=FAKE other=x", "x MYSQL_ROOT_PASSWORD=" + Marker},
+		{"prefixed key, tab", "x DB_PASSWORD = fa\tke=c", "x DB_PASSWORD = " + Marker},
+		{"prefixed key, vertical tab", "x DB_PASSWORD = fa\vke=c x=1", "x DB_PASSWORD = " + Marker},
+		{"vertical tab before the next pair", "x password=FAKE\v other=x", "x password=" + Marker},
+		{"tab before the next pair", "x password=FAKE\tother=x", "x password=" + Marker},
+		{"key: value", "error: password: FAKE other: x", "error: password: " + Marker},
+		{"colon pair inside the value", "x TOKEN: my fake: rex", "x TOKEN: " + Marker},
+		{"key: value then key=value", "x password: FAKE other=x", "x password: " + Marker},
+		{"spaces around =", "x password = FAKE other = x", "x password = " + Marker},
+		{"tail pair with an empty value", "x credentials = fake K= hotel", "x credentials = " + Marker},
+		{"--password=value", "cmd --password=FAKE other=x", "cmd --password=" + Marker},
+		{"--password=value then an option", "cmd --password=FAKE --verbose", "cmd --password=" + Marker},
 		{"quote inside the value", `x password=fa"ke other=x`, "x password=" + Marker},
 		{"quote inside the value, later quote", `x password=fa"ke pw" other=x`, "x password=" + Marker},
 		{"escaped quote inside the value", `x password=fa\"ke other=x`, "x password=" + Marker},
 		{"backtick inside the value", "x password=fa`ke other=x", "x password=" + Marker},
-		{"delimiters stay in the value", "x password=fa,ke;pw)x other=x", "x password=" + Marker + " other=x"},
-		{"comma before the next pair", "x password=FAKE, other=x", "x password=" + Marker + " other=x"},
+		{"delimiters stay in the value", "x password=fa,ke;pw)x other=x", "x password=" + Marker},
+		{"comma before the next pair", "x password=FAKE, other=x", "x password=" + Marker},
 		{"glued pair is part of the value", "x password=FAKE,other=x", "x password=" + Marker},
 		{"user:pass@host is not a pair", "x password=FAKE user:pw@host", "x password=" + Marker},
 		{"scheme is not a pair", "x password=FAKE http://host", "x password=" + Marker},
 		{"auth scheme", "x authorization=Bearer FAKE-token x=1", "x authorization=Bearer " + Marker},
 		{"auth scheme, key: value", "x password: Basic FAKE x: 1", "x password: Basic " + Marker},
-		{"whole string NAME=VALUE (env entry)", "PASSWORD=FAKE other=x", "PASSWORD=" + Marker},
+		{"query string, then a pair after a space", "GET /a?token=FAKE&page=2 x=1&token=FAKE2 more=y",
+			"GET /a?token=" + Marker + "&page=2 x=1&token=" + Marker},
+
+		// Whole strings of the form NAME=VALUE (environment entries, env-file
+		// lines) are redacted to their end.
+		{"env entry", "PASSWORD=FAKE other=x", "PASSWORD=" + Marker},
+		{"env entry, tab", "DB_PASSWORD = fa\tke=c", "DB_PASSWORD =" + Marker},
+		{"env entry, vertical tab", "DB_PASSWORD = fa\vke=c", "DB_PASSWORD =" + Marker},
+		{"env entry, colon pair", "TOKEN: my fake: rex", "TOKEN: " + Marker},
+		{"env entry, tail pair with an empty value", "credentials = fake K= hotel", "credentials =" + Marker},
+		{"env entry with spaces", "MYSQL_ROOT_PASSWORD=fake root pw", "MYSQL_ROOT_PASSWORD=" + Marker},
+		{"env-file lines", "DB_PASSWORD=FAKE other=x\nTZ=UTC\nAPI_KEY=FAKE2 more=y",
+			"DB_PASSWORD=" + Marker + "\nTZ=UTC\nAPI_KEY=" + Marker},
+		{"export line", "export DB_PASSWORD=FAKE other=x", "export DB_PASSWORD=" + Marker},
 	}
 	for _, c := range cases {
 		got := Text(c.in)
@@ -78,11 +98,6 @@ func TestTextNarrowRedaction(t *testing.T) {
 		if again := Text(got); again != got {
 			t.Errorf("%s: not idempotent: %q", c.name, again)
 		}
-		for _, secret := range []string{"FAKE", "fake", "pw"} {
-			if strings.Contains(c.in, secret) && strings.Contains(got, secret) {
-				t.Errorf("%s: %q leaks %q", c.name, got, secret)
-			}
-		}
 	}
 }
 
@@ -90,42 +105,45 @@ func TestTextNarrowRedaction(t *testing.T) {
 // them has none of those letters or digits (and neither has Marker), so any
 // of them in the output is a leak of part of the secret. '&' is left out: an
 // unquoted value ends at "&name=" so that query strings
-// (?token=S3CR3T&page=2) keep their other parameters, and a secret written
-// unquoted with "&name=" in it is not covered by this change.
+// (?token=S3CR3T&page=2) keep their other parameters, so a secret written
+// unquoted with "&name=" in it is only partly redacted (a known gap).
 const (
 	secretLetters = "QZXJKVY79"
-	secretChars   = secretLetters + `QZXJ79 ,;:=@/#}){%+-.!"'\` + "\t"
+	secretChars   = secretLetters + `QZXJ79 ,;:=@/#}){%+-.!"'\` + "\t\v"
 )
 
 var narrowKeys = []string{
 	"password", "PASSWORD", "Password", "passwd", "passphrase", "secret", "token",
 	"api_key", "key", "client_secret", "private_key", "db_password", "--password",
+	"DB_PASSWORD", "MYSQL_ROOT_PASSWORD", "TOKEN", "credentials",
 }
 
-var narrowSeps = []string{"=", " = ", ": ", ":\t"}
+var narrowSeps = []string{"=", " = ", ": ", ":\t", "\t=\t", " =\v"}
 
-var narrowPrefixes = []string{"", "nopool ", "error: ", "a, ", "(", "{", "cmd -v "}
+var narrowPrefixes = []string{"", "nopool ", "error: ", "a, ", "(", "{", "cmd -v ", "export ", "\t"}
 
 var narrowSuffixes = []string{
 	"", " other=x", " user: bob", "\tother=x", " other = x", ", other=x",
 	" trailing words", " other", "\nnext=1", "\r\nnext: line", " --verbose",
 	" other=x more=y", " user:pw@host", " http://host/", ")", "}", " ",
+	" k= hotel", " my: rex", "\vother=x", "\tb=c", " cd=ef", "\nTZ=UTC",
 }
 
 // encodings write a secret as a value: each returns the encoded value, or
 // false when the secret cannot be written that way.
 var narrowEncodings = []struct {
 	name   string
+	quoted bool // the value ends at a closing quote
 	encode func(string) (string, bool)
 }{
-	{"double-quoted", func(s string) (string, bool) {
+	{"double-quoted", true, func(s string) (string, bool) {
 		r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 		return `"` + r.Replace(s) + `"`, true
 	}},
-	{"single-quoted", func(s string) (string, bool) {
+	{"single-quoted", true, func(s string) (string, bool) {
 		return "'" + s + "'", !strings.Contains(s, "'")
 	}},
-	{"backslash-escaped", func(s string) (string, bool) {
+	{"backslash-escaped", false, func(s string) (string, bool) {
 		var b strings.Builder
 		for i := 0; i < len(s); i++ {
 			if strings.IndexByte(" \t\"'`\\", s[i]) >= 0 {
@@ -135,20 +153,22 @@ var narrowEncodings = []struct {
 		}
 		return b.String(), true
 	}},
-	{"bare word", func(s string) (string, bool) {
+	{"bare word", false, func(s string) (string, bool) {
 		return s, !strings.ContainsAny(s, " \t\"'`\\")
 	}},
-	{"unterminated double quote", func(s string) (string, bool) {
+	{"unterminated double quote", false, func(s string) (string, bool) {
 		return `"` + s, !strings.Contains(s, `"`)
 	}},
-	{"unterminated single quote", func(s string) (string, bool) {
+	{"unterminated single quote", false, func(s string) (string, bool) {
 		return "'" + s, !strings.Contains(s, "'")
 	}},
 }
 
 // checkNoSecretLeak redacts prefix+key+sep+value+suffix and fails if any
-// letter or digit of the secret is left before the end of that line.
-func checkNoSecretLeak(t *testing.T, prefix, key, sep, value, suffix, enc string) {
+// letter or digit of the secret is left before the end of that line. A value
+// that is not quoted has no provable end, so it must also be redacted to the
+// end of the line: nothing of the suffix may be left on it.
+func checkNoSecretLeak(t *testing.T, prefix, key, sep, value, suffix, enc string, quoted bool) {
 	t.Helper()
 	in := prefix + key + sep + value + suffix
 	out := Text(in)
@@ -156,8 +176,17 @@ func checkNoSecretLeak(t *testing.T, prefix, key, sep, value, suffix, enc string
 	if i := strings.IndexAny(out, "\r\n"); i >= 0 {
 		line = out[:i]
 	}
-	if strings.ContainsAny(line, secretLetters) {
+	// Keys such as TOKEN contain secret letters: look only after the key.
+	rest, ok := strings.CutPrefix(line, prefix+key)
+	if !ok {
+		t.Errorf("%s: Text(%q) = %q, changed the text before the value", enc, in, out)
+		return
+	}
+	if strings.ContainsAny(rest, secretLetters) {
 		t.Errorf("%s: Text(%q) leaks part of the secret: %q", enc, in, out)
+	}
+	if !quoted && !strings.HasSuffix(strings.TrimRight(line, " \t"), Marker) {
+		t.Errorf("%s: Text(%q) = %q, want the rest of the line redacted", enc, in, out)
 	}
 }
 
@@ -187,7 +216,7 @@ func TestTextNarrowNeverLeaks(t *testing.T) {
 			}
 			prefix := narrowPrefixes[rng.Intn(len(narrowPrefixes))]
 			for _, suffix := range narrowSuffixes {
-				checkNoSecretLeak(t, prefix, key, sep, value, suffix, e.name)
+				checkNoSecretLeak(t, prefix, key, sep, value, suffix, e.name, e.quoted)
 				n++
 			}
 		}
@@ -223,6 +252,6 @@ func FuzzTextNarrowNeverLeaks(f *testing.F) {
 		if strings.HasPrefix(k, "--") {
 			s = "="
 		}
-		checkNoSecretLeak(t, "x ", k, s, value, narrowSuffixes[int(suffix)%len(narrowSuffixes)], e.name)
+		checkNoSecretLeak(t, "x ", k, s, value, narrowSuffixes[int(suffix)%len(narrowSuffixes)], e.name, e.quoted)
 	})
 }

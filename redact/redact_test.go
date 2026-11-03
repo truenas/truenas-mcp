@@ -531,9 +531,9 @@ func TestContextualNames(t *testing.T) {
 
 func TestTextStyles(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"login failed: password=fake-user-pw user=bob", "login failed: password=" + Marker + " user=bob"},
+		{"login failed: password=fake-user-pw user=bob", "login failed: password=" + Marker},
 		{"api key: fake-api-key-0000", "api key: " + Marker},
-		{"key: fake-hex-key-0000, keyboard: us", "key: " + Marker + " keyboard: us"}, // the comma goes with the value
+		{"key: fake-hex-key-0000, keyboard: us", "key: " + Marker},
 		{"DB_PASS=fake-db-pw", "DB_PASS=" + Marker},
 		{"MYSQL_ROOT_PASSWORD=fake db pw with spaces", "MYSQL_ROOT_PASSWORD=" + Marker},
 		{"TZ=Etc/UTC", "TZ=Etc/UTC"},
@@ -638,7 +638,7 @@ func TestTextBareValueExtent(t *testing.T) {
 		{"prose on the next line stays", "bindpw: fake-bind-pw trailing\nThe bind failed, retrying in 5 seconds.",
 			"bindpw: " + Marker + "\nThe bind failed, retrying in 5 seconds."},
 		{"separator does not cross lines", "password:\nfake is not on this line", "password:\nfake is not on this line"},
-		{"delimiters inside the value", "secret: a,b;c}d)e, user: bob", "secret: " + Marker + " user: bob"},
+		{"delimiters inside the value", "secret: a,b;c}d)e, user: bob", "secret: " + Marker},
 		{"trailing whitespace kept", "token: fake-oauth-token  \nok", "token: " + Marker + "  \nok"},
 		{"query string stops at next param", "GET /api?token=fake-oauth-token&page=2 HTTP/1.1", "GET /api?token=" + Marker + "&page=2 HTTP/1.1"},
 		{"auth scheme kept", "Authorization: Bearer fake-oauth-token extra", "Authorization: Bearer " + Marker},
