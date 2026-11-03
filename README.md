@@ -108,7 +108,7 @@ make build
 make build-all
 ```
 
-Binaries report their version with `--version`. `make` takes the version from `git describe`; override it with `make build VERSION=1.2.3`. Without `make`, `go build -o truenas-mcp ./cmd/truenas-mcp` produces the same binary, with version `dev`. `make clean` removes the binaries.
+Binaries report their version with `--version`. `make` takes the version from `git describe`; override it with `make build VERSION=1.2.3`. Without `make`, `go build -o truenas-mcp ./cmd/truenas-mcp` produces the same binary; its version is the module version Go records from the git checkout (or from `go install ...@vX.Y.Z`), or `dev` when none is available. `make clean` removes the binaries.
 
 ## Installation
 
