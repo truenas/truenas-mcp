@@ -12,7 +12,7 @@ import (
 
 // noUpgradeRegistry is an upgrade_app registry whose middleware answers the
 // methods in failing with the "No upgrade available" error TrueNAS raises
-// for an app that is already up to date (EFAULT, with a traceback).
+// for an app with no newer version (EFAULT, with a traceback).
 func noUpgradeRegistry(t *testing.T, failing ...string) (*Registry, *fakeMiddleware) {
 	t.Helper()
 	app := appEntry("plex", "RUNNING", [2]string{"web", "running"})
@@ -65,7 +65,7 @@ func TestUpgradeAppNoUpgradeAvailablePreview(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r, fake := noUpgradeRegistry(t, "app.upgrade_summary")
 			out, err := r.CallTool("upgrade_app", args)
-			assertNoUpgradeError(t, err, out, `no upgrade available for app "plex": it is already up to date (installed version 2.0.0_1.2.0)`, "nothing was changed")
+			assertNoUpgradeError(t, err, out, `no upgrade available for app "plex" (installed version 2.0.0_1.2.0)`, "nothing was changed")
 			if n := len(fake.called("app.upgrade")); n != 0 {
 				t.Errorf("preview called app.upgrade %d times", n)
 			}
@@ -117,6 +117,44 @@ func TestUpgradeAppOtherSummaryErrorUnchanged(t *testing.T) {
 	}
 }
 
+// Middleware errors that only resemble "No upgrade available" keep the full
+// error: they are not classified as no-upgrade.
+func TestIsNoUpgradeAvailableNearMisses(t *testing.T) {
+	for _, reason := range []string{
+		"Upgrade available for 'plex'",
+		"An upgrade is available for 'plex'",
+		"No upgrade path available for 'plex'",
+		"No upgrades available for 'plex'",
+		"No upgrade summary available for 'plex'",
+		"No catalog available for 'plex'",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			fake := &fakeMiddleware{
+				handle: func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+					switch method {
+					case "app.query":
+						return []interface{}{appEntry("plex", "RUNNING")}, nil, true
+					case "app.upgrade_summary":
+						return nil, middlewareError("EFAULT", reason), true
+					}
+					return nil, nil, false
+				},
+			}
+			client, _ := newFakeClientFrom(t, fake)
+			_, err := (&upgradeAppDryRun{}).ExecuteDryRun(client, map[string]interface{}{"app_name": "plex", "dry_run": true})
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if isNoUpgradeAvailable(err) {
+				t.Errorf("%q classified as no upgrade available", reason)
+			}
+			if !strings.Contains(err.Error(), "failed to get upgrade summary") || !strings.Contains(err.Error(), reason) {
+				t.Errorf("want the middleware error passed through, got %v", err)
+			}
+		})
+	}
+}
+
 func TestIsNoUpgradeAvailableNeedsAPIError(t *testing.T) {
 	if isNoUpgradeAvailable(errors.New("No upgrade available")) {
 		t.Error("a non-API error must not be classified")
@@ -128,7 +166,7 @@ func TestIsNoUpgradeAvailableNeedsAPIError(t *testing.T) {
 
 func TestNoUpgradeAvailableErrorWithoutApp(t *testing.T) {
 	got := noUpgradeAvailableError("plex", "latest", nil).Error()
-	if got != `no upgrade available for app "plex": it is already up to date; nothing was changed` {
+	if got != `no upgrade available for app "plex"; nothing was changed` {
 		t.Errorf("got %q", got)
 	}
 }

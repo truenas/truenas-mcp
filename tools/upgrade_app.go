@@ -162,8 +162,9 @@ func normalizeUpgradeSummary(summary interface{}) interface{} {
 
 // isNoUpgradeAvailable reports whether err is the middleware's "No upgrade
 // available" error. app.upgrade_summary (and app.upgrade) raise it as EFAULT,
-// with a traceback, when the app is already at the newest version or the
-// requested version is not an upgrade.
+// with a traceback, when the app has no newer version to upgrade to (on some
+// TrueNAS versions also when the app's catalog entry is missing). A requested
+// version that is not an upgrade is a separate validation error.
 func isNoUpgradeAvailable(err error) bool {
 	var apiErr *truenas.APICallError
 	return errors.As(err, &apiErr) && strings.Contains(strings.ToLower(apiErr.Message), "no upgrade available")
@@ -176,7 +177,7 @@ func isNoUpgradeAvailable(err error) bool {
 func noUpgradeAvailableError(appName, version string, app map[string]interface{}) error {
 	var b strings.Builder
 	if version == "latest" {
-		fmt.Fprintf(&b, "no upgrade available for app %q: it is already up to date", appName)
+		fmt.Fprintf(&b, "no upgrade available for app %q", appName)
 	} else {
 		fmt.Fprintf(&b, "no upgrade to version %q is available for app %q", version, appName)
 	}
