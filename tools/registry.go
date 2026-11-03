@@ -1801,19 +1801,23 @@ Returns task_id for tracking progress with tasks_get.
 	r.tools["query_jobs"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_jobs",
-			Description: "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, etc.), most recent first. Reports has_more and total when the list was cut by limit; long results and error text are truncated with a flag.",
+			Description: "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, app upgrades, etc.), most recent first. Returns jobs in every state unless state is given; method narrows to one job method (e.g. app.upgrade). Reports has_more and total when the list was cut by limit; long results and error text are truncated with a flag.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"state": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"RUNNING", "WAITING", "SUCCESS", "FAILED", "ABORTED", "all"},
-						"description": "Filter by job state (default: RUNNING)",
-						"default":     "RUNNING",
+						"description": "Filter by job state (default: all states)",
+						"default":     "all",
+					},
+					"method": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: only return jobs whose method is exactly this name, e.g. app.upgrade or pool.scrub.scrub",
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state filter) when more exist than were returned. Each job entry is at most 4 KiB. Values above 9999 are capped at 9999.",
+						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state and method filters) when more exist than were returned. Each job entry is at most 4 KiB. Values above 9999 are capped at 9999.",
 						"default":     50,
 						"minimum":     1,
 						"maximum":     maxQueryJobsLimit,
@@ -4539,24 +4543,26 @@ func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 const maxQueryJobsLimit = 9999
 
 func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (string, error) {
-	state := "RUNNING"
-	if s, ok := args["state"].(string); ok && s != "" {
+	// No state (or "all") means every state, reported as "ALL".
+	state := "ALL"
+	if s, ok := args["state"].(string); ok && s != "" && !strings.EqualFold(s, "all") {
 		state = s
 	}
+	method, _ := args["method"].(string)
 
 	limit := 50
 	if l, ok := args["limit"].(float64); ok && l >= 1 {
 		limit = int(math.Min(l, maxQueryJobsLimit))
 	}
 
-	// Build query filters based on state
-	var filters []interface{}
-	if state != "all" {
-		filters = []interface{}{
-			[]interface{}{"state", "=", state},
-		}
-	} else {
-		filters = []interface{}{}
+	// Filter server-side so limit, has_more and total apply to the
+	// matching jobs only.
+	filters := []interface{}{}
+	if state != "ALL" {
+		filters = append(filters, []interface{}{"state", "=", state})
+	}
+	if method != "" {
+		filters = append(filters, []interface{}{"method", "=", method})
 	}
 
 	// Build options
@@ -4662,6 +4668,9 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 		"state_filter": state,
 		"has_more":     hasMore,
 		"limit":        limit,
+	}
+	if method != "" {
+		response["method_filter"] = method
 	}
 	if totalKnown {
 		response["total"] = total
