@@ -456,6 +456,8 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - `HTTP 404` / "TrueNAS 25.04 or later required": the server predates the JSON-RPC API; upgrade TrueNAS
 - Verify API key is valid and has admin permissions
 - "connecting via proxy ... proxy unreachable": the proxy named in the message (and the variable it came from) is not listening; check it, or bypass it with `NO_PROXY` or `--proxy none`
+- "connecting via proxy ... the proxy is reachable but could not connect to the TrueNAS host ...": the SOCKS5 proxy answered but could not open a connection to TrueNAS (the SOCKS5 reply, such as "general failure" or "host unreachable", is shown at the end); check the TrueNAS host and port, that the system is up, and that the proxy's network (for example your tailnet or VPN) can route to it
+- "request too large for the TrueNAS API": TrueNAS accepts at most 64 KiB per API message, so a larger request (for example a very long value in a tool argument) is refused before it is sent and nothing runs; reduce the size of the input. If TrueNAS itself closes the connection for an oversized message (WebSocket close code 1009), the error says so and the next request reconnects
 
 **Certificate Verification Errors** (`x509: certificate signed by unknown authority` or similar):
 - TrueNAS uses a self-signed certificate by default; export it and pass `--tls-ca truenas-cert.pem` (recommended)
@@ -488,7 +490,7 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - Command lines: `-p` of programs other than `sshpass` and the MySQL/MariaDB clients is left alone (it often means port or parents), and so is Samba's `net -U user%password`. A password passed as a plain positional argument (`["admin", "secret"]`, `tool user secret`) is not detected; in free text this includes the positional passwords of `smbpasswd`, `net user`, `pdbedit -t` and `chpasswd`.
 - Command-line scanning is heuristic: where a command ends on a line is worked out from separators (`|`, `;`, `&`) and quotes, so unusual quoting (a separator inside a quoted argument, an unbalanced quote) can leave a later password option visible or redact the rest of the line. A quote in the middle of an unquoted option value (`--password ab"c d"`) ends that value. An escaped quote (`\"`) that is never closed swallows the separators after it, so a later option of another program on the same line (`ssh -p 2222`) can be redacted as well; this is deliberate, because the same text can be a truncated quoted argument. A doubled-escaped quote idiom written twice in one command can still hide the second password option from the scanner.
 - Text right after a closing quote of a quoted value (`password='x' y`, `'token_ttl': '5'X`) is not part of the value and stays visible.
-- Free-text redaction fails closed. An unquoted `key=value` or `key: value` value of a sensitive key is redacted to the end of the line, together with any later pairs on it (`password=S3CR3T user=bob` becomes `password=[REDACTED]`), because its end cannot be proven: `password=ab cd=ef` may be the single secret `ab cd=ef`. This also applies to backslash-escaped spaces, tabs and vertical tabs. Quote the value to keep the rest of the line visible: a quoted value ends at its closing quote (`password="a b" user=bob` becomes `password="[REDACTED]" user=bob`). A whole string of the form `NAME=VALUE` (an environment entry) is redacted to its end. The one exception is a URL query string: an unquoted value stops at `&name=` so that its other parameters stay visible, which means a secret written unquoted that contains `&name=` is only partly redacted.
+- Free-text redaction fails closed. An unquoted `key=value` or `key: value` value of a sensitive key is redacted to the end of the line, together with any later pairs on it (`password=S3CR3T user=bob` becomes `password=[REDACTED]`), because its end cannot be proven: `password=ab cd=ef` may be the single secret `ab cd=ef`. This also applies to backslash-escaped spaces, tabs and vertical tabs, and to `&name=` anywhere on the line, not only inside a URL query string (`?token=S3CR3T&page=2` becomes `?token=[REDACTED]`), because a secret can itself contain `&name=`. Quote the value to keep the rest of the line visible: a quoted value ends at its closing quote (`password="a b" user=bob` becomes `password="[REDACTED]" user=bob`). In a query string, put a sensitive parameter last to keep the others visible. A whole string of the form `NAME=VALUE` (an environment entry) is redacted to its end.
 - URLs whose password contains a raw `/`, `?`, `#`, quote or whitespace, or whose user name contains `@`, are only partly redacted. The host name stays visible by design.
 - Plain multi-line YAML scalars are not handled; single-line `key: value` pairs, block scalars (`|`, `>`) under a sensitive key and Kubernetes-style `name`/`value` entries are.
 - In JSON results, keys such as `password_file`, `token_file` or `secret_path` stay sensitive and their values are redacted, although the path itself is not a secret. Only command-line options of that shape (`--password-file /path`) are left visible.
@@ -514,7 +516,14 @@ Every tool is classified as **read**, **write** or **destructive** in one table
 **Read-only mode.** `--read-only` (or `TRUENAS_MCP_READ_ONLY` set to `1`, `true`,
 `yes`, `on`, ...) removes every write and destructive tool from `tools/list`,
 and `tools/call` refuses them with an error, even if a client calls a tool it
-was never shown. Dry runs of write tools are refused too.
+was never shown. Dry runs of write tools are refused too, with one explicit
+exception: `upgrade_app` stays listed for dry runs only, so you can preview an
+upgrade (current version, target version, changelog, planned steps) from a
+read-only server. In read-only mode its schema requires `"dry_run": true`, its
+description says only dry runs are allowed, and the preview only queries the
+system (`app.query`, `app.upgrade_summary`). Any other call (`dry_run` false
+or absent, with or without `confirm`) is refused with a read-only error and
+nothing is executed.
 
 **Tool allowlist and denylist.** `--allow-tools` / `TRUENAS_MCP_ALLOW_TOOLS`
 takes a comma-separated list; only those tools are listed and callable.
@@ -522,7 +531,7 @@ takes a comma-separated list; only those tools are listed and callable.
 A flag overrides its environment variable. The server refuses to start if a
 list names an unknown tool, if `--allow-tools` is set but names no tools (for
 example `","`), or if `--allow-tools` names a write tool while `--read-only`
-is set.
+is set (`upgrade_app` may be named; it stays limited to dry runs).
 
 ```bash
 # Monitoring only
@@ -576,8 +585,14 @@ Once connected via an MCP client, ask questions in natural language:
 
 **Monitoring:**
 - "What version of TrueNAS is running?"
-- "Are there any system alerts?"
+- "Are there any system alerts?" (`list_alerts` lists active alerts; dismissed ones need `include_dismissed: true`)
 - "Show me CPU and memory usage over the past day"
+
+> **Behaviour change:** `list_alerts` called without arguments now lists only
+> active alerts; dismissed alerts are no longer included. Pass
+> `"include_dismissed": true` to list all alerts as before, or
+> `"dismissed": true` for dismissed alerts only. `dismissed` and
+> `include_dismissed` must be JSON booleans; any other value is rejected.
 
 **Storage:**
 - "Show me all storage pools and their health status"
@@ -656,8 +671,8 @@ Returns:
   ],
   "estimated_time": {
     "min_seconds": 30,
-    "max_seconds": 300,
-    "note": "Time varies based on image size and network speed"
+    "max_seconds": 600,
+    "note": "Time varies based on image size and network speed: up to 300s for the upgrade job, plus up to 300s waiting for the app to report RUNNING (health_timeout_seconds)"
   }
 }
 ```

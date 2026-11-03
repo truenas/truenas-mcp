@@ -2,22 +2,28 @@ package redact
 
 import (
 	"math/rand"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-// The differential tests below compare Text with mainText, a frozen copy of
-// Text and redactBarePairs as they were before free-text values could be
-// narrowed (the shared helpers are called as they are). The rule they
-// enforce: Text may show a byte that mainText redacts only after a provable
-// end of the value, which is the closing quote of a quoted value; mainText
-// already ends quoted values there, so for every input the two outputs must
-// be the same. In particular an unquoted value is redacted exactly as
-// before, to the end of the line. A change that narrows a value further must
-// extend diffAllowed with the provable end it relies on.
+// The differential tests below compare Text with oldText, a frozen copy of
+// Text and redactBarePairs as they were before this branch (the shared
+// helpers are called as they are), when an unquoted value still ended at
+// "&name=" (oldQueryNext). The rule they enforce: Text never shows a byte
+// that oldText redacts unless it comes after a provable end of the value.
+// oldText already ends quoted values at their closing quote, and no further
+// provable end is relied on yet, so Text must redact everything oldText
+// redacts and may only hide more (an unquoted value now also runs past
+// "&name="). A change that narrows a value further must extend diffAllowed
+// with the provable end it relies on.
 
-// mainText is Text before narrowing. Do not change it.
-func mainText(s string) string {
+// oldQueryNext is the regexp oldText ended unquoted values at. Do not
+// change it.
+var oldQueryNext = regexp.MustCompile(`&[A-Za-z_][A-Za-z0-9_.-]*=`)
+
+// oldText is Text before this branch. Do not change it.
+func oldText(s string) string {
 	s = pemPrivateKey.ReplaceAllLiteralString(s, Marker)
 	s = urlUserinfo.ReplaceAllString(s, "${1}"+Marker+"@")
 	if m := envPair.FindStringSubmatch(s); m != nil {
@@ -62,11 +68,12 @@ func mainText(s string) string {
 		}
 		return sub[1] + `\"` + Marker + `\"`
 	})
-	return mainRedactBarePairs(s)
+	return oldRedactBarePairs(s)
 }
 
-// mainRedactBarePairs is redactBarePairs before narrowing. Do not change it.
-func mainRedactBarePairs(s string) string {
+// oldRedactBarePairs is redactBarePairs before this branch. Do not change
+// it.
+func oldRedactBarePairs(s string) string {
 	if !strings.ContainsAny(s, "=:") {
 		return s
 	}
@@ -106,7 +113,7 @@ func mainRedactBarePairs(s string) string {
 			}
 		}
 		val := s[valStart:lineEnd]
-		if loc := queryNext.FindStringIndex(val); loc != nil {
+		if loc := oldQueryNext.FindStringIndex(val); loc != nil {
 			val = val[:loc[0]]
 		}
 		val = strings.TrimRight(val, " \t")
@@ -117,15 +124,70 @@ func mainRedactBarePairs(s string) string {
 	return b.String()
 }
 
-// diffAllowed reports whether Text(in) may differ from mainText(in). No
-// difference is allowed yet.
-func diffAllowed(in, got, old string) bool { return false }
+// diffAllowed reports whether Text(in) = got may differ from
+// oldText(in) = old: got must hide everything old hides (see hidesMore).
+// No provable end beyond those oldText knows is accepted yet.
+func diffAllowed(in, got, old string) bool { return hidesMore(got, old) }
+
+// markerItems splits an output into items: one per visible byte, and -1 for
+// each Marker.
+func markerItems(s string) []int {
+	var items []int
+	for len(s) > 0 {
+		if strings.HasPrefix(s, Marker) {
+			items = append(items, -1)
+			s = s[len(Marker):]
+			continue
+		}
+		items = append(items, int(s[0]))
+		s = s[1:]
+	}
+	return items
+}
+
+// hidesMore reports whether got can be made from old by replacing runs of
+// one or more items of old (visible bytes or markers) with a single Marker.
+// Then every byte old redacts is redacted in got as well, and every byte
+// got shows is shown by old at the same place. It is wildcard matching:
+// each Marker of got matches one or more items of old, and each visible
+// byte of got matches the same visible byte of old.
+func hidesMore(got, old string) bool {
+	var p []int // pattern: a Marker of got becomes "any item" (-2) then "any run" (-3)
+	for _, it := range markerItems(got) {
+		if it == -1 {
+			p = append(p, -2, -3)
+		} else {
+			p = append(p, it)
+		}
+	}
+	t := markerItems(old)
+	i, j, star, mark := 0, 0, -1, 0
+	for i < len(t) {
+		switch {
+		case j < len(p) && (p[j] == -2 || p[j] == t[i]):
+			i++
+			j++
+		case j < len(p) && p[j] == -3:
+			star, mark = j, i
+			j++
+		case star >= 0:
+			mark++
+			i, j = mark, star+1
+		default:
+			return false
+		}
+	}
+	for j < len(p) && p[j] == -3 {
+		j++
+	}
+	return j == len(p)
+}
 
 func checkDiff(t *testing.T, in string) {
 	t.Helper()
-	got, old := Text(in), mainText(in)
+	got, old := Text(in), oldText(in)
 	if got != old && !diffAllowed(in, got, old) {
-		t.Errorf("Text(%q)\n got %q\nmain %q", in, got, old)
+		t.Errorf("Text(%q) shows something the old code redacts\n got %q\n old %q", in, got, old)
 	}
 }
 
@@ -151,10 +213,40 @@ func randomDiffLine(rng *rand.Rand) string {
 	return b.String()
 }
 
-// TestTextMatchesMain checks the inputs that used to differ (several
-// unquoted shapes followed by another pair) and a large sample of random
-// lines made of diffTokens.
-func TestTextMatchesMain(t *testing.T) {
+// TestHidesMore checks the comparison itself: hiding more is accepted,
+// showing a byte that old redacts (or a different byte) is not.
+func TestHidesMore(t *testing.T) {
+	M := Marker
+	cases := []struct {
+		got, old string
+		want     bool
+	}{
+		{"a=" + M, "a=" + M, true},
+		{"a=" + M, "a=" + M + "&b=c", true},
+		{"a=" + M, "a=" + M + "&b=" + M, true},
+		{M, "x " + M + " y", true},
+		{"x " + M + " y", "x " + M + " y", true},
+		{"a=" + M + " b=" + M, "a=" + M + " b=c", true},
+		{"a=" + M + " b=c", "a=" + M, false},      // shows bytes old redacts
+		{"a=" + M + "&b=c", "a=" + M, false},      // the old narrowing at &name=
+		{"a=x", "a=" + M, false},                  // shows the secret
+		{"a=" + M + M, "a=" + M, false},           // two markers for one
+		{"a=" + M + " y", "a=" + M + " z", false}, // different visible byte
+		{"a=" + M, "a=", false},                   // a marker must hide something
+		{"", "", true},
+	}
+	for _, c := range cases {
+		if got := hidesMore(c.got, c.old); got != c.want {
+			t.Errorf("hidesMore(%q, %q) = %v, want %v", c.got, c.old, got, c.want)
+		}
+	}
+}
+
+// TestTextNeverShowsOldRedacted checks the inputs that differed while
+// unquoted values were narrowed (several unquoted shapes followed by
+// another pair), query strings, and a large sample of random lines made of
+// diffTokens.
+func TestTextNeverShowsOldRedacted(t *testing.T) {
 	for _, in := range []string{
 		"nopool password=FAKEPW other=x",
 		"x password=ab cd=ef",
@@ -189,11 +281,11 @@ func TestTextMatchesMain(t *testing.T) {
 	}
 }
 
-// FuzzTextMatchesMain is the fuzzing form of TestTextMatchesMain, on
+// FuzzTextNeverShowsOldRedacted is the fuzzing form of TestTextNeverShowsOldRedacted, on
 // arbitrary input and on lines built from diffTokens:
 //
-//	go test ./redact -run '^$' -fuzz FuzzTextMatchesMain -fuzztime 10m
-func FuzzTextMatchesMain(f *testing.F) {
+//	go test ./redact -run '^$' -fuzz FuzzTextNeverShowsOldRedacted -fuzztime 10m
+func FuzzTextNeverShowsOldRedacted(f *testing.F) {
 	f.Add("x password=ab cd=ef", []byte{})
 	f.Add("credentials = x K= hotel", []byte{0, 26, 13})
 	f.Add("DB_PASSWORD = a\tb=c", []byte{2, 28, 36, 30})

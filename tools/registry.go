@@ -1082,13 +1082,18 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["list_alerts"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "list_alerts",
-			Description: "List system alerts with optional filtering by dismissed status",
+			Description: "List system alerts. By default only active alerts are listed: dismissed alerts are excluded. Set include_dismissed=true to list all alerts, or dismissed=true to list only dismissed ones.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"dismissed": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Filter by dismissed status (true=dismissed only, false=active only, omit=all)",
+						"description": "Filter by dismissed status (true=dismissed only, false=active only, omit=active only unless include_dismissed=true)",
+					},
+					"include_dismissed": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Also list dismissed alerts when dismissed is not set (default: false, dismissed alerts are excluded)",
+						"default":     false,
 					},
 				},
 			},
@@ -1456,8 +1461,8 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"train": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"stable", "enterprise", "community", "all"},
-						"description": "Filter by catalog train (default: stable)",
-						"default":     "stable",
+						"description": "Filter by catalog train (default: all trains). Each result includes its train.",
+						"default":     "all",
 					},
 					"category": map[string]interface{}{
 						"type":        "string",
@@ -1489,8 +1494,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"train": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"stable", "enterprise", "community"},
-						"description": "Catalog train (default: stable)",
-						"default":     "stable",
+						"description": "Catalog train (optional). When omitted, the train that has the app is looked up in the catalog; if several do, stable is preferred, then enterprise, then community. The response reports the train used.",
 					},
 				},
 				"required": []string{"app_name"},
@@ -1817,7 +1821,7 @@ Returns task_id for tracking progress with tasks_get.
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state and method filters) when more exist than were returned. Each job entry is at most 4 KiB. Values above 9999 are capped at 9999.",
+						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state and method filters) when more exist than were returned. Each job entry is at most 4 KiB. Must be an integer from 1 to 9999; other values are rejected with an error and nothing is queried.",
 						"default":     50,
 						"minimum":     1,
 						"maximum":     maxQueryJobsLimit,
@@ -1919,7 +1923,12 @@ Returns task_id for tracking progress with tasks_get.
 func (r *Registry) ListTools() []mcp.Tool {
 	tools := make([]mcp.Tool, 0, len(r.tools))
 	for name, tool := range r.tools {
-		if r.checkPolicy(name) == nil {
+		if r.checkPolicy(name) != nil {
+			continue
+		}
+		if r.readOnly && readOnlyDryRunTools[name] {
+			tools = append(tools, readOnlyDryRunDefinition(tool.Definition))
+		} else {
 			tools = append(tools, tool.Definition)
 		}
 	}
@@ -1949,6 +1958,9 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (result st
 	// Enforce the policy here, not only in ListTools: clients may call tools
 	// they were never shown.
 	if err := r.checkPolicy(name); err != nil {
+		return "", err
+	}
+	if err := r.checkReadOnlyDryRun(name, args); err != nil {
 		return "", err
 	}
 	// Reject arguments the schema does not declare before anything runs,
@@ -2170,7 +2182,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 	}
 
 	// Only active alerts are listed; dismissed ones are only counted
-	// (list_alerts returns them).
+	// (list_alerts returns them with include_dismissed=true or dismissed=true).
 	activeAlertList := make([]map[string]interface{}, 0, activeAlerts)
 	for _, alert := range alerts {
 		if dismissed, _ := alert["dismissed"].(bool); !dismissed {
@@ -3061,6 +3073,31 @@ func sortVMs(vms []map[string]interface{}, orderBy string) {
 // Alert management handlers
 
 func handleListAlerts(client *truenas.Client, args map[string]interface{}) (string, error) {
+	// Validate every argument before calling the API. A value that is not a
+	// boolean is rejected rather than ignored, and values are not echoed.
+	dismissed, hasDismissed := false, false
+	if v, present := args["dismissed"]; present && v != nil {
+		b, ok := v.(bool)
+		if !ok {
+			return "", fmt.Errorf("invalid arguments for tool list_alerts: dismissed must be a boolean (true or false); nothing was executed")
+		}
+		dismissed, hasDismissed = b, true
+	}
+	includeDismissed, hasInclude := false, false
+	if v, present := args["include_dismissed"]; present && v != nil {
+		b, ok := v.(bool)
+		if !ok {
+			return "", fmt.Errorf("invalid arguments for tool list_alerts: include_dismissed must be a boolean (true or false); nothing was executed")
+		}
+		includeDismissed, hasInclude = b, true
+	}
+	if hasDismissed && hasInclude && dismissed != includeDismissed {
+		if dismissed {
+			return "", fmt.Errorf("invalid arguments for tool list_alerts: dismissed=true lists only dismissed alerts and cannot be combined with include_dismissed=false; nothing was executed")
+		}
+		return "", fmt.Errorf("invalid arguments for tool list_alerts: dismissed=false lists only active alerts and cannot be combined with include_dismissed=true; nothing was executed")
+	}
+
 	// alert.list doesn't take filter parameters in the same way as other queries
 	// It just returns all alerts, so we'll filter in post-processing if needed
 	result, err := client.Call("alert.list")
@@ -3073,11 +3110,22 @@ func handleListAlerts(client *truenas.Client, args map[string]interface{}) (stri
 		return "", fmt.Errorf("failed to parse alerts: %w", err)
 	}
 
-	// Post-filter by dismissed status if requested
-	if dismissed, ok := args["dismissed"].(bool); ok {
+	// Post-filter by dismissed status. An explicit dismissed filter wins and
+	// keeps only alerts whose dismissed field matches it; otherwise only
+	// alerts marked dismissed are excluded unless include_dismissed=true.
+	switch {
+	case hasDismissed:
 		filtered := make([]map[string]interface{}, 0)
 		for _, alert := range alerts {
 			if isDismissed, ok := alert["dismissed"].(bool); ok && isDismissed == dismissed {
+				filtered = append(filtered, alert)
+			}
+		}
+		alerts = filtered
+	case !includeDismissed:
+		filtered := make([]map[string]interface{}, 0)
+		for _, alert := range alerts {
+			if isDismissed, _ := alert["dismissed"].(bool); !isDismissed {
 				filtered = append(filtered, alert)
 			}
 		}
@@ -4028,6 +4076,9 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 		"app_version": version,
 	})
 	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(client, appName))
+		}
 		return "", fmt.Errorf("failed to get upgrade summary: %w", err)
 	}
 
@@ -4046,6 +4097,9 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 
 	result, err := client.Call("app.upgrade", appName, upgradeOptions)
 	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(client, appName))
+		}
 		return "", fmt.Errorf("failed to upgrade app: %w", err)
 	}
 
@@ -4155,6 +4209,9 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		"app_version": version,
 	})
 	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			return nil, noUpgradeAvailableError(appName, version, currentApp)
+		}
 		return nil, fmt.Errorf("failed to get upgrade summary: %w", err)
 	}
 
@@ -4246,14 +4303,10 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		Tool:           "upgrade_app",
 		CurrentState:   currentState,
 		PlannedActions: actions,
-		EstimatedTime: &EstimatedTime{
-			MinSeconds: 30,
-			MaxSeconds: 300,
-			Note:       "Time varies based on image size and network speed",
-		},
-		DryRun:   &dryRun,
-		Executed: &executed,
-		Warnings: warnings,
+		EstimatedTime:  upgradeEstimatedTime(healthTimeout),
+		DryRun:         &dryRun,
+		Executed:       &executed,
+		Warnings:       warnings,
 	}
 
 	return result, nil
@@ -4612,9 +4665,15 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 		method = m
 	}
 
+	// limit must be a whole number from 1 to maxQueryJobsLimit; anything
+	// else is rejected rather than coerced, and the value is not echoed.
 	limit := 50
-	if l, ok := args["limit"].(float64); ok && l >= 1 {
-		limit = int(math.Min(l, maxQueryJobsLimit))
+	if v, present := args["limit"]; present && v != nil {
+		l, ok := toInt(v)
+		if !ok || l < 1 || l > maxQueryJobsLimit {
+			return "", fmt.Errorf("invalid arguments for tool query_jobs: limit must be an integer from 1 to %d; nothing was executed", maxQueryJobsLimit)
+		}
+		limit = l
 	}
 
 	// Filter server-side so limit, has_more and total apply to the

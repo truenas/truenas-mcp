@@ -26,7 +26,7 @@ func TestTextNarrowRedaction(t *testing.T) {
 		{"JSON-like pair with space", `{"password": "FAKE pw", "other": "x"}`, `{"password": "` + Marker + `", "other": "x"}`},
 		{"URL userinfo", "x https://user:FAKE@host/path other=x", "x https://user:" + Marker + "@host/path other=x"},
 		{"URL userinfo with @ in the password", "x https://user:FA@KE@host other=x", "x https://user:" + Marker + "@host other=x"},
-		{"query parameter", "GET /a?token=FAKE&page=2 other=x", "GET /a?token=" + Marker + "&page=2 other=x"},
+		{"query parameter", "GET /a?token=FAKE&page=2 other=x", "GET /a?token=" + Marker},
 		{"--password value", "cmd --password FAKE other=x", "cmd --password " + Marker + " other=x"},
 		{"empty value at the end of the line", "x password=\nnext", "x password=\nnext"},
 
@@ -76,7 +76,7 @@ func TestTextNarrowRedaction(t *testing.T) {
 		{"auth scheme", "x authorization=Bearer FAKE-token x=1", "x authorization=Bearer " + Marker},
 		{"auth scheme, key: value", "x password: Basic FAKE x: 1", "x password: Basic " + Marker},
 		{"query string, then a pair after a space", "GET /a?token=FAKE&page=2 x=1&token=FAKE2 more=y",
-			"GET /a?token=" + Marker + "&page=2 x=1&token=" + Marker},
+			"GET /a?token=" + Marker},
 
 		// Whole strings of the form NAME=VALUE (environment entries, env-file
 		// lines) are redacted to their end.
@@ -103,13 +103,12 @@ func TestTextNarrowRedaction(t *testing.T) {
 
 // Secrets in the property test are made of secretChars only; the text around
 // them has none of those letters or digits (and neither has Marker), so any
-// of them in the output is a leak of part of the secret. '&' is left out: an
-// unquoted value ends at "&name=" so that query strings
-// (?token=S3CR3T&page=2) keep their other parameters, so a secret written
-// unquoted with "&name=" in it is only partly redacted (a known gap).
+// of them in the output is a leak of part of the secret. '&' is included:
+// "&name=" does not end an unquoted value, so a secret such as "ab&cd=ef"
+// is redacted as a whole.
 const (
 	secretLetters = "QZXJKVY79"
-	secretChars   = secretLetters + `QZXJ79 ,;:=@/#}){%+-.!"'\` + "\t\v"
+	secretChars   = secretLetters + `QZXJ79 ,;:=@/#}){%+-.!"'\&` + "\t\v"
 )
 
 var narrowKeys = []string{
@@ -127,6 +126,7 @@ var narrowSuffixes = []string{
 	" trailing words", " other", "\nnext=1", "\r\nnext: line", " --verbose",
 	" other=x more=y", " user:pw@host", " http://host/", ")", "}", " ",
 	" k= hotel", " my: rex", "\vother=x", "\tb=c", " cd=ef", "\nTZ=UTC",
+	"&page=2", "&page=2 other=x", "&b=c",
 }
 
 // encodings write a secret as a value: each returns the encoded value, or
