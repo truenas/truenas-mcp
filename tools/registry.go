@@ -4027,6 +4027,9 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 		"app_version": version,
 	})
 	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(client, appName))
+		}
 		return "", fmt.Errorf("failed to get upgrade summary: %w", err)
 	}
 
@@ -4045,6 +4048,9 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 
 	result, err := client.Call("app.upgrade", appName, upgradeOptions)
 	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(client, appName))
+		}
 		return "", fmt.Errorf("failed to upgrade app: %w", err)
 	}
 
@@ -4154,6 +4160,9 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		"app_version": version,
 	})
 	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			return nil, noUpgradeAvailableError(appName, version, currentApp)
+		}
 		return nil, fmt.Errorf("failed to get upgrade summary: %w", err)
 	}
 

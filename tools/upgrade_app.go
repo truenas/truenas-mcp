@@ -1,12 +1,15 @@
 package tools
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
 	"time"
 
 	"github.com/truenas/truenas-mcp/tasks"
+	"github.com/truenas/truenas-mcp/truenas"
 )
 
 const (
@@ -155,4 +158,48 @@ func normalizeUpgradeSummary(summary interface{}) interface{} {
 		return out
 	}
 	return summary
+}
+
+// isNoUpgradeAvailable reports whether err is the middleware's "No upgrade
+// available" error. app.upgrade_summary (and app.upgrade) raise it as EFAULT,
+// with a traceback, when the app has no newer version to upgrade to (on some
+// TrueNAS versions also when the app's catalog entry is missing). A requested
+// version that is not an upgrade is a separate validation error.
+func isNoUpgradeAvailable(err error) bool {
+	var apiErr *truenas.APICallError
+	return errors.As(err, &apiErr) && strings.Contains(strings.ToLower(apiErr.Message), "no upgrade available")
+}
+
+// noUpgradeAvailableError is the short error returned instead of the raw
+// middleware error (request block and traceback) when there is no upgrade to
+// apply. It names the installed version when app (an app.query entry) is
+// known.
+func noUpgradeAvailableError(appName, version string, app map[string]interface{}) error {
+	var b strings.Builder
+	if version == "latest" {
+		fmt.Fprintf(&b, "no upgrade available for app %q", appName)
+	} else {
+		fmt.Fprintf(&b, "no upgrade to version %q is available for app %q", version, appName)
+	}
+	if installed, _ := app["human_version"].(string); strings.TrimSpace(installed) != "" {
+		fmt.Fprintf(&b, " (installed version %s)", strings.TrimSpace(installed))
+	}
+	b.WriteString("; nothing was changed")
+	return errors.New(b.String())
+}
+
+// queryAppQuietly returns the app.query entry for appName, or nil if the
+// query fails or finds nothing. It is only used to add detail to a message.
+func queryAppQuietly(client *truenas.Client, appName string) map[string]interface{} {
+	result, err := client.Call("app.query", []interface{}{
+		[]interface{}{"name", "=", appName},
+	})
+	if err != nil {
+		return nil
+	}
+	var apps []map[string]interface{}
+	if err := json.Unmarshal(result, &apps); err != nil || len(apps) == 0 {
+		return nil
+	}
+	return apps[0]
 }
