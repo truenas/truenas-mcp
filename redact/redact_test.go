@@ -545,7 +545,7 @@ func TestTextStyles(t *testing.T) {
 		{`{'password': "it's fake-user-pw"}`, `{'password': "` + Marker + `"}`},
 		{"Credentials(password='fake-user-pw')", "Credentials(password='" + Marker + "')"},
 		{"connect postgres://app:fake-db-pw@192.0.2.5:5432/db failed", "connect postgres://app:" + Marker + "@192.0.2.5:5432/db failed"},
-		{"https://192.0.2.1:8443/api?token=fake-oauth-token&x=1", "https://192.0.2.1:8443/api?token=" + Marker + "&x=1"},
+		{"https://192.0.2.1:8443/api?token=fake-oauth-token&x=1", "https://192.0.2.1:8443/api?token=" + Marker}, // a secret can contain "&x="
 		{"see https://example.com:443/path and passthrough: on", "see https://example.com:443/path and passthrough: on"},
 		{"Basic configuration saved", "Basic configuration saved"},
 		{"pool: tank, state: ONLINE", "pool: tank, state: ONLINE"},
@@ -640,7 +640,7 @@ func TestTextBareValueExtent(t *testing.T) {
 		{"separator does not cross lines", "password:\nfake is not on this line", "password:\nfake is not on this line"},
 		{"delimiters inside the value", "secret: a,b;c}d)e, user: bob", "secret: " + Marker},
 		{"trailing whitespace kept", "token: fake-oauth-token  \nok", "token: " + Marker + "  \nok"},
-		{"query string stops at next param", "GET /api?token=fake-oauth-token&page=2 HTTP/1.1", "GET /api?token=" + Marker + "&page=2 HTTP/1.1"},
+		{"query string runs to the end of the line", "GET /api?token=fake-oauth-token&page=2 HTTP/1.1", "GET /api?token=" + Marker},
 		{"auth scheme kept", "Authorization: Bearer fake-oauth-token extra", "Authorization: Bearer " + Marker},
 		{"cli flag", "--password=fake-user-pw --verbose", "--password=" + Marker},
 		{"no sensitive key", "pool: tank, state: ONLINE\nscan: none requested", "pool: tank, state: ONLINE\nscan: none requested"},
@@ -687,7 +687,7 @@ func TestTextLongLinesLinear(t *testing.T) {
 		{"URL query", line("https://h/?", "a=1&"), nil},
 		{"URL query with token params", line("https://h/?", "token=abc&"),
 			func(out string) bool {
-				return !strings.Contains(out, "=abc") && strings.Count(out, "token="+Marker) == (size-11)/10
+				return out == "https://h/?token="+Marker
 			}},
 		{"repeated a://u:", line("", "a://u:"), nil},
 		{"repeated sensitive quoted pairs", line("", "pw='x' "),

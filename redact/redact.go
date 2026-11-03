@@ -308,10 +308,7 @@ var (
 	// nextPair matches the start of the next key=value / key: value pair on
 	// a line (whitespace, ',', ';' or '(' before the key). A quoted value
 	// ends at the last suitable closing quote before it.
-	nextPair = regexp.MustCompile(`[\s,;(]+[A-Za-z_][A-Za-z0-9_.-]{0,63}[ \t]*[=:]`)
-	// queryNext matches the start of the next query-string parameter
-	// (&name=), where an unquoted value inside a URL ends.
-	queryNext = regexp.MustCompile(`&[A-Za-z_][A-Za-z0-9_.-]*=`)
+	nextPair  = regexp.MustCompile(`[\s,;(]+[A-Za-z_][A-Za-z0-9_.-]{0,63}[ \t]*[=:]`)
 	quotedKey = regexp.MustCompile(`^["']([^"'\\\n]{1,64})["']`)
 )
 
@@ -386,9 +383,9 @@ func Text(s string) string {
 //     excluded. ',', ';', '}' and ')' do not end it: they also occur inside
 //     secrets and error text ("Invalid value, got 'X'"), so the rest of the
 //     line is redacted instead. This can over-redact later pairs on the same
-//     line, which is preferred to leaking.
-//   - The one exception is a URL query string: the value ends before
-//     "&name=", so later parameters are checked on their own.
+//     line, which is preferred to leaking. '&' does not end it either, not
+//     even in a URL query string: a secret can contain "&name="
+//     (password=a&b=c), so the later parameters are redacted too.
 //   - A value never crosses a newline, so following lines stay visible.
 //
 // An auth scheme word at the start of the value is kept
@@ -438,11 +435,7 @@ func redactBarePairs(s string) string {
 				continue
 			}
 		}
-		val := s[valStart:lineEnd]
-		if loc := queryNext.FindStringIndex(val); loc != nil {
-			val = val[:loc[0]]
-		}
-		val = strings.TrimRight(val, " \t")
+		val := strings.TrimRight(s[valStart:lineEnd], " \t")
 		b.WriteString(redactUnquoted(val))
 		pos = valStart + len(val)
 	}
