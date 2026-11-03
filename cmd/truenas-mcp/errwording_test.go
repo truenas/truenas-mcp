@@ -41,6 +41,13 @@ func TestStartupErrorDistinguishesConnectFromAuth(t *testing.T) {
 		t.Errorf("first connect failure worded as %q", got)
 	}
 
+	// A SOCKS5 failure reply keeps the no-login context and the explanation.
+	socks := "connecting via proxy socks5h://proxy.example.com:1080 from --proxy: the proxy is reachable but could not connect to the TrueNAS host truenas.example.com:443 through it. " +
+		"Check the TrueNAS host address and port, that the TrueNAS system is up, and that the proxy's network (for example a VPN) can route to it (SOCKS5 proxy reply: general failure)"
+	if got := startupAuthError(&truenas.ConnectError{Err: errors.New(socks)}); got != "Could not connect to TrueNAS (no login was attempted): "+socks {
+		t.Errorf("SOCKS5 reply failure worded as %q", got)
+	}
+
 	bad := &truenas.EndpointError{Err: errors.New("bad port")}
 	if got := startupAuthError(bad); got != "invalid TrueNAS host or URL: bad port" {
 		t.Errorf("endpoint error worded as %q", got)
