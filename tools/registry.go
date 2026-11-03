@@ -1082,13 +1082,18 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["list_alerts"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "list_alerts",
-			Description: "List system alerts with optional filtering by dismissed status",
+			Description: "List system alerts. By default only active alerts are listed: dismissed alerts are excluded. Set include_dismissed=true to list all alerts, or dismissed=true to list only dismissed ones.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"dismissed": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Filter by dismissed status (true=dismissed only, false=active only, omit=all)",
+						"description": "Filter by dismissed status (true=dismissed only, false=active only, omit=active only unless include_dismissed=true)",
+					},
+					"include_dismissed": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Also list dismissed alerts when dismissed is not set (default: false, dismissed alerts are excluded)",
+						"default":     false,
 					},
 				},
 			},
@@ -2170,7 +2175,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 	}
 
 	// Only active alerts are listed; dismissed ones are only counted
-	// (list_alerts returns them).
+	// (list_alerts returns them with include_dismissed=true or dismissed=true).
 	activeAlertList := make([]map[string]interface{}, 0, activeAlerts)
 	for _, alert := range alerts {
 		if dismissed, _ := alert["dismissed"].(bool); !dismissed {
@@ -3073,11 +3078,26 @@ func handleListAlerts(client *truenas.Client, args map[string]interface{}) (stri
 		return "", fmt.Errorf("failed to parse alerts: %w", err)
 	}
 
-	// Post-filter by dismissed status if requested
-	if dismissed, ok := args["dismissed"].(bool); ok {
+	// Post-filter by dismissed status. An explicit dismissed filter wins;
+	// otherwise dismissed alerts are excluded unless include_dismissed=true.
+	dismissed, hasDismissed := args["dismissed"].(bool)
+	includeDismissed, hasInclude := args["include_dismissed"].(bool)
+	if hasDismissed && hasInclude && dismissed != includeDismissed {
+		return "", fmt.Errorf("dismissed=%t contradicts include_dismissed=%t: set dismissed to filter by status, or include_dismissed=true to list all alerts", dismissed, includeDismissed)
+	}
+	switch {
+	case hasDismissed:
 		filtered := make([]map[string]interface{}, 0)
 		for _, alert := range alerts {
 			if isDismissed, ok := alert["dismissed"].(bool); ok && isDismissed == dismissed {
+				filtered = append(filtered, alert)
+			}
+		}
+		alerts = filtered
+	case !includeDismissed:
+		filtered := make([]map[string]interface{}, 0)
+		for _, alert := range alerts {
+			if isDismissed, _ := alert["dismissed"].(bool); !isDismissed {
 				filtered = append(filtered, alert)
 			}
 		}
