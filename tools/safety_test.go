@@ -196,6 +196,9 @@ func TestReadOnlyHidesAndRefusesWrites(t *testing.T) {
 	}
 	names := listed(r)
 	for name := range r.tools {
+		if readOnlyDryRunTools[name] {
+			continue // listed for dry runs only: see readonly_dryrun_test.go
+		}
 		readOnly := safetyOf(name).Access == Read
 		if names[name] != readOnly {
 			t.Errorf("read-only: %s listed=%v, want %v", name, names[name], readOnly)
