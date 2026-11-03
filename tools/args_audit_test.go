@@ -272,7 +272,7 @@ func TestAuditSeesKnownReads(t *testing.T) {
 		"system_reboot":  {"delay", "dry_run"},
 		"dismiss_alert":  {"uuid", "dry_run"},
 		"create_dataset": {"name", "volblocksize"},
-		"query_jobs":     {"limit"},
+		"query_jobs":     {"limit", "state", "method"},
 	} {
 		read := src.keysRead(src.handlers[tool])
 		for _, key := range want {

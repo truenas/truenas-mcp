@@ -162,7 +162,7 @@ func TestUpgradeTaskJobAppLabelledWhenAppNotFound(t *testing.T) {
 func TestQueryJobsDescriptionAndUpgradeDescription(t *testing.T) {
 	r, _, _ := newUpgradeRegistry(t, upgradeSummaryFixture("x"))
 	want := map[string][]string{
-		"upgrade_app": {"SUCCESS only means the upgrade job finished, not that the app is healthy", "tasks_get or query_apps", "list jobs with query_jobs and find the entry whose id matches the returned job_id"},
+		"upgrade_app": {"SUCCESS only means the upgrade job finished, not that the app is healthy", "tasks_get or query_apps", "list jobs with query_jobs", "find the entry whose id matches the returned job_id"},
 		"query_jobs":  {"SUCCESS means the job finished, not that the app", "tasks_get or query_apps"},
 	}
 	seen := 0
