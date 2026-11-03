@@ -457,6 +457,7 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - Verify API key is valid and has admin permissions
 - "connecting via proxy ... proxy unreachable": the proxy named in the message (and the variable it came from) is not listening; check it, or bypass it with `NO_PROXY` or `--proxy none`
 - "connecting via proxy ... the proxy is reachable but could not connect to the TrueNAS host ...": the SOCKS5 proxy answered but could not open a connection to TrueNAS (the SOCKS5 reply, such as "general failure" or "host unreachable", is shown at the end); check the TrueNAS host and port, that the system is up, and that the proxy's network (for example your tailnet or VPN) can route to it
+- "request too large for the TrueNAS API": TrueNAS accepts at most 64 KiB per API message, so a larger request (for example a very long value in a tool argument) is refused before it is sent and nothing runs; reduce the size of the input. If TrueNAS itself closes the connection for an oversized message (WebSocket close code 1009), the error says so and the next request reconnects
 
 **Certificate Verification Errors** (`x509: certificate signed by unknown authority` or similar):
 - TrueNAS uses a self-signed certificate by default; export it and pass `--tls-ca truenas-cert.pem` (recommended)
