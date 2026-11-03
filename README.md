@@ -456,6 +456,7 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - `HTTP 404` / "TrueNAS 25.04 or later required": the server predates the JSON-RPC API; upgrade TrueNAS
 - Verify API key is valid and has admin permissions
 - "connecting via proxy ... proxy unreachable": the proxy named in the message (and the variable it came from) is not listening; check it, or bypass it with `NO_PROXY` or `--proxy none`
+- "connecting via proxy ... the proxy is reachable but could not connect to the TrueNAS host ...": the SOCKS5 proxy answered but could not open a connection to TrueNAS (the SOCKS5 reply, such as "general failure" or "host unreachable", is shown at the end); check the TrueNAS host and port, that the system is up, and that the proxy's network (for example your tailnet or VPN) can route to it
 
 **Certificate Verification Errors** (`x509: certificate signed by unknown authority` or similar):
 - TrueNAS uses a self-signed certificate by default; export it and pass `--tls-ca truenas-cert.pem` (recommended)
