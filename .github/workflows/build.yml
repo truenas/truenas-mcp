@@ -61,7 +61,7 @@ jobs:
         retention-days: 30
 
     - name: Set version from git
-      run: echo "VERSION=$(git describe --tags --always | sed 's/^v//')" >> $GITHUB_ENV
+      run: echo "VERSION=$(git describe --tags --always --dirty | sed 's/^v//')" >> $GITHUB_ENV
 
     - name: Build for macOS ARM64
       run: GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-darwin-arm64 ./cmd/truenas-mcp
