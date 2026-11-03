@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"runtime/debug"
@@ -271,8 +272,9 @@ func (p *Poller) verifyApp(task *Task) (TaskStatus, string) {
 // starting, which contradicts a task that has since seen the app RUNNING.
 // app_source says where job.app came from; result_truncated and
 // result_size_bytes keep describing the job's own result, which is still not
-// returned in full. If the app could not be read, the job's copy is kept and
-// labelled as such. task.Job is replaced, not modified: stored copies share it.
+// returned in full. If the app could not be read, or app.query no longer
+// lists it, the job's copy (or the last live copy) is kept and labelled as
+// such, and app_checked_at is dropped. task.Job is replaced, not modified: stored copies share it.
 func refreshJobApp(task *Task, h appHealthInfo, err error) {
 	if task.Job == nil {
 		return
@@ -285,13 +287,24 @@ func refreshJobApp(task *Task, h appHealthInfo, err error) {
 		job["app"] = SummarizeApp(h.app)
 		job["app_source"] = "app.query"
 		job["app_checked_at"] = time.Now().UTC().Format(time.RFC3339)
-	} else if _, ok := job["app"]; ok {
-		job["app_source"] = "job result (the live app state could not be read)"
+	} else {
+		// The previous live copy, if any, is no longer current.
 		delete(job, "app_checked_at")
+		if _, ok := job["app"]; ok {
+			if errors.Is(err, errAppNotFound) {
+				job["app_source"] = "job result (app.query no longer lists the app)"
+			} else {
+				job["app_source"] = "job result (the live app state could not be read)"
+			}
+		}
 	}
 	task.Job = FitJobSummary(job)
 	task.Result = task.Job
 }
+
+// errAppNotFound is returned by appHealth when app.query succeeded but listed
+// no app of that name.
+var errAppNotFound = errors.New("not found")
 
 // appHealthInfo is an app's state as seen by the health wait.
 type appHealthInfo struct {
@@ -323,7 +336,7 @@ func (p *Poller) appHealth(appName string) (appHealthInfo, error) {
 		return h, err
 	}
 	if len(apps) == 0 {
-		return h, fmt.Errorf("app %s not found", appName)
+		return h, fmt.Errorf("app %s %w", appName, errAppNotFound)
 	}
 	app := apps[0]
 	h.app = app

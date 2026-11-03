@@ -131,11 +131,38 @@ func TestUpgradeTaskJobAppLabelledWhenNotRefreshed(t *testing.T) {
 	}
 }
 
+// If app.query succeeds but no longer lists the app, the label says so
+// rather than claiming the state could not be read.
+func TestUpgradeTaskJobAppLabelledWhenAppNotFound(t *testing.T) {
+	r, mgr, f := newUpgradeRegistry(t, upgradeSummaryFixture("x"))
+	upgradeJobWithResult(f, appEntry("plex", "DEPLOYING", [2]string{"web", "starting"}))
+	handle := f.handle
+	f.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if method == "app.query" {
+			return []interface{}{}, nil, true
+		}
+		return handle(method, params)
+	}
+
+	id := startUpgrade(t, r, map[string]interface{}{"health_timeout_seconds": 600})["task_id"].(string)
+	mgr.PollNow()
+	job, app := jobApp(t, taskState(t, r, id))
+	if app["state"] != "DEPLOYING" {
+		t.Errorf("job.app.state = %v", app["state"])
+	}
+	if job["app_source"] != "job result (app.query no longer lists the app)" {
+		t.Errorf("app_source = %v", job["app_source"])
+	}
+	if _, ok := job["app_checked_at"]; ok {
+		t.Error("app_checked_at set although the app was not found")
+	}
+}
+
 // upgrade_app and query_jobs say that job SUCCESS is not app health.
 func TestQueryJobsDescriptionAndUpgradeDescription(t *testing.T) {
 	r, _, _ := newUpgradeRegistry(t, upgradeSummaryFixture("x"))
 	want := map[string][]string{
-		"upgrade_app": {"SUCCESS only means the upgrade job finished, not that the app is healthy", "tasks_get or query_apps", "query_jobs"},
+		"upgrade_app": {"SUCCESS only means the upgrade job finished, not that the app is healthy", "tasks_get or query_apps", "list jobs with query_jobs and find the entry whose id matches the returned job_id"},
 		"query_jobs":  {"SUCCESS means the job finished, not that the app", "tasks_get or query_apps"},
 	}
 	seen := 0
@@ -147,6 +174,17 @@ func TestQueryJobsDescriptionAndUpgradeDescription(t *testing.T) {
 		}
 		if want[tool.Name] != nil {
 			seen++
+		}
+		// query_jobs takes no job_id argument, so the restart advice must
+		// not suggest passing one.
+		if tool.Name == "upgrade_app" && strings.Contains(tool.Description, "query_jobs using") {
+			t.Errorf("upgrade_app description suggests a query_jobs job_id argument: %q", tool.Description)
+		}
+		if tool.Name == "query_jobs" {
+			props, _ := tool.InputSchema["properties"].(map[string]interface{})
+			if _, ok := props["job_id"]; ok {
+				t.Error("query_jobs has a job_id argument; update the upgrade_app restart advice")
+			}
 		}
 	}
 	if seen != len(want) {
