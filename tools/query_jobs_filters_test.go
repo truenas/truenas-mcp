@@ -107,9 +107,9 @@ func TestQueryJobsStateAndMethodFilters(t *testing.T) {
 	}
 }
 
-// The method filter keeps the 9999 cap on limit.
+// The method filter works with the largest allowed limit.
 func TestQueryJobsMethodFilterKeepsLimitCap(t *testing.T) {
-	resp, fake := queryJobs(t, numberedJobs(3), 3, map[string]interface{}{"method": "app.upgrade", "limit": 50000.0})
+	resp, fake := queryJobs(t, numberedJobs(3), 3, map[string]interface{}{"method": "app.upgrade", "limit": 9999.0})
 	if resp["limit"] != 9999.0 {
 		t.Errorf("limit = %v, want 9999", resp["limit"])
 	}
@@ -192,6 +192,62 @@ func TestQueryJobsNeverReturnsRawResult(t *testing.T) {
 			if strings.Contains(string(c.Params), "raw_result") || strings.Contains(string(c.Params), "extra") {
 				t.Errorf("%v: core.get_jobs params request extra data: %s", args, c.Params)
 			}
+		}
+	}
+}
+
+// limit must be a whole number from 1 to 9999. Anything else is rejected
+// before anything is sent, like a bad state or method, instead of being
+// silently replaced by the default or clamped; the value is not echoed.
+func TestQueryJobsRejectsBadLimit(t *testing.T) {
+	for _, limit := range []interface{}{
+		0.0, -1.0, -50.0, 1.5, 0.5, 9999.5, 10000.0, 20000.0, 1e300,
+		"abc", "50", "", true, []interface{}{10.0}, map[string]interface{}{"n": 10.0},
+		json.Number("1.5"), json.Number("abc"), json.Number("20000"),
+	} {
+		args := map[string]interface{}{"limit": limit}
+		fake := &fakeMiddleware{handle: jobsHandle(numberedJobs(3), 3)}
+		client, _ := newFakeClientFrom(t, fake)
+		mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
+		_, err := NewRegistry(client, mgr).CallTool("query_jobs", args)
+		mgr.Shutdown()
+		if err == nil {
+			t.Errorf("limit %#v: no error", limit)
+			continue
+		}
+		msg := err.Error()
+		for _, w := range []string{"invalid arguments for tool query_jobs", "limit must be an integer from 1 to 9999", "nothing was executed"} {
+			if !strings.Contains(msg, w) {
+				t.Errorf("limit %#v: error %q lacks %q", limit, msg, w)
+			}
+		}
+		for _, echoed := range []string{"abc", "1.5", "20000", "-1"} {
+			if strings.Contains(msg, echoed) {
+				t.Errorf("limit %#v: error echoes a value: %q", limit, msg)
+			}
+		}
+		if n := len(fake.called("core.get_jobs")); n != 0 {
+			t.Errorf("limit %#v: core.get_jobs called %d times, want 0", limit, n)
+		}
+	}
+}
+
+// Valid limits, including the bounds, an integer-valued JSON number and an
+// explicit null (the default), are accepted and passed through unchanged.
+func TestQueryJobsAcceptsValidLimit(t *testing.T) {
+	for _, c := range []struct {
+		limit interface{}
+		want  float64
+	}{
+		{1.0, 1}, {2.0, 2}, {50.0, 50}, {9999.0, 9999}, {7, 7}, {json.Number("25"), 25}, {nil, 50},
+	} {
+		resp, fake := queryJobs(t, numberedJobs(3), 3, map[string]interface{}{"limit": c.limit})
+		if resp["limit"] != c.want {
+			t.Errorf("limit %#v: reported limit %v, want %v", c.limit, resp["limit"], c.want)
+		}
+		_, opts := jobsQueries(t, fake)
+		if len(opts) == 0 || opts[0]["limit"] != c.want+1 {
+			t.Errorf("limit %#v: options = %v, want limit %v", c.limit, opts, c.want+1)
 		}
 	}
 }
