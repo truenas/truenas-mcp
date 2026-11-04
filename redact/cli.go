@@ -409,8 +409,9 @@ func escapedSeparator(s string, i int) bool {
 }
 
 // wordRunEnd returns the end of the run of unquoted characters at s[i]: up
-// to white space, a quote, or a line continuation, with backslash escapes.
-func wordRunEnd(s string, i int) int {
+// to white space, a quote, or a line continuation, with backslash escapes,
+// and also up to an unquoted command separator if stopAtSep.
+func wordRunEnd(s string, i int, stopAtSep bool) int {
 	j := i
 	for j < len(s) {
 		switch s[j] {
@@ -420,8 +421,14 @@ func wordRunEnd(s string, i int) int {
 			if lineContinuation(s, j) > 0 {
 				return j
 			}
-			if j+1 < len(s) && !isLineEnd(s[j+1]) {
+			if stopAtSep && escapedSeparator(s, j) {
+				j += 2
+			} else if j+1 < len(s) && !isLineEnd(s[j+1]) {
 				j++
+			}
+		default:
+			if stopAtSep && separatorAt(s, j) {
+				return j
 			}
 		}
 		j++
@@ -436,7 +443,7 @@ func shellWordEnd(s string, i int) int {
 	if i < len(s) && (s[i] == '"' || s[i] == '\'') {
 		return quotedEnd(s, i)
 	}
-	return wordRunEnd(s, i)
+	return wordRunEnd(s, i, false)
 }
 
 // quoteIdiom is how a single quote is written inside a single-quoted
@@ -484,24 +491,18 @@ func escapedRunEnd(s string, i, n int, q byte) (end int, closed bool) {
 }
 
 // programWordEnd returns the end of the value of a program's password
-// option at s[i]. It is like shellWordEnd, except that a value that starts
-// with a quote written inside another quoted string (the quote idiom or an
-// escaped quote, \"S 3CR3T\") runs to the matching quote.
+// option at s[i]. It is like shellWordEnd, except that an unquoted value
+// ends at an unquoted command separator (mysql -pA;mysql -pB), and that a
+// value that starts with a quote written inside another quoted string (the
+// quote idiom or an escaped quote, \"S 3CR3T\") runs to the matching quote.
 // If sep is not zero, a value like bob:'S 3CR3T' that has a quote right
 // after the user name and sep is read to the end of that quoted string.
-//
-// An unquoted value does not end at a command separator glued to it
-// ('&', '&&', ';', '|'): sshpass -p ab&cd may be the password "ab&cd"
-// written inside another quoted string (sh -c "...", JSON text), and its
-// end cannot be proven, so the value runs to the end of the word (white
-// space, a quote or the line end). A separator after white space
-// (sshpass -p S3CR3T && ssh host) still ends it.
 func programWordEnd(s string, i int, sep byte) int {
 	end := quotedPartEnd(s, i, true)
 	if end > i {
 		return end
 	}
-	end = wordRunEnd(s, i)
+	end = wordRunEnd(s, i, true)
 	if sep != 0 {
 		// the user name, then sep, then a quoted string
 		// the word is user<sep>, and then a quoted string
@@ -717,9 +718,13 @@ func redactSshpass(s string) string {
 	var b strings.Builder
 	pos, written := 0, 0
 	redact := func(vs, end int) {
-		if vs < written {
-			return // inside a value redacted already
+		// A value read again after an earlier one that ran past this
+		// sshpass (sshpass -vp \rsshpass -vp x) is only redacted from where
+		// that one ended: the part before it is already written.
+		if end <= written {
+			return
 		}
+		vs = max(vs, written)
 		if w := s[vs:end]; w != "" {
 			if r := secretArg(w, 0, metaNone); r != w {
 				b.WriteString(s[written:vs])
@@ -815,9 +820,6 @@ func redactProgramOption(s string, p textProgram) string {
 	pos, written := 0, 0
 	redactAt := func(vs int) int {
 		end := programWordEnd(s, vs, p.sep)
-		if vs < written {
-			return max(end, written) // inside a value redacted already
-		}
 		if w := s[vs:end]; w != "" {
 			if r := secretArg(w, p.sep, metaNone); r != w {
 				b.WriteString(s[written:vs])
@@ -835,8 +837,7 @@ func redactProgramOption(s string, p textProgram) string {
 		// The match ends with the white space that starts the options. The
 		// command ends at the first '|', ';', '&' or newline outside quotes.
 		// An unquoted value that runs past one (-pA;b) is redacted whole,
-		// and the command is then read on from the end of that value, as
-		// the separator may have been part of it.
+		// and ends the command.
 		pos += m[1] - 1
 		cmdEnd := commandEnd(s, pos)
 		for {
@@ -847,7 +848,7 @@ func redactProgramOption(s string, p textProgram) string {
 			next := pos + om[1]
 			pos = max(redactAt(next-p.back), next)
 			if pos > cmdEnd {
-				cmdEnd = commandEnd(s, pos)
+				break
 			}
 		}
 		pos = max(pos, cmdEnd)
@@ -857,4 +858,66 @@ func redactProgramOption(s string, p textProgram) string {
 	}
 	b.WriteString(s[written:])
 	return b.String()
+}
+
+// redactGluedTails widens each Marker that is directly followed by a
+// command separator ('&', ';', '|') to the end of the shell word. The
+// scanners above cut an unquoted secret at a separator glued to it, so that
+// the text after it is still read as a new command (mysql -pA;ipmitool -P B)
+// and as key/value pairs (mysql -pA;password=B), and each of those is
+// redacted as on its own. But the separator may be part of the secret
+// (sshpass -p ab&cd), whose end therefore cannot be proven, so the rest of
+// the word is redacted too, once every other pass has run: white space or
+// the line end ends it, and quoted parts glued to it are part of it. It
+// runs last, on the output of all passes, so no pass loses a key or a
+// program name to it.
+func redactGluedTails(s string) string {
+	if !strings.Contains(s, Marker) {
+		return s
+	}
+	var b strings.Builder
+	pos, written := 0, 0
+	for {
+		k := strings.Index(s[pos:], Marker)
+		if k < 0 {
+			break
+		}
+		i := pos + k + len(Marker)
+		pos = i
+		if i >= len(s) || (s[i] != '&' && s[i] != ';' && s[i] != '|') {
+			continue
+		}
+		end := gluedWordEnd(s, i)
+		b.WriteString(s[written:i])
+		written, pos = end, end
+	}
+	if written == 0 {
+		return s
+	}
+	b.WriteString(s[written:])
+	return b.String()
+}
+
+// gluedWordEnd returns the end of the shell word that continues at s[i]: up
+// to white space, a line continuation or the line end, with quoted strings
+// (an unclosed one runs to the line end) and backslash escapes in it.
+func gluedWordEnd(s string, i int) int {
+	for i < len(s) {
+		switch c := s[i]; c {
+		case ' ', '\t', '\n', '\r':
+			return i
+		case '"', '\'':
+			i = quotedEnd(s, i)
+			continue
+		case '\\':
+			if lineContinuation(s, i) > 0 {
+				return i
+			}
+			if i+1 < len(s) && !isLineEnd(s[i+1]) {
+				i++
+			}
+		}
+		i++
+	}
+	return i
 }

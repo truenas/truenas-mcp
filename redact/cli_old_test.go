@@ -91,6 +91,12 @@ func oldRedactSshpass(s string) string {
 	var b strings.Builder
 	pos, written := 0, 0
 	redact := func(vs, end int) {
+		// The guard from the fix of the same panic in cli.go (main panics
+		// on sshpass -vp \rsshpass -vp x), so that the reference runs.
+		if end <= written {
+			return
+		}
+		vs = max(vs, written)
 		if w := s[vs:end]; w != "" {
 			if r := oldSecretArg(w, 0, metaNone); r != w {
 				b.WriteString(s[written:vs])
@@ -300,4 +306,56 @@ func oldWordRunEnd(s string, i int, stopAtSep bool) int {
 		j++
 	}
 	return j
+}
+
+// mainText264 is a frozen copy of Text as it is on main at 264e605, with the
+// frozen CLI scanner above. The differential compares the full Text output
+// with it, so a CLI marker that hides a key or a program name from a later
+// pass is caught too.
+func mainText264(s string) string {
+	s = pemPrivateKey.ReplaceAllLiteralString(s, Marker)
+	s = urlUserinfo.ReplaceAllString(s, "${1}"+Marker+"@")
+	if m := envPair.FindStringSubmatch(s); m != nil {
+		name := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[1]), "="))
+		sens, meta := classifyKey(name)
+		if sens && isRedactable(m[2]) && !scalarAt(m[2], 0, meta) {
+			return m[1] + Marker
+		}
+	}
+	s = authHeader.ReplaceAllString(s, "${1}${2} "+Marker)
+	s = bearerToken.ReplaceAllString(s, "${1}"+Marker)
+	// Before the quoted pairs, which would redact a sensitive-looking name
+	// ('key': 'DB_PASS') that these passes need to see.
+	s = oldRedactOptions(s)
+	s = redactYAML(s)
+	s = redactFlowPairs(s)
+	s = quotedPair.ReplaceAllStringFunc(s, func(m string) string {
+		sub := quotedPair.FindStringSubmatch(m)
+		key := quotedKey.FindStringSubmatch(sub[1])
+		if key == nil {
+			return m
+		}
+		sens, meta := classifyKey(key[1])
+		if !sens {
+			return m
+		}
+		if strings.HasPrefix(m[len(sub[1]):], `"`) {
+			if !isRedactable(sub[2]) || meta.visible(sub[2]) {
+				return m
+			}
+			return sub[1] + `"` + Marker + `"`
+		}
+		if !isRedactable(sub[3]) || meta.visible(sub[3]) {
+			return m
+		}
+		return sub[1] + `'` + Marker + `'`
+	})
+	s = escapedPair.ReplaceAllStringFunc(s, func(m string) string {
+		sub := escapedPair.FindStringSubmatch(m)
+		if sens, meta := classifyKey(sub[2]); !sens || !isRedactable(sub[3]) || meta.visible(sub[3]) {
+			return m
+		}
+		return sub[1] + `\"` + Marker + `\"`
+	})
+	return redactBarePairs(s)
 }

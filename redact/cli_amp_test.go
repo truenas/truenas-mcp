@@ -44,6 +44,18 @@ func TestCLISeparatorInSecret(t *testing.T) {
 		{"PASSWORD=ab&cd x", "PASSWORD=" + M},
 		{"x DB_PASSWORD=ab;cd y", "x DB_PASSWORD=" + M},
 		{"x DB_PASSWORD='ab|cd' y", "x DB_PASSWORD='" + M + "' y"},
+		// A key or another program after the glued separator is still
+		// redacted as on its own, then the whole word is (review of #91).
+		{"mysql -phunter2;password=s3cret more", "mysql -p" + M},
+		{`mysql -phunter2;password="s3cret more" db`, "mysql -p" + M + " db"},
+		{"curl -u bob:hunter2;secret: s3cret more", "curl -u bob:" + M + " " + M},
+		{"mysql -phunter2|ipmitool -P 's3cret more' chassis", "mysql -p" + M + " -P '" + M + "' chassis"},
+		{"mysql -phunter2;curl -u bob:s3cret|more x", "mysql -p" + M + " -u bob:" + M + " x"},
+		{"sshpass -p hunter2&cd  -pbob:ipmitool -P s3cret", "sshpass -p " + M + "  -pbob:ipmitool -P " + M},
+		{"sshpass -p a&cd  ", "sshpass -p " + M + "  "},
+		{`mysql -pab;"cd ef" x`, "mysql -p" + M + " x"},
+		// Found by FuzzCLIHidesAtLeastOld: this panicked on main.
+		{"sshpass -vp \rsshpass -vp x", "sshpass -vp \r" + M + " -vp " + M},
 	})
 }
 
@@ -141,16 +153,18 @@ func FuzzCLISeparatorNeverLeaks(f *testing.F) {
 	})
 }
 
-// The differential tests compare redactOptions with oldRedactOptions (see
-// cli_old_test.go): redactOptions must hide at least what the old scanner
-// hides (hidesMore, see main_diff_test.go), and may only hide more.
+// The differential tests compare Text with mainText264, main's Text (and
+// redactOptions with oldRedactOptions; see cli_old_test.go): each must hide
+// at least what main hides (hidesMore, see main_diff_test.go), and may only
+// hide more. Comparing the full Text also catches a CLI marker that hides a
+// key (;password=) or a program name (;ipmitool) from the later passes.
 
 var cliDiffTokens = []string{
 	"sshpass", "sshpass ", "mysql ", "curl ", "smbclient ", "ipmitool ", "ssh ", "-p", "-p ",
 	"-vp ", "-e ", "-f ", "-u ", "-U ", "-P ", "--password", "--password=", "--password ",
 	"--no-password ", "bob:", "bob%", "ab", "cd", "S3CR3T", "&", "&&", ";", "|", "||", "|&",
 	"2>&1 ", ">&", " ", "  ", "\t", "\n", "\r", "\\\n", "'", `"`, `\"`, `'\''`, "\\", "db",
-	"h", "x=1", "PASSWORD=", "#",
+	"h", "x=1", "PASSWORD=", "#", "password=", "secret: ", "token=", "s3cret more", "more",
 }
 
 func randomCLILine(r *rand.Rand) string {
@@ -163,9 +177,11 @@ func randomCLILine(r *rand.Rand) string {
 
 func checkCLIDiff(t *testing.T, in string) {
 	t.Helper()
-	got, old := redactOptions(in), oldRedactOptions(in)
-	if got != old && !hidesMore(got, old) {
+	if got, old := redactOptions(in), oldRedactOptions(in); got != old && !hidesMore(got, old) {
 		t.Errorf("redactOptions(%q) shows something the old scanner redacts\n got %q\n old %q", in, got, old)
+	}
+	if got, old := Text(in), mainText264(in); got != old && !hidesMore(got, old) {
+		t.Errorf("Text(%q) shows something main's Text redacts\n got %q\n old %q", in, got, old)
 	}
 }
 
@@ -175,6 +191,11 @@ func TestCLIHidesAtLeastOld(t *testing.T) {
 		"mysql -pab;grep -px", "curl -u a:b;curl -u c:d", "sshpass -p ab & sshpass -p cd x",
 		"mysql -pab|mysql -pcd|mysql -pef", "sshpass -f /a;b -p cd ssh h",
 		"cmd --password ab&cd y", "cmd --password ab;cd y", "cmd --password 'ab|cd' y",
+		// A key or another program after a glued separator (review of #91).
+		"mysql -phunter2;password=s3cret more", `mysql -phunter2;password="s3cret more" db`,
+		"curl -u bob:hunter2;secret: s3cret more", "mysql -phunter2|ipmitool -P 's3cret more' chassis",
+		"mysql -phunter2;curl -u bob:s3cret|more x", "sshpass -p hunter2&cd  -pbob:ipmitool -P s3cret",
+		"sshpass -p a&cd  ", `mysql -pab;"cd ef" x`,
 	} {
 		checkCLIDiff(t, in)
 	}

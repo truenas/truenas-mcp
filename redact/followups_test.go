@@ -25,7 +25,10 @@ func checkText(t *testing.T, cases []struct{ in, want string }) {
 		if got := Text(c.in); got != c.want {
 			t.Errorf("Text(%q)\n got %q\nwant %q", c.in, got, c.want)
 		}
-		if again := Text(c.want); again != c.want {
+		// Text on its own output may only hide more: a glued tail that held
+		// a program name (-pA;grep -px -> -p[REDACTED] -px) leaves the next
+		// options under the first program, which reads -px as a password.
+		if again := Text(c.want); again != c.want && !hidesMore(again, c.want) {
 			t.Errorf("Text not idempotent on %q: %q", c.want, again)
 		}
 	}
@@ -594,7 +597,7 @@ func TestTextQuotedSeparatorsFollowUps(t *testing.T) {
 		{"mysql -pfake-db-pw;mysql -pfake-user-pw", "mysql -p" + Marker + " -p" + Marker},
 		{"mysql -pfake-db-pw|mysql -pfake-user-pw", "mysql -p" + Marker + " -p" + Marker},
 		{"mysql -pfake-db-pw&&mysql -pfake-user-pw", "mysql -p" + Marker + " -p" + Marker},
-		{"mysql -pfake-db-pw;grep -px", "mysql -p" + Marker + " -p" + Marker},
+		{"mysql -pfake-db-pw;grep -px", "mysql -p" + Marker + " -px"},
 		{"curl -u a:fake-user-pw;curl -u b:fake-db-pw", "curl -u a:" + Marker + " -u b:" + Marker},
 		{"ipmitool -P fake-user-pw;ipmitool -P fake-db-pw", "ipmitool -P " + Marker + " -P " + Marker},
 		{"sshpass -p fake-ssh-pw;sshpass -p fake-user-pw ssh h", "sshpass -p " + Marker + " -p " + Marker + " ssh h"},
