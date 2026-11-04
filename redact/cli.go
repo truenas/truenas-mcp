@@ -718,6 +718,13 @@ func redactSshpass(s string) string {
 	var b strings.Builder
 	pos, written := 0, 0
 	redact := func(vs, end int) {
+		// A value read again after an earlier one that ran past this
+		// sshpass (sshpass -vp \rsshpass -vp x) is only redacted from where
+		// that one ended: the part before it is already written.
+		if end <= written {
+			return
+		}
+		vs = max(vs, written)
 		if w := s[vs:end]; w != "" {
 			if r := secretArg(w, 0, metaNone); r != w {
 				b.WriteString(s[written:vs])
@@ -851,4 +858,66 @@ func redactProgramOption(s string, p textProgram) string {
 	}
 	b.WriteString(s[written:])
 	return b.String()
+}
+
+// redactGluedTails widens each Marker that is directly followed by a
+// command separator ('&', ';', '|') to the end of the shell word. The
+// scanners above cut an unquoted secret at a separator glued to it, so that
+// the text after it is still read as a new command (mysql -pA;ipmitool -P B)
+// and as key/value pairs (mysql -pA;password=B), and each of those is
+// redacted as on its own. But the separator may be part of the secret
+// (sshpass -p ab&cd), whose end therefore cannot be proven, so the rest of
+// the word is redacted too, once every other pass has run: white space or
+// the line end ends it, and quoted parts glued to it are part of it. It
+// runs last, on the output of all passes, so no pass loses a key or a
+// program name to it.
+func redactGluedTails(s string) string {
+	if !strings.Contains(s, Marker) {
+		return s
+	}
+	var b strings.Builder
+	pos, written := 0, 0
+	for {
+		k := strings.Index(s[pos:], Marker)
+		if k < 0 {
+			break
+		}
+		i := pos + k + len(Marker)
+		pos = i
+		if i >= len(s) || (s[i] != '&' && s[i] != ';' && s[i] != '|') {
+			continue
+		}
+		end := gluedWordEnd(s, i)
+		b.WriteString(s[written:i])
+		written, pos = end, end
+	}
+	if written == 0 {
+		return s
+	}
+	b.WriteString(s[written:])
+	return b.String()
+}
+
+// gluedWordEnd returns the end of the shell word that continues at s[i]: up
+// to white space, a line continuation or the line end, with quoted strings
+// (an unclosed one runs to the line end) and backslash escapes in it.
+func gluedWordEnd(s string, i int) int {
+	for i < len(s) {
+		switch c := s[i]; c {
+		case ' ', '\t', '\n', '\r':
+			return i
+		case '"', '\'':
+			i = quotedEnd(s, i)
+			continue
+		case '\\':
+			if lineContinuation(s, i) > 0 {
+				return i
+			}
+			if i+1 < len(s) && !isLineEnd(s[i+1]) {
+				i++
+			}
+		}
+		i++
+	}
+	return i
 }

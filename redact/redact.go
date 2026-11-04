@@ -365,7 +365,7 @@ func Text(s string) string {
 		}
 		return sub[1] + `\"` + Marker + `\"`
 	})
-	return redactBarePairs(s)
+	return redactGluedTails(redactBarePairs(s))
 }
 
 // redactBarePairs redacts the values of key=value / key: value pairs with a

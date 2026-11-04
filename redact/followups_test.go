@@ -25,7 +25,10 @@ func checkText(t *testing.T, cases []struct{ in, want string }) {
 		if got := Text(c.in); got != c.want {
 			t.Errorf("Text(%q)\n got %q\nwant %q", c.in, got, c.want)
 		}
-		if again := Text(c.want); again != c.want {
+		// Text on its own output may only hide more: a glued tail that held
+		// a program name (-pA;grep -px -> -p[REDACTED] -px) leaves the next
+		// options under the first program, which reads -px as a password.
+		if again := Text(c.want); again != c.want && !hidesMore(again, c.want) {
 			t.Errorf("Text not idempotent on %q: %q", c.want, again)
 		}
 	}
@@ -588,15 +591,20 @@ func TestTextQuotedSeparatorsFollowUps(t *testing.T) {
 		{"sshpass -e \\\n -p fake-ssh-pw ssh h", "sshpass -e \\\n -p " + Marker + " ssh h"},
 		{"mysql -pfake-db-pw \\\n  db\nmysql -e x\ngrep -px", "mysql -p" + Marker + " \\\n  db\nmysql -e x\ngrep -px"},
 		{"mysql db \\\n\ngrep -px", "mysql db \\\n\ngrep -px"},
-		// A separator glued to the secret ends the value, and the next command is still matched.
-		{"mysql -pfake-db-pw;mysql -pfake-user-pw", "mysql -p" + Marker + ";mysql -p" + Marker},
-		{"mysql -pfake-db-pw|mysql -pfake-user-pw", "mysql -p" + Marker + "|mysql -p" + Marker},
-		{"mysql -pfake-db-pw&&mysql -pfake-user-pw", "mysql -p" + Marker + "&&mysql -p" + Marker},
-		{"mysql -pfake-db-pw;grep -px", "mysql -p" + Marker + ";grep -px"},
-		{"curl -u a:fake-user-pw;curl -u b:fake-db-pw", "curl -u a:" + Marker + ";curl -u b:" + Marker},
-		{"ipmitool -P fake-user-pw;ipmitool -P fake-db-pw", "ipmitool -P " + Marker + ";ipmitool -P " + Marker},
-		{"sshpass -p fake-ssh-pw;sshpass -p fake-user-pw ssh h", "sshpass -p " + Marker + ";sshpass -p " + Marker + " ssh h"},
-		{"smbclient -U a%fake-smb-pw;smbclient -U b%fake-db-pw", "smbclient -U a%" + Marker + ";smbclient -U b%" + Marker},
+		// A separator glued to the secret does not end the value: it may be
+		// part of the secret, so the value runs to the end of the word, and
+		// the options after it are still read.
+		{"mysql -pfake-db-pw;mysql -pfake-user-pw", "mysql -p" + Marker + " -p" + Marker},
+		{"mysql -pfake-db-pw|mysql -pfake-user-pw", "mysql -p" + Marker + " -p" + Marker},
+		{"mysql -pfake-db-pw&&mysql -pfake-user-pw", "mysql -p" + Marker + " -p" + Marker},
+		{"mysql -pfake-db-pw;grep -px", "mysql -p" + Marker + " -px"},
+		{"curl -u a:fake-user-pw;curl -u b:fake-db-pw", "curl -u a:" + Marker + " -u b:" + Marker},
+		{"ipmitool -P fake-user-pw;ipmitool -P fake-db-pw", "ipmitool -P " + Marker + " -P " + Marker},
+		{"sshpass -p fake-ssh-pw;sshpass -p fake-user-pw ssh h", "sshpass -p " + Marker + " -p " + Marker + " ssh h"},
+		{"smbclient -U a%fake-smb-pw;smbclient -U b%fake-db-pw", "smbclient -U a%" + Marker + " -U b%" + Marker},
+		// A separator after white space still ends it.
+		{"mysql -pfake-db-pw ; mysql -pfake-user-pw", "mysql -p" + Marker + " ; mysql -p" + Marker},
+		{"mysql -pfake-db-pw && grep -px", "mysql -p" + Marker + " && grep -px"},
 		// Redirections do not end the command.
 		{"mysql -e x 2>&1 -pfake-db-pw", "mysql -e x 2>&1 -p" + Marker},
 		{"mysql -e x >&2 -pfake-db-pw", "mysql -e x >&2 -p" + Marker},
