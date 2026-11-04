@@ -146,16 +146,18 @@ func markerItems(s string) []int {
 }
 
 // hidesMore reports whether got can be made from old by replacing runs of
-// one or more items of old (visible bytes or markers) with a single Marker.
+// zero or more items of old (visible bytes or markers) with a single Marker.
 // Then every byte old redacts is redacted in got as well, and every byte
 // got shows is shown by old at the same place. It is wildcard matching:
-// each Marker of got matches one or more items of old, and each visible
-// byte of got matches the same visible byte of old.
+// each Marker of got matches any run of items of old, and each visible
+// byte of got matches the same visible byte of old. A Marker that hides
+// nothing (an empty value redacted, as in an unterminated quote at the end
+// of a line) shows nothing either, so it is accepted.
 func hidesMore(got, old string) bool {
-	var p []int // pattern: a Marker of got becomes "any item" (-2) then "any run" (-3)
+	var p []int // pattern: a Marker of got becomes "any run" (-3)
 	for _, it := range markerItems(got) {
 		if it == -1 {
-			p = append(p, -2, -3)
+			p = append(p, -3)
 		} else {
 			p = append(p, it)
 		}
@@ -164,7 +166,7 @@ func hidesMore(got, old string) bool {
 	i, j, star, mark := 0, 0, -1, 0
 	for i < len(t) {
 		switch {
-		case j < len(p) && (p[j] == -2 || p[j] == t[i]):
+		case j < len(p) && p[j] == t[i]:
 			i++
 			j++
 		case j < len(p) && p[j] == -3:
@@ -230,9 +232,10 @@ func TestHidesMore(t *testing.T) {
 		{"a=" + M + " b=c", "a=" + M, false},      // shows bytes old redacts
 		{"a=" + M + "&b=c", "a=" + M, false},      // the old narrowing at &name=
 		{"a=x", "a=" + M, false},                  // shows the secret
-		{"a=" + M + M, "a=" + M, false},           // two markers for one
+		{"a=" + M + M, "a=" + M, true},            // an extra marker hides nothing
 		{"a=" + M + " y", "a=" + M + " z", false}, // different visible byte
-		{"a=" + M, "a=", false},                   // a marker must hide something
+		{"a=" + M, "a=", true},                    // nor does a marker on an empty value
+		{M + "x", "x" + M, false},                 // a visible byte moved
 		{"", "", true},
 	}
 	for _, c := range cases {
