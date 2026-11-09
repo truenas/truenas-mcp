@@ -212,7 +212,7 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 						"job_id":      int(job["id"].(float64)),
 						"progress":    percent,
 						"description": description,
-						"started":     started.Format(time.RFC3339),
+						"started":     formatInLocation(started, loc),
 					}
 					break
 				}
@@ -239,7 +239,7 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 				if endTime, ok := scan["end_time"].(map[string]interface{}); ok {
 					if endSec, ok := endTime["$date"].(float64); ok {
 						completed := time.Unix(int64(endSec/1000), 0)
-						lastScrub["completed"] = completed.Format(time.RFC3339)
+						lastScrub["completed"] = formatInLocation(completed, loc)
 						lastScrub["days_ago"] = int(time.Since(completed).Hours() / 24)
 					}
 				}
@@ -585,19 +585,19 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 		return nil, fmt.Errorf("failed to parse pool: %w", err)
 	}
 
+	scheduleHuman := formatCronSchedule(scheduleObj)
+	loc, _, assumedUTC := nasTimezone(client)
+
 	var lastScrubDate string
 	if len(pools) > 0 {
 		if scan, ok := pools[0]["scan"].(map[string]interface{}); ok {
 			if endTime, ok := scan["end_time"].(map[string]interface{}); ok {
 				if endSec, ok := endTime["$date"].(float64); ok {
-					lastScrubDate = time.Unix(int64(endSec/1000), 0).Format(time.RFC3339)
+					lastScrubDate = formatInLocation(time.Unix(int64(endSec/1000), 0), loc)
 				}
 			}
 		}
 	}
-
-	scheduleHuman := formatCronSchedule(scheduleObj)
-	loc, _, assumedUTC := nasTimezone(client)
 	firstRun := calculateNextRun(scheduleObj, time.Now(), loc)
 	scrubEstimate, scrubEstimateNote, hasScrubEstimate := estimateNextScrub(scheduleObj, time.Now(), loc, enabled, threshold, lastFinishedScrubEnd(poolInfo), scrubScanRunning(poolInfo))
 	estimatedHours := estimateScrubDuration(int64(poolInfo["size"].(float64)))
@@ -739,6 +739,8 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 		return nil, fmt.Errorf("failed to parse pool: %w", err)
 	}
 
+	loc, _, _ := nasTimezone(client)
+
 	var lastScrub map[string]interface{}
 	if len(pools) > 0 {
 		if scan, ok := pools[0]["scan"].(map[string]interface{}); ok {
@@ -749,7 +751,7 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 			if endTime, ok := scan["end_time"].(map[string]interface{}); ok {
 				if endSec, ok := endTime["$date"].(float64); ok {
 					completed := time.Unix(int64(endSec/1000), 0)
-					lastScrub["date"] = completed.Format(time.RFC3339)
+					lastScrub["date"] = formatInLocation(completed, loc)
 					lastScrub["days_ago"] = int(time.Since(completed).Hours() / 24)
 				}
 			}
@@ -968,6 +970,16 @@ const nextRunTimezoneNote = "NAS timezone unavailable; next_run computed in UTC"
 // Both TrueNAS 25.x and 27.x expose timezone as an IANA name on that call
 // (same value as system.general.config). On any failure, falls back to UTC
 // with assumedUTC=true so callers can surface an honest note.
+// formatInLocation renders t as RFC3339 in loc (NAS zone, or the UTC
+// fallback from nasTimezone). Same instant as time.Unix(...).Format would
+// show, but with the NAS offset instead of the MCP host zone.
+func formatInLocation(t time.Time, loc *time.Location) string {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return t.In(loc).Format(time.RFC3339)
+}
+
 func nasTimezone(client *truenas.Client) (loc *time.Location, name string, assumedUTC bool) {
 	result, err := client.Call("system.info")
 	if err != nil {
