@@ -23,6 +23,30 @@ func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface
 		return "", fmt.Errorf("failed to parse schedules: %w", err)
 	}
 
+	// Pool scan end times are needed for next_scrub_estimate.
+	poolsResult, err := client.Call("pool.query", []interface{}{})
+	if err != nil {
+		return "", fmt.Errorf("failed to query pools: %w", err)
+	}
+
+	var pools []map[string]interface{}
+	if err := json.Unmarshal(poolsResult, &pools); err != nil {
+		return "", fmt.Errorf("failed to parse pools: %w", err)
+	}
+
+	lastEndByPoolID := map[int]*time.Time{}
+	runningByPoolID := map[int]bool{}
+	for _, pool := range pools {
+		poolID, _ := pool["id"].(float64)
+		id := int(poolID)
+		if end := lastFinishedScrubEnd(pool); end != nil {
+			lastEndByPoolID[id] = end
+		}
+		if scrubScanRunning(pool) {
+			runningByPoolID[id] = true
+		}
+	}
+
 	// Apply filters
 	poolFilter, hasPoolFilter := args["pool"].(string)
 	enabledOnly, _ := args["enabled_only"].(bool)
@@ -46,19 +70,10 @@ func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface
 		}
 
 		poolsWithSchedules[poolName] = true
-		simplified := simplifyScrubSchedule(schedule, loc)
+		poolID, _ := schedule["pool"].(float64)
+		id := int(poolID)
+		simplified := simplifyScrubSchedule(schedule, loc, lastEndByPoolID[id], runningByPoolID[id])
 		filtered = append(filtered, simplified)
-	}
-
-	// Get all pools to show pools without schedules
-	poolsResult, err := client.Call("pool.query", []interface{}{})
-	if err != nil {
-		return "", fmt.Errorf("failed to query pools: %w", err)
-	}
-
-	var pools []map[string]interface{}
-	if err := json.Unmarshal(poolsResult, &pools); err != nil {
-		return "", fmt.Errorf("failed to parse pools: %w", err)
 	}
 
 	poolsWithoutSchedules := []string{}
@@ -162,12 +177,14 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 				scheduleHuman := formatCronSchedule(schedObj)
 				nextRun := calculateNextRun(schedObj, time.Now(), loc)
 
-				status["schedule"] = map[string]interface{}{
+				schedOut := map[string]interface{}{
 					"enabled":        enabled,
 					"schedule_human": scheduleHuman,
 					"next_run":       nextRun,
 					"threshold_days": int(threshold),
 				}
+				attachNextScrubEstimate(schedOut, schedObj, enabled, int(threshold), loc, time.Now(), lastFinishedScrubEnd(pool), scrubScanRunning(pool))
+				status["schedule"] = schedOut
 				break
 			}
 		}
@@ -343,6 +360,7 @@ func (r *Registry) handleCreateScrubSchedule(client *truenas.Client, args map[st
 		"next_run":       nextRun,
 		"message":        fmt.Sprintf("Scrub schedule created for pool '%s'. First run: %s", poolName, nextRun),
 	}
+	attachNextScrubEstimate(response, scheduleObj, enabled, threshold, loc, time.Now(), lastFinishedScrubEnd(poolInfo), scrubScanRunning(poolInfo))
 	if assumedUTC {
 		response["next_run_timezone_note"] = nextRunTimezoneNote
 	}
@@ -581,6 +599,7 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 	scheduleHuman := formatCronSchedule(scheduleObj)
 	loc, _, assumedUTC := nasTimezone(client)
 	firstRun := calculateNextRun(scheduleObj, time.Now(), loc)
+	scrubEstimate, scrubEstimateNote, hasScrubEstimate := estimateNextScrub(scheduleObj, time.Now(), loc, enabled, threshold, lastFinishedScrubEnd(poolInfo), scrubScanRunning(poolInfo))
 	estimatedHours := estimateScrubDuration(int64(poolInfo["size"].(float64)))
 
 	warnings := []string{}
@@ -588,7 +607,14 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 		warnings = append(warnings, fmt.Sprintf("ERROR: Pool '%s' already has a scrub schedule (id: %v)", poolName, existingSchedule["id"]))
 		warnings = append(warnings, "Delete the existing schedule first, or choose a different pool")
 	} else {
-		warnings = append(warnings, fmt.Sprintf("First scrub will run on %s", firstRun))
+		warnings = append(warnings, fmt.Sprintf("Next cron tick: %s", firstRun))
+		if hasScrubEstimate {
+			if scrubEstimate != "" {
+				warnings = append(warnings, fmt.Sprintf("Earliest possible scrub: %s (%s)", scrubEstimate, scrubEstimateNote))
+			} else {
+				warnings = append(warnings, scrubEstimateNote)
+			}
+		}
 		warnings = append(warnings, fmt.Sprintf("Scrub may take %d-%d hours based on pool size", estimatedHours, estimatedHours*3))
 		warnings = append(warnings, "Ensure system is powered on at scheduled time")
 
@@ -605,6 +631,19 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 		}
 	}
 
+	actionDetails := map[string]interface{}{
+		"schedule_human": scheduleHuman,
+		"first_run":      firstRun,
+		"threshold_days": threshold,
+		"enabled":        enabled,
+	}
+	if hasScrubEstimate {
+		if scrubEstimate != "" {
+			actionDetails["next_scrub_estimate"] = scrubEstimate
+		}
+		actionDetails["next_scrub_estimate_note"] = scrubEstimateNote
+	}
+
 	actions := []PlannedAction{}
 	if existingSchedule == nil {
 		actions = append(actions, PlannedAction{
@@ -612,12 +651,7 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 			Description: fmt.Sprintf("Create scrub schedule for pool '%s'", poolName),
 			Operation:   "create",
 			Target:      poolName,
-			Details: map[string]interface{}{
-				"schedule_human": scheduleHuman,
-				"first_run":      firstRun,
-				"threshold_days": threshold,
-				"enabled":        enabled,
-			},
+			Details:     actionDetails,
 		})
 	}
 
@@ -853,10 +887,18 @@ func (d *deleteScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 
 // Helper functions for scrub management
 
-func simplifyScrubSchedule(schedule map[string]interface{}, loc *time.Location) map[string]interface{} {
+func simplifyScrubSchedule(schedule map[string]interface{}, loc *time.Location, lastScrubEnd *time.Time, scrubRunning bool) map[string]interface{} {
 	scheduleObj := schedule["schedule"].(map[string]interface{})
+	enabled, _ := schedule["enabled"].(bool)
+	threshold := 0
+	switch t := schedule["threshold"].(type) {
+	case float64:
+		threshold = int(t)
+	case int:
+		threshold = t
+	}
 
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"id":             schedule["id"],
 		"pool":           schedule["pool_name"],
 		"pool_id":        schedule["pool"],
@@ -867,6 +909,8 @@ func simplifyScrubSchedule(schedule map[string]interface{}, loc *time.Location) 
 		"schedule_human": formatCronSchedule(scheduleObj),
 		"next_run":       calculateNextRun(scheduleObj, time.Now(), loc),
 	}
+	attachNextScrubEstimate(out, scheduleObj, enabled, threshold, loc, time.Now(), lastScrubEnd, scrubRunning)
+	return out
 }
 
 func formatCronSchedule(schedule map[string]interface{}) string {
@@ -942,6 +986,116 @@ func nasTimezone(client *truenas.Client) (loc *time.Location, name string, assum
 		return time.UTC, "UTC", true
 	}
 	return loc, tz, false
+}
+
+// nextScrubEstimateNoteWithEnd explains next_scrub_estimate when a finished
+// scrub end_time is known (TrueNAS 26+ rule; approximate on 25.x).
+const nextScrubEstimateNoteWithEnd = "Earliest possible start: first cron tick on or after last finished scrub end + (threshold-1)*24h; may be later on TrueNAS 25.x or if create/import/scrub activity falls in the window"
+
+// nextScrubEstimateNoteNoEnd is used when we have no finished-scrub end_time
+// (new/imported pool, resilver, canceled scrub, etc.).
+const nextScrubEstimateNoteNoEnd = "Earliest possible start (next cron tick); may be later if the pool was created, imported, or scrubbed within the threshold window"
+
+// nextScrubEstimateNoteRunning explains why no timestamp is given while a
+// scrub is in progress.
+const nextScrubEstimateNoteRunning = "A scrub is currently running; the next cron tick is skipped"
+
+// lastFinishedScrubEnd returns the pool's last finished SCRUB scan end_time
+// when present. On TrueNAS 26/27, middleware's threshold check uses
+// scan.end_time for a FINISHED SCRUB. TrueNAS 25.x instead uses the start
+// of the latest zpool scrub|create|import from pool history, so an estimate
+// based on end_time is only approximate there. Returns nil when there is no
+// finished scrub end to use (including resilver, canceled, or in-progress).
+func lastFinishedScrubEnd(pool map[string]interface{}) *time.Time {
+	scan, ok := pool["scan"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if fn, _ := scan["function"].(string); fn != "SCRUB" {
+		return nil
+	}
+	if state, _ := scan["state"].(string); state != "FINISHED" {
+		return nil
+	}
+	endTime, ok := scan["end_time"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	endSec, ok := endTime["$date"].(float64)
+	if !ok {
+		return nil
+	}
+	t := time.Unix(int64(endSec/1000), 0).UTC()
+	return &t
+}
+
+// scrubScanRunning reports an in-progress (not paused) SCRUB scan.
+func scrubScanRunning(pool map[string]interface{}) bool {
+	scan, ok := pool["scan"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if fn, _ := scan["function"].(string); fn != "SCRUB" {
+		return false
+	}
+	if state, _ := scan["state"].(string); state != "SCANNING" {
+		return false
+	}
+	if pause, exists := scan["pause"]; exists && pause != nil {
+		return false
+	}
+	return true
+}
+
+// nextCronAtOrAfter returns the first cron tick at or after at, in loc.
+func nextCronAtOrAfter(schedule map[string]interface{}, at time.Time, loc *time.Location) string {
+	// calculateNextRun treats an exact tick as already passed; step 1ns
+	// earlier so an exact eligibility instant still counts.
+	return calculateNextRun(schedule, at.Add(-time.Nanosecond), loc)
+}
+
+// estimateNextScrub returns when a scrub may actually start.
+// Middleware is due once (threshold-1)*86400 seconds have passed since the
+// last scrub reference time; threshold ≤ 1 means the next cron tick.
+// Disabled schedules yield ok=false. When a scrub is running, ok=true with
+// an empty estimate and a note that the next tick is skipped.
+func estimateNextScrub(schedule map[string]interface{}, fromTime time.Time, loc *time.Location, enabled bool, thresholdDays int, lastEnd *time.Time, scrubRunning bool) (estimate, note string, ok bool) {
+	if !enabled {
+		return "", "", false
+	}
+	if scrubRunning {
+		return "", nextScrubEstimateNoteRunning, true
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	if lastEnd == nil {
+		return calculateNextRun(schedule, fromTime, loc), nextScrubEstimateNoteNoEnd, true
+	}
+	if thresholdDays <= 1 {
+		return calculateNextRun(schedule, fromTime, loc), nextScrubEstimateNoteWithEnd, true
+	}
+	// Match middleware: due when tick > last + (threshold-1)*86400 (fixed
+	// seconds, not calendar AddDate, so DST does not shift the window).
+	eligible := lastEnd.Add(time.Duration(thresholdDays-1) * 24 * time.Hour)
+	anchor := fromTime
+	if eligible.After(anchor) {
+		anchor = eligible
+	}
+	return nextCronAtOrAfter(schedule, anchor.In(loc), loc), nextScrubEstimateNoteWithEnd, true
+}
+
+// attachNextScrubEstimate adds next_scrub_estimate fields when applicable.
+// A running scrub sets only the note (no timestamp).
+func attachNextScrubEstimate(out map[string]interface{}, schedule map[string]interface{}, enabled bool, thresholdDays int, loc *time.Location, fromTime time.Time, lastEnd *time.Time, scrubRunning bool) {
+	estimate, note, ok := estimateNextScrub(schedule, fromTime, loc, enabled, thresholdDays, lastEnd, scrubRunning)
+	if !ok {
+		return
+	}
+	if estimate != "" {
+		out["next_scrub_estimate"] = estimate
+	}
+	out["next_scrub_estimate_note"] = note
 }
 
 func calculateNextRun(schedule map[string]interface{}, fromTime time.Time, loc *time.Location) string {
