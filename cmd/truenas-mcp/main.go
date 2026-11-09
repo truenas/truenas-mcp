@@ -13,6 +13,10 @@ import (
 	"sync"
 	"time"
 
+	// Embed IANA zoneinfo so time.LoadLocation works on Windows (and other
+	// hosts without a system zone database) for NAS timezone next_run.
+	_ "time/tzdata"
+
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/tasks"
