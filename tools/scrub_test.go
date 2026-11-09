@@ -226,8 +226,9 @@ func TestMapKeys(t *testing.T) {
 }
 
 func TestCalculateNextRunUsesExplicitLocation(t *testing.T) {
-	// Force the process into Pacific so a regression that uses the host
-	// zone instead of the passed location fails even on UTC CI runners.
+	// t.Setenv does not retarget time.Local (Go reads TZ once at process
+	// start). Assertions below pass explicit locations into calculateNextRun;
+	// TZ is set only so accidental host-local use is less likely to match UTC CI.
 	t.Setenv("TZ", "America/Los_Angeles")
 
 	ny, err := time.LoadLocation("America/New_York")
@@ -424,5 +425,77 @@ func TestNasTimezoneInvalidFallsBackToUTC(t *testing.T) {
 	loc, name, assumed := nasTimezone(client)
 	if !assumed || name != "UTC" || loc != time.UTC {
 		t.Fatalf("nasTimezone() = %v %q assumed=%v, want UTC fallback", loc, name, assumed)
+	}
+}
+
+func TestCalculateNextRunSpringForward(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2027-03-14 spring-forward: 02:00–02:59 do not exist. Daily 02:30 from
+	// 03:15 EDT the same day must land on the next calendar day's 02:30, not
+	// AddDate's gap-normalized 01:30.
+	sched := map[string]interface{}{
+		"minute": "30",
+		"hour":   "2",
+		"dom":    "*",
+		"dow":    "*",
+		"month":  "*",
+	}
+	from := time.Date(2027, 3, 14, 3, 15, 0, 0, ny)
+	got := calculateNextRun(sched, from, ny)
+	if got != "2027-03-15T02:30:00-04:00" {
+		t.Fatalf("spring-forward daily next_run = %q, want 2027-03-15T02:30:00-04:00", got)
+	}
+
+	// Weekly Sunday 02:30 from the Friday before the spring-forward Sunday.
+	weekly := map[string]interface{}{
+		"minute": "30",
+		"hour":   "2",
+		"dom":    "*",
+		"dow":    "0",
+		"month":  "*",
+	}
+	fri := time.Date(2027, 3, 12, 10, 0, 0, 0, ny)
+	gotWeekly := calculateNextRun(weekly, fri, ny)
+	// Gap Sunday 02:30 is nonexistent; Go's Date normalizes that instant.
+	if !strings.HasPrefix(gotWeekly, "2027-03-14T") {
+		t.Fatalf("spring-forward weekly next_run = %q, want a 2027-03-14 timestamp", gotWeekly)
+	}
+	// After the gap (03:15 EDT), the next Sunday must keep schedule 02:30, not
+	// AddDate's carried 01:30 from a gap-normalized wall clock.
+	fromAfterGap := time.Date(2027, 3, 14, 3, 15, 0, 0, ny)
+	gotNextWeek := calculateNextRun(weekly, fromAfterGap, ny)
+	if gotNextWeek != "2027-03-21T02:30:00-04:00" {
+		t.Fatalf("post-gap weekly next_run = %q, want 2027-03-21T02:30:00-04:00", gotNextWeek)
+	}
+}
+
+func TestCalculateNextRunFallBackSanity(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := map[string]interface{}{
+		"minute": "30",
+		"hour":   "1",
+		"dom":    "*",
+		"dow":    "*",
+		"month":  "*",
+	}
+	// Fall-back Sunday 2026-11-01: 01:30 occurs twice. From 00:30 EDT, next is
+	// the first 01:30 (EDT). From 03:00 EST, next is Monday 01:30 EST.
+	before := time.Date(2026, 11, 1, 0, 30, 0, 0, ny)
+	gotBefore := calculateNextRun(sched, before, ny)
+	if gotBefore != "2026-11-01T01:30:00-04:00" {
+		t.Fatalf("fall-back early next_run = %q, want 2026-11-01T01:30:00-04:00", gotBefore)
+	}
+	after := time.Date(2026, 11, 1, 3, 0, 0, 0, ny)
+	gotAfter := calculateNextRun(sched, after, ny)
+	if gotAfter != "2026-11-02T01:30:00-05:00" {
+		t.Fatalf("fall-back late next_run = %q, want 2026-11-02T01:30:00-05:00", gotAfter)
 	}
 }
