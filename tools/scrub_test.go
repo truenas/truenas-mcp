@@ -443,11 +443,11 @@ func TestEstimateNextScrubThresholdSkip(t *testing.T) {
 		"month":  "*",
 	}
 	// Last finished scrub end: 2026-10-31 12:00 Eastern. Threshold 35 →
-	// eligible 2026-12-05 12:00 ET (Saturday). First Sunday 00:00 tick is Dec 6.
+	// eligible after (35-1)*24h = 2026-12-04 12:00 ET; first Sunday 00:00 is Dec 6.
 	lastEnd := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
 	from := time.Date(2026, 11, 9, 7, 30, 0, 0, ny)
 
-	got, note, ok := estimateNextScrub(sched, from, ny, true, 35, &lastEnd)
+	got, note, ok := estimateNextScrub(sched, from, ny, true, 35, &lastEnd, false)
 	if !ok {
 		t.Fatal("expected estimate")
 	}
@@ -481,7 +481,7 @@ func TestEstimateNextScrubRunsAtNextTickWhenDue(t *testing.T) {
 	// Last end well past threshold relative to "now".
 	lastEnd := time.Date(2026, 1, 1, 0, 0, 0, 0, utc)
 	from := time.Date(2026, 11, 9, 10, 0, 0, 0, utc) // Monday
-	got, _, ok := estimateNextScrub(sched, from, utc, true, 35, &lastEnd)
+	got, _, ok := estimateNextScrub(sched, from, utc, true, 35, &lastEnd, false)
 	if !ok {
 		t.Fatal("expected estimate")
 	}
@@ -501,7 +501,7 @@ func TestEstimateNextScrubNoPriorScan(t *testing.T) {
 		"month":  "*",
 	}
 	from := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
-	got, note, ok := estimateNextScrub(sched, from, time.UTC, true, 35, nil)
+	got, note, ok := estimateNextScrub(sched, from, time.UTC, true, 35, nil, false)
 	if !ok {
 		t.Fatal("expected estimate")
 	}
@@ -518,14 +518,17 @@ func TestEstimateNextScrubDisabled(t *testing.T) {
 		"minute": "0", "hour": "0", "dom": "*", "dow": "0", "month": "*",
 	}
 	lastEnd := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	_, _, ok := estimateNextScrub(sched, time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC), time.UTC, false, 35, &lastEnd)
+	_, _, ok := estimateNextScrub(sched, time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC), time.UTC, false, 35, &lastEnd, false)
 	if ok {
 		t.Fatal("disabled schedule must not produce an estimate")
 	}
 	out := map[string]interface{}{"next_run": "x"}
-	attachNextScrubEstimate(out, sched, false, 35, time.UTC, time.Now(), &lastEnd)
+	attachNextScrubEstimate(out, sched, false, 35, time.UTC, time.Now(), &lastEnd, false)
 	if _, exists := out["next_scrub_estimate"]; exists {
 		t.Fatalf("disabled schedule leaked estimate fields: %v", out)
+	}
+	if _, exists := out["next_scrub_estimate_note"]; exists {
+		t.Fatalf("disabled schedule leaked estimate note: %v", out)
 	}
 }
 
@@ -542,12 +545,11 @@ func TestEstimateNextScrubDSTCrossing(t *testing.T) {
 		"dow":    "0",
 		"month":  "*",
 	}
-	// Last end just before the 2026-11-01 fall-back; threshold 0 → eligible
-	// at that end instant. First Sunday 00:00 at or after Oct 31 12:00 is
-	// Nov 1 00:00 EDT (-04:00).
+	// threshold ≤ 1 → next cron tick (no (threshold-1) wait). From Oct 31
+	// noon, next Sunday 00:00 is Nov 1 00:00 EDT (-04:00).
 	lastEnd := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
 	from := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
-	got, _, ok := estimateNextScrub(sched, from, ny, true, 0, &lastEnd)
+	got, _, ok := estimateNextScrub(sched, from, ny, true, 0, &lastEnd, false)
 	if !ok {
 		t.Fatal("expected estimate")
 	}
@@ -555,15 +557,104 @@ func TestEstimateNextScrubDSTCrossing(t *testing.T) {
 		t.Fatalf("DST estimate = %q, want 2026-11-01T00:00:00-04:00", got)
 	}
 
-	// After fall-back, threshold still 0 from a Nov 2 end → next Sunday Nov 8 EST.
+	// After fall-back, threshold 0 from a Nov 2 end → next Sunday Nov 8 EST.
 	lastEnd2 := time.Date(2026, 11, 2, 12, 0, 0, 0, ny)
 	from2 := time.Date(2026, 11, 2, 12, 0, 0, 0, ny)
-	got2, _, ok := estimateNextScrub(sched, from2, ny, true, 0, &lastEnd2)
+	got2, _, ok := estimateNextScrub(sched, from2, ny, true, 0, &lastEnd2, false)
 	if !ok {
 		t.Fatal("expected estimate")
 	}
 	if got2 != "2026-11-08T00:00:00-05:00" {
 		t.Fatalf("post-DST estimate = %q, want 2026-11-08T00:00:00-05:00", got2)
+	}
+}
+
+func TestEstimateNextScrubDefaultWeeklyOffByOne(t *testing.T) {
+	t.Setenv("TZ", "America/Los_Angeles")
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := map[string]interface{}{
+		"minute": "00",
+		"hour":   "00",
+		"dom":    "*",
+		"dow":    "7",
+		"month":  "*",
+	}
+	// Default weekly Sunday 00:00 / threshold 35. Scrub ended Sun 2026-10-04
+	// 03:00 ET. Middleware is due after (35-1)*24h → Sat Nov 7 03:00 ET, so
+	// the first Sunday tick is Nov 8. Adding full threshold calendar days
+	// wrongly yields Nov 15 (week 6).
+	lastEnd := time.Date(2026, 10, 4, 3, 0, 0, 0, ny)
+	from := time.Date(2026, 10, 5, 12, 0, 0, 0, ny)
+	got, _, ok := estimateNextScrub(sched, from, ny, true, 35, &lastEnd, false)
+	if !ok {
+		t.Fatal("expected estimate")
+	}
+	if got != "2026-11-08T00:00:00-05:00" {
+		t.Fatalf("estimate = %q, want 2026-11-08T00:00:00-05:00 (not Nov 15)", got)
+	}
+	wrongFullThreshold := lastEnd.AddDate(0, 0, 35)
+	wrongAnchor := from
+	if wrongFullThreshold.After(wrongAnchor) {
+		wrongAnchor = wrongFullThreshold
+	}
+	wrong := nextCronAtOrAfter(sched, wrongAnchor, ny)
+	if wrong != "2026-11-15T00:00:00-05:00" {
+		t.Fatalf("full-threshold control = %q, want Nov 15 (to prove the trap)", wrong)
+	}
+	if got == wrong {
+		t.Fatal("estimate must use (threshold-1)*24h, not full threshold days")
+	}
+}
+
+func TestEstimateNextScrubRunningSkipsNextTick(t *testing.T) {
+	sched := map[string]interface{}{
+		"minute": "0", "hour": "0", "dom": "*", "dow": "0", "month": "*",
+	}
+	lastEnd := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	got, note, ok := estimateNextScrub(sched, time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC), time.UTC, true, 35, &lastEnd, true)
+	if !ok {
+		t.Fatal("expected running note")
+	}
+	if got != "" {
+		t.Fatalf("running scrub must not return a timestamp, got %q", got)
+	}
+	if note != nextScrubEstimateNoteRunning {
+		t.Fatalf("note = %q", note)
+	}
+	out := map[string]interface{}{}
+	attachNextScrubEstimate(out, sched, true, 35, time.UTC, time.Now(), &lastEnd, true)
+	if _, exists := out["next_scrub_estimate"]; exists {
+		t.Fatalf("running scrub leaked estimate timestamp: %v", out)
+	}
+	if out["next_scrub_estimate_note"] != nextScrubEstimateNoteRunning {
+		t.Fatalf("note field = %v", out["next_scrub_estimate_note"])
+	}
+}
+
+func TestScrubScanRunning(t *testing.T) {
+	running := map[string]interface{}{
+		"scan": map[string]interface{}{"function": "SCRUB", "state": "SCANNING"},
+	}
+	if !scrubScanRunning(running) {
+		t.Fatal("SCANNING scrub should count as running")
+	}
+	paused := map[string]interface{}{
+		"scan": map[string]interface{}{
+			"function": "SCRUB", "state": "SCANNING",
+			"pause": map[string]interface{}{"$date": 1.0},
+		},
+	}
+	if scrubScanRunning(paused) {
+		t.Fatal("paused scrub should not count as running")
+	}
+	finished := map[string]interface{}{
+		"scan": map[string]interface{}{"function": "SCRUB", "state": "FINISHED"},
+	}
+	if scrubScanRunning(finished) {
+		t.Fatal("finished scrub should not count as running")
 	}
 }
 
