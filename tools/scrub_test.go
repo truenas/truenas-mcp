@@ -426,3 +426,239 @@ func TestNasTimezoneInvalidFallsBackToUTC(t *testing.T) {
 		t.Fatalf("nasTimezone() = %v %q assumed=%v, want UTC fallback", loc, name, assumed)
 	}
 }
+
+func TestEstimateNextScrubThresholdSkip(t *testing.T) {
+	t.Setenv("TZ", "America/Los_Angeles")
+
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sched := map[string]interface{}{
+		"minute": "00",
+		"hour":   "00",
+		"dom":    "*",
+		"dow":    "7",
+		"month":  "*",
+	}
+	// Last finished scrub end: 2026-10-31 12:00 Eastern. Threshold 35 →
+	// eligible 2026-12-05 12:00 ET (Saturday). First Sunday 00:00 tick is Dec 6.
+	lastEnd := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
+	from := time.Date(2026, 11, 9, 7, 30, 0, 0, ny)
+
+	got, note, ok := estimateNextScrub(sched, from, ny, true, 35, &lastEnd)
+	if !ok {
+		t.Fatal("expected estimate")
+	}
+	if got != "2026-12-06T00:00:00-05:00" {
+		t.Fatalf("estimate = %q, want 2026-12-06T00:00:00-05:00", got)
+	}
+	if note != nextScrubEstimateNoteWithEnd {
+		t.Fatalf("note = %q", note)
+	}
+
+	// next_run (next cron tick) would still be Nov 15 — estimate must differ.
+	nextTick := calculateNextRun(sched, from, ny)
+	if nextTick != "2026-11-15T00:00:00-05:00" {
+		t.Fatalf("next tick control = %q, want 2026-11-15T00:00:00-05:00", nextTick)
+	}
+	if got == nextTick {
+		t.Fatal("estimate must skip threshold window, not equal next_run")
+	}
+}
+
+func TestEstimateNextScrubRunsAtNextTickWhenDue(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	utc := time.UTC
+	sched := map[string]interface{}{
+		"minute": "0",
+		"hour":   "2",
+		"dom":    "*",
+		"dow":    "0",
+		"month":  "*",
+	}
+	// Last end well past threshold relative to "now".
+	lastEnd := time.Date(2026, 1, 1, 0, 0, 0, 0, utc)
+	from := time.Date(2026, 11, 9, 10, 0, 0, 0, utc) // Monday
+	got, _, ok := estimateNextScrub(sched, from, utc, true, 35, &lastEnd)
+	if !ok {
+		t.Fatal("expected estimate")
+	}
+	want := calculateNextRun(sched, from, utc)
+	if got != want {
+		t.Fatalf("estimate = %q, want next tick %q", got, want)
+	}
+}
+
+func TestEstimateNextScrubNoPriorScan(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	sched := map[string]interface{}{
+		"minute": "0",
+		"hour":   "0",
+		"dom":    "*",
+		"dow":    "0",
+		"month":  "*",
+	}
+	from := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	got, note, ok := estimateNextScrub(sched, from, time.UTC, true, 35, nil)
+	if !ok {
+		t.Fatal("expected estimate")
+	}
+	if note != nextScrubEstimateNoteNoEnd {
+		t.Fatalf("note = %q", note)
+	}
+	if got != calculateNextRun(sched, from, time.UTC) {
+		t.Fatalf("estimate = %q, want next cron tick", got)
+	}
+}
+
+func TestEstimateNextScrubDisabled(t *testing.T) {
+	sched := map[string]interface{}{
+		"minute": "0", "hour": "0", "dom": "*", "dow": "0", "month": "*",
+	}
+	lastEnd := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, _, ok := estimateNextScrub(sched, time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC), time.UTC, false, 35, &lastEnd)
+	if ok {
+		t.Fatal("disabled schedule must not produce an estimate")
+	}
+	out := map[string]interface{}{"next_run": "x"}
+	attachNextScrubEstimate(out, sched, false, 35, time.UTC, time.Now(), &lastEnd)
+	if _, exists := out["next_scrub_estimate"]; exists {
+		t.Fatalf("disabled schedule leaked estimate fields: %v", out)
+	}
+}
+
+func TestEstimateNextScrubDSTCrossing(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := map[string]interface{}{
+		"minute": "00",
+		"hour":   "00",
+		"dom":    "*",
+		"dow":    "0",
+		"month":  "*",
+	}
+	// Last end just before the 2026-11-01 fall-back; threshold 0 → eligible
+	// at that end instant. First Sunday 00:00 at or after Oct 31 12:00 is
+	// Nov 1 00:00 EDT (-04:00).
+	lastEnd := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
+	from := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
+	got, _, ok := estimateNextScrub(sched, from, ny, true, 0, &lastEnd)
+	if !ok {
+		t.Fatal("expected estimate")
+	}
+	if got != "2026-11-01T00:00:00-04:00" {
+		t.Fatalf("DST estimate = %q, want 2026-11-01T00:00:00-04:00", got)
+	}
+
+	// After fall-back, threshold still 0 from a Nov 2 end → next Sunday Nov 8 EST.
+	lastEnd2 := time.Date(2026, 11, 2, 12, 0, 0, 0, ny)
+	from2 := time.Date(2026, 11, 2, 12, 0, 0, 0, ny)
+	got2, _, ok := estimateNextScrub(sched, from2, ny, true, 0, &lastEnd2)
+	if !ok {
+		t.Fatal("expected estimate")
+	}
+	if got2 != "2026-11-08T00:00:00-05:00" {
+		t.Fatalf("post-DST estimate = %q, want 2026-11-08T00:00:00-05:00", got2)
+	}
+}
+
+func TestLastFinishedScrubEnd(t *testing.T) {
+	ms := float64(time.Date(2026, 10, 31, 17, 0, 0, 0, time.UTC).UnixMilli())
+	pool := map[string]interface{}{
+		"scan": map[string]interface{}{
+			"function": "SCRUB",
+			"state":    "FINISHED",
+			"end_time": map[string]interface{}{"$date": ms},
+		},
+	}
+	got := lastFinishedScrubEnd(pool)
+	if got == nil || !got.Equal(time.UnixMilli(int64(ms)).UTC()) {
+		t.Fatalf("lastFinishedScrubEnd = %v", got)
+	}
+	// Non-SCRUB or non-FINISHED → nil
+	pool["scan"].(map[string]interface{})["function"] = "RESILVER"
+	if lastFinishedScrubEnd(pool) != nil {
+		t.Fatal("resilver must not count")
+	}
+}
+
+func TestQueryScrubSchedulesNextScrubEstimate(t *testing.T) {
+	t.Setenv("TZ", "America/Los_Angeles")
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastEnd := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
+	sched := map[string]interface{}{
+		"id": 35.0, "pool": 1.0, "pool_name": "tank", "enabled": true,
+		"threshold": 35.0, "description": "",
+		"schedule": map[string]interface{}{
+			"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*",
+		},
+	}
+	client, _ := newFakeClientWith(t, map[string]interface{}{
+		"system.info": map[string]interface{}{
+			"hostname": "nas.example.invalid", "timezone": "America/New_York",
+		},
+		"pool.scrub.query": []interface{}{sched},
+		"pool.query": []interface{}{
+			map[string]interface{}{
+				"id": 1.0, "name": "tank", "size": 1.0e12, "status": "ONLINE",
+				"scan": map[string]interface{}{
+					"function": "SCRUB", "state": "FINISHED",
+					"end_time": map[string]interface{}{"$date": float64(lastEnd.UnixMilli())},
+				},
+			},
+		},
+	}, nil)
+
+	out, err := handleQueryScrubSchedules(client, map[string]interface{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatal(err)
+	}
+	entry := resp["scrub_schedules"].([]interface{})[0].(map[string]interface{})
+	if entry["next_scrub_estimate"] != "2026-12-06T00:00:00-05:00" {
+		t.Fatalf("next_scrub_estimate = %v; body=%s", entry["next_scrub_estimate"], out)
+	}
+	if entry["next_scrub_estimate_note"] != nextScrubEstimateNoteWithEnd {
+		t.Fatalf("note = %v", entry["next_scrub_estimate_note"])
+	}
+	// Disabled schedule omits estimate.
+	sched["enabled"] = false
+	client2, _ := newFakeClientWith(t, map[string]interface{}{
+		"system.info": map[string]interface{}{
+			"hostname": "nas.example.invalid", "timezone": "America/New_York",
+		},
+		"pool.scrub.query": []interface{}{sched},
+		"pool.query": []interface{}{
+			map[string]interface{}{
+				"id": 1.0, "name": "tank", "size": 1.0e12, "status": "ONLINE",
+				"scan": map[string]interface{}{
+					"function": "SCRUB", "state": "FINISHED",
+					"end_time": map[string]interface{}{"$date": float64(lastEnd.UnixMilli())},
+				},
+			},
+		},
+	}, nil)
+	out2, err := handleQueryScrubSchedules(client2, map[string]interface{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp2 map[string]interface{}
+	if err := json.Unmarshal([]byte(out2), &resp2); err != nil {
+		t.Fatal(err)
+	}
+	entry2 := resp2["scrub_schedules"].([]interface{})[0].(map[string]interface{})
+	if _, ok := entry2["next_scrub_estimate"]; ok {
+		t.Fatalf("disabled schedule should omit estimate: %s", out2)
+	}
+}
