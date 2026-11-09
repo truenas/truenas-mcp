@@ -826,3 +826,94 @@ func TestQueryScrubSchedulesNextScrubEstimate(t *testing.T) {
 		t.Fatalf("disabled schedule should omit estimate: %s", out2)
 	}
 }
+
+func TestFormatInLocationUsesNASZone(t *testing.T) {
+	t.Setenv("TZ", "America/Los_Angeles")
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fixed UTC instant: 2026-11-08 05:00:02Z == Sunday 00:00:02 Eastern (EST).
+	instant := time.Unix(1794114002, 0).UTC()
+	got := formatInLocation(instant, ny)
+	if got != "2026-11-08T00:00:02-05:00" {
+		t.Fatalf("formatInLocation = %q, want 2026-11-08T00:00:02-05:00", got)
+	}
+	hostLocal := instant.Format(time.RFC3339)
+	if strings.HasSuffix(hostLocal, "-08:00") || strings.HasSuffix(hostLocal, "-07:00") {
+		if got == hostLocal {
+			t.Fatalf("NAS format matched host-local %q", hostLocal)
+		}
+	}
+	if strings.HasSuffix(got, "-08:00") || strings.HasSuffix(got, "-07:00") {
+		t.Fatalf("NAS format leaked Pacific offset: %q", got)
+	}
+	// UTC fallback location
+	if formatInLocation(instant, time.UTC) != "2026-11-08T05:00:02Z" {
+		t.Fatalf("UTC fallback = %q", formatInLocation(instant, time.UTC))
+	}
+}
+
+func TestGetScrubStatusTimestampsUseNASTimezone(t *testing.T) {
+	t.Setenv("TZ", "America/Los_Angeles")
+	// Completed scrub end: 2026-11-08 05:00:02Z → Eastern 00:00:02-05:00
+	endMS := float64(1794114002 * 1000)
+	startMS := float64((1794114002 - 3600) * 1000)
+	jobStartMS := float64(1794114002 * 1000)
+	client, _ := newFakeClientWith(t, map[string]interface{}{
+		"system.info": map[string]interface{}{
+			"hostname": "nas.example.invalid",
+			"timezone": "America/New_York",
+		},
+		"pool.query": []interface{}{
+			map[string]interface{}{
+				"id": 1.0, "name": "tank", "size": 1.0e12, "status": "ONLINE",
+				"scan": map[string]interface{}{
+					"function":   "SCRUB",
+					"state":      "FINISHED",
+					"errors":     0.0,
+					"start_time": map[string]interface{}{"$date": startMS},
+					"end_time":   map[string]interface{}{"$date": endMS},
+				},
+			},
+		},
+		"pool.scrub.query": []interface{}{
+			map[string]interface{}{
+				"id": 1.0, "pool": 1.0, "pool_name": "tank", "enabled": true,
+				"threshold": 35.0,
+				"schedule": map[string]interface{}{
+					"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*",
+				},
+			},
+		},
+		"core.get_jobs": []interface{}{
+			map[string]interface{}{
+				"id": 9.0, "method": "pool.scrub.scrub", "state": "RUNNING",
+				"arguments":    []interface{}{"tank"},
+				"progress":     map[string]interface{}{"percent": 10.0, "description": "scrubbing"},
+				"time_started": map[string]interface{}{"$date": jobStartMS},
+			},
+		},
+	}, nil)
+
+	out, err := handleGetScrubStatus(client, map[string]interface{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatal(err)
+	}
+	pool := resp["pools"].([]interface{})[0].(map[string]interface{})
+	last := pool["last_scrub"].(map[string]interface{})
+	if last["completed"] != "2026-11-08T00:00:02-05:00" {
+		t.Fatalf("last_scrub.completed = %v; body=%s", last["completed"], out)
+	}
+	cur := pool["current_scrub"].(map[string]interface{})
+	if cur["started"] != "2026-11-08T00:00:02-05:00" {
+		t.Fatalf("current_scrub.started = %v; body=%s", cur["started"], out)
+	}
+	if strings.Contains(out, "-08:00") || strings.Contains(out, "-07:00") {
+		t.Fatalf("response leaked Pacific host offset: %s", out)
+	}
+}
