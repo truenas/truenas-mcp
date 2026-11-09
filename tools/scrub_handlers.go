@@ -977,8 +977,11 @@ func calculateNextRun(schedule map[string]interface{}, fromTime time.Time, loc *
 			daysUntil = 7
 		}
 
-		next := now.AddDate(0, 0, daysUntil)
-		next = time.Date(next.Year(), next.Month(), next.Day(), hourInt, minuteInt, 0, 0, next.Location())
+		// Build the candidate with time.Date on loc, not AddDate. AddDate on a
+		// wall-clock that fell in a spring-forward gap keeps the normalized
+		// (wrong) hour; Date(y,m,d+n,hour,min,...,loc) re-applies the schedule.
+		y, m, d := now.Date()
+		next := time.Date(y, m, d+daysUntil, hourInt, minuteInt, 0, 0, loc)
 		return next.Format(time.RFC3339)
 	}
 
@@ -987,17 +990,20 @@ func calculateNextRun(schedule map[string]interface{}, fromTime time.Time, loc *
 		domInt := 0
 		fmt.Sscanf(dom, "%d", &domInt)
 
-		next := time.Date(now.Year(), now.Month(), domInt, hourInt, minuteInt, 0, 0, now.Location())
+		next := time.Date(now.Year(), now.Month(), domInt, hourInt, minuteInt, 0, 0, loc)
 		if next.Before(now) {
-			next = next.AddDate(0, 1, 0)
+			// Same as weekly: rebuild with the schedule hour/minute rather than
+			// AddDate on a gap-normalized instant.
+			next = time.Date(now.Year(), now.Month()+1, domInt, hourInt, minuteInt, 0, 0, loc)
 		}
 		return next.Format(time.RFC3339)
 	}
 
 	// Daily
-	next := time.Date(now.Year(), now.Month(), now.Day(), hourInt, minuteInt, 0, 0, now.Location())
+	next := time.Date(now.Year(), now.Month(), now.Day(), hourInt, minuteInt, 0, 0, loc)
 	if next.Before(now) {
-		next = next.AddDate(0, 0, 1)
+		y, m, d := now.Date()
+		next = time.Date(y, m, d+1, hourInt, minuteInt, 0, 0, loc)
 	}
 	return next.Format(time.RFC3339)
 }
