@@ -29,6 +29,7 @@ func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface
 
 	filtered := []map[string]interface{}{}
 	poolsWithSchedules := make(map[string]bool)
+	loc, _, assumedUTC := nasTimezone(client)
 
 	for _, schedule := range schedules {
 		poolName, _ := schedule["pool_name"].(string)
@@ -45,7 +46,7 @@ func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface
 		}
 
 		poolsWithSchedules[poolName] = true
-		simplified := simplifyScrubSchedule(schedule)
+		simplified := simplifyScrubSchedule(schedule, loc)
 		filtered = append(filtered, simplified)
 	}
 
@@ -73,6 +74,9 @@ func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface
 		"count":                   len(filtered),
 		"pools_with_schedules":    mapKeys(poolsWithSchedules),
 		"pools_without_schedules": poolsWithoutSchedules,
+	}
+	if assumedUTC {
+		response["next_run_timezone_note"] = nextRunTimezoneNote
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -127,6 +131,7 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 	scrubNowCount := 0
 	withSchedules := 0
 	withoutSchedules := 0
+	loc, _, assumedUTC := nasTimezone(client)
 
 	for _, pool := range pools {
 		poolName, _ := pool["name"].(string)
@@ -155,7 +160,7 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 
 				schedObj, _ := schedule["schedule"].(map[string]interface{})
 				scheduleHuman := formatCronSchedule(schedObj)
-				nextRun := calculateNextRun(schedObj, time.Now())
+				nextRun := calculateNextRun(schedObj, time.Now(), loc)
 
 				status["schedule"] = map[string]interface{}{
 					"enabled":        enabled,
@@ -247,6 +252,9 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 			"without_schedules": withoutSchedules,
 		},
 	}
+	if assumedUTC {
+		response["next_run_timezone_note"] = nextRunTimezoneNote
+	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
@@ -324,14 +332,19 @@ func (r *Registry) handleCreateScrubSchedule(client *truenas.Client, args map[st
 		return "", fmt.Errorf("failed to parse result: %w", err)
 	}
 
+	loc, _, assumedUTC := nasTimezone(client)
+	nextRun := calculateNextRun(scheduleObj, time.Now(), loc)
 	response := map[string]interface{}{
 		"pool":           poolName,
 		"schedule_id":    created["id"],
 		"enabled":        enabled,
 		"threshold_days": threshold,
 		"schedule_human": formatCronSchedule(scheduleObj),
-		"next_run":       calculateNextRun(scheduleObj, time.Now()),
-		"message":        fmt.Sprintf("Scrub schedule created for pool '%s'. First run: %s", poolName, calculateNextRun(scheduleObj, time.Now())),
+		"next_run":       nextRun,
+		"message":        fmt.Sprintf("Scrub schedule created for pool '%s'. First run: %s", poolName, nextRun),
+	}
+	if assumedUTC {
+		response["next_run_timezone_note"] = nextRunTimezoneNote
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -566,7 +579,8 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 	}
 
 	scheduleHuman := formatCronSchedule(scheduleObj)
-	firstRun := calculateNextRun(scheduleObj, time.Now())
+	loc, _, assumedUTC := nasTimezone(client)
+	firstRun := calculateNextRun(scheduleObj, time.Now(), loc)
 	estimatedHours := estimateScrubDuration(int64(poolInfo["size"].(float64)))
 
 	warnings := []string{}
@@ -605,6 +619,10 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 				"enabled":        enabled,
 			},
 		})
+	}
+
+	if assumedUTC {
+		warnings = append(warnings, nextRunTimezoneNote)
 	}
 
 	return &DryRunResult{
@@ -835,7 +853,7 @@ func (d *deleteScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 
 // Helper functions for scrub management
 
-func simplifyScrubSchedule(schedule map[string]interface{}) map[string]interface{} {
+func simplifyScrubSchedule(schedule map[string]interface{}, loc *time.Location) map[string]interface{} {
 	scheduleObj := schedule["schedule"].(map[string]interface{})
 
 	return map[string]interface{}{
@@ -847,7 +865,7 @@ func simplifyScrubSchedule(schedule map[string]interface{}) map[string]interface
 		"description":    schedule["description"],
 		"schedule":       scheduleObj,
 		"schedule_human": formatCronSchedule(scheduleObj),
-		"next_run":       calculateNextRun(scheduleObj, time.Now()),
+		"next_run":       calculateNextRun(scheduleObj, time.Now(), loc),
 	}
 }
 
@@ -897,9 +915,41 @@ func formatCronSchedule(schedule map[string]interface{}) string {
 	return fmt.Sprintf("Custom: %s %s %s * %s", minute, hour, dom, dow)
 }
 
-func calculateNextRun(schedule map[string]interface{}, fromTime time.Time) string {
+// nextRunTimezoneNote is added to scrub responses only when the NAS
+// timezone could not be read or loaded. next_run is then computed in UTC
+// so we never silently present the MCP host's local zone as the NAS zone.
+const nextRunTimezoneNote = "NAS timezone unavailable; next_run computed in UTC"
+
+// nasTimezone returns the NAS system timezone from system.info.
+// Both TrueNAS 25.x and 27.x expose timezone as an IANA name on that call
+// (same value as system.general.config). On any failure, falls back to UTC
+// with assumedUTC=true so callers can surface an honest note.
+func nasTimezone(client *truenas.Client) (loc *time.Location, name string, assumedUTC bool) {
+	result, err := client.Call("system.info")
+	if err != nil {
+		return time.UTC, "UTC", true
+	}
+	var info map[string]interface{}
+	if err := json.Unmarshal(result, &info); err != nil {
+		return time.UTC, "UTC", true
+	}
+	tz, _ := info["timezone"].(string)
+	if tz == "" {
+		return time.UTC, "UTC", true
+	}
+	loc, err = time.LoadLocation(tz)
+	if err != nil {
+		return time.UTC, "UTC", true
+	}
+	return loc, tz, false
+}
+
+func calculateNextRun(schedule map[string]interface{}, fromTime time.Time, loc *time.Location) string {
 	// Simplified calculation - just add one week/month/day based on pattern
 	// In production, would use a proper cron library
+	if loc == nil {
+		loc = time.UTC
+	}
 	minute, _ := schedule["minute"].(string)
 	hour, _ := schedule["hour"].(string)
 	dom, _ := schedule["dom"].(string)
@@ -909,7 +959,9 @@ func calculateNextRun(schedule map[string]interface{}, fromTime time.Time) strin
 	fmt.Sscanf(minute, "%d", &minuteInt)
 	fmt.Sscanf(hour, "%d", &hourInt)
 
-	now := fromTime
+	// Evaluate cron fields in the NAS timezone. TrueNAS pool.scrub
+	// schedules fire in the system timezone, not the MCP host's local zone.
+	now := fromTime.In(loc)
 
 	// Weekly
 	if dow != "*" && dom == "*" {
