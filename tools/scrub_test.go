@@ -1054,7 +1054,7 @@ func TestScrubToolsTolerateNullPoolSize(t *testing.T) {
 	r := NewRegistry(client, nil)
 
 	t.Run("get_scrub_status reports both pools", func(t *testing.T) {
-		out, err := r.CallTool("get_scrub_status", map[string]interface{}{})
+		out, err := r.CallTool(t.Context(), "get_scrub_status", map[string]interface{}{})
 		assertNotInternalError(t, "get_scrub_status", out, err)
 		if err != nil {
 			t.Fatalf("get_scrub_status: %v", err)
@@ -1095,7 +1095,7 @@ func TestScrubToolsTolerateNullPoolSize(t *testing.T) {
 		}
 		client, _ := newFakeClientFilteringPools(t, results)
 		r := NewRegistry(client, nil)
-		out, err := r.CallTool("get_scrub_status", map[string]interface{}{})
+		out, err := r.CallTool(t.Context(), "get_scrub_status", map[string]interface{}{})
 		assertNotInternalError(t, "get_scrub_status null job id", out, err)
 		if err != nil {
 			t.Fatalf("get_scrub_status: %v", err)
@@ -1120,7 +1120,7 @@ func TestScrubToolsTolerateNullPoolSize(t *testing.T) {
 	})
 
 	t.Run("query_scrub_schedules survives a null schedule object", func(t *testing.T) {
-		out, err := r.CallTool("query_scrub_schedules", map[string]interface{}{})
+		out, err := r.CallTool(t.Context(), "query_scrub_schedules", map[string]interface{}{})
 		assertNotInternalError(t, "query_scrub_schedules", out, err)
 		if err != nil {
 			t.Fatalf("query_scrub_schedules: %v", err)
@@ -1128,7 +1128,7 @@ func TestScrubToolsTolerateNullPoolSize(t *testing.T) {
 	})
 
 	t.Run("run_scrub refuses an offline pool", func(t *testing.T) {
-		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "backup"})
+		out, err := r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "backup"})
 		assertNotInternalError(t, "run_scrub", out, err)
 		if err == nil {
 			t.Fatalf("run_scrub on OFFLINE pool succeeded: %s", out)
@@ -1149,7 +1149,7 @@ func TestScrubToolsTolerateNullPoolSize(t *testing.T) {
 	})
 
 	t.Run("run_scrub dry-run refuses an offline pool", func(t *testing.T) {
-		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "backup", "dry_run": true})
+		out, err := r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "backup", "dry_run": true})
 		assertNotInternalError(t, "run_scrub dry-run", out, err)
 		if err == nil {
 			t.Fatalf("run_scrub dry-run on OFFLINE pool succeeded: %s", out)
@@ -1163,7 +1163,7 @@ func TestScrubToolsTolerateNullPoolSize(t *testing.T) {
 	})
 
 	t.Run("create_scrub_schedule dry-run reports unknown size", func(t *testing.T) {
-		out, err := r.CallTool("create_scrub_schedule", map[string]interface{}{
+		out, err := r.CallTool(t.Context(), "create_scrub_schedule", map[string]interface{}{
 			"pool":     "backup",
 			"dry_run":  true,
 			"schedule": map[string]interface{}{"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*"},
