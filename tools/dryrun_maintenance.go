@@ -170,11 +170,11 @@ const (
 )
 
 func planDismissAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
-	uuid, current, err := lookupAlert(ctx, client, args)
+	uuid, current, warning, err := lookupAlert(ctx, client, args)
 	if err != nil {
 		return nil, err
 	}
-	return &writePlan{
+	plan := &writePlan{
 		Tool:         "dismiss_alert",
 		Method:       alertDismissMethod,
 		CallParams:   []interface{}{uuid},
@@ -187,15 +187,19 @@ func planDismissAlert(ctx context.Context, client *truenas.Client, args map[stri
 			Operation:   "update",
 			Target:      alertDismissMethod,
 		}},
-	}, nil
+	}
+	if warning != "" {
+		plan.Warnings = []string{warning}
+	}
+	return plan, nil
 }
 
 func planRestoreAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
-	uuid, current, err := lookupAlert(ctx, client, args)
+	uuid, current, warning, err := lookupAlert(ctx, client, args)
 	if err != nil {
 		return nil, err
 	}
-	return &writePlan{
+	plan := &writePlan{
 		Tool:         "restore_alert",
 		Method:       alertRestoreMethod,
 		CallParams:   []interface{}{uuid},
@@ -208,28 +212,37 @@ func planRestoreAlert(ctx context.Context, client *truenas.Client, args map[stri
 			Operation:   "update",
 			Target:      alertRestoreMethod,
 		}},
-	}, nil
+	}
+	if warning != "" {
+		plan.Warnings = []string{warning}
+	}
+	return plan, nil
 }
 
-func lookupAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, map[string]interface{}, error) {
+// lookupAlert resolves the uuid and, when possible, the alert.list row.
+// alert.list hides alerts whose policy is NEVER, so a missing row is not a
+// refusal: the call is still planned, as main's execute path did, and the
+// preview carries a warning.
+func lookupAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (uuid string, current map[string]interface{}, warning string, err error) {
 	uuid, ok := args["uuid"].(string)
 	if !ok || uuid == "" {
-		return "", nil, fmt.Errorf("uuid parameter is required")
+		return "", nil, "", fmt.Errorf("uuid parameter is required")
 	}
-	result, err := client.Call(ctx, "alert.list")
-	if err != nil {
-		return "", nil, err
+	current = map[string]interface{}{"uuid": uuid}
+	result, listErr := client.Call(ctx, "alert.list")
+	if listErr != nil {
+		return uuid, current, fmt.Sprintf("could not read alert.list (%v); the call will still be sent", listErr), nil
 	}
 	var alerts []map[string]interface{}
 	if err := json.Unmarshal(result, &alerts); err != nil {
-		return "", nil, fmt.Errorf("failed to parse alerts: %w", err)
+		return uuid, current, fmt.Sprintf("could not parse alert.list (%v); the call will still be sent", err), nil
 	}
 	for _, alert := range alerts {
 		if alert["uuid"] == uuid {
-			return uuid, alert, nil
+			return uuid, alert, "", nil
 		}
 	}
-	return "", nil, fmt.Errorf("alert not found: %s", uuid)
+	return uuid, current, fmt.Sprintf("alert %s is not in alert.list; it may be hidden by a NEVER policy. The call will still be sent.", uuid), nil
 }
 
 func executeAlertAction(ctx context.Context, client *truenas.Client, plan *writePlan, verb string) (string, error) {

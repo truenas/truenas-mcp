@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -226,6 +227,31 @@ func TestREADMENotesDownloadUpdatePassesTrainAndVersion(t *testing.T) {
 	}
 }
 
+func TestREADMENotesBlankTrainAndVersionAreOmitted(t *testing.T) {
+	text, err := os.ReadFile(filepath.Join("..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the download_update documentation; "whitespace" also appears in an
+	// unrelated URL-redaction note.
+	var section string
+	for _, para := range strings.Split(string(text), "\n\n") {
+		if strings.Contains(para, "download_update") && (strings.Contains(para, "train") || strings.Contains(para, "`train`")) {
+			section += para + "\n"
+		}
+	}
+	if section == "" {
+		t.Fatal("README.md has no download_update paragraph that mentions train")
+	}
+	lower := strings.ToLower(section)
+	hasBlank := strings.Contains(lower, "blank") || strings.Contains(lower, "whitespace")
+	hasOmitted := strings.Contains(lower, "omitted") || strings.Contains(lower, "omit")
+	hasEmptyParams := strings.Contains(section, "params: []") || strings.Contains(section, "params []") || strings.Contains(section, "`[]`")
+	if !hasBlank || !hasOmitted || !hasEmptyParams {
+		t.Errorf("README.md download_update docs must say that if train and version are both blank or whitespace, they are treated as omitted and params [] is sent; section=%q", section)
+	}
+}
+
 func TestDownloadUpdateSchemaDocumentsTrainAndVersion(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	props := r.tools["download_update"].Definition.InputSchema["properties"].(map[string]interface{})
@@ -281,6 +307,60 @@ func TestDismissAndRestoreAlertSharePlanPayload(t *testing.T) {
 			params := lastCallParams(t, fake, tc.method)
 			if len(params) != 1 || params[0] != "alert-1" {
 				t.Errorf("%s params = %#v, want [uuid]", tc.method, params)
+			}
+		})
+	}
+}
+
+// alert.list omits alerts whose policy is NEVER, so a uuid can be valid
+// even when it is not listed. Main's dismiss_alert / restore_alert still
+// sent alert.dismiss / alert.restore with that uuid; refusing it would
+// make those alerts impossible to dismiss or restore.
+func TestDismissAndRestoreAlertUnlistedUUIDStillCallsMiddleware(t *testing.T) {
+	const hidden = "never-policy-alert"
+	wantPayload, err := json.Marshal([]interface{}{hidden})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, fake := newFakeClientWith(t, map[string]interface{}{
+		"alert.list": []interface{}{
+			map[string]interface{}{"uuid": "alert-1", "level": "WARNING", "dismissed": false, "formatted": "disk"},
+		},
+		"alert.dismiss": nil,
+		"alert.restore": nil,
+	}, nil)
+	r := NewRegistry(client, nil)
+
+	for _, tc := range []struct{ tool, method, verb string }{
+		{"dismiss_alert", "alert.dismiss", "dismissed"},
+		{"restore_alert", "alert.restore", "restored"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			args := map[string]interface{}{"uuid": hidden}
+			out, err := r.CallTool(t.Context(), tc.tool, withArgs(args, obj{"dry_run": true}))
+			if err != nil {
+				t.Fatalf("dry-run refused an unlisted uuid: %v\n%s", err, out)
+			}
+			if strings.Contains(strings.ToLower(out), "alert not found") && strings.Contains(out, `"status": "error"`) {
+				t.Errorf("dry-run should not refuse an unlisted uuid:\n%s", out)
+			}
+			if n := len(fake.called(tc.method)); n != 0 {
+				t.Errorf("dry-run called %s %d times", tc.method, n)
+			}
+
+			out, err = r.CallTool(t.Context(), tc.tool, args)
+			if err != nil {
+				t.Fatalf("execute refused an unlisted uuid: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, hidden) || !strings.Contains(out, tc.verb) {
+				t.Errorf("execute result = %s", out)
+			}
+			calls := fake.called(tc.method)
+			if len(calls) != 1 {
+				t.Fatalf("%s called %d times, want 1", tc.method, len(calls))
+			}
+			if !bytes.Equal(calls[0].Params, wantPayload) {
+				t.Errorf("%s params = %s, want %s (byte-identical to main)", tc.method, calls[0].Params, wantPayload)
 			}
 		})
 	}
