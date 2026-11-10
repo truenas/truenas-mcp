@@ -1,5 +1,7 @@
 package tools
 
+import "encoding/json"
+
 // Per-tool allow lists for former raw-passthrough tools. The field lists
 // follow the TrueNAS 25.10 / 27.0 API models. Unlisted keys, including
 // surprise secret-looking fields, are dropped before redact.ToolOutput
@@ -93,19 +95,35 @@ func pickAllowedMap(v interface{}, keys []string) interface{} {
 	return pickAllowed(m, keys)
 }
 
-// zfsPropValue returns the parsed (or human) value of a ZFS property object.
+// zfsPropValue returns the parsed (or human) value of a ZFS property
+// object. Scalars are passed through; arrays and other composites are
+// dropped (returning nil so the caller can omit the field).
 func zfsPropValue(v interface{}) interface{} {
-	m, ok := v.(map[string]interface{})
-	if !ok {
+	if m, ok := v.(map[string]interface{}); ok {
+		if parsed, ok := m["parsed"]; ok && parsed != nil {
+			v = parsed
+		} else if val, ok := m["value"]; ok && val != nil {
+			v = val
+		} else {
+			return nil
+		}
+	}
+	if isScalarValue(v) {
 		return v
 	}
-	if parsed, ok := m["parsed"]; ok && parsed != nil {
-		return parsed
-	}
-	if val, ok := m["value"]; ok && val != nil {
-		return val
-	}
 	return nil
+}
+
+func isScalarValue(v interface{}) bool {
+	switch v.(type) {
+	case bool, string,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, json.Number:
+		return true
+	default:
+		return false
+	}
 }
 
 func projectAllowedObject(v interface{}, keys []string) (interface{}, bool) {

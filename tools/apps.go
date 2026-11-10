@@ -496,34 +496,39 @@ func summarizeQuestion(question map[string]interface{}) map[string]interface{} {
 
 // extractSchemaDefaults returns run-as user/group and resource-limit
 // defaults from the app schema in catalog.get_app_details. Keys use the
-// schema's own variable names (run_as or runAs). Fields and the whole
-// object are omitted when the schema has no such default.
+// schema's own variable names (run_as or runAs). Resource defaults keep
+// the schema nesting (for example resources.limits.cpus). Only numeric
+// defaults are passed through. In ix-app, run_as applies only when
+// run_as_custom_user is true, so run_as is omitted when that flag's
+// default is false. Fields and the whole object are omitted when the
+// schema has no such default.
 func extractSchemaDefaults(schema map[string]interface{}) map[string]interface{} {
 	if schema == nil {
 		return nil
 	}
 	out := map[string]interface{}{}
-	if q, name := schemaQuestionByVariable(schema, "run_as", "runAs"); q != nil {
-		runAs := map[string]interface{}{}
-		if v, ok := schemaAttrDefault(q, "user"); ok {
-			runAs["user"] = v
+	includeRunAs := true
+	if q, _ := schemaQuestionByVariable(schema, "run_as_custom_user", "runAsCustomUser"); q != nil {
+		if d, ok := schemaQuestionBoolDefault(q); ok && !d {
+			includeRunAs = false
 		}
-		if v, ok := schemaAttrDefault(q, "group"); ok {
-			runAs["group"] = v
-		}
-		if len(runAs) > 0 {
-			out[name] = runAs
+	}
+	if includeRunAs {
+		if q, name := schemaQuestionByVariable(schema, "run_as", "runAs"); q != nil {
+			runAs := map[string]interface{}{}
+			if v, ok := schemaNumericAttrDefault(q, "user"); ok {
+				runAs["user"] = v
+			}
+			if v, ok := schemaNumericAttrDefault(q, "group"); ok {
+				runAs["group"] = v
+			}
+			if len(runAs) > 0 {
+				out[name] = runAs
+			}
 		}
 	}
 	if q, _ := schemaQuestionByVariable(schema, "resources"); q != nil {
-		resources := map[string]interface{}{}
-		if v, ok := schemaAttrDefault(q, "cpus"); ok {
-			resources["cpus"] = v
-		}
-		if v, ok := schemaAttrDefault(q, "memory"); ok {
-			resources["memory"] = v
-		}
-		if len(resources) > 0 {
+		if resources := extractNestedNumericDefaults(q); len(resources) > 0 {
 			out["resources"] = resources
 		}
 	}
@@ -531,6 +536,117 @@ func extractSchemaDefaults(schema map[string]interface{}) map[string]interface{}
 		return nil
 	}
 	return out
+}
+
+func schemaQuestionBoolDefault(question map[string]interface{}) (bool, bool) {
+	schemaMap, _ := question["schema"].(map[string]interface{})
+	if schemaMap == nil {
+		return false, false
+	}
+	d, ok := schemaMap["default"]
+	if !ok {
+		return false, false
+	}
+	b, ok := d.(bool)
+	return b, ok
+}
+
+func schemaNumericAttrDefault(question map[string]interface{}, variable string) (interface{}, bool) {
+	v, ok := findSchemaAttrDefault(question, variable)
+	if !ok {
+		return nil, false
+	}
+	return asNumericDefault(v)
+}
+
+// extractNestedNumericDefaults walks a question's nested schema.attrs and
+// returns only numeric defaults, preserving the schema nesting.
+func extractNestedNumericDefaults(node map[string]interface{}) map[string]interface{} {
+	if node == nil {
+		return nil
+	}
+	schemaMap, _ := node["schema"].(map[string]interface{})
+	if schemaMap == nil {
+		return nil
+	}
+	attrs, ok := schemaMap["attrs"].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := map[string]interface{}{}
+	for _, a := range attrs {
+		am, ok := a.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := am["variable"].(string)
+		if name == "" {
+			continue
+		}
+		if nested := extractNestedNumericDefaults(am); len(nested) > 0 {
+			out[name] = nested
+			continue
+		}
+		if v, ok := attrDirectNumericDefault(am); ok {
+			out[name] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func attrDirectNumericDefault(node map[string]interface{}) (interface{}, bool) {
+	schemaMap, _ := node["schema"].(map[string]interface{})
+	if schemaMap == nil {
+		return nil, false
+	}
+	d, ok := schemaMap["default"]
+	if !ok {
+		return nil, false
+	}
+	return asNumericDefault(d)
+}
+
+func asNumericDefault(v interface{}) (interface{}, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case uint:
+		return int(n), true
+	case uint8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case uint32:
+		return int(n), true
+	case uint64:
+		return int(n), true
+	case float32:
+		return float64(n), true
+	case float64:
+		return n, true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i), true
+		}
+		f, err := n.Float64()
+		if err != nil {
+			return nil, false
+		}
+		return f, true
+	default:
+		return nil, false
+	}
 }
 
 func schemaQuestionByVariable(schema map[string]interface{}, names ...string) (map[string]interface{}, string) {
@@ -553,12 +669,6 @@ func schemaQuestionByVariable(schema map[string]interface{}, names ...string) (m
 		}
 	}
 	return nil, ""
-}
-
-// schemaAttrDefault walks a question's nested schema.attrs (the 25.10
-// questions.yaml shape) and returns the default for variable.
-func schemaAttrDefault(question map[string]interface{}, variable string) (interface{}, bool) {
-	return findSchemaAttrDefault(question, variable)
 }
 
 func findSchemaAttrDefault(node map[string]interface{}, variable string) (interface{}, bool) {
@@ -798,7 +908,7 @@ func (r *Registry) executeInstallApp(ctx context.Context, client *truenas.Client
 
 	jobID, err := parseJobID(result)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse job ID as int or array: app.create returned %s", result)
+		return "", err
 	}
 
 	opts := []tasks.TaskOption{}

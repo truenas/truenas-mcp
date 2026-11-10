@@ -227,8 +227,12 @@ func TestGetAppCatalogDetailsUsesSchemaDefaults(t *testing.T) {
 	if resources == nil {
 		t.Fatalf("defaults.resources missing: %v", defaults)
 	}
-	wantNum(t, resources, "cpus", 8)
-	wantNum(t, resources, "memory", 2048)
+	limits, _ := resources["limits"].(map[string]interface{})
+	if limits == nil {
+		t.Fatalf("defaults.resources.limits missing: %v", resources)
+	}
+	wantNum(t, limits, "cpus", 8)
+	wantNum(t, limits, "memory", 2048)
 }
 
 // When the schema uses the common official-app values (568 and 4096), those
@@ -248,10 +252,14 @@ func TestGetAppCatalogDetailsReportsSchemaDefaultsWhenTheyMatchOldFixedValues(t 
 	if runAs == nil || resources == nil {
 		t.Fatalf("defaults incomplete: %v", defaults)
 	}
+	limits, _ := resources["limits"].(map[string]interface{})
+	if limits == nil {
+		t.Fatalf("defaults.resources.limits missing: %v", resources)
+	}
 	wantNum(t, runAs, "user", 568)
 	wantNum(t, runAs, "group", 568)
-	wantNum(t, resources, "cpus", 2)
-	wantNum(t, resources, "memory", 4096)
+	wantNum(t, limits, "cpus", 2)
+	wantNum(t, limits, "memory", 4096)
 }
 
 // Guidance lives in the tool descriptions, worded so any MCP client can

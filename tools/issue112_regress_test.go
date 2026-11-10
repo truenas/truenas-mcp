@@ -84,39 +84,30 @@ func TestIssue112JobIDParsingIsCentralized(t *testing.T) {
 	}
 }
 
-// inlineJobIDUnmarshal reports whether fn still does `var jobID int` (or
-// equivalent) and json.Unmarshal into that variable, instead of calling
-// parseJobID.
+// inlineJobIDUnmarshal reports whether fn still json.Unmarshals a method
+// result into an int or []int, instead of calling parseJobID. The
+// destination variable name does not matter.
 func inlineJobIDUnmarshal(fn *ast.FuncDecl) bool {
 	if fn.Body == nil {
 		return false
 	}
-	declares := map[string]bool{}
-	unmarshals := false
+	intVars := map[string]bool{}
 	callsParse := false
+	unmarshals := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.ValueSpec:
-			for _, ident := range x.Names {
-				if ident.Name == "jobID" || ident.Name == "jobIDArray" || ident.Name == "jobIDs" {
-					declares[ident.Name] = true
-				}
+			if !isIntOrIntSliceType(x.Type) {
+				return true
 			}
-		case *ast.AssignStmt:
-			for _, lhs := range x.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && (id.Name == "jobID" || id.Name == "jobIDArray" || id.Name == "jobIDs") {
-					if x.Tok == token.DEFINE {
-						declares[id.Name] = true
-					}
-				}
+			for _, ident := range x.Names {
+				intVars[ident.Name] = true
 			}
 		case *ast.CallExpr:
 			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
 				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "json" && sel.Sel.Name == "Unmarshal" && len(x.Args) == 2 {
-					if id, ok := x.Args[1].(*ast.UnaryExpr); ok {
-						if v, ok := id.X.(*ast.Ident); ok && (v.Name == "jobID" || v.Name == "jobIDArray" || v.Name == "jobIDs") {
-							unmarshals = true
-						}
+					if dest, ok := unmarshalDestIdent(x.Args[1]); ok && intVars[dest] {
+						unmarshals = true
 					}
 				}
 			}
@@ -129,5 +120,91 @@ func inlineJobIDUnmarshal(fn *ast.FuncDecl) bool {
 	if callsParse {
 		return false
 	}
-	return unmarshals && (declares["jobID"] || declares["jobIDArray"] || declares["jobIDs"])
+	return unmarshals
+}
+
+func isIntOrIntSliceType(expr ast.Expr) bool {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name == "int"
+	case *ast.ArrayType:
+		elem, ok := t.Elt.(*ast.Ident)
+		return ok && elem.Name == "int"
+	default:
+		return false
+	}
+}
+
+func unmarshalDestIdent(arg ast.Expr) (string, bool) {
+	unary, ok := arg.(*ast.UnaryExpr)
+	if !ok || unary.Op != token.AND {
+		return "", false
+	}
+	id, ok := unary.X.(*ast.Ident)
+	if !ok {
+		return "", false
+	}
+	return id.Name, true
+}
+
+func parseFuncDecl(t *testing.T, src, name string) *ast.FuncDecl {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "snippet.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range file.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name != nil && fn.Name.Name == name {
+			return fn
+		}
+	}
+	t.Fatalf("function %s not found in snippet", name)
+	return nil
+}
+
+// TestIssue112JobIDParsingDetectorCatchesGenericIntVar is the review
+// follow-up: the centralized check must flag any json.Unmarshal of a
+// method result into an int or []int, not only variables named jobID /
+// jobIDArray / jobIDs.
+func TestIssue112JobIDParsingDetectorCatchesGenericIntVar(t *testing.T) {
+	intSrc := `package p
+import "encoding/json"
+func f(result json.RawMessage) {
+	var n int
+	_ = json.Unmarshal(result, &n)
+}
+`
+	if !inlineJobIDUnmarshal(parseFuncDecl(t, intSrc, "f")) {
+		t.Error("detector missed json.Unmarshal of a method result into an int not named jobID")
+	}
+	sliceSrc := `package p
+import "encoding/json"
+func f(result json.RawMessage) {
+	var ids []int
+	_ = json.Unmarshal(result, &ids)
+}
+`
+	if !inlineJobIDUnmarshal(parseFuncDecl(t, sliceSrc, "f")) {
+		t.Error("detector missed json.Unmarshal of a method result into []int")
+	}
+	countSrc := `package p
+import "encoding/json"
+func queryCount(raw json.RawMessage) {
+	var n float64
+	_ = json.Unmarshal(raw, &n)
+}
+`
+	if inlineJobIDUnmarshal(parseFuncDecl(t, countSrc, "queryCount")) {
+		t.Error("detector flagged a float64 count unmarshal")
+	}
+	parseSrc := `package p
+import "encoding/json"
+func f(result json.RawMessage) (int, error) {
+	return parseJobID(result)
+}
+`
+	if inlineJobIDUnmarshal(parseFuncDecl(t, parseSrc, "f")) {
+		t.Error("detector flagged a function that only calls parseJobID")
+	}
 }
