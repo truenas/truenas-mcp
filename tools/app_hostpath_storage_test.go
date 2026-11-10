@@ -707,7 +707,7 @@ func TestAppHostPathCatalogFollowups(t *testing.T) {
 		if dry {
 			args["dry_run"] = true
 		}
-		out, err := r.CallTool("install_app", args)
+		out, err := r.CallTool(t.Context(), "install_app", args)
 		return out, err, fake
 	}
 	mustRefuseWrite := func(t *testing.T, schema map[string]interface{}, values map[string]interface{}, want string, dry bool) {
