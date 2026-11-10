@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/truenas/truenas-mcp/truenas"
@@ -97,24 +98,23 @@ func checkDirectoryServiceForShareWarnings(ctx context.Context, client *truenas.
 			fmt.Sprintf("NOTICE: %s is enabled but not healthy - users may not authenticate properly", status.Type))
 	}
 
-	if status.Enabled && status.Type == "activedirectory" {
+	// Middleware reports type as ACTIVEDIRECTORY / LDAP / IPA.
+	if status.Enabled && strings.EqualFold(status.Type, "activedirectory") {
 		warnings = append(warnings,
 			"NOTICE: Active Directory is enabled - ensure ACLs are configured for domain users/groups")
 	}
 
-	if status.Enabled && status.Type == "ldap" {
+	if status.Enabled && strings.EqualFold(status.Type, "ldap") {
 		warnings = append(warnings,
 			"NOTICE: LDAP is enabled - ensure POSIX attributes are configured for LDAP users")
 	}
 
-	return warnings
-}
+	if status.Enabled && strings.EqualFold(status.Type, "ipa") {
+		warnings = append(warnings,
+			"NOTICE: IPA is enabled - ensure permissions are configured for IPA users/groups")
+	}
 
-// GetTrueNASClient returns a TrueNAS client (stub for share handlers)
-func GetTrueNASClient() (*truenas.Client, error) {
-	// This is called from share handlers but they already have a client
-	// Return error as this shouldn't be used directly
-	return nil, fmt.Errorf("client should be passed directly")
+	return warnings
 }
 
 // Read-only handlers
