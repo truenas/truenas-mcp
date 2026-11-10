@@ -26,7 +26,7 @@ A Model Context Protocol (MCP) server for TrueNAS that enables AI models to inte
   - [Safety Controls](#safety-controls)
 - [Example Usage](#example-usage)
 - [Advanced Features](#advanced-features)
-  - [MCP Tasks for Long-Running Operations](#mcp-tasks-for-long-running-operations)
+  - [Tasks for Long-Running Operations](#tasks-for-long-running-operations)
   - [Dry-Run Mode for Write Operations](#dry-run-mode-for-write-operations)
 - [Development](#development)
 
@@ -662,9 +662,9 @@ Once connected via an MCP client, ask questions in natural language:
 
 ## Advanced Features
 
-### MCP Tasks for Long-Running Operations
+### Tasks for Long-Running Operations
 
-The server implements MCP Tasks specification for operations that take time to complete (like app upgrades):
+Operations that take time to complete (like app upgrades) are tracked as tasks. These are ordinary tools (`tasks_list` and `tasks_get`) backed by the server's own background polling of TrueNAS jobs; the server does not implement the MCP tasks extension, which the Go MCP SDK does not support yet.
 
 **How it works:**
 1. Write operations (like `upgrade_app`) return a `task_id` instead of blocking
@@ -673,21 +673,26 @@ The server implements MCP Tasks specification for operations that take time to c
 4. `upgrade_app` only reports success once the app is seen RUNNING after the upgrade job finishes. It waits `health_timeout_seconds` (an integer from 0 to 600, default 60; other values are rejected). If the app is merely still starting when the wait ends, the task fails with a message saying the upgrade itself succeeded and the app was slow to start; raise `health_timeout_seconds` for such apps. For a version upgrade TrueNAS stops the app and snapshots its ix-volumes dataset (if it has one); `snapshot_hostpaths` only controls whether host paths are also snapshotted. Custom apps and image-only updates are instead redeployed with updated images, without a stop or any snapshot, and the preview shows a single `redeploy` step saying so. While it waits, and once it is done, the task's `job.app` is the app as read from `app.query` (`app_source: "app.query"`, `app_checked_at`), not the copy embedded in the job result, so it agrees with `statusMessage`. A job state of `SUCCESS` (in `job.state` or `query_jobs`) only means the job finished, not that the app is healthy. Task IDs are held in memory; after a server restart, list jobs with `query_jobs` (`method: "app.upgrade"` narrows the list) and find the entry whose `id` matches the returned `job_id`.
 5. Job output is summarized: each job summary (the `job` of `tasks_get`, each entry of `query_jobs`) is at most 4 KiB, with `*_truncated` flags when text was cut
 6. Tasks update automatically - no manual polling needed
+7. Each task shows the tool that started it (`tool`), the TrueNAS job it tracks (`job_id`) and, once the job succeeded, its `result`. The result is at most 4 KiB; a larger one is cut to a preview (an app entry is summarized) with `result_truncated: true` and `result_size_bytes`. `upgrade_app` tasks report the result in `job` instead. Task arguments are never returned.
+8. TrueNAS job ids restart at 1 when the middleware restarts or the system reboots, so the server records each job's method and start time when the task is created and checks them on every poll. If the job is gone (no row for 3 consecutive polls) or its id now belongs to a different job, the task fails with a message saying TrueNAS restarted and which tool shows the current state. For `apply_update` a reboot is expected; the message points to `system_info` and `update_status`.
+9. If reading the job fails repeatedly (3 consecutive polls), `statusMessage` says so and the failure is logged to stderr; the task keeps working.
+10. `ttl` is how long a task is tracked while it is working, in seconds from `createdAt`. A task still working when it runs out fails with "tracking timed out" (the operation may still be running on TrueNAS). Finished tasks (completed, failed or cancelled) stay readable for 24 hours after they finish. Tasks are held in memory and are lost when the server restarts.
 
 **Example:**
 ```
-User: "Upgrade the plex app"
-→ Returns: {"task_id": "abc-123", "status": "working", ...}
+User: "Install the web app"
+→ Returns: {"task_id": "abc-123", "task_status": "working", "job_id": 42, ...}
 
 User: "Check task abc-123"
-→ Returns: {"status": "completed", "result": {...}}
+→ Returns: {"taskId": "abc-123", "status": "completed", "tool": "install_app", "job_id": 42,
+            "statusMessage": "Job completed successfully", "result": {...}, ...}
 ```
 
 **Task States:**
 - `working` - Operation in progress
 - `completed` - Operation finished successfully
 - `failed` - Operation encountered an error
-- `cancelled` - Operation was cancelled
+- `cancelled` - The TrueNAS job was aborted
 
 ### Dry-Run Mode for Write Operations
 

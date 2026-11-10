@@ -31,6 +31,7 @@ func NewManager(client *truenas.Client, config PollerConfig) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	store := NewTaskStore()
+	store.SetRetention(config.Retention)
 	poller := NewPoller(client, store, config)
 
 	return &Manager{
@@ -107,7 +108,10 @@ func (m *Manager) cleanOnce() {
 	m.store.CleanExpired()
 }
 
-// CreateJobTask creates a task for a job-based operation
+// CreateJobTask creates a task for a job-based operation. It reads the job
+// once to record its identity (method and start time) and the client's
+// session generation, so that the poller can tell the job apart from a later
+// job that reuses its id after a middleware restart.
 func (m *Manager) CreateJobTask(toolName string, args map[string]interface{}, jobID int, ttl time.Duration, opts ...TaskOption) (*Task, error) {
 	task := &Task{
 		TaskID:        uuid.New().String(),
@@ -126,26 +130,8 @@ func (m *Manager) CreateJobTask(toolName string, args map[string]interface{}, jo
 		opt(task)
 	}
 
-	if err := m.store.Add(task); err != nil {
-		return nil, fmt.Errorf("failed to store task: %w", err)
-	}
-
-	return task, nil
-}
-
-// CreateStatusTask creates a task for a status-based operation
-func (m *Manager) CreateStatusTask(toolName string, args map[string]interface{}, statusMethod string, ttl time.Duration) (*Task, error) {
-	task := &Task{
-		TaskID:        uuid.New().String(),
-		Status:        TaskStatusWorking,
-		CreatedAt:     time.Now(),
-		LastUpdatedAt: time.Now(),
-		TTL:           int64(ttl.Seconds()),
-		PollInterval:  int64(m.config.PollInterval.Seconds()),
-		OperationType: OperationTypeStatus,
-		StatusMethod:  statusMethod,
-		ToolName:      toolName,
-		Arguments:     args,
+	if m.client != nil {
+		m.poller.recordIdentity(task)
 	}
 
 	if err := m.store.Add(task); err != nil {
@@ -163,34 +149,4 @@ func (m *Manager) Get(taskID string) (*Task, error) {
 // List returns tasks with pagination
 func (m *Manager) List(cursor string, limit int) ([]*Task, string, error) {
 	return m.store.List(cursor, limit)
-}
-
-// Cancel attempts to cancel a task
-func (m *Manager) Cancel(taskID string) (*Task, error) {
-	task, err := m.store.Get(taskID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Only cancel non-terminal tasks
-	if task.Status == TaskStatusCompleted || task.Status == TaskStatusFailed || task.Status == TaskStatusCancelled {
-		return nil, fmt.Errorf("task is already in terminal state: %s", task.Status)
-	}
-
-	// For job-based tasks, try to abort the job
-	if task.OperationType == OperationTypeJob && task.JobID != nil {
-		_, err := m.client.Call("core.job_abort", *task.JobID)
-		if err != nil {
-			// Log but don't fail - job might already be done
-		}
-	}
-
-	// Update task status
-	task.Status = TaskStatusCancelled
-	task.StatusMessage = "Cancelled by user"
-	if err := m.store.Update(task); err != nil {
-		return nil, fmt.Errorf("failed to update task: %w", err)
-	}
-
-	return task, nil
 }

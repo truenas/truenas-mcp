@@ -1883,7 +1883,7 @@ Returns task_id for tracking progress with tasks_get.
 	r.tools["tasks_list"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "tasks_list",
-			Description: "List all active and recent tasks. Tasks represent long-running operations like app upgrades.",
+			Description: "List tasks started by this server (newest first): running tasks, and finished ones for 24 hours after they finish. Each task names the tool that started it (tool), the TrueNAS job it tracks (job_id), its status and statusMessage, and, once the job succeeded, its result (bounded; result_truncated is set when cut). Tasks are held in this server's memory only and are lost when it restarts.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1905,7 +1905,7 @@ Returns task_id for tracking progress with tasks_get.
 	r.tools["tasks_get"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "tasks_get",
-			Description: "Get detailed status of a specific task by ID. Use this to track progress of long-running operations.",
+			Description: "Get the status of a task by ID: tool, job_id, status (working, completed, failed or cancelled), statusMessage and, once the job succeeded, its result (bounded; result_truncated is set when cut). If TrueNAS or its middleware restarts, the tracked job is gone and the task fails with a message naming the tool to check the state with. A task still working when its ttl (seconds since createdAt) runs out fails with \"tracking timed out\"; the operation may still be running. Finished tasks stay readable for 24 hours.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

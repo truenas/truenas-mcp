@@ -37,7 +37,7 @@ func captureLog(t *testing.T) *logBuf {
 }
 
 func workingTask(id string) *Task {
-	return &Task{TaskID: id, Status: TaskStatusWorking, OperationType: OperationTypeStatus, StatusMethod: "x", TTL: 60}
+	return &Task{TaskID: id, Status: TaskStatusWorking, OperationType: OperationTypeJob, TTL: 60}
 }
 
 // A panic while polling one task marks that task failed, still polls the
@@ -147,12 +147,15 @@ func TestCleanupLoopSurvivesPanic(t *testing.T) {
 	}
 }
 
-// A cleanup pass really removes expired tasks, without a hook.
+// A cleanup pass really removes finished tasks past their retention, without
+// a hook.
 func TestCleanOnceRemovesExpired(t *testing.T) {
 	m := &Manager{store: NewTaskStore()}
+	m.store.SetRetention(time.Nanosecond)
 	exp := workingTask("old")
-	exp.TTL = -1
+	exp.Status = TaskStatusCompleted
 	m.store.Add(exp)
+	time.Sleep(time.Millisecond)
 	m.store.Add(workingTask("new"))
 	m.cleanOnce()
 	if _, err := m.store.Get("old"); err == nil {

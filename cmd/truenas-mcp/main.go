@@ -205,7 +205,6 @@ func main() {
 	// Create task manager
 	taskConfig := tasks.PollerConfig{
 		PollInterval:    5 * time.Second,
-		MaxPollAttempts: 0, // Unlimited
 		CleanupInterval: 1 * time.Minute,
 	}
 	taskManager := tasks.NewManager(client, taskConfig)

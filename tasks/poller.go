@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/truenas/truenas-mcp/internal/safego"
+	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
@@ -86,59 +87,169 @@ func (p *Poller) pollOne(task *Task) {
 		p.pollTask(task)
 		return
 	}
-	switch task.OperationType {
-	case OperationTypeJob:
+	if task.OperationType == OperationTypeJob {
 		p.pollJobTask(task)
-	case OperationTypeStatus:
-		p.pollStatusTask(task)
 	}
 }
 
-// pollJobTask polls a job-based task using core.get_jobs
+func (p *Poller) missingJobPolls() int {
+	if p.config.MissingJobPolls > 0 {
+		return p.config.MissingJobPolls
+	}
+	return DefaultMissingJobPolls
+}
+
+func (p *Poller) pollErrorPolls() int {
+	if p.config.PollErrorPolls > 0 {
+		return p.config.PollErrorPolls
+	}
+	return DefaultPollErrorPolls
+}
+
+// readJob reads one job row by id. It returns nil (and no error) when
+// core.get_jobs has no such job, and the client's session generation after
+// the read, so a reconnect during the read is seen as a new session.
+func (p *Poller) readJob(jobID int) (job map[string]interface{}, gen uint64, err error) {
+	result, err := p.client.Call("core.get_jobs", []interface{}{
+		[]interface{}{"id", "=", jobID},
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	var jobs []map[string]interface{}
+	if err := json.Unmarshal(result, &jobs); err != nil {
+		return nil, 0, fmt.Errorf("unexpected core.get_jobs result: %w", err)
+	}
+	gen, err = p.client.SessionGeneration()
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(jobs) == 0 {
+		return nil, gen, nil
+	}
+	return jobs[0], gen, nil
+}
+
+// jobIdentity returns the fields that tell one job apart from a later job
+// with the same id: its method and its start time (as JSON).
+func jobIdentity(job map[string]interface{}) (method, started string) {
+	method, _ = job["method"].(string)
+	if v, ok := job["time_started"]; ok && v != nil {
+		if b, err := json.Marshal(v); err == nil {
+			started = string(b)
+		}
+	}
+	return method, started
+}
+
+// recordIdentity reads the task's job once, at creation, and records its
+// identity and the session it was read in. If the read fails the identity is
+// recorded by the first poll that still sees the same session.
+func (p *Poller) recordIdentity(task *Task) {
+	if task.JobID == nil {
+		return
+	}
+	job, gen, err := p.readJob(*task.JobID)
+	if err != nil {
+		log.Printf("task %s (%s): could not read job %d at creation: %s", task.TaskID, task.ToolName, *task.JobID, redact.Text(err.Error()))
+		if g, gerr := p.client.SessionGeneration(); gerr == nil {
+			task.sessionGen, task.genKnown = g, true
+		}
+		return
+	}
+	task.sessionGen, task.genKnown = gen, true
+	if job != nil {
+		task.jobMethod, task.jobStarted = jobIdentity(job)
+		task.identityKnown = true
+	}
+}
+
+// failTask ends a task as failed with msg and logs why.
+func (p *Poller) failTask(task *Task, msg string) {
+	task.Status = TaskStatusFailed
+	task.StatusMessage = msg
+	log.Printf("task %s (%s): %s", task.TaskID, task.ToolName, msg)
+	p.store.Update(task)
+}
+
+// pollJobTask polls a job-based task using core.get_jobs. The row must be the
+// same job the task was created for (same method and start time); a job that
+// is gone, or whose id now belongs to another job, ends the task as failed.
+// Read errors keep the task working but are reported once they repeat.
 func (p *Poller) pollJobTask(task *Task) {
 	if task.JobID == nil {
 		return
 	}
 
-	// Query job status
-	result, err := p.client.Call("core.get_jobs", []interface{}{
-		[]interface{}{"id", "=", *task.JobID},
-	})
+	job, gen, err := p.readJob(*task.JobID)
 	if err != nil {
-		// Don't fail the task on network errors, just skip this poll
+		p.pollFailed(task, err)
 		return
 	}
 
-	var jobs []map[string]interface{}
-	if err := json.Unmarshal(result, &jobs); err != nil {
+	dirty := task.pollErrors != 0
+	task.pollErrors = 0
+
+	if job == nil {
+		task.missingPolls++
+		if task.missingPolls >= p.missingJobPolls() {
+			p.failTask(task, restartMessage(task, false))
+			return
+		}
+		if task.StatusMessage != "" && dirty {
+			task.StatusMessage = ""
+			p.store.Update(task)
+			return
+		}
+		p.store.Save(task)
+		return
+	}
+	if task.missingPolls != 0 {
+		task.missingPolls = 0
+		dirty = true
+	}
+
+	method, started := jobIdentity(job)
+	switch {
+	case task.identityKnown:
+		if method != task.jobMethod || started != task.jobStarted {
+			p.failTask(task, restartMessage(task, true))
+			return
+		}
+	case task.genKnown && gen == task.sessionGen:
+		// The creation read failed, but this is still the session the job
+		// was started in, so the row is that job.
+		task.jobMethod, task.jobStarted, task.identityKnown = method, started, true
+		dirty = true
+	default:
+		// The session changed before the job's identity was recorded: the
+		// row may belong to a job started after a restart.
+		p.failTask(task, restartMessage(task, true))
 		return
 	}
 
-	if len(jobs) == 0 {
-		return
+	if dirty {
+		p.store.Save(task)
 	}
-
-	p.updateTaskFromJob(task, jobs[0])
+	p.updateTaskFromJob(task, job)
 }
 
-// pollStatusTask polls a status-based task using custom status endpoint
-func (p *Poller) pollStatusTask(task *Task) {
-	if task.StatusMethod == "" {
+// pollFailed records a failed poll. After PollErrorPolls consecutive
+// failures the task's statusMessage says so (it stays working) and the
+// failure is logged, then again every PollErrorPolls failures.
+func (p *Poller) pollFailed(task *Task, err error) {
+	task.pollErrors++
+	n := p.pollErrorPolls()
+	if task.pollErrors < n {
+		p.store.Save(task)
 		return
 	}
-
-	// Call the status method
-	result, err := p.client.Call(task.StatusMethod)
-	if err != nil {
-		return
+	text, _ := TruncateText(redact.Text(err.Error()), 256)
+	if task.pollErrors%n == 0 {
+		log.Printf("task %s (%s): could not read %s for %d consecutive polls: %s", task.TaskID, task.ToolName, jobIDText(task), task.pollErrors, text)
 	}
-
-	var status map[string]interface{}
-	if err := json.Unmarshal(result, &status); err != nil {
-		return
-	}
-
-	p.updateTaskFromStatus(task, status)
+	task.StatusMessage = fmt.Sprintf("Could not read %s from TrueNAS for %d consecutive polls (last error: %s); still tracking", jobIDText(task), task.pollErrors, text)
+	p.store.Update(task)
 }
 
 // updateTaskFromJob updates task state based on TrueNAS job state
@@ -172,23 +283,22 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 	case "SUCCESS":
 		newStatus = TaskStatusCompleted
 		statusMessage = "Job completed successfully"
-		if result, ok := job["result"]; ok {
-			task.Result = result
-		}
 		if task.VerifyApp != "" {
 			// A finished job is not a healthy app: hold the task open until
 			// the app is observed running, or report what state it is in.
-			task.Result = task.Job
+			// The result is reported in the bounded job summary.
 			newStatus, statusMessage = p.verifyApp(task)
+		} else if result, ok := job["result"]; ok && result != nil {
+			task.Result, task.ResultTruncated, task.ResultSizeBytes = BoundResult(result)
+			if !task.ResultTruncated {
+				task.ResultSizeBytes = 0
+			}
 		}
 
 	case "FAILED":
 		newStatus = TaskStatusFailed
 		if errMsg, ok := job["error"].(string); ok {
-			statusMessage = errMsg
-			if task.VerifyApp != "" {
-				statusMessage, _ = TruncateText(errMsg, MaxJobTextBytes)
-			}
+			statusMessage, _ = TruncateText(errMsg, MaxJobTextBytes)
 		} else {
 			statusMessage = "Job failed"
 		}
@@ -299,7 +409,6 @@ func refreshJobApp(task *Task, h appHealthInfo, err error) {
 		}
 	}
 	task.Job = FitJobSummary(job)
-	task.Result = task.Job
 }
 
 // errAppNotFound is returned by appHealth when app.query succeeded but listed
@@ -369,56 +478,4 @@ func (p *Poller) appHealth(appName string) (appHealthInfo, error) {
 		return h, fmt.Errorf("app %s reported no state", appName)
 	}
 	return h, nil
-}
-
-// updateTaskFromStatus updates task state based on custom status endpoint
-func (p *Poller) updateTaskFromStatus(task *Task, status map[string]interface{}) {
-	// Generic status parsing - can be extended per status endpoint
-	// Look for common fields like "state", "status", "progress"
-
-	var newStatus TaskStatus
-	var statusMessage string
-
-	// Try to find state/status field
-	if state, ok := status["state"].(string); ok {
-		switch state {
-		case "RUNNING", "IN_PROGRESS":
-			newStatus = TaskStatusWorking
-		case "FINISHED", "COMPLETED":
-			newStatus = TaskStatusCompleted
-		case "FAILED", "ERROR":
-			newStatus = TaskStatusFailed
-		default:
-			return
-		}
-	} else if statusStr, ok := status["status"].(string); ok {
-		switch statusStr {
-		case "RUNNING", "IN_PROGRESS":
-			newStatus = TaskStatusWorking
-		case "FINISHED", "COMPLETED":
-			newStatus = TaskStatusCompleted
-		case "FAILED", "ERROR":
-			newStatus = TaskStatusFailed
-		default:
-			return
-		}
-	} else {
-		// No recognized status field
-		return
-	}
-
-	// Try to get message
-	if msg, ok := status["message"].(string); ok {
-		statusMessage = msg
-	} else if desc, ok := status["description"].(string); ok {
-		statusMessage = desc
-	}
-
-	// Update task if state changed
-	if task.Status != newStatus || task.StatusMessage != statusMessage {
-		task.Status = newStatus
-		task.StatusMessage = statusMessage
-		task.Result = status
-		p.store.Update(task)
-	}
 }
