@@ -16,6 +16,11 @@ import (
 	"github.com/truenas/truenas-mcp/mcp"
 )
 
+// largeResultBytes is a tool result big enough to exceed the old 64 KiB
+// scanner limit, but under the 100 KiB client output cap, so protocol
+// tests can still check that a large reply reaches stdout in full.
+const largeResultBytes = 80 << 10
+
 // fakeRegistry echoes the size of its "data" argument and returns a large
 // result, and logs from inside the tool as real tools do.
 type fakeRegistry struct{ resultBytes int }
@@ -41,7 +46,7 @@ func runStdioSession(t *testing.T, c *rpcClient) {
 	c.send(map[string]interface{}{"method": "notifications/initialized"})
 	c.call(float64(2), "tools/list", nil)
 	text, _ := toolText(t, c.call(float64(3), "tools/call", toolArgs("echo", map[string]interface{}{"data": big})))
-	if !strings.HasPrefix(text, "got 307200 bytes;") || len(text) < 256<<10 {
+	if !strings.HasPrefix(text, "got 307200 bytes;") || len(text) < largeResultBytes {
 		t.Errorf("large request/response did not round-trip: %d bytes, prefix %.40q", len(text), text)
 	}
 	if m := c.call(float64(4), "no/such/method", nil); errorCode(m) != -32601 {
@@ -61,7 +66,7 @@ func TestStdioOnlyProtocolReachesStdout(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
 
-	c, run := session(t, newTestHandler(fakeRegistry{resultBytes: 256 << 10}, true))
+	c, run := session(t, newTestHandler(fakeRegistry{resultBytes: largeResultBytes}, true))
 	runStdioSession(t, c)
 	if err := run.wait(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -261,7 +266,7 @@ func TestStdioHelperProcess(t *testing.T) {
 	}
 	configureLogging()
 	log.Println("log line before serving")
-	h := NewStdioHandler(fakeRegistry{resultBytes: 256 << 10}, true)
+	h := NewStdioHandler(fakeRegistry{resultBytes: largeResultBytes}, true)
 	if err := h.Run(context.Background()); err != nil {
 		log.Printf("Run: %v", err)
 		os.Exit(1)

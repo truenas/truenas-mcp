@@ -1054,9 +1054,13 @@ func (c *Client) Close() error {
 
 // APICallError is the error for a failed middleware call. Its text is the
 // server's message, the request context (method and already masked params),
-// and the server's details and trace. The parts are kept apart so a caller
-// can post-process only the server-supplied text (Message, Details, Trace)
-// without touching the request block, which was masked by key name already.
+// and the server's details. The server trace is kept on the struct so a
+// caller can inspect or log it, but Error() never includes it: a Python
+// traceback has no value to the model. When debug logging is on,
+// formatAPIErrorWithContext writes the trace to stderr. The parts are
+// kept apart so a caller can post-process only the server-supplied text
+// (Message, Details, Trace) without touching the request block, which was
+// masked by key name already.
 type APICallError struct {
 	Message string // server message, scrubbed of the API key
 	Code    int
@@ -1066,7 +1070,8 @@ type APICallError struct {
 	Trace   string // server trace, scrubbed; empty if none
 }
 
-// Error renders the full message in a fixed layout.
+// Error renders the client-facing message in a fixed layout. The server
+// trace is omitted; see the type comment.
 func (e *APICallError) Error() string {
 	errMsg := fmt.Sprintf("API error: %s (code %d)", e.Message, e.Code)
 	errMsg = fmt.Sprintf("%s\n\nRequest:\n  Method: %s", errMsg, e.Method)
@@ -1075,9 +1080,6 @@ func (e *APICallError) Error() string {
 	}
 	if e.Details != "" {
 		errMsg = fmt.Sprintf("%s\n\nDetails: %s", errMsg, e.Details)
-	}
-	if e.Trace != "" {
-		errMsg = fmt.Sprintf("%s\n\nTrace: %s", errMsg, e.Trace)
 	}
 	return errMsg
 }
@@ -1118,6 +1120,10 @@ func (c *Client) formatAPIErrorWithContext(apiErr *APIError, method string, para
 				e.Trace = c.scrubSecrets(string(traceJSON))
 			}
 		}
+	}
+
+	if debugLogging.Load() && e.Trace != "" {
+		log.Printf("TrueNAS API error trace for %s: %s", method, e.Trace)
 	}
 
 	return e
