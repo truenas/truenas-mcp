@@ -15,6 +15,7 @@ import (
 
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/redact"
+	"github.com/truenas/truenas-mcp/tasks"
 )
 
 const (
@@ -26,6 +27,15 @@ const (
 	// the wait for a slot. It is above what the slowest tools need: a few
 	// sequential middleware calls of up to 120 s each.
 	toolCallTimeout = 10 * time.Minute
+	// maxToolOutputBytes is the cap on a tool result or error sent to the
+	// MCP client, in bytes (100 KiB). Larger output is redacted first,
+	// then cut on a rune boundary, and a notice is appended so the total
+	// stays within the cap.
+	maxToolOutputBytes = 100 * 1024
+	// toolOutputTruncationNotice is appended when a redacted tool result
+	// or error exceeds maxToolOutputBytes. It tells the model the output
+	// was cut and how to narrow the query.
+	toolOutputTruncationNotice = "\n\n[truncated] Output exceeded 100 KiB and was cut. Narrow the query with limit, select, or filters and call again."
 )
 
 // StdioHandler serves MCP over newline-delimited JSON-RPC on stdin/stdout.
@@ -177,13 +187,30 @@ func (h *StdioHandler) interrupted(ctx context.Context, name string, started boo
 
 // toolResult builds the tools/call result. Every result and error is
 // redacted before it reaches the client: TrueNAS returns secrets
-// (passwords, keys, tokens) in many query results.
+// (passwords, keys, tokens) in many query results. The redacted text is
+// then cut to maxToolOutputBytes so a secret cannot survive as a
+// fragment at the cut.
 func toolResult(result string, err error) *sdk.CallToolResult {
 	if err != nil {
 		return &sdk.CallToolResult{
-			Content: []sdk.Content{&sdk.TextContent{Text: "Error: " + redact.Text(err.Error())}},
+			Content: []sdk.Content{&sdk.TextContent{Text: capToolOutput("Error: " + redact.Text(err.Error()))}},
 			IsError: true,
 		}
 	}
-	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: redact.ToolOutput(result)}}}
+	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: capToolOutput(redact.ToolOutput(result))}}}
+}
+
+// capToolOutput cuts already-redacted text to at most maxToolOutputBytes.
+// When s is larger, it is cut on a rune boundary and the truncation
+// notice is appended; the notice is included in the cap.
+func capToolOutput(s string) string {
+	if len(s) <= maxToolOutputBytes {
+		return s
+	}
+	budget := maxToolOutputBytes - len(toolOutputTruncationNotice)
+	if budget < 0 {
+		budget = 0
+	}
+	cut, _ := tasks.TruncateText(s, budget)
+	return cut + toolOutputTruncationNotice
 }
