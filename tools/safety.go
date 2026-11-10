@@ -214,6 +214,23 @@ func (r *Registry) checkPolicy(name string) error {
 	return nil
 }
 
+// validateSafetyBooleans rejects a dry_run or confirm value that is present
+// but is not a JSON boolean. A string such as "true" or a number must not
+// fall through to a real write. The error names the argument, never echoes
+// the value, and states that nothing was executed.
+func validateSafetyBooleans(name string, args map[string]interface{}) error {
+	for _, key := range []string{"dry_run", "confirm"} {
+		v, present := args[key]
+		if !present {
+			continue
+		}
+		if _, ok := v.(bool); !ok {
+			return fmt.Errorf("invalid arguments for tool %s: %s must be a JSON boolean (true or false); nothing was executed", name, key)
+		}
+	}
+	return nil
+}
+
 // checkReadOnlyDryRun refuses a call to a readOnlyDryRunTools tool in
 // read-only mode unless it is an explicit dry run (dry_run is the boolean
 // true). It runs before anything else, so a refused call executes nothing.
