@@ -18,8 +18,12 @@ type DryRunResult struct {
 	CurrentState   interface{}     `json:"current_state"`
 	PlannedActions []PlannedAction `json:"planned_actions"`
 	Warnings       []string        `json:"warnings,omitempty"`
-	Requirements   *Requirements   `json:"requirements,omitempty"`
-	EstimatedTime  *EstimatedTime  `json:"estimated_time,omitempty"`
+	// Blocked is the list of reasons the operation cannot proceed. It is
+	// separate from warnings: a warning is informational, a blocked reason
+	// is refused on both the preview and the real call.
+	Blocked       []string       `json:"blocked,omitempty"`
+	Requirements  *Requirements  `json:"requirements,omitempty"`
+	EstimatedTime *EstimatedTime `json:"estimated_time,omitempty"`
 	// DryRun and Executed mark the result explicitly as a preview. They are
 	// optional so tools that do not set them keep their output unchanged.
 	DryRun   *bool `json:"dry_run,omitempty"`

@@ -161,7 +161,7 @@ func (p *Poller) recordIdentity(ctx context.Context, task *Task) {
 	if job != nil {
 		task.jobMethod, task.jobStarted = jobIdentity(job)
 		task.identityKnown = true
-		if !methodMatches(task.ToolName, task.jobMethod) {
+		if !task.methodMatches(task.jobMethod) {
 			// TrueNAS restarted between the start call and this read, and
 			// the id now belongs to another job.
 			task.Status = TaskStatusFailed
@@ -229,7 +229,7 @@ func (p *Poller) pollJobTask(ctx context.Context, task *Task) {
 		// The creation read failed, but this is still the session the job
 		// was started in, so the row is that job if it runs the method the
 		// tool starts.
-		if !methodMatches(task.ToolName, method) {
+		if !task.methodMatches(method) {
 			p.failTask(task, restartMessage(task, true))
 			return
 		}

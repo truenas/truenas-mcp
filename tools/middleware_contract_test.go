@@ -81,6 +81,13 @@ var methodDispatchers = map[string]bool{
 	"queryCount":      true,
 }
 
+// planExecutors pass plan.Method to Call. A non-literal method is allowed
+// in their bodies; they are not themselves middleware dispatchers (their
+// callers pass a *writePlan, not a method name).
+var planExecutors = map[string]bool{
+	"callPlan": true,
+}
+
 func TestMiddlewareMethodContract(t *testing.T) {
 	root := repoRoot(t)
 	found, problems := collectMiddlewareCalls(t, root)
@@ -160,6 +167,9 @@ func collectMiddlewareCalls(t *testing.T, root string) (map[string]bool, []strin
 		for m := range got {
 			found[m] = true
 		}
+		for m := range planMethodConsts(data) {
+			found[m] = true
+		}
 		problems = append(problems, probs...)
 		return nil
 	})
@@ -187,7 +197,7 @@ func callsInSource(filename, src string) (map[string]bool, []string) {
 		if !ok {
 			continue
 		}
-		inDispatcher := methodDispatchers[fn.Name.Name]
+		inDispatcher := methodDispatchers[fn.Name.Name] || planExecutors[fn.Name.Name]
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -253,4 +263,44 @@ func methodArg(fn string, args []ast.Expr) (method string, literal, ok bool) {
 	default:
 		return "", false, true
 	}
+}
+
+// planMethodConsts returns middleware methods declared as string constants
+// whose name ends in "Method" (for example startAppMethod = "app.start").
+// writePlan stores the method in that constant and Call uses plan.Method,
+// so the contract cannot see a string literal at the Call site.
+func planMethodConsts(src string) map[string]bool {
+	found := map[string]bool{}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "plan.go", src, 0)
+	if err != nil {
+		return found
+	}
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if !strings.HasSuffix(name.Name, "Method") || i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				s, err := strconv.Unquote(lit.Value)
+				if err != nil || !strings.Contains(s, ".") {
+					continue
+				}
+				found[s] = true
+			}
+		}
+	}
+	return found
 }

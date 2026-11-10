@@ -4492,39 +4492,12 @@ func (u *upgradeAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Cl
 	return result, nil
 }
 
-// startAppPlan is the shared plan for start_app. The dry-run preview is this
-// plan, and the real call executes the same plan, so validation cannot diverge.
-type startAppPlan struct {
-	appName      string
-	callParams   []interface{}
-	currentState map[string]interface{}
-	warnings     []string
-}
-
-func (p *startAppPlan) dryRunResult() *DryRunResult {
-	dry, executed := true, false
-	return &DryRunResult{
-		Tool:         "start_app",
-		CurrentState: p.currentState,
-		PlannedActions: []PlannedAction{
-			{
-				Step:        1,
-				Description: fmt.Sprintf("Start application %q", p.appName),
-				Operation:   "start",
-				Target:      "app.start",
-				Details:     p.callParams,
-			},
-		},
-		Warnings:      p.warnings,
-		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 120, Note: "Depends on app startup time"},
-		DryRun:        &dry,
-		Executed:      &executed,
-	}
-}
+const startAppMethod = "app.start"
 
 // planStartApp builds the start_app plan used by both the dry-run preview and
-// the real call. An already RUNNING app is refused.
-func planStartApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*startAppPlan, error) {
+// the real call. A RUNNING app is refused, and so are DEPLOYING and STOPPING
+// (retry when the app settles). CRASHED stays startable.
+func planStartApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
@@ -4546,27 +4519,42 @@ func planStartApp(ctx context.Context, client *truenas.Client, args map[string]i
 	}
 
 	stateVal := apps[0]["state"]
-	state, _ := stateVal.(string)
-	if state == "" && stateVal != nil {
-		state = fmt.Sprint(stateVal)
+	state, ok := stateVal.(string)
+	if !ok || state == "" {
+		return nil, fmt.Errorf("failed to parse app state: expected a string")
 	}
-	if strings.EqualFold(state, "RUNNING") {
-		return nil, fmt.Errorf("cannot start app %q: it is already RUNNING; nothing was executed", appName)
+
+	var blocked []string
+	switch strings.ToUpper(state) {
+	case "RUNNING":
+		blocked = append(blocked, fmt.Sprintf("cannot start app %q: it is already RUNNING; nothing was executed", appName))
+	case "DEPLOYING", "STOPPING":
+		blocked = append(blocked, fmt.Sprintf("cannot start app %q: it is currently %s; retry when it settles; nothing was executed", appName, state))
 	}
 
 	var warnings []string
-	if state != "" && !strings.EqualFold(state, "STOPPED") {
+	if len(blocked) == 0 && !strings.EqualFold(state, "STOPPED") {
 		warnings = append(warnings, fmt.Sprintf("App is currently in state: %s.", state))
 	}
 
-	return &startAppPlan{
-		appName:    appName,
-		callParams: []interface{}{appName},
-		currentState: map[string]interface{}{
+	return &writePlan{
+		Tool:        "start_app",
+		Method:      startAppMethod,
+		CallParams:  []interface{}{appName},
+		JobMethod:   startAppMethod,
+		Description: fmt.Sprintf("Start application %q", appName),
+		Operation:   "start",
+		PreviewDetails: map[string]interface{}{
 			"app_name": appName,
-			"state":    stateVal,
 		},
-		warnings: warnings,
+		CurrentState: map[string]interface{}{
+			"app_name": appName,
+			"state":    state,
+		},
+		Warnings:      warnings,
+		Blocked:       blocked,
+		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 120, Note: "Depends on app startup time"},
+		TargetName:    appName,
 	}, nil
 }
 
@@ -4575,14 +4563,20 @@ func (r *Registry) handleStartAppWithDryRun(ctx context.Context, client *truenas
 	if err != nil {
 		return "", err
 	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
 		return marshalJSON(plan.dryRunResult())
 	}
 	return r.executeStartApp(ctx, client, args, plan)
 }
 
-func (r *Registry) executeStartApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *startAppPlan) (string, error) {
-	result, err := client.Call(ctx, "app.start", plan.callParams...)
+func (r *Registry) executeStartApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to start app: %w", err)
 	}
@@ -4594,18 +4588,22 @@ func (r *Registry) executeStartApp(ctx context.Context, client *truenas.Client, 
 			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
 		}
 		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("app.start returned empty job ID array")
+			return "", fmt.Errorf("%s returned empty job ID array", plan.Method)
 		}
 		jobID = jobIDArray[0]
 	}
 
-	task, err := r.taskManager.CreateJobTask(ctx, "start_app", args, jobID, 10*time.Minute)
+	opts := []tasks.TaskOption{}
+	if plan.JobMethod != "" {
+		opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+	}
+	task, err := r.taskManager.CreateJobTask(ctx, "start_app", args, jobID, 10*time.Minute, opts...)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
 
 	response := map[string]interface{}{
-		"app_name":      plan.appName,
+		"app_name":      plan.TargetName,
 		"task_id":       task.TaskID,
 		"task_status":   task.Status,
 		"poll_interval": task.PollInterval,

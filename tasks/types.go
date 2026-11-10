@@ -65,8 +65,12 @@ type Task struct {
 	jobMethod     string
 	jobStarted    string // time_started as JSON
 	identityKnown bool
-	sessionGen    uint64 // client session generation when created
-	genKnown      bool
+	// expectedMethod, when set by WithExpectedMethod, is the job method
+	// the tool's start call creates. Identity checks use it instead of
+	// the default table for the tool name.
+	expectedMethod string
+	sessionGen     uint64 // client session generation when created
+	genKnown       bool
 
 	// Consecutive polls that found no job row, and that failed outright.
 	missingPolls int
