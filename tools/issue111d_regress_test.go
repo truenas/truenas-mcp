@@ -456,18 +456,51 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 			"schedule": map[string]interface{}{"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*"},
 		},
 	}
-	client, _ := newFakeClientWith(t, map[string]interface{}{
-		"app.query":                []interface{}{appEntry("plex", "STOPPED")},
-		"app.upgrade_summary":      upgradeSummaryFixture("x"),
-		"catalog.get_app_details":  hostPathCatalogDetails(),
-		"app.available":            []interface{}{map[string]interface{}{"name": "plex", "train": "community"}},
-		"app.config":               map[string]interface{}{},
-		"pool.query":               []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+	results := map[string]interface{}{
+		"app.query":               []interface{}{appEntry("plex", "STOPPED")},
+		"app.upgrade_summary":     upgradeSummaryFixture("x"),
+		"catalog.get_app_details": hostPathCatalogDetails(),
+		"app.available":           []interface{}{map[string]interface{}{"name": "plex", "train": "community"}},
+		"app.config":              map[string]interface{}{},
+		"pool.query": []interface{}{
+			map[string]interface{}{"id": 1.0, "name": "tank", "status": "ONLINE", "size": 1.0e12},
+			map[string]interface{}{"id": 2.0, "name": "spare", "status": "ONLINE", "size": 1.0e12},
+		},
 		"boot.environment.query":   bootEnvs,
-		"pool.scrub.query":         schedules,
 		"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
 		"update.status":            updateStatusAvailable("25.10.1"),
-	}, nil)
+		"core.get_jobs":            []interface{}{},
+		"alert.list": []interface{}{
+			map[string]interface{}{"uuid": "alert-1", "level": "WARNING", "dismissed": false, "formatted": "disk"},
+		},
+	}
+	fake := &fakeMiddleware{results: results}
+	fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		switch method {
+		case "pool.query":
+			pools, _ := results["pool.query"].([]interface{})
+			name := poolQueryNameFilter(params)
+			if name == "" {
+				return pools, nil, true
+			}
+			var matched []interface{}
+			for _, p := range pools {
+				m, _ := p.(map[string]interface{})
+				if m["name"] == name {
+					matched = append(matched, p)
+				}
+			}
+			return matched, nil, true
+		case "pool.scrub.query":
+			if poolScrubQueryMatches(params, "id", 1) || poolScrubQueryMatches(params, "pool", 1) {
+				return schedules, nil, true
+			}
+			return []interface{}{}, nil, true
+		default:
+			return nil, nil, false
+		}
+	}
+	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)
 	r := NewRegistry(client, mgr)
@@ -479,6 +512,9 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 		}
 		checked++
 		args := toolArgsForSafetyFlagTest(name)
+		if name == "create_scrub_schedule" {
+			args["pool"] = "spare"
+		}
 		plan, err := tool.Plan(t.Context(), client, args)
 		if err != nil {
 			t.Errorf("%s Plan: %v", name, err)
@@ -493,5 +529,75 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no registered tools have a Plan")
+	}
+}
+
+// poolScrubQueryFilter returns the [field, "=", value] filter from a
+// pool.scrub.query call, if the first positional argument is that tuple
+// or a list containing it.
+func poolScrubQueryFilter(params json.RawMessage) (field string, value float64, ok bool) {
+	var wrap []interface{}
+	if err := json.Unmarshal(params, &wrap); err != nil || len(wrap) == 0 {
+		return "", 0, false
+	}
+	if f, v, found := asEqualsFilter(wrap[0]); found {
+		return f, v, true
+	}
+	list, ok := wrap[0].([]interface{})
+	if !ok {
+		return "", 0, false
+	}
+	for _, item := range list {
+		if f, v, found := asEqualsFilter(item); found {
+			return f, v, true
+		}
+	}
+	return "", 0, false
+}
+
+func asEqualsFilter(v interface{}) (string, float64, bool) {
+	filter, ok := v.([]interface{})
+	if !ok || len(filter) != 3 || filter[1] != "=" {
+		return "", 0, false
+	}
+	field, _ := filter[0].(string)
+	switch n := filter[2].(type) {
+	case float64:
+		return field, n, field != ""
+	case int:
+		return field, float64(n), field != ""
+	default:
+		return "", 0, false
+	}
+}
+
+func poolScrubQueryMatches(params json.RawMessage, field string, id float64) bool {
+	f, v, ok := poolScrubQueryFilter(params)
+	return ok && f == field && v == id
+}
+
+func filterPoolScrubQuery(params json.RawMessage, all []interface{}) []interface{} {
+	field, value, ok := poolScrubQueryFilter(params)
+	if !ok {
+		return all
+	}
+	var out []interface{}
+	for _, item := range all {
+		m, _ := item.(map[string]interface{})
+		if queryNumberEquals(m[field], value) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func queryNumberEquals(v interface{}, want float64) bool {
+	switch n := v.(type) {
+	case float64:
+		return n == want
+	case int:
+		return float64(n) == want
+	default:
+		return false
 	}
 }

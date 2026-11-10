@@ -224,40 +224,51 @@ func handleListDirectoryCertificates(ctx context.Context, client *truenas.Client
 	return string(formatted), nil
 }
 
-func handleRefreshDirectoryCache(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-
-	// Check which directory service is enabled
+func planRefreshDirectoryCache(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	status, err := getDirectoryServiceStatus(ctx, client)
 	if err != nil {
+		return nil, err
+	}
+	if status.Type == "none" {
+		return nil, fmt.Errorf("no directory service is configured")
+	}
+	if !status.Enabled {
+		return nil, fmt.Errorf("%s is not enabled", status.Type)
+	}
+	return &writePlan{
+		Tool:         "refresh_directory_cache",
+		Method:       directoryServicesCacheRefreshMethod,
+		CallParams:   []interface{}{},
+		TargetName:   status.Type,
+		CurrentState: status,
+		Actions: []PlannedAction{{
+			Step:        1,
+			Description: "Refresh cached directory users and groups",
+			Operation:   "refresh",
+			Target:      directoryServicesCacheRefreshMethod,
+		}},
+	}, nil
+}
+
+func executeRefreshDirectoryCache(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
 		return "", err
 	}
-
-	if status.Type == "none" {
-		return "", fmt.Errorf("no directory service is configured")
-	}
-
-	if !status.Enabled {
-		return "", fmt.Errorf("%s is not enabled", status.Type)
-	}
-
-	// Call unified cache refresh method
-	_, err = client.Call(ctx, "directoryservices.cache_refresh")
+	_, err := callPlan(ctx, client, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to refresh cache: %w", err)
 	}
-
+	dirType := plan.TargetName
 	response := map[string]interface{}{
 		"success":         true,
-		"directory_type":  status.Type,
+		"directory_type":  dirType,
 		"cache_refreshed": true,
-		"message":         fmt.Sprintf("%s cache has been refreshed", status.Type),
+		"message":         fmt.Sprintf("%s cache has been refreshed", dirType),
 	}
-
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
 }
 
@@ -271,8 +282,9 @@ const dsJobTTL = 15 * time.Minute
 // Middleware method names used as writePlan.Method must be declared in
 // this file (same-file contract for TestMiddlewareMethodContract).
 const (
-	directoryServicesUpdateMethod = "directoryservices.update"
-	directoryServicesLeaveMethod  = "directoryservices.leave"
+	directoryServicesUpdateMethod       = "directoryservices.update"
+	directoryServicesLeaveMethod        = "directoryservices.leave"
+	directoryServicesCacheRefreshMethod = "directoryservices.cache_refresh"
 )
 
 // parseJobID returns the job id from the result of a job method: a bare

@@ -112,11 +112,11 @@ func (r *Registry) registerTools() {
 				"properties": map[string]interface{}{
 					"train": map[string]interface{}{
 						"type":        "string",
-						"description": "Ignored. Accepted for compatibility only: the download always uses the system's configured update train",
+						"description": "Optional train name passed to update.download. Must be set together with version, or both omitted. When both are omitted, the download uses the update offered by the system's configured profile",
 					},
 					"version": map[string]interface{}{
 						"type":        "string",
-						"description": "Ignored. Accepted for compatibility only: the download fetches whatever update the system's configured train offers",
+						"description": "Optional version passed to update.download. Must be set together with train, or both omitted",
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -127,6 +127,7 @@ func (r *Registry) registerTools() {
 			},
 		},
 		Handler: r.handleDownloadUpdateWithDryRun,
+		Plan:    planDownloadUpdate,
 	}
 
 	r.tools["apply_update"] = Tool{
@@ -367,6 +368,7 @@ func (r *Registry) registerTools() {
 			},
 		},
 		Handler: r.handleCreateScrubScheduleWithDryRun,
+		Plan:    planCreateScrubSchedule,
 	}
 
 	r.tools["run_scrub"] = Tool{
@@ -396,6 +398,7 @@ func (r *Registry) registerTools() {
 			},
 		},
 		Handler: r.handleRunScrubWithDryRun,
+		Plan:    planRunScrub,
 	}
 
 	r.tools["delete_scrub_schedule"] = Tool{
@@ -476,6 +479,7 @@ func (r *Registry) registerTools() {
 			},
 		},
 		Handler: handleRefreshDirectoryCacheWithDryRun,
+		Plan:    planRefreshDirectoryCache,
 	}
 
 	r.tools["configure_directory_service"] = Tool{
@@ -1159,6 +1163,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: handleDismissAlertWithDryRun,
+		Plan:    planDismissAlert,
 	}
 
 	// Restore alert
@@ -1183,6 +1188,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: handleRestoreAlertWithDryRun,
+		Plan:    planRestoreAlert,
 	}
 
 	// System reporting metrics
@@ -3353,34 +3359,6 @@ func handleListAlerts(ctx context.Context, client *truenas.Client, args map[stri
 	return string(formatted), nil
 }
 
-func handleDismissAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	uuid, ok := args["uuid"].(string)
-	if !ok || uuid == "" {
-		return "", fmt.Errorf("uuid parameter is required")
-	}
-
-	result, err := client.Call(ctx, "alert.dismiss", uuid)
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("Alert %s dismissed successfully: %s", uuid, string(result)), nil
-}
-
-func handleRestoreAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	uuid, ok := args["uuid"].(string)
-	if !ok || uuid == "" {
-		return "", fmt.Errorf("uuid parameter is required")
-	}
-
-	result, err := client.Call(ctx, "alert.restore", uuid)
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("Alert %s restored successfully: %s", uuid, string(result)), nil
-}
-
 // Reporting handlers
 
 func handleGetSystemMetrics(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
@@ -4534,6 +4512,7 @@ const bootEnvironmentDestroyMethod = "boot.environment.destroy"
 const upgradeAppMethod = "app.upgrade"
 const updateAppMethod = "app.update"
 const updateRunMethod = "update.run"
+const updateDownloadMethod = "update.download"
 
 func queryApp(ctx context.Context, client *truenas.Client, appName string) (map[string]interface{}, error) {
 	currentResult, err := client.Call(ctx, "app.query", []interface{}{
@@ -6187,56 +6166,228 @@ func handleUpdateStatus(ctx context.Context, client *truenas.Client, args map[st
 
 // handleDownloadUpdate downloads a TrueNAS system update
 func (r *Registry) handleDownloadUpdate(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	// train and version are declared for compatibility but ignored:
-	// update.download takes no parameters and fetches whatever the system's
-	// configured train offers. Nothing below reports them as applied.
-	ignored := downloadUpdateIgnoredNote(args)
+	plan, err := planDownloadUpdate(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	return r.executeDownloadUpdate(ctx, client, args, plan)
+}
 
-	// Check if update is already downloaded
-	statusResult, err := client.Call(ctx, "update.status")
-	if err == nil {
-		var status map[string]interface{}
-		if err := json.Unmarshal(statusResult, &status); err == nil {
-			// Check if download is complete
-			if progress, ok := status["update_download_progress"].(map[string]interface{}); ok {
-				if percent, ok := progress["percent"].(float64); ok && percent == 100 {
-					if dlVersion, ok := progress["version"].(string); ok {
-						response := map[string]interface{}{
-							"version":            dlVersion,
-							"already_downloaded": true,
-							"download_percent":   100,
-							"message":            fmt.Sprintf("Update %s is already downloaded (100%%). Ready to apply.", dlVersion),
-						}
-						if ignored != "" {
-							response["warning"] = ignored
-						}
-						formatted, _ := json.MarshalIndent(response, "", "  ")
-						return string(formatted), nil
-					}
-				}
-			}
-		}
+// handleDownloadUpdateWithDryRun uses the shared plan for preview and the real call.
+func (r *Registry) handleDownloadUpdateWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planDownloadUpdate(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return r.executeDownloadUpdate(ctx, client, args, plan)
+}
+
+// optionalNonEmptyString reports a trimmed string argument. ok is false when
+// the key is missing, null, or a blank string. A non-string value is an error.
+func optionalNonEmptyString(args map[string]interface{}, key string) (string, bool, error) {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return "", false, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", false, fmt.Errorf("%s must be a string", key)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false, nil
+	}
+	return s, true, nil
+}
+
+// downloadUpdateTrainVersion reads the optional train and version arguments.
+// 25.10 update.download requires both or neither
+// (src/middlewared/middlewared/plugins/update_/download.py).
+func downloadUpdateTrainVersion(args map[string]interface{}) (train, version string, set bool, err error) {
+	train, hasTrain, err := optionalNonEmptyString(args, "train")
+	if err != nil {
+		return "", "", false, err
+	}
+	version, hasVersion, err := optionalNonEmptyString(args, "version")
+	if err != nil {
+		return "", "", false, err
+	}
+	if hasTrain != hasVersion {
+		return "", "", false, fmt.Errorf("train and version must both be set, or both omitted (TrueNAS update.download requires both or neither)")
+	}
+	return train, version, hasTrain, nil
+}
+
+// updateAlreadyDownloaded reports a completed download of the requested
+// version (or of the current profile's update when no version was requested).
+// progress is the 25.10 update.status update_download_progress object
+// ({percent, description, version}).
+func updateAlreadyDownloaded(status map[string]interface{}, requestedVersion string) (string, bool) {
+	if status == nil {
+		return "", false
+	}
+	progress, _ := status["update_download_progress"].(map[string]interface{})
+	if progress == nil {
+		return "", false
+	}
+	percent, _ := progress["percent"].(float64)
+	version, _ := progress["version"].(string)
+	if percent != 100 || version == "" {
+		return "", false
+	}
+	if requestedVersion != "" && requestedVersion != version {
+		return "", false
+	}
+	return version, true
+}
+
+func planDownloadUpdate(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
+	train, version, set, err := downloadUpdateTrainVersion(args)
+	if err != nil {
+		return nil, err
 	}
 
-	// Start the download (update.download typically takes no parameters)
-	// TrueNAS downloads based on the configured train automatically
-	result, err := client.Call(ctx, "update.download")
+	sysInfoResult, err := client.Call(ctx, "system.info")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get system info: %w", err)
+	}
+	var sysInfo map[string]interface{}
+	if err := json.Unmarshal(sysInfoResult, &sysInfo); err != nil {
+		return nil, fmt.Errorf("failed to parse system info: %w", err)
+	}
+	currentVersion, ok := sysInfo["version"].(string)
+	if !ok || currentVersion == "" {
+		return nil, fmt.Errorf("system.info returned no usable version")
+	}
+
+	current := map[string]interface{}{
+		"current_version": currentVersion,
+	}
+	if set {
+		current["requested_train"] = train
+		current["requested_version"] = version
+	}
+
+	var callParams []interface{}
+	var paramNames []string
+	if set {
+		callParams = []interface{}{train, version}
+		paramNames = []string{"train", "version"}
+	}
+
+	var status map[string]interface{}
+	statusResult, statusErr := client.Call(ctx, "update.status")
+	if statusErr == nil {
+		if err := json.Unmarshal(statusResult, &status); err != nil {
+			return nil, fmt.Errorf("failed to parse update status: %w", err)
+		}
+		current["update_status"] = status
+	}
+
+	if ver, already := updateAlreadyDownloaded(status, version); already {
+		return &writePlan{
+			Tool:         "download_update",
+			Method:       updateDownloadMethod,
+			CallParams:   callParams,
+			ParamNames:   paramNames,
+			CurrentState: current,
+			Actions: []PlannedAction{{
+				Step:        1,
+				Description: fmt.Sprintf("Update %s is already downloaded (100%%); no download will be started", ver),
+				Operation:   "download",
+				Target:      ver,
+			}},
+			Result: map[string]interface{}{
+				"version":            ver,
+				"already_downloaded": true,
+				"download_percent":   100,
+				"message":            fmt.Sprintf("Update %s is already downloaded (100%%). Ready to apply.", ver),
+			},
+		}, nil
+	}
+
+	desc := "Download the update offered by the system's configured update train"
+	target := "configured update train"
+	if set {
+		desc = fmt.Sprintf("Download %s from train %s", version, train)
+		target = version
+	}
+	return &writePlan{
+		Tool:         "download_update",
+		Method:       updateDownloadMethod,
+		CallParams:   callParams,
+		ParamNames:   paramNames,
+		JobMethod:    updateDownloadMethod,
+		CurrentState: current,
+		Actions: []PlannedAction{
+			{
+				Step:        1,
+				Description: "Connect to TrueNAS update server",
+				Operation:   "connect",
+				Target:      "update.truenas.com",
+			},
+			{
+				Step:        2,
+				Description: desc,
+				Operation:   "download",
+				Target:      target,
+			},
+			{
+				Step:        3,
+				Description: "Verify update package integrity",
+				Operation:   "verify",
+				Target:      "downloaded update",
+			},
+		},
+		EstimatedTime: &EstimatedTime{
+			MinSeconds: 120,
+			MaxSeconds: 1800,
+			Note:       "Time varies based on update size and network speed",
+		},
+	}, nil
+}
+
+func (r *Registry) executeDownloadUpdate(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if already, _ := plan.Result["already_downloaded"].(bool); already {
+		formatted, err := json.MarshalIndent(plan.Result, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(formatted), nil
+	}
+
+	result, err := callPlan(ctx, client, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to start update download: %w", err)
 	}
 
-	// Parse job ID
 	var jobID int
 	if err := json.Unmarshal(result, &jobID); err != nil {
 		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
-	// Create task to track download progress
+	opts := []tasks.TaskOption{}
+	if plan.JobMethod != "" {
+		opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+	}
 	task, err := r.taskManager.CreateJobTask(ctx,
 		"download_update",
-		withoutKeys(args, "train", "version"),
+		withoutKeys(args, "dry_run", "confirm", "confirmation_token"),
 		jobID,
-		2*time.Hour, // 2 hour TTL
+		2*time.Hour,
+		opts...,
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
@@ -6249,92 +6400,11 @@ func (r *Registry) handleDownloadUpdate(ctx context.Context, client *truenas.Cli
 		"job_id":        jobID,
 		"message":       fmt.Sprintf("Update download started. Track progress with tasks_get using task_id: %s", task.TaskID),
 	}
-	if ignored != "" {
-		response["warning"] = ignored
-	}
-
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
-}
-
-// handleDownloadUpdateWithDryRun wraps the download handler with dry-run support
-func (r *Registry) handleDownloadUpdateWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &downloadUpdateDryRun{}, r.handleDownloadUpdate)
-}
-
-// downloadUpdateDryRun implements dry-run preview for update downloads
-type downloadUpdateDryRun struct{}
-
-func (d *downloadUpdateDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	// Get current system info
-	sysInfoResult, err := client.Call(ctx, "system.info")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get system info: %w", err)
-	}
-
-	var sysInfo map[string]interface{}
-	if err := json.Unmarshal(sysInfoResult, &sysInfo); err != nil {
-		return nil, fmt.Errorf("failed to parse system info: %w", err)
-	}
-
-	currentVersion, ok := sysInfo["version"].(string)
-	if !ok || currentVersion == "" {
-		return nil, fmt.Errorf("system.info returned no usable version")
-	}
-
-	actions := []PlannedAction{
-		{
-			Step:        1,
-			Description: "Connect to TrueNAS update server",
-			Operation:   "connect",
-			Target:      "update.truenas.com",
-		},
-		{
-			Step:        2,
-			Description: "Download the update offered by the system's configured update train",
-			Operation:   "download",
-			Target:      "configured update train",
-		},
-		{
-			Step:        3,
-			Description: "Verify update package integrity",
-			Operation:   "verify",
-			Target:      "downloaded update",
-		},
-	}
-
-	result := &DryRunResult{
-		Tool: "download_update",
-		CurrentState: map[string]interface{}{
-			"current_version": currentVersion,
-		},
-		PlannedActions: actions,
-		EstimatedTime: &EstimatedTime{
-			MinSeconds: 120,
-			MaxSeconds: 1800,
-			Note:       "Time varies based on update size and network speed",
-		},
-	}
-	if note := downloadUpdateIgnoredNote(args); note != "" {
-		result.Warnings = append(result.Warnings, note)
-	}
-
-	return result, nil
-}
-
-// downloadUpdateIgnoredNote explains that train and version had no effect,
-// or returns "" when neither was supplied.
-func downloadUpdateIgnoredNote(args map[string]interface{}) string {
-	_, hasTrain := args["train"]
-	_, hasVersion := args["version"]
-	if !hasTrain && !hasVersion {
-		return ""
-	}
-	return "train and version were ignored: the download always fetches the update offered by the system's configured update train"
 }
 
 // withoutKeys returns a copy of args without the named keys.

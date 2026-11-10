@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
@@ -278,21 +279,26 @@ func handleGetScrubStatus(ctx context.Context, client *truenas.Client, args map[
 	return string(formatted), nil
 }
 
-func (r *Registry) handleCreateScrubSchedule(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+const (
+	poolScrubDeleteMethod = "pool.scrub.delete"
+	poolScrubCreateMethod = "pool.scrub.create"
+	poolScrubScrubMethod  = "pool.scrub.scrub"
+)
+
+func planCreateScrubSchedule(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	poolName, ok := args["pool"].(string)
 	if !ok || poolName == "" {
-		return "", fmt.Errorf("pool is required")
+		return nil, fmt.Errorf("pool is required")
 	}
 
 	scheduleObj, ok := args["schedule"].(map[string]interface{})
 	if !ok {
-		return "", fmt.Errorf("schedule is required")
+		return nil, fmt.Errorf("schedule is required")
 	}
 
-	// Get pool ID
 	poolInfo, err := getPoolByName(ctx, client, poolName)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	threshold := 35
@@ -310,24 +316,22 @@ func (r *Registry) handleCreateScrubSchedule(ctx context.Context, client *truena
 		enabled = e
 	}
 
-	// Check if schedule already exists
 	existingResult, err := client.Call(ctx, "pool.scrub.query", []interface{}{
 		[]interface{}{"pool", "=", poolInfo["id"]},
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to check existing schedules: %w", err)
+		return nil, fmt.Errorf("failed to check existing schedules: %w", err)
 	}
 
 	var existing []map[string]interface{}
 	if err := json.Unmarshal(existingResult, &existing); err != nil {
-		return "", fmt.Errorf("failed to parse existing schedules: %w", err)
+		return nil, fmt.Errorf("failed to parse existing schedules: %w", err)
 	}
 
 	if len(existing) > 0 {
-		return "", fmt.Errorf("pool '%s' already has a scrub schedule (id: %v). Delete it first or use a different pool", poolName, existing[0]["id"])
+		return nil, fmt.Errorf("pool '%s' already has a scrub schedule (id: %v). Delete it first or use a different pool", poolName, existing[0]["id"])
 	}
 
-	// Create schedule
 	createArgs := map[string]interface{}{
 		"pool":        poolInfo["id"],
 		"threshold":   threshold,
@@ -336,7 +340,111 @@ func (r *Registry) handleCreateScrubSchedule(ctx context.Context, client *truena
 		"schedule":    scheduleObj,
 	}
 
-	result, err := client.Call(ctx, "pool.scrub.create", createArgs)
+	scheduleHuman := formatCronSchedule(scheduleObj)
+	loc, _, assumedUTC := nasTimezone(ctx, client)
+	firstRun := calculateNextRun(scheduleObj, time.Now(), loc)
+	scrubEstimate, scrubEstimateNote, hasScrubEstimate := estimateNextScrub(scheduleObj, time.Now(), loc, enabled, threshold, lastFinishedScrubEnd(poolInfo), scrubScanRunning(poolInfo))
+	sizeBytes, hasSize := poolSizeBytes(poolInfo)
+	_, sizeHuman := poolSizeFields(poolInfo)
+	var estimatedHours int
+	if hasSize {
+		estimatedHours = estimateScrubDuration(sizeBytes)
+	}
+
+	var lastScrubDate string
+	if scan, ok := poolInfo["scan"].(map[string]interface{}); ok {
+		if endTime, ok := scan["end_time"].(map[string]interface{}); ok {
+			if endSec, ok := endTime["$date"].(float64); ok {
+				lastScrubDate = formatInLocation(time.Unix(int64(endSec/1000), 0), loc)
+			}
+		}
+	}
+
+	warnings := []string{fmt.Sprintf("Next cron tick: %s", firstRun)}
+	if hasScrubEstimate {
+		if scrubEstimate != "" {
+			warnings = append(warnings, fmt.Sprintf("Earliest possible scrub: %s (%s)", scrubEstimate, scrubEstimateNote))
+		} else {
+			warnings = append(warnings, scrubEstimateNote)
+		}
+	}
+	if hasSize {
+		warnings = append(warnings, fmt.Sprintf("Scrub may take %d-%d hours based on pool size", estimatedHours, estimatedHours*3))
+	} else {
+		warnings = append(warnings, "Pool size is unknown; duration cannot be estimated")
+	}
+	warnings = append(warnings, "Ensure system is powered on at scheduled time")
+	hour, _ := scheduleObj["hour"].(string)
+	if hour != "*" {
+		hourInt := 0
+		fmt.Sscanf(hour, "%d", &hourInt)
+		if hourInt >= 2 && hourInt <= 4 {
+			warnings = append(warnings, "Schedule runs during low-activity hours (recommended)")
+		} else if hourInt >= 8 && hourInt <= 18 {
+			warnings = append(warnings, "WARNING: Schedule runs during typical business hours - may impact performance")
+		}
+	}
+	if assumedUTC {
+		warnings = append(warnings, nextRunTimezoneNote)
+	}
+
+	actionDetails := map[string]interface{}{
+		"schedule_human": scheduleHuman,
+		"first_run":      firstRun,
+		"threshold_days": threshold,
+		"enabled":        enabled,
+	}
+	if hasScrubEstimate {
+		if scrubEstimate != "" {
+			actionDetails["next_scrub_estimate"] = scrubEstimate
+		}
+		actionDetails["next_scrub_estimate_note"] = scrubEstimateNote
+	}
+
+	plan := &writePlan{
+		Tool:       "create_scrub_schedule",
+		Method:     poolScrubCreateMethod,
+		CallParams: []interface{}{createArgs},
+		ParamNames: []string{"data"},
+		TargetName: poolName,
+		CurrentState: map[string]interface{}{
+			"pool":              poolName,
+			"pool_id":           poolInfo["id"],
+			"pool_size":         sizeHuman,
+			"existing_schedule": nil,
+			"last_scrub":        lastScrubDate,
+		},
+		Actions: []PlannedAction{{
+			Step:        1,
+			Description: fmt.Sprintf("Create scrub schedule for pool '%s'", poolName),
+			Operation:   "create",
+			Target:      poolName,
+			Details:     actionDetails,
+		}},
+		Warnings: warnings,
+		Result: map[string]interface{}{
+			"pool":      poolName,
+			"threshold": threshold,
+			"enabled":   enabled,
+			"schedule":  scheduleObj,
+			"pool_info": poolInfo,
+		},
+	}
+	if hasSize {
+		plan.EstimatedTime = &EstimatedTime{
+			MinSeconds: estimatedHours * 3600,
+			MaxSeconds: estimatedHours * 3 * 3600,
+			Note:       fmt.Sprintf("Scrub duration: %d-%d hours for %s pools", estimatedHours, estimatedHours*3, sizeHuman),
+		}
+	}
+	return plan, nil
+}
+
+func (r *Registry) executeCreateScrubSchedule(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to create schedule: %w", err)
 	}
@@ -345,6 +453,12 @@ func (r *Registry) handleCreateScrubSchedule(ctx context.Context, client *truena
 	if err := json.Unmarshal(result, &created); err != nil {
 		return "", fmt.Errorf("failed to parse result: %w", err)
 	}
+
+	poolName := plan.TargetName
+	threshold, _ := plan.Result["threshold"].(int)
+	enabled, _ := plan.Result["enabled"].(bool)
+	scheduleObj, _ := plan.Result["schedule"].(map[string]interface{})
+	poolInfo, _ := plan.Result["pool_info"].(map[string]interface{})
 
 	loc, _, assumedUTC := nasTimezone(ctx, client)
 	nextRun := calculateNextRun(scheduleObj, time.Now(), loc)
@@ -366,14 +480,13 @@ func (r *Registry) handleCreateScrubSchedule(ctx context.Context, client *truena
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
 }
 
-func (r *Registry) handleRunScrub(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+func planRunScrub(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	poolName, ok := args["pool"].(string)
 	if !ok || poolName == "" {
-		return "", fmt.Errorf("pool is required")
+		return nil, fmt.Errorf("pool is required")
 	}
 
 	threshold := 7
@@ -381,62 +494,191 @@ func (r *Registry) handleRunScrub(ctx context.Context, client *truenas.Client, a
 		threshold = int(t)
 	}
 
-	// Get pool info
 	poolInfo, err := getPoolByName(ctx, client, poolName)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if err := errIfPoolCannotScrub(poolInfo, poolName); err != nil {
-		return "", err
+		return nil, err
 	}
 	if err := errIfPoolResilvering(poolInfo, poolName); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	jobs, err := queryScrubJobs(ctx, client, true)
 	if err != nil {
-		return "", fmt.Errorf("failed to check running scrubs: %w", err)
+		return nil, fmt.Errorf("failed to check running scrubs: %w", err)
 	}
 	for _, job := range jobs {
 		if jobPoolName, ok := scrubJobPoolName(job); ok && jobPoolName == poolName {
-			return "", fmt.Errorf("scrub already running on pool '%s' (job id: %v)", poolName, job["id"])
+			return nil, fmt.Errorf("scrub already running on pool '%s' (job id: %v)", poolName, job["id"])
 		}
 	}
 	if scrubScanRunning(poolInfo) {
-		return "", fmt.Errorf("scrub already running on pool '%s'", poolName)
+		return nil, fmt.Errorf("scrub already running on pool '%s'", poolName)
+	}
+
+	status, _ := poolInfo["status"].(string)
+	sizeBytes, hasSize := poolSizeBytes(poolInfo)
+	_, sizeHuman := poolSizeFields(poolInfo)
+	loc, _, _ := nasTimezone(ctx, client)
+
+	var lastScrub map[string]interface{}
+	if scan, ok := poolInfo["scan"].(map[string]interface{}); ok {
+		lastScrub = map[string]interface{}{
+			"state":  scan["state"],
+			"errors": scan["errors"],
+		}
+		if endTime, ok := scan["end_time"].(map[string]interface{}); ok {
+			if endSec, ok := endTime["$date"].(float64); ok {
+				completed := time.Unix(int64(endSec/1000), 0)
+				lastScrub["date"] = formatInLocation(completed, loc)
+				lastScrub["days_ago"] = int(time.Since(completed).Hours() / 24)
+			}
+		}
+	}
+
+	current := map[string]interface{}{
+		"pool":          poolName,
+		"pool_id":       poolInfo["id"],
+		"size":          sizeHuman,
+		"status":        status,
+		"last_scrub":    lastScrub,
+		"scrub_running": false,
+		"threshold":     threshold,
 	}
 
 	if end := lastFinishedScrubEnd(poolInfo); lastScrubWithinThreshold(end, threshold) {
 		daysAgo := int(time.Since(*end).Hours() / 24)
-		response := map[string]interface{}{
-			"pool":          poolName,
-			"scrub_started": false,
-			"reason":        fmt.Sprintf("last scrub finished %d days ago, within the threshold of %d days", daysAgo, threshold),
-			"message":       fmt.Sprintf("No scrub started on pool '%s': last scrub finished %d days ago, within the threshold of %d days", poolName, daysAgo, threshold),
+		reason := fmt.Sprintf("last scrub finished %d days ago, within the threshold of %d days", daysAgo, threshold)
+		return &writePlan{
+			Tool:         "run_scrub",
+			Method:       poolScrubScrubMethod,
+			CallParams:   []interface{}{poolName, "START"},
+			ParamNames:   []string{"name", "action"},
+			TargetName:   poolName,
+			CurrentState: current,
+			Actions: []PlannedAction{{
+				Step:        1,
+				Description: fmt.Sprintf("No scrub will start on pool '%s': %s", poolName, reason),
+				Operation:   "scrub",
+				Target:      poolName,
+			}},
+			Warnings: []string{reason},
+			Result: map[string]interface{}{
+				"pool":          poolName,
+				"scrub_started": false,
+				"reason":        reason,
+				"message":       fmt.Sprintf("No scrub started on pool '%s': %s", poolName, reason),
+			},
+		}, nil
+	}
+
+	var estimatedHours, minSeconds, maxSeconds int
+	if hasSize {
+		estimatedHours = estimateScrubDuration(sizeBytes)
+		minSeconds = estimatedHours * 3600
+		maxSeconds = estimatedHours * 3 * 3600
+	}
+
+	warnings := []string{
+		"Scrub will verify all data blocks on the pool",
+		"Performance may be impacted during scrub",
+	}
+	if lastScrub != nil {
+		daysAgo, _ := lastScrub["days_ago"].(int)
+		warnings = append(warnings, fmt.Sprintf("Last scrub was %d days ago (exceeds threshold of %d days)", daysAgo, threshold))
+	}
+	warnings = append(warnings, "Scrub can be safely interrupted (resumes from checkpoint)")
+
+	details := map[string]interface{}{
+		"pool_size": sizeHuman,
+	}
+	if hasSize {
+		details["estimated_duration_hours"] = estimatedHours
+	}
+
+	plan := &writePlan{
+		Tool:         "run_scrub",
+		Method:       poolScrubScrubMethod,
+		CallParams:   []interface{}{poolName, "START"},
+		ParamNames:   []string{"name", "action"},
+		JobMethod:    poolScrubScrubMethod,
+		TargetName:   poolName,
+		CurrentState: current,
+		Actions: []PlannedAction{{
+			Step:        1,
+			Description: fmt.Sprintf("Start manual scrub of pool '%s'", poolName),
+			Operation:   "scrub",
+			Target:      poolName,
+			Details:     details,
+		}},
+		Warnings: warnings,
+		Requirements: &Requirements{
+			Conditions: []string{
+				fmt.Sprintf("Pool must be ONLINE or DEGRADED (current: %s)", status),
+				"No existing scrub running (current: none)",
+			},
+		},
+		Result: map[string]interface{}{
+			"pool_info": poolInfo,
+		},
+	}
+	if hasSize {
+		plan.EstimatedTime = &EstimatedTime{
+			MinSeconds: minSeconds,
+			MaxSeconds: maxSeconds,
+			Note:       "Duration varies by pool size, data amount, and system load",
 		}
-		formatted, err := json.MarshalIndent(response, "", "  ")
+	}
+	return plan, nil
+}
+
+func (r *Registry) executeRunScrub(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if started, ok := plan.Result["scrub_started"].(bool); ok && !started {
+		formatted, err := json.MarshalIndent(map[string]interface{}{
+			"pool":          plan.Result["pool"],
+			"scrub_started": false,
+			"reason":        plan.Result["reason"],
+			"message":       plan.Result["message"],
+		}, "", "  ")
 		if err != nil {
 			return "", err
 		}
 		return string(formatted), nil
 	}
 
-	jobID, err := startScrubJob(ctx, client, poolName)
+	// pool.scrub.scrub is present on TrueNAS 25.04–27 and fails the job
+	// when the start fails. zpool.scrub.run (26+) can finish successfully
+	// without starting a scrub, so it is not used for the start call.
+	result, err := callPlan(ctx, client, plan)
+	if err != nil {
+		return "", fmt.Errorf("failed to start scrub: %w", err)
+	}
+	jobID, err := parseScrubJobID(result)
 	if err != nil {
 		return "", err
 	}
 
-	// Create task for tracking
+	opts := []tasks.TaskOption{}
+	if plan.JobMethod != "" {
+		opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+	}
 	task, err := r.taskManager.CreateJobTask(ctx,
 		"run_scrub",
 		args,
 		jobID,
-		48*time.Hour, // Scrubs can take days on large pools
+		48*time.Hour,
+		opts...,
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
 
+	poolName := plan.TargetName
 	response := map[string]interface{}{
 		"pool":          poolName,
 		"scrub_started": true,
@@ -446,19 +688,18 @@ func (r *Registry) handleRunScrub(ctx context.Context, client *truenas.Client, a
 		"poll_interval": task.PollInterval,
 		"message":       fmt.Sprintf("Scrub started on pool '%s'. Track progress: (1) tasks_get with task_id: %s, or (2) get_scrub_status", poolName, task.TaskID),
 	}
-	if size, ok := poolSizeBytes(poolInfo); ok {
-		response["estimated_duration_hours"] = estimateScrubDuration(size)
+	if poolInfo, ok := plan.Result["pool_info"].(map[string]interface{}); ok {
+		if size, ok := poolSizeBytes(poolInfo); ok {
+			response["estimated_duration_hours"] = estimateScrubDuration(size)
+		}
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
 }
-
-const poolScrubDeleteMethod = "pool.scrub.delete"
 
 func planDeleteScrubSchedule(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	scheduleID, ok := args["id"].(float64)
@@ -563,328 +804,31 @@ func executeDeleteScrubSchedule(ctx context.Context, client *truenas.Client, _ m
 // Dry-run wrappers
 
 func (r *Registry) handleCreateScrubScheduleWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &createScrubScheduleDryRun{}, r.handleCreateScrubSchedule)
+	plan, err := planCreateScrubSchedule(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return r.executeCreateScrubSchedule(ctx, client, args, plan)
 }
 
 func (r *Registry) handleRunScrubWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &runScrubDryRun{}, r.handleRunScrub)
-}
-
-// Dry-run implementations
-
-type createScrubScheduleDryRun struct{}
-
-func (c *createScrubScheduleDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	poolName, ok := args["pool"].(string)
-	if !ok || poolName == "" {
-		return nil, fmt.Errorf("pool is required")
-	}
-
-	scheduleObj, ok := args["schedule"].(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("schedule is required")
-	}
-
-	// Get pool info
-	poolInfo, err := getPoolByName(ctx, client, poolName)
+	plan, err := planRunScrub(ctx, client, args)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-
-	threshold := 35
-	if t, ok := args["threshold"].(float64); ok {
-		threshold = int(t)
+	if err := plan.blockedReply(); err != nil {
+		return "", err
 	}
-
-	enabled := true
-	if e, ok := args["enabled"].(bool); ok {
-		enabled = e
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
 	}
-
-	// Check existing schedule
-	existingResult, err := client.Call(ctx, "pool.scrub.query", []interface{}{
-		[]interface{}{"pool", "=", poolInfo["id"]},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to check existing schedules: %w", err)
-	}
-
-	var existing []map[string]interface{}
-	if err := json.Unmarshal(existingResult, &existing); err != nil {
-		return nil, fmt.Errorf("failed to parse existing schedules: %w", err)
-	}
-
-	var existingSchedule map[string]interface{}
-	if len(existing) > 0 {
-		existingSchedule = existing[0]
-	}
-
-	// Get last scrub info
-	poolsResult, err := client.Call(ctx, "pool.query", []interface{}{
-		[]interface{}{"name", "=", poolName},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query pool: %w", err)
-	}
-
-	var pools []map[string]interface{}
-	if err := json.Unmarshal(poolsResult, &pools); err != nil {
-		return nil, fmt.Errorf("failed to parse pool: %w", err)
-	}
-
-	scheduleHuman := formatCronSchedule(scheduleObj)
-	loc, _, assumedUTC := nasTimezone(ctx, client)
-
-	var lastScrubDate string
-	if len(pools) > 0 {
-		if scan, ok := pools[0]["scan"].(map[string]interface{}); ok {
-			if endTime, ok := scan["end_time"].(map[string]interface{}); ok {
-				if endSec, ok := endTime["$date"].(float64); ok {
-					lastScrubDate = formatInLocation(time.Unix(int64(endSec/1000), 0), loc)
-				}
-			}
-		}
-	}
-	firstRun := calculateNextRun(scheduleObj, time.Now(), loc)
-	scrubEstimate, scrubEstimateNote, hasScrubEstimate := estimateNextScrub(scheduleObj, time.Now(), loc, enabled, threshold, lastFinishedScrubEnd(poolInfo), scrubScanRunning(poolInfo))
-	sizeBytes, hasSize := poolSizeBytes(poolInfo)
-	_, sizeHuman := poolSizeFields(poolInfo)
-	var estimatedHours int
-	if hasSize {
-		estimatedHours = estimateScrubDuration(sizeBytes)
-	}
-
-	warnings := []string{}
-	if existingSchedule != nil {
-		warnings = append(warnings, fmt.Sprintf("ERROR: Pool '%s' already has a scrub schedule (id: %v)", poolName, existingSchedule["id"]))
-		warnings = append(warnings, "Delete the existing schedule first, or choose a different pool")
-	} else {
-		warnings = append(warnings, fmt.Sprintf("Next cron tick: %s", firstRun))
-		if hasScrubEstimate {
-			if scrubEstimate != "" {
-				warnings = append(warnings, fmt.Sprintf("Earliest possible scrub: %s (%s)", scrubEstimate, scrubEstimateNote))
-			} else {
-				warnings = append(warnings, scrubEstimateNote)
-			}
-		}
-		if hasSize {
-			warnings = append(warnings, fmt.Sprintf("Scrub may take %d-%d hours based on pool size", estimatedHours, estimatedHours*3))
-		} else {
-			warnings = append(warnings, "Pool size is unknown; duration cannot be estimated")
-		}
-		warnings = append(warnings, "Ensure system is powered on at scheduled time")
-
-		// Check if schedule is during reasonable hours
-		hour, _ := scheduleObj["hour"].(string)
-		if hour != "*" {
-			hourInt := 0
-			fmt.Sscanf(hour, "%d", &hourInt)
-			if hourInt >= 2 && hourInt <= 4 {
-				warnings = append(warnings, "Schedule runs during low-activity hours (recommended)")
-			} else if hourInt >= 8 && hourInt <= 18 {
-				warnings = append(warnings, "WARNING: Schedule runs during typical business hours - may impact performance")
-			}
-		}
-	}
-
-	actionDetails := map[string]interface{}{
-		"schedule_human": scheduleHuman,
-		"first_run":      firstRun,
-		"threshold_days": threshold,
-		"enabled":        enabled,
-	}
-	if hasScrubEstimate {
-		if scrubEstimate != "" {
-			actionDetails["next_scrub_estimate"] = scrubEstimate
-		}
-		actionDetails["next_scrub_estimate_note"] = scrubEstimateNote
-	}
-
-	actions := []PlannedAction{}
-	if existingSchedule == nil {
-		actions = append(actions, PlannedAction{
-			Step:        1,
-			Description: fmt.Sprintf("Create scrub schedule for pool '%s'", poolName),
-			Operation:   "create",
-			Target:      poolName,
-			Details:     actionDetails,
-		})
-	}
-
-	if assumedUTC {
-		warnings = append(warnings, nextRunTimezoneNote)
-	}
-
-	result := &DryRunResult{
-		Tool: "create_scrub_schedule",
-		CurrentState: map[string]interface{}{
-			"pool":              poolName,
-			"pool_id":           poolInfo["id"],
-			"pool_size":         sizeHuman,
-			"existing_schedule": existingSchedule,
-			"last_scrub":        lastScrubDate,
-		},
-		PlannedActions: actions,
-		Warnings:       warnings,
-	}
-	if hasSize {
-		result.EstimatedTime = &EstimatedTime{
-			MinSeconds: estimatedHours * 3600,
-			MaxSeconds: estimatedHours * 3 * 3600,
-			Note:       fmt.Sprintf("Scrub duration: %d-%d hours for %s pools", estimatedHours, estimatedHours*3, sizeHuman),
-		}
-	}
-	return result, nil
-}
-
-type runScrubDryRun struct{}
-
-func (r *runScrubDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	poolName, ok := args["pool"].(string)
-	if !ok || poolName == "" {
-		return nil, fmt.Errorf("pool is required")
-	}
-
-	threshold := 7
-	if t, ok := args["threshold"].(float64); ok {
-		threshold = int(t)
-	}
-
-	// Get pool info
-	poolInfo, err := getPoolByName(ctx, client, poolName)
-	if err != nil {
-		return nil, err
-	}
-	if err := errIfPoolCannotScrub(poolInfo, poolName); err != nil {
-		return nil, err
-	}
-	if err := errIfPoolResilvering(poolInfo, poolName); err != nil {
-		return nil, err
-	}
-
-	status, _ := poolInfo["status"].(string)
-	sizeBytes, hasSize := poolSizeBytes(poolInfo)
-	_, sizeHuman := poolSizeFields(poolInfo)
-
-	jobs, err := queryScrubJobs(ctx, client, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check running scrubs: %w", err)
-	}
-
-	scrubRunning := false
-	for _, job := range jobs {
-		if jobPoolName, ok := scrubJobPoolName(job); ok && jobPoolName == poolName {
-			scrubRunning = true
-			break
-		}
-	}
-	if scrubScanRunning(poolInfo) {
-		scrubRunning = true
-	}
-
-	// Get last scrub info
-	poolsResult, err := client.Call(ctx, "pool.query", []interface{}{
-		[]interface{}{"name", "=", poolName},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query pool: %w", err)
-	}
-
-	var pools []map[string]interface{}
-	if err := json.Unmarshal(poolsResult, &pools); err != nil {
-		return nil, fmt.Errorf("failed to parse pool: %w", err)
-	}
-
-	loc, _, _ := nasTimezone(ctx, client)
-
-	var lastScrub map[string]interface{}
-	if len(pools) > 0 {
-		if scan, ok := pools[0]["scan"].(map[string]interface{}); ok {
-			lastScrub = map[string]interface{}{
-				"state":  scan["state"],
-				"errors": scan["errors"],
-			}
-			if endTime, ok := scan["end_time"].(map[string]interface{}); ok {
-				if endSec, ok := endTime["$date"].(float64); ok {
-					completed := time.Unix(int64(endSec/1000), 0)
-					lastScrub["date"] = formatInLocation(completed, loc)
-					lastScrub["days_ago"] = int(time.Since(completed).Hours() / 24)
-				}
-			}
-		}
-	}
-
-	var estimatedHours, minSeconds, maxSeconds int
-	if hasSize {
-		estimatedHours = estimateScrubDuration(sizeBytes)
-		minSeconds = estimatedHours * 3600
-		maxSeconds = estimatedHours * 3 * 3600
-	}
-
-	warnings := []string{}
-	if scrubRunning {
-		warnings = append(warnings, fmt.Sprintf("ERROR: Scrub already running on pool '%s'", poolName))
-		warnings = append(warnings, "Wait for current scrub to complete, or stop it first")
-	} else {
-		warnings = append(warnings, "Scrub will verify all data blocks on the pool")
-		warnings = append(warnings, "Performance may be impacted during scrub")
-		if lastScrub != nil {
-			daysAgo, _ := lastScrub["days_ago"].(int)
-			if lastScrubWithinThreshold(lastFinishedScrubEnd(poolInfo), threshold) {
-				warnings = append(warnings, fmt.Sprintf("Last scrub was %d days ago (within threshold of %d days)", daysAgo, threshold))
-			} else {
-				warnings = append(warnings, fmt.Sprintf("Last scrub was %d days ago (exceeds threshold of %d days)", daysAgo, threshold))
-			}
-		}
-		warnings = append(warnings, "Scrub can be safely interrupted (resumes from checkpoint)")
-	}
-
-	actions := []PlannedAction{}
-	if !scrubRunning {
-		details := map[string]interface{}{
-			"pool_size": sizeHuman,
-		}
-		if hasSize {
-			details["estimated_duration_hours"] = estimatedHours
-		}
-		actions = append(actions, PlannedAction{
-			Step:        1,
-			Description: fmt.Sprintf("Start manual scrub of pool '%s'", poolName),
-			Operation:   "scrub",
-			Target:      poolName,
-			Details:     details,
-		})
-	}
-
-	requirements := &Requirements{
-		Conditions: []string{
-			fmt.Sprintf("Pool must be ONLINE or DEGRADED (current: %s)", status),
-			fmt.Sprintf("No existing scrub running (current: %v)", map[bool]string{true: "running", false: "none"}[scrubRunning]),
-		},
-	}
-
-	result := &DryRunResult{
-		Tool: "run_scrub",
-		CurrentState: map[string]interface{}{
-			"pool":          poolName,
-			"pool_id":       poolInfo["id"],
-			"size":          sizeHuman,
-			"status":        status,
-			"last_scrub":    lastScrub,
-			"scrub_running": scrubRunning,
-		},
-		PlannedActions: actions,
-		Warnings:       warnings,
-		Requirements:   requirements,
-	}
-	if hasSize {
-		result.EstimatedTime = &EstimatedTime{
-			MinSeconds: minSeconds,
-			MaxSeconds: maxSeconds,
-			Note:       "Duration varies by pool size, data amount, and system load",
-		}
-	}
-	return result, nil
+	return r.executeRunScrub(ctx, client, args, plan)
 }
 
 // Helper functions for scrub management
@@ -1348,23 +1292,6 @@ func lastScrubWithinThresholdAt(end *time.Time, threshold int, now time.Time) bo
 		return false
 	}
 	return now.Sub(*end) < time.Duration(threshold-1)*24*time.Hour
-}
-
-// startScrubJob starts a scrub with pool.scrub.scrub, which is present
-// on TrueNAS 25.04–27 and fails the job when the start fails. zpool.scrub.run
-// (26+) can finish successfully without starting a scrub (HA standby, a
-// race with a scheduled run, or the concurrent-scrub limit), so it is not
-// used for the start call. Threshold is enforced in the handler first.
-func startScrubJob(ctx context.Context, client *truenas.Client, poolName string) (int, error) {
-	result, err := client.Call(ctx, "pool.scrub.scrub", poolName, "START")
-	if err != nil {
-		return 0, fmt.Errorf("failed to start scrub: %w", err)
-	}
-	jobID, err := parseScrubJobID(result)
-	if err != nil {
-		return 0, err
-	}
-	return jobID, nil
 }
 
 func parseScrubJobID(result json.RawMessage) (int, error) {
