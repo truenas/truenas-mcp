@@ -107,8 +107,8 @@ func TestShareDryRunWarnings(t *testing.T) {
 		if hasWarning(ws, "no_root_squash") {
 			t.Errorf("maproot_user=root alone is not no_root_squash: %v", ws)
 		}
-		if !hasWarning(ws, "uid 0") || !hasWarning(ws, "root_squash") {
-			t.Errorf("maproot_user=root alone should mention uid 0 and root_squash: %v", ws)
+		if !hasWarning(ws, "uid 0") || !hasWarning(ws, "root_squash") || !hasWarning(ws, "root file access") {
+			t.Errorf("maproot_user=root alone should mention uid 0, root_squash, and root file access: %v", ws)
 		}
 	})
 
@@ -167,6 +167,21 @@ func TestShareDryRunWarnings(t *testing.T) {
 		}
 		if hasWarning(ws, "no_root_squash") {
 			t.Errorf("mapall is not no_root_squash: %v", ws)
+		}
+	})
+
+	t.Run("NFS mapall root is all_squash with root file access", func(t *testing.T) {
+		r := shareDryRunRegistry(t, nil)
+		resp := callShareDryRun(t, r, "create_nfs_share", mergeShareArgs(nfsBase, map[string]interface{}{
+			"mapall_user":  "root",
+			"mapall_group": "root",
+		}))
+		ws := warningStrings(resp)
+		if hasWarning(ws, "no_root_squash") {
+			t.Errorf("mapall root is all_squash, not no_root_squash: %v", ws)
+		}
+		if !hasWarning(ws, "all_squash") || !hasWarning(ws, "uid 0") || !hasWarning(ws, "root file access") {
+			t.Errorf("mapall root should name uid 0 / gid 0 and root file access: %v", ws)
 		}
 	})
 
@@ -247,10 +262,13 @@ func TestShareHostnameUnavailable(t *testing.T) {
 
 	assertPlaceholder := func(t *testing.T, tool, field, value string, resp map[string]interface{}) {
 		t.Helper()
-		if !strings.Contains(value, "<hostname unavailable>") {
-			t.Errorf("%s %s = %q, want the hostname placeholder", tool, field, value)
+		if !strings.Contains(value, "NAS_HOSTNAME") {
+			t.Errorf("%s %s = %q, want the NAS_HOSTNAME placeholder", tool, field, value)
 		}
-		if strings.Contains(value, "truenas") && !strings.Contains(value, "unavailable") {
+		if strings.ContainsAny(value, "<>") {
+			t.Errorf("%s %s is not shell-safe: %q", tool, field, value)
+		}
+		if strings.Contains(value, "truenas") && !strings.Contains(value, "NAS_HOSTNAME") {
 			t.Errorf("%s %s used a silent truenas fallback: %q", tool, field, value)
 		}
 		note, _ := resp["hostname_note"].(string)

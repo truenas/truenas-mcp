@@ -246,14 +246,16 @@ func smbHasHostsallow(payload map[string]interface{}) bool {
 	return len(list) > 0
 }
 
-const nasHostnamePlaceholder = "<hostname unavailable>"
-const nasHostnameUnavailableNote = "NAS hostname unavailable; the value is a placeholder"
+const nasHostnamePlaceholder = "NAS_HOSTNAME"
+const nasHostnameUnavailableNote = "NAS hostname unavailable; NAS_HOSTNAME is a placeholder"
 
 // lookupNASHostname returns system.info hostname for share paths and mount
 // examples. That value is the short hostname (socket.gethostname()), not
 // the HA virtual hostname from network.configuration. If it is missing or
-// unusable, a visible placeholder is returned with a note so the result
-// cannot be mistaken for the factory-default hostname "truenas".
+// unusable, the shell-safe placeholder NAS_HOSTNAME is returned with a
+// note so the result cannot be mistaken for the factory-default hostname
+// "truenas", and so a mount example can be pasted without being treated
+// as a shell redirect.
 func lookupNASHostname(client *truenas.Client) (host, note string) {
 	if client == nil {
 		return nasHostnamePlaceholder, nasHostnameUnavailableNote

@@ -254,7 +254,11 @@ func nfsRootMappingWarning(payload map[string]interface{}) string {
 	mapallUser, _ := payload["mapall_user"].(string)
 	mapallGroup, _ := payload["mapall_group"].(string)
 	if mapallUser != "" || mapallGroup != "" {
-		return fmt.Sprintf("All client users are mapped to %s (all_squash)", nfsMappedAccount(mapallUser, mapallGroup))
+		msg := fmt.Sprintf("All client users are mapped to %s (all_squash)", nfsMappedAccount(mapallUser, mapallGroup))
+		if nfsRootIDName(mapallUser, false) {
+			msg += ", so every client has root file access"
+		}
+		return msg
 	}
 	maprootUser, _ := payload["maproot_user"].(string)
 	maprootGroup, _ := payload["maproot_group"].(string)
@@ -264,5 +268,9 @@ func nfsRootMappingWarning(payload map[string]interface{}) string {
 	if maprootUser == "" && maprootGroup == "" {
 		return "Root clients are squashed to nobody (root_squash)"
 	}
-	return fmt.Sprintf("Root clients are mapped to %s (root_squash)", nfsMappedAccount(maprootUser, maprootGroup))
+	msg := fmt.Sprintf("Root clients are mapped to %s (root_squash)", nfsMappedAccount(maprootUser, maprootGroup))
+	if nfsRootIDName(maprootUser, false) {
+		msg += ", so they keep root file access"
+	}
+	return msg
 }
