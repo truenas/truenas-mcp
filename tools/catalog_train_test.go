@@ -76,7 +76,7 @@ func callCatalogTool(t *testing.T, tool string, args map[string]interface{}) (st
 	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	defer mgr.Shutdown()
-	out, err := NewRegistry(client, mgr).CallTool(tool, args)
+	out, err := NewRegistry(client, mgr).CallTool(t.Context(), tool, args)
 	return out, err, fake
 }
 
@@ -248,7 +248,7 @@ func TestGetAppCatalogDetailsLookupFailureFallsBackToStable(t *testing.T) {
 	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	defer mgr.Shutdown()
-	out, err := NewRegistry(client, mgr).CallTool("get_app_catalog_details", map[string]interface{}{"app_name": "stableapp"})
+	out, err := NewRegistry(client, mgr).CallTool(t.Context(), "get_app_catalog_details", map[string]interface{}{"app_name": "stableapp"})
 	if err != nil {
 		t.Fatal(err)
 	}

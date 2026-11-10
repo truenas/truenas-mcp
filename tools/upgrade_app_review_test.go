@@ -52,7 +52,7 @@ func TestUpgradeAppRejectsBadHealthTimeoutBeforeUpgrade(t *testing.T) {
 		for _, dry := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s dry_run=%v", name, dry), func(t *testing.T) {
 				r, _, f := newUpgradeRegistry(t, upgradeSummaryFixture("x"))
-				_, err := r.CallTool("upgrade_app", map[string]interface{}{
+				_, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{
 					"app_name": "plex", "confirm": true, "dry_run": dry, "health_timeout_seconds": v,
 				})
 				if err == nil || !strings.Contains(err.Error(), "health_timeout_seconds") {
@@ -71,7 +71,7 @@ func TestUpgradeAppRejectsBadHealthTimeoutBeforeUpgrade(t *testing.T) {
 		t.Errorf("600 not honoured: %v", resp["message"])
 	}
 	r, _, f := newUpgradeRegistry(t, upgradeSummaryFixture("x"))
-	if _, err := r.CallTool("upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true, "health_timeout_seconds": 601}); err == nil {
+	if _, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true, "health_timeout_seconds": 601}); err == nil {
 		t.Error("601 accepted")
 	}
 	if len(f.called("app.upgrade")) != 0 {
@@ -208,13 +208,13 @@ func TestTasksGetWhilePolling(t *testing.T) {
 					return
 				default:
 				}
-				out, err := r.CallTool("tasks_get", map[string]interface{}{"task_id": id})
+				out, err := r.CallTool(t.Context(), "tasks_get", map[string]interface{}{"task_id": id})
 				if err != nil {
 					t.Error(err)
 					return
 				}
 				_ = out
-				if _, err := r.CallTool("tasks_list", map[string]interface{}{}); err != nil {
+				if _, err := r.CallTool(t.Context(), "tasks_list", map[string]interface{}{}); err != nil {
 					t.Error(err)
 					return
 				}
@@ -247,7 +247,7 @@ func TestJobSummaryCapOnEveryPath(t *testing.T) {
 	f.job.Store(job)
 	id := startUpgrade(t, r, nil)["task_id"].(string)
 	mgr.PollNow()
-	out, err := r.CallTool("tasks_get", map[string]interface{}{"task_id": id})
+	out, err := r.CallTool(t.Context(), "tasks_get", map[string]interface{}{"task_id": id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestJobSummaryCapOnEveryPath(t *testing.T) {
 
 	fake := &fakeMiddleware{handle: jobsHandle([]interface{}{job, job}, 2)}
 	client, _ := newFakeClientFrom(t, fake)
-	qj, err := NewRegistry(client, mgr).CallTool("query_jobs", map[string]interface{}{"state": "all"})
+	qj, err := NewRegistry(client, mgr).CallTool(t.Context(), "query_jobs", map[string]interface{}{"state": "all"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func queryJobs(t *testing.T, jobs []interface{}, total int, args map[string]inte
 	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)
-	out, err := NewRegistry(client, mgr).CallTool("query_jobs", args)
+	out, err := NewRegistry(client, mgr).CallTool(t.Context(), "query_jobs", args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestQueryJobsCountFailureStillFlagsHasMore(t *testing.T) {
 	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)
-	out, err := NewRegistry(client, mgr).CallTool("query_jobs", map[string]interface{}{"state": "all", "limit": 5.0})
+	out, err := NewRegistry(client, mgr).CallTool(t.Context(), "query_jobs", map[string]interface{}{"state": "all", "limit": 5.0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +440,7 @@ func TestQueryAppsShowsVersions(t *testing.T) {
 	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)
-	out, err := NewRegistry(client, mgr).CallTool("query_apps", map[string]interface{}{})
+	out, err := NewRegistry(client, mgr).CallTool(t.Context(), "query_apps", map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}

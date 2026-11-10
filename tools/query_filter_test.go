@@ -187,7 +187,7 @@ func TestQueryDatasetsPoolFilterAndBounds(t *testing.T) {
 	}}
 	r := queryFilterRegistry(t, fake)
 
-	out, err := r.CallTool("query_datasets", map[string]interface{}{"pool": "tank"})
+	out, err := r.CallTool(t.Context(), "query_datasets", map[string]interface{}{"pool": "tank"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestQueryDatasetsPoolFilterAndBounds(t *testing.T) {
 		t.Errorf("pool=tank datasets = %s, want 3", out)
 	}
 
-	out, err = r.CallTool("query_datasets", map[string]interface{}{"order_by": "name"})
+	out, err = r.CallTool(t.Context(), "query_datasets", map[string]interface{}{"order_by": "name"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestQueryDatasetsPoolFilterAndBounds(t *testing.T) {
 		t.Errorf("tank/data missing deduplication after requesting dedup: %s", out)
 	}
 
-	out, err = r.CallTool("query_datasets", map[string]interface{}{"pool": "tank", "encrypted_only": true})
+	out, err = r.CallTool(t.Context(), "query_datasets", map[string]interface{}{"pool": "tank", "encrypted_only": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestQueryDatasetsPoolFilterAndBounds(t *testing.T) {
 		t.Errorf("encrypted_only datasets = %s", out)
 	}
 
-	out, err = r.CallTool("query_datasets", map[string]interface{}{"encrypted_only": true, "order_by": "name"})
+	out, err = r.CallTool(t.Context(), "query_datasets", map[string]interface{}{"encrypted_only": true, "order_by": "name"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestQuerySnapshotsUnfilteredCarriesLimit(t *testing.T) {
 		}, nil, true
 	}}
 	r := queryFilterRegistry(t, fake)
-	out, err := r.CallTool("query_snapshots", map[string]interface{}{})
+	out, err := r.CallTool(t.Context(), "query_snapshots", map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +398,7 @@ func TestQueryPoolsAndSharesRequestSelect(t *testing.T) {
 	}}
 	r := queryFilterRegistry(t, fake)
 
-	out, err := r.CallTool("query_pools", map[string]interface{}{})
+	out, err := r.CallTool(t.Context(), "query_pools", map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func TestQueryPoolsAndSharesRequestSelect(t *testing.T) {
 		}
 	}
 
-	out, err = r.CallTool("query_shares", map[string]interface{}{})
+	out, err = r.CallTool(t.Context(), "query_shares", map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +470,7 @@ func TestQueryPoolsAndSharesRequestSelect(t *testing.T) {
 		t.Errorf("sharing.nfs.query options = %s, want no select", methods["sharing.nfs.query"])
 	}
 
-	if _, err := r.CallTool("query_vms", map[string]interface{}{}); err != nil {
+	if _, err := r.CallTool(t.Context(), "query_vms", map[string]interface{}{}); err != nil {
 		t.Fatal(err)
 	}
 	_, vmOpts := parseQueryParams(t, methods["vm.query"])
@@ -532,7 +532,7 @@ func TestQueryLimitIsClamped(t *testing.T) {
 		}
 	}}
 	r := queryFilterRegistry(t, fake)
-	dsOut, err := r.CallTool("query_datasets", map[string]interface{}{"limit": 1e300})
+	dsOut, err := r.CallTool(t.Context(), "query_datasets", map[string]interface{}{"limit": 1e300})
 	if err != nil {
 		t.Fatalf("query_datasets huge limit: %v", err)
 	}
@@ -540,7 +540,7 @@ func TestQueryLimitIsClamped(t *testing.T) {
 	if !strings.Contains(dsNote, "capped to 1000") {
 		t.Errorf("query_datasets capped note = %q, want cap mentioned; body=%s", dsNote, dsOut)
 	}
-	snapOut, err := r.CallTool("query_snapshots", map[string]interface{}{"limit": 1e300})
+	snapOut, err := r.CallTool(t.Context(), "query_snapshots", map[string]interface{}{"limit": 1e300})
 	if err != nil {
 		t.Fatalf("query_snapshots huge limit: %v", err)
 	}
@@ -590,7 +590,7 @@ func TestQuerySnapshotsCountFailureMarksTotalUnknown(t *testing.T) {
 		return snaps, nil, true
 	}}
 	r := queryFilterRegistry(t, fake)
-	out, err := r.CallTool("query_snapshots", map[string]interface{}{})
+	out, err := r.CallTool(t.Context(), "query_snapshots", map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}

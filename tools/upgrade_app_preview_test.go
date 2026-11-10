@@ -19,7 +19,7 @@ func upgradePreview(t *testing.T, r *Registry, explicit bool, extra map[string]i
 	for k, v := range extra {
 		args[k] = v
 	}
-	out, err := r.CallTool("upgrade_app", args)
+	out, err := r.CallTool(t.Context(), "upgrade_app", args)
 	if err != nil {
 		t.Fatal(err)
 	}

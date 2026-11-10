@@ -106,7 +106,7 @@ func startUpgrade(t *testing.T, r *Registry, extra map[string]interface{}) map[s
 	for k, v := range extra {
 		args[k] = v
 	}
-	out, err := r.CallTool("upgrade_app", args)
+	out, err := r.CallTool(t.Context(), "upgrade_app", args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func startUpgrade(t *testing.T, r *Registry, extra map[string]interface{}) map[s
 
 func taskState(t *testing.T, r *Registry, id string) map[string]interface{} {
 	t.Helper()
-	out, err := r.CallTool("tasks_get", map[string]interface{}{"task_id": id})
+	out, err := r.CallTool(t.Context(), "tasks_get", map[string]interface{}{"task_id": id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestUpgradeAppNullChangelog(t *testing.T) {
 	for name, changelog := range map[string]interface{}{"null": nil, "empty": "", "blank": " \n\t"} {
 		t.Run(name, func(t *testing.T) {
 			r, _, _ := newUpgradeRegistry(t, upgradeSummaryFixture(changelog))
-			out, err := r.CallTool("upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true})
+			out, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -147,7 +147,7 @@ func TestUpgradeAppDryRunNullChangelogAndChangelogKept(t *testing.T) {
 	r, _, f := newUpgradeRegistry(t, upgradeSummaryFixture(nil))
 	f.results["app.query"] = []interface{}{appEntry("plex", "RUNNING")}
 	// Without confirm the call is a preview built by the dry-run path.
-	out, err := r.CallTool("upgrade_app", map[string]interface{}{"app_name": "plex"})
+	out, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestUpgradeAppHugeJobResultIsBounded(t *testing.T) {
 
 	id := startUpgrade(t, r, nil)["task_id"].(string)
 	mgr.PollNow()
-	out, err := r.CallTool("tasks_get", map[string]interface{}{"task_id": id})
+	out, err := r.CallTool(t.Context(), "tasks_get", map[string]interface{}{"task_id": id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestUpgradeAppHugeJobResultIsBounded(t *testing.T) {
 	// query_jobs bounds the same result.
 	f.results["core.get_jobs"] = []interface{}{job}
 	f.handle = nil
-	qj, err := r.CallTool("query_jobs", map[string]interface{}{"state": "all"})
+	qj, err := r.CallTool(t.Context(), "query_jobs", map[string]interface{}{"state": "all"})
 	if err != nil {
 		t.Fatal(err)
 	}

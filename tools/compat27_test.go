@@ -115,7 +115,7 @@ func TestGetArcMetricsAllFailedIsError(t *testing.T) {
 
 	// Through the registry the failure reaches the MCP layer as an error.
 	r := NewRegistry(client, nil)
-	if _, err := r.CallTool("get_arc_metrics", map[string]interface{}{}); err == nil {
+	if _, err := r.CallTool(t.Context(), "get_arc_metrics", map[string]interface{}{}); err == nil {
 		t.Error("CallTool should return an error (isError=true) when every graph fails")
 	}
 }

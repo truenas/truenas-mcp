@@ -1,8 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/truenas/truenas-mcp/mcp"
@@ -23,99 +24,49 @@ func (f fakeRegistry) ListTools() []mcp.Tool {
 	return []mcp.Tool{{Name: "echo", Description: "echo", InputSchema: map[string]interface{}{"type": "object"}}}
 }
 
-func (f fakeRegistry) CallTool(name string, args map[string]interface{}) (string, error) {
+func (f fakeRegistry) CallTool(_ context.Context, name string, args map[string]interface{}) (string, error) {
 	log.Printf("calling tool %s", name)
 	data, _ := args["data"].(string)
 	return fmt.Sprintf("got %d bytes;%s", len(data), strings.Repeat("r", f.resultBytes)), nil
 }
 
-func rpcLine(t *testing.T, v map[string]interface{}) string {
-	t.Helper()
-	v["jsonrpc"] = "2.0"
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b) + "\n"
-}
-
-// stdioSession is a request stream covering every response path: requests,
+// runStdioSession drives a session covering every response path: requests,
 // notifications, a large request and result, an unknown method and garbage.
-func stdioSession(t *testing.T) (input string, wantIDs []float64) {
+// Each reply is read before the next request is sent, so a notification
+// that got a reply would show up as the wrong reply to the next request.
+func runStdioSession(t *testing.T, c *rpcClient) {
 	t.Helper()
 	big := strings.Repeat("d", 300*1024) // 300 KiB, over bufio.Scanner's 64 KiB limit
-	input += rpcLine(t, map[string]interface{}{"id": 1, "method": "initialize"})
-	input += rpcLine(t, map[string]interface{}{"method": "notifications/initialized"})
-	input += rpcLine(t, map[string]interface{}{"id": 2, "method": "tools/list"})
-	input += rpcLine(t, map[string]interface{}{"id": 3, "method": "tools/call", "params": map[string]interface{}{
-		"name": "echo", "arguments": map[string]interface{}{"data": big}}})
-	input += rpcLine(t, map[string]interface{}{"id": 4, "method": "no/such/method"})
-	input += "this is not json\n"
-	input += rpcLine(t, map[string]interface{}{"id": 5, "method": "tools/list"})
-	return input, []float64{1, 2, 3, 4, 5}
-}
-
-// checkOnlyJSONRPC asserts every line of stdout is a JSON-RPC 2.0 response
-// and returns them.
-func checkOnlyJSONRPC(t *testing.T, stdout []byte) []map[string]interface{} {
-	t.Helper()
-	var msgs []map[string]interface{}
-	for i, line := range strings.Split(strings.TrimSuffix(string(stdout), "\n"), "\n") {
-		var m map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Fatalf("stdout line %d is not JSON (%v): %.200q", i+1, err, line)
-		}
-		if m["jsonrpc"] != "2.0" {
-			t.Fatalf("stdout line %d is not JSON-RPC 2.0: %.200q", i+1, line)
-		}
-		_, hasResult := m["result"]
-		_, hasError := m["error"]
-		if hasResult == hasError {
-			t.Fatalf("stdout line %d must have exactly one of result and error: %.200q", i+1, line)
-		}
-		msgs = append(msgs, m)
-	}
-	return msgs
-}
-
-func checkSession(t *testing.T, msgs []map[string]interface{}, wantIDs []float64) {
-	t.Helper()
-	// Responses to 1-5, plus the parse error for the garbage line (id null).
-	if len(msgs) != len(wantIDs)+1 {
-		t.Fatalf("got %d responses, want %d", len(msgs), len(wantIDs)+1)
-	}
-	byID := map[float64]map[string]interface{}{}
-	for _, m := range msgs {
-		if id, ok := m["id"].(float64); ok {
-			byID[id] = m
-		} else if e, _ := m["error"].(map[string]interface{}); e == nil || e["code"] != float64(-32700) {
-			t.Errorf("response without id should be a parse error: %v", m)
-		}
-	}
-	for _, id := range wantIDs {
-		if byID[id] == nil {
-			t.Errorf("no response for id %v", id)
-		}
-	}
-	result := byID[3]["result"].(map[string]interface{})
-	text := result["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
+	c.call(float64(1), "initialize", initParams("2025-11-25"))
+	c.send(map[string]interface{}{"method": "notifications/initialized"})
+	c.call(float64(2), "tools/list", nil)
+	text, _ := toolText(t, c.call(float64(3), "tools/call", toolArgs("echo", map[string]interface{}{"data": big})))
 	if !strings.HasPrefix(text, "got 307200 bytes;") || len(text) < 256<<10 {
 		t.Errorf("large request/response did not round-trip: %d bytes, prefix %.40q", len(text), text)
 	}
+	if m := c.call(float64(4), "no/such/method", nil); errorCode(m) != -32601 {
+		t.Errorf("unknown method: %v; want -32601", m)
+	}
+	c.sendRaw("this is not json\n")
+	line, m := c.recvLine()
+	if errorCode(m) != -32700 {
+		t.Errorf("garbage line: %v; want -32700", m)
+	}
+	assertIDNull(t, line)
+	c.call(float64(5), "tools/list", nil)
 }
 
 func TestStdioOnlyProtocolReachesStdout(t *testing.T) {
-	input, wantIDs := stdioSession(t)
-	var stdout bytes.Buffer
-	var logs bytes.Buffer
+	var logs syncBuffer
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
 
-	h := newStdioHandler(fakeRegistry{resultBytes: 256 << 10}, true, strings.NewReader(input), &stdout)
-	if err := h.Run(); err != nil {
+	c, run := session(t, newTestHandler(fakeRegistry{resultBytes: 256 << 10}, true))
+	runStdioSession(t, c)
+	if err := run.wait(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	checkSession(t, checkOnlyJSONRPC(t, stdout.Bytes()), wantIDs)
+	c.noMoreOutput()
 	for _, want := range []string{"[STDIN]", "[STDOUT]", "calling tool echo", "Parse error"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log is missing %q", want)
@@ -127,59 +78,76 @@ func TestStdioLargeRequestDoesNotStopServer(t *testing.T) {
 	// A request over 64 KiB used to end the loop (bufio.ErrTooLong), taking
 	// the server down. Here the last request follows 4 MiB of padding.
 	huge := strings.Repeat("h", 4<<20)
-	input := rpcLine(t, map[string]interface{}{"id": 1, "method": "tools/call", "params": map[string]interface{}{
-		"name": "echo", "arguments": map[string]interface{}{"data": huge}}}) +
-		rpcLine(t, map[string]interface{}{"id": 2, "method": "tools/list"})
-	var stdout bytes.Buffer
-	if err := newStdioHandler(fakeRegistry{}, false, strings.NewReader(input), &stdout).Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
-	if len(msgs) != 2 || msgs[0]["id"] != float64(1) || msgs[1]["id"] != float64(2) {
-		t.Fatalf("responses = %d, first %v", len(msgs), msgs[0]["id"])
-	}
-	text := msgs[0]["result"].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
+	c, run := session(t, newTestHandler(fakeRegistry{}, false))
+	c.initialize()
+	text, _ := toolText(t, c.call(float64(1), "tools/call", toolArgs("echo", map[string]interface{}{"data": huge})))
 	if !strings.HasPrefix(text, fmt.Sprintf("got %d bytes;", len(huge))) {
 		t.Errorf("tool saw a truncated argument: %.40q", text)
 	}
+	c.call(float64(2), "tools/list", nil)
+	if err := run.wait(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 }
 
-type failWriter struct{}
+// failAfter accepts n writes, then fails every write.
+type failAfter struct {
+	mu sync.Mutex
+	n  int
+	w  io.Writer
+}
 
-func (failWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+func (f *failAfter) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.n <= 0 {
+		return 0, errors.New("broken pipe")
+	}
+	f.n--
+	return f.w.Write(p)
+}
 
-// countingRegistry counts tool listings, to show whether requests are still
-// being served after stdout failed.
-type countingRegistry struct {
+// callCountingRegistry counts tool calls.
+type callCountingRegistry struct {
 	fakeRegistry
-	lists *int
+	calls atomic.Int32
 }
 
-func (c countingRegistry) ListTools() []mcp.Tool { *c.lists++; return c.fakeRegistry.ListTools() }
+func (c *callCountingRegistry) CallTool(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	c.calls.Add(1)
+	return c.fakeRegistry.CallTool(ctx, name, args)
+}
 
 func TestStdioWriteErrorStopsServer(t *testing.T) {
 	// A broken stdout means no response can be delivered: Run must return the
-	// error and not keep executing requests (which may have side effects).
-	req := rpcLine(t, map[string]interface{}{"id": 1, "method": "tools/list"})
+	// error and stop reading, so no later request (which may have side
+	// effects) is executed.
+	call := map[string]interface{}{"id": 1, "method": "tools/call", "params": toolArgs("echo", nil)}
 	for name, tc := range map[string]struct {
-		in        string
-		limit     int
-		wantLists int // requests executed: only the one whose reply failed
+		failing   string // the line whose reply cannot be written
+		wantCalls int32  // tools executed: only a call whose reply failed
 	}{
-		"response":       {req + req + req, mcp.MaxLineBytes, 1},
-		"parse error":    {"{bad\n" + req + req, mcp.MaxLineBytes, 0},
-		"oversize reply": {strings.Repeat("z", 100) + "\n" + req + req, 50, 0},
+		"response":       {rpcLine(t, call), 1},
+		"parse error":    {"{bad\n", 0},
+		"oversize reply": {strings.Repeat("z", 300) + "\n", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
-			lists := 0
-			h := newStdioHandler(countingRegistry{lists: &lists}, false, strings.NewReader(tc.in), failWriter{})
-			h.stdin = mcp.NewLineReader(strings.NewReader(tc.in), tc.limit)
-			err := h.Run()
+			reg := &callCountingRegistry{}
+			h := newTestHandler(reg, false)
+			h.maxLineBytes = 200
+			// Only the initialize reply gets through.
+			c, run := session(t, h, func(w io.Writer) io.Writer { return &failAfter{n: 1, w: w} })
+			c.initialize()
+			c.sendRaw(tc.failing)
+			err := run.result()
 			if err == nil || !strings.Contains(err.Error(), "broken pipe") || !errors.Is(err, errStdoutWrite) {
 				t.Fatalf("Run = %v; want a stdout write error", err)
 			}
-			if lists != tc.wantLists {
-				t.Errorf("%d requests were executed; want %d", lists, tc.wantLists)
+			if c.sendRaw(rpcLine(t, call)) {
+				t.Error("the server still reads its input after stdout failed")
+			}
+			if got := reg.calls.Load(); got != tc.wantCalls {
+				t.Errorf("%d tool calls were executed; want %d", got, tc.wantCalls)
 			}
 		})
 	}
@@ -188,124 +156,97 @@ func TestStdioWriteErrorStopsServer(t *testing.T) {
 func TestStdioOversizedRequestIsRejected(t *testing.T) {
 	// A line over the limit gets an error response, and the next request
 	// is still served. (Uses a handler with a small limit.)
-	in := strings.Repeat("z", 100) + "\n" + rpcLine(t, map[string]interface{}{"id": 7, "method": "tools/list"})
-	var stdout bytes.Buffer
-	h := newStdioHandler(fakeRegistry{}, false, strings.NewReader(in), &stdout)
-	h.stdin = mcp.NewLineReader(strings.NewReader(in), 50)
-	if err := h.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
-	if len(msgs) != 2 {
-		t.Fatalf("got %d responses", len(msgs))
-	}
-	if e, _ := msgs[0]["error"].(map[string]interface{}); e == nil || e["code"] != float64(-32600) {
-		t.Errorf("first response = %v; want -32600", msgs[0])
-	}
-	if msgs[1]["id"] != float64(7) {
-		t.Errorf("second response = %v", msgs[1])
+	h := newTestHandler(fakeRegistry{}, false)
+	h.maxLineBytes = 50
+	c, run := session(t, h)
+	c.sendRaw(strings.Repeat("z", 100) + "\n")
+	line, m := c.recvLine()
+	if errorCode(m) != -32600 {
+		t.Errorf("oversized line: %v; want -32600", m)
 	}
 	// JSON-RPC 2.0: an error reply to a request with an unknown id carries
 	// "id": null, not a missing member.
-	assertIDNull(t, stdout.Bytes(), 0)
-}
-
-// assertIDNull checks the raw JSON of output line n has an "id" member that
-// is null (json.Unmarshal into a map alone cannot tell null from absent).
-func assertIDNull(t *testing.T, out []byte, n int) {
-	t.Helper()
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if n >= len(lines) {
-		t.Fatalf("no output line %d in %q", n, out)
-	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(lines[n]), &raw); err != nil {
-		t.Fatalf("line %d is not JSON: %v", n, err)
-	}
-	id, ok := raw["id"]
-	if !ok || string(id) != "null" {
-		t.Errorf("line %d = %s; want \"id\":null", n, lines[n])
+	assertIDNull(t, line)
+	c.call(float64(7), "ping", nil)
+	if err := run.wait(); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 }
 
 func TestStdioParseErrorHasNullID(t *testing.T) {
-	var stdout bytes.Buffer
-	h := newStdioHandler(fakeRegistry{}, false, strings.NewReader("{not json\n"), &stdout)
-	if err := h.Run(); err != nil {
+	c, run := session(t, newTestHandler(fakeRegistry{}, false))
+	c.sendRaw("{not json\n")
+	line, m := c.recvLine()
+	if errorCode(m) != -32700 {
+		t.Errorf("response = %v; want -32700", m)
+	}
+	assertIDNull(t, line)
+	if err := run.wait(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
-	if len(msgs) != 1 {
-		t.Fatalf("got %d responses", len(msgs))
+	c.noMoreOutput()
+}
+
+// A message that is JSON but not a JSON-RPC message is an invalid request,
+// answered with its id when it has a usable one.
+func TestStdioInvalidRequest(t *testing.T) {
+	c, run := session(t, newTestHandler(fakeRegistry{}, false))
+	c.sendRaw(`{"jsonrpc":"1.0","id":5,"method":"ping"}` + "\n")
+	if m := c.recv(); errorCode(m) != -32600 || m["id"] != float64(5) {
+		t.Errorf("wrong version tag: %v; want -32600 with id 5", m)
 	}
-	if e, _ := msgs[0]["error"].(map[string]interface{}); e == nil || e["code"] != float64(-32700) {
-		t.Errorf("response = %v; want -32700", msgs[0])
+	c.sendRaw(`[{"jsonrpc":"2.0","id":6,"method":"ping"}]` + "\n")
+	line, m := c.recvLine()
+	if errorCode(m) != -32600 {
+		t.Errorf("batch: %v; want -32600", m)
 	}
-	assertIDNull(t, stdout.Bytes(), 0)
+	assertIDNull(t, line)
+	c.call(float64(7), "ping", nil)
+	if err := run.wait(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 }
 
 func TestStdioResponseKeepsFalsyIDs(t *testing.T) {
 	// ids 0 and "" are real ids and must be echoed, not turned into null.
-	var stdout bytes.Buffer
-	in := rpcLine(t, map[string]interface{}{"id": 0, "method": "tools/list"}) +
-		rpcLine(t, map[string]interface{}{"id": "", "method": "tools/list"})
-	h := newStdioHandler(fakeRegistry{}, false, strings.NewReader(in), &stdout)
-	if err := h.Run(); err != nil {
+	c, run := session(t, newTestHandler(fakeRegistry{}, false))
+	c.initialize()
+	c.call(float64(0), "tools/list", nil)
+	c.call("", "tools/list", nil)
+	if err := run.wait(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
-	if len(msgs) != 2 || msgs[0]["id"] != float64(0) || msgs[1]["id"] != "" {
-		t.Errorf("responses = %v", msgs)
-	}
-}
-
-// callCountingRegistry counts tool calls and listings.
-type callCountingRegistry struct {
-	fakeRegistry
-	lists, calls int
-}
-
-func (c *callCountingRegistry) ListTools() []mcp.Tool { c.lists++; return c.fakeRegistry.ListTools() }
-func (c *callCountingRegistry) CallTool(name string, args map[string]interface{}) (string, error) {
-	c.calls++
-	return c.fakeRegistry.CallTool(name, args)
 }
 
 func TestStdioRequestsWithoutIDAreNotifications(t *testing.T) {
-	// initialize, tools/list and tools/call without an id are notifications:
-	// no reply, and the tool must not run. The valid requests around them
-	// (including ids 0 and "") are still served.
-	call := map[string]interface{}{"name": "echo", "arguments": map[string]interface{}{"data": "x"}}
-	in := rpcLine(t, map[string]interface{}{"method": "initialize"}) +
-		rpcLine(t, map[string]interface{}{"method": "tools/list"}) +
-		rpcLine(t, map[string]interface{}{"method": "tools/call", "params": call}) +
-		rpcLine(t, map[string]interface{}{"id": nil, "method": "tools/call", "params": call}) +
-		rpcLine(t, map[string]interface{}{"method": "notifications/initialized"}) +
-		rpcLine(t, map[string]interface{}{"method": "no/such/method"}) +
-		rpcLine(t, map[string]interface{}{"id": 0, "method": "tools/call", "params": call}) +
-		rpcLine(t, map[string]interface{}{"id": "", "method": "tools/list"}) +
-		rpcLine(t, map[string]interface{}{"id": 9, "method": "initialize"})
+	// Requests without an id (or with "id": null) are notifications: no
+	// reply, and the tool must not run. The valid requests after them
+	// (including ids 0 and "") are still served, and each is the next reply.
+	call := toolArgs("echo", map[string]interface{}{"data": "x"})
 	for _, debug := range []bool{false, true} {
 		reg := &callCountingRegistry{}
-		var stdout, logs bytes.Buffer
+		var logs syncBuffer
 		log.SetOutput(&logs)
-		h := newStdioHandler(reg, debug, strings.NewReader(in), &stdout)
-		err := h.Run()
+		c, run := session(t, newTestHandler(reg, debug))
+		c.call(float64(9), "initialize", initParams("2025-11-25"))
+		c.send(map[string]interface{}{"method": "initialize", "params": initParams("2025-11-25")})
+		c.send(map[string]interface{}{"method": "tools/list"})
+		c.send(map[string]interface{}{"method": "tools/call", "params": call})
+		c.send(map[string]interface{}{"id": nil, "method": "tools/call", "params": call})
+		c.send(map[string]interface{}{"method": "notifications/initialized"})
+		c.send(map[string]interface{}{"method": "no/such/method"})
+		c.call(float64(0), "tools/call", call)
+		c.call("", "tools/list", nil)
+		err := run.wait()
 		log.SetOutput(os.Stderr)
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		if reg.calls != 1 {
-			t.Errorf("debug=%v: the tool ran %d times; want 1 (only the call with id 0)", debug, reg.calls)
+		c.noMoreOutput()
+		if got := reg.calls.Load(); got != 1 {
+			t.Errorf("debug=%v: the tool ran %d times; want 1 (only the call with id 0)", debug, got)
 		}
-		if reg.lists != 1 {
-			t.Errorf("debug=%v: tools/list ran %d times; want 1 (only id \"\")", debug, reg.lists)
-		}
-		msgs := checkOnlyJSONRPC(t, stdout.Bytes())
-		if len(msgs) != 3 || msgs[0]["id"] != float64(0) || msgs[1]["id"] != "" || msgs[2]["id"] != float64(9) {
-			t.Errorf("debug=%v: responses = %v; want only ids 0, \"\" and 9", debug, msgs)
-		}
-		if got := strings.Count(logs.String(), "sent without an id"); debug && got != 4 || !debug && got != 0 {
+		if got := strings.Count(logs.String(), "sent without an id"); debug && got != 5 || !debug && got != 0 {
 			t.Errorf("debug=%v: %d ignore log lines", debug, got)
 		}
 	}
@@ -321,7 +262,7 @@ func TestStdioHelperProcess(t *testing.T) {
 	configureLogging()
 	log.Println("log line before serving")
 	h := NewStdioHandler(fakeRegistry{resultBytes: 256 << 10}, true)
-	if err := h.Run(); err != nil {
+	if err := h.Run(context.Background()); err != nil {
 		log.Printf("Run: %v", err)
 		os.Exit(1)
 	}
@@ -330,16 +271,27 @@ func TestStdioHelperProcess(t *testing.T) {
 }
 
 func TestStdioDefaultLoggingGoesToStderr(t *testing.T) {
-	input, wantIDs := stdioSession(t)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestStdioHelperProcess$")
 	cmd.Env = append(os.Environ(), "TRUENAS_MCP_STDIO_HELPER=1")
-	cmd.Stdin = strings.NewReader(input)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutR, stdoutW := io.Pipe()
+	var stdout, stderr syncBuffer
+	cmd.Stdout, cmd.Stderr = io.MultiWriter(stdoutW, &stdout), &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	c := newRPCClient(t, stdin, stdoutR)
+	runStdioSession(t, c)
+	stdin.Close()
+	err = cmd.Wait()
+	stdoutW.Close()
+	if err != nil {
 		t.Fatalf("helper: %v\nstderr: %.2000s", err, stderr.String())
 	}
-	checkSession(t, checkOnlyJSONRPC(t, stdout.Bytes()), wantIDs)
+	c.noMoreOutput()
 	for _, want := range []string{"log line before serving", "log line after serving", "[STDIN]", "[STDOUT]", "calling tool echo"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr is missing %q", want)
@@ -371,7 +323,7 @@ func (r *repeatReader) Read(p []byte) (int, error) {
 }
 
 // sizedRequest streams one tools/list request line of exactly size bytes
-// (excluding the newline), padded with an unknown member that json.Unmarshal
+// (excluding the newline), padded with an unknown member that the decoder
 // skips, so the test does not allocate a second copy of the padding.
 func sizedRequest(id, size int) io.Reader {
 	prefix := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/list","pad":"`, id)
@@ -391,29 +343,25 @@ func TestStdioRealLimitThroughRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("streams about 128 MiB")
 	}
-	in := io.MultiReader(
-		sizedRequest(1, mcp.MaxLineBytes),
-		sizedRequest(2, mcp.MaxLineBytes+1),
-		strings.NewReader(rpcLine(t, map[string]interface{}{"id": 3, "method": "tools/list"})),
-	)
-	var stdout bytes.Buffer
-	h := newStdioHandler(fakeRegistry{}, false, in, &stdout)
-	if err := h.Run(); err != nil {
+	c, run := session(t, newTestHandler(fakeRegistry{}, false))
+	c.initialize()
+	if _, err := io.Copy(c.in, sizedRequest(1, mcp.MaxLineBytes)); err != nil {
+		t.Fatal(err)
+	}
+	if m := c.recv(); m["id"] != float64(1) || m["error"] != nil || m["result"] == nil {
+		t.Errorf("request of exactly the limit: %v", m)
+	}
+	if _, err := io.Copy(c.in, sizedRequest(2, mcp.MaxLineBytes+1)); err != nil {
+		t.Fatal(err)
+	}
+	line, m := c.recvLine()
+	if errorCode(m) != -32600 {
+		t.Errorf("request one byte over the limit: %v", m)
+	}
+	assertIDNull(t, line)
+	c.call(float64(3), "tools/list", nil)
+	if err := run.wait(); err != nil {
 		t.Fatalf("Run: %v", err)
-	}
-	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
-	if len(msgs) != 3 {
-		t.Fatalf("got %d responses: %s", len(msgs), stdout.String())
-	}
-	if msgs[0]["id"] != float64(1) || msgs[0]["error"] != nil || msgs[0]["result"] == nil {
-		t.Errorf("request of exactly the limit: %v", msgs[0])
-	}
-	if e, _ := msgs[1]["error"].(map[string]interface{}); e == nil || e["code"] != float64(-32600) {
-		t.Errorf("request one byte over the limit: %v", msgs[1])
-	}
-	assertIDNull(t, stdout.Bytes(), 1)
-	if msgs[2]["id"] != float64(3) || msgs[2]["result"] == nil {
-		t.Errorf("request after the oversized one: %v", msgs[2])
 	}
 }
 
@@ -421,33 +369,32 @@ func TestStdioRealLimitThroughRun(t *testing.T) {
 // with or without params, before and after initialize; a ping without an
 // id is a notification and gets no reply.
 func TestStdioPing(t *testing.T) {
-	in := rpcLine(t, map[string]interface{}{"id": 1, "method": "ping"}) +
-		rpcLine(t, map[string]interface{}{"method": "ping"}) +
-		rpcLine(t, map[string]interface{}{"id": 2, "method": "initialize"}) +
-		rpcLine(t, map[string]interface{}{"id": "p", "method": "ping", "params": map[string]interface{}{}}) +
-		rpcLine(t, map[string]interface{}{"id": 0, "method": "ping", "params": map[string]interface{}{"_meta": map[string]interface{}{"k": "v"}}})
-	var stdout bytes.Buffer
-	h := newStdioHandler(fakeRegistry{}, false, strings.NewReader(in), &stdout)
-	if err := h.Run(); err != nil {
+	c, run := session(t, newTestHandler(fakeRegistry{}, false))
+	check := func(id interface{}, params interface{}) {
+		t.Helper()
+		req := map[string]interface{}{"id": id, "method": "ping"}
+		if params != nil {
+			req["params"] = params
+		}
+		c.send(req)
+		line, m := c.recvLine()
+		if m["id"] != id {
+			t.Errorf("ping %v: reply id %v", id, m["id"])
+		}
+		if res, ok := m["result"].(map[string]interface{}); !ok || len(res) != 0 {
+			t.Errorf("ping %v: result = %#v, want {}", id, m["result"])
+		}
+		if !strings.Contains(string(line), `"result":{}`) {
+			t.Errorf("ping %v: wire response %s, want \"result\":{}", id, line)
+		}
+	}
+	check(float64(1), nil)
+	c.send(map[string]interface{}{"method": "ping"})
+	c.call(float64(2), "initialize", initParams("2025-11-25"))
+	check("p", map[string]interface{}{})
+	check(float64(0), map[string]interface{}{"_meta": map[string]interface{}{"k": "v"}})
+	if err := run.wait(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
-	if len(msgs) != 4 {
-		t.Fatalf("got %d responses, want 4: %v", len(msgs), msgs)
-	}
-	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
-	for i, want := range []interface{}{float64(1), "p", float64(0)} {
-		idx := []int{0, 2, 3}[i]
-		m := msgs[idx]
-		if m["id"] != want {
-			t.Errorf("response %d id = %v, want %v", idx, m["id"], want)
-		}
-		res, ok := m["result"].(map[string]interface{})
-		if !ok || len(res) != 0 {
-			t.Errorf("ping %v: result = %#v, want {}", want, m["result"])
-		}
-		if !strings.Contains(lines[idx], `"result":{}`) {
-			t.Errorf("ping %v: wire response %s, want \"result\":{}", want, lines[idx])
-		}
-	}
+	c.noMoreOutput()
 }

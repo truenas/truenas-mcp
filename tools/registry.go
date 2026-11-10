@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1936,7 +1937,17 @@ func (r *Registry) ListTools() []mcp.Tool {
 	return tools
 }
 
-func (r *Registry) CallTool(name string, args map[string]interface{}) (result string, err error) {
+// HasTool reports whether name is a registered tool, whether or not the
+// safety policy hides it.
+func (r *Registry) HasTool(name string) bool {
+	_, ok := r.tools[name]
+	return ok
+}
+
+// CallTool runs a tool. It is safe for concurrent use once SetPolicy has
+// returned. A call whose ctx is already done runs nothing; handlers do not
+// observe ctx yet, so a cancelled call that has started runs to completion.
+func (r *Registry) CallTool(ctx context.Context, name string, args map[string]interface{}) (result string, err error) {
 	// A panicking handler must not take down the server. Log the details to
 	// stderr (the panic value only for runtime errors, which carry no
 	// argument values) and return a generic error to the client.
@@ -1973,6 +1984,9 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (result st
 	// including the dry-run preview of a destructive tool.
 	if err := validateArgs(name, tool, args); err != nil {
 		return "", withMigrationHint(name, args, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("tool %s was not run: %w", name, err)
 	}
 	if safetyOf(name).Access == Destructive && requiresConfirmation(tool, args) {
 		return r.confirmationRequired(name, tool, args)

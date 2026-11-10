@@ -113,7 +113,7 @@ func TestListAlertsRejectsInvalidArguments(t *testing.T) {
 	// Through CallTool too: the schema check does not convert the value.
 	client, fake := newFakeClientWith(t, map[string]interface{}{"alert.list": []interface{}{}}, nil)
 	r := NewRegistry(client, nil)
-	if _, err := r.CallTool("list_alerts", map[string]interface{}{"include_dismissed": "true"}); err == nil || !strings.Contains(err.Error(), badInclude) {
+	if _, err := r.CallTool(t.Context(), "list_alerts", map[string]interface{}{"include_dismissed": "true"}); err == nil || !strings.Contains(err.Error(), badInclude) {
 		t.Errorf("CallTool err = %v, want %q", err, badInclude)
 	}
 	if calls := fake.called("alert.list"); len(calls) != 0 {
@@ -143,7 +143,7 @@ func TestListAlertsSchemaDocumentsDefault(t *testing.T) {
 	}
 	// The argument passes schema validation through CallTool.
 	seen := stubHandlers(r)
-	if _, err := r.CallTool("list_alerts", map[string]interface{}{"include_dismissed": true}); err != nil {
+	if _, err := r.CallTool(t.Context(), "list_alerts", map[string]interface{}{"include_dismissed": true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(seen["list_alerts"]) != 1 {

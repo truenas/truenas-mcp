@@ -20,6 +20,7 @@ A Model Context Protocol (MCP) server for TrueNAS that enables AI models to inte
   - [Step 5: Verify the Connection](#step-5-verify-the-connection)
 - [Command-Line Options](#command-line-options)
 - [Connection Details](#connection-details)
+  - [MCP Protocol](#mcp-protocol)
   - [Proxies](#proxies)
 - [Security](#security)
   - [Safety Controls](#safety-controls)
@@ -63,7 +64,7 @@ TrueNAS MCP provides comprehensive management capabilities through natural langu
          │ stdio (JSON-RPC)
 ┌────────▼───────────────────┐
 │  truenas-mcp               │ (Your Desktop)
-│  - stdio interface         │
+│  - MCP server (Go MCP SDK) │
 │  - Tool registry + safety  │
 │  - Output redaction        │
 │  - JSON-RPC 2.0 client     │
@@ -365,6 +366,52 @@ The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 
 The connection and login happen once, at startup, before the server reads any MCP request. If TrueNAS cannot be reached, or the login fails, the server logs the reason to stderr (`Could not connect to TrueNAS (no login was attempted): ...` when the connection fails, `Failed to authenticate with TrueNAS: ...` when the login is rejected, or `invalid TrueNAS host or URL: ...` for an unusable host setting) and exits with a non-zero status instead of starting without a working connection. This is intentional: the MCP client then shows the server as failed, and its log holds that message. Fix the cause (host, port, proxy, certificate or API key, see [Troubleshooting](#troubleshooting)) and restart the client.
 
+### MCP Protocol
+
+The MCP side is served by the official
+[Go MCP SDK](https://github.com/modelcontextprotocol/go-sdk) (v1.8.0) over stdio:
+newline-delimited JSON-RPC 2.0 on stdin and stdout, with logs on stderr only.
+
+- **Protocol versions:** `initialize` negotiates `2024-11-05`, `2025-03-26`,
+  `2025-06-18` or `2025-11-25` (the version the client asks for, or
+  `2025-11-25` if the server does not support it). Clients on `2026-07-28`
+  use that version's per-request handshake (`server/discover`) instead.
+- **Concurrency:** requests are handled concurrently, so a slow tool call
+  does not hold up `ping`, `tools/list` or other tool calls. At most 8 tool
+  calls run at once; further calls wait for a slot.
+- **Cancellation and deadlines:** a `notifications/cancelled` for a running
+  call, or the client closing stdin, cancels the call and the server stops
+  waiting for it; a cancelled call, and a call still in flight when stdin
+  closes, gets no reply. A cancelled or timed-out call keeps its
+  concurrency slot until its handler finishes, which can take a few
+  middleware calls of up to 120 seconds each. A tool call that has not
+  finished after 10 minutes gets a tool error. The TrueNAS request a
+  cancelled or timed-out tool already sent is not withdrawn, so the
+  operation may still complete on the NAS: check the system state before
+  retrying.
+- **Errors:** an unknown tool name, or `params` or `arguments` that are not
+  objects (including array params), are JSON-RPC errors (`-32602`) that
+  keep the request's id. A tool hidden by
+  [Safety Controls](#safety-controls) is refused with a tool error
+  (`isError`) that says why. Requests other than `ping` are rejected until
+  the client has sent `initialize`, which must carry its `params`.
+- **Limits:** a message may be up to 64 MiB. A longer line, or one that is
+  not JSON, gets an error reply (`-32600` or `-32700`, `"id": null`) and the
+  session goes on. JSON-RPC batches are not supported and get a `-32600`
+  error.
+
+> **Breaking change:** older releases had a hand-written transport that
+> always answered `protocolVersion` `2024-11-05`, served requests one at a
+> time and in order, answered unknown tools with a tool error, accepted
+> `tools/list` and `tools/call` before `initialize`, and still answered
+> calls that were in flight when stdin closed. Array params now get
+> `-32602` with the request id; a batch gets `-32600`; calls still in
+> flight when stdin closes get no reply. A cancelled or timed-out call
+> keeps its concurrency slot until its handler finishes, which can take a
+> few middleware calls of up to 120 seconds each. Clients that follow the
+> MCP specification are not affected; tool names, schemas and output are
+> unchanged.
+
 ### ⚠️ Security Requirement
 
 **IMPORTANT**: TrueNAS **requires** encrypted connections (`wss://`) for API key authentication. Using unencrypted `ws://` will cause your API key to be **revoked** as a security measure. This binary defaults to `wss://` to protect your credentials.
@@ -576,8 +623,8 @@ and nothing is executed.
 derived from the same table, so clients can apply their own approval prompts.
 `destructiveHint` is true for the nine destructive tools and for `update_app`,
 which replaces app configuration in place but does not need `confirm`.
-Annotations were added in MCP 2025-03-26; this server still reports protocol
-`2024-11-05`, and older clients ignore the extra field.
+Annotations were added in MCP 2025-03-26; clients that negotiate
+`2024-11-05` ignore the extra field.
 
 ## Example Usage
 
@@ -708,7 +755,8 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 make clean
 ```
 
-The "Build and Package" workflow runs the linters, the tests, `govulncheck`
+The "Build and Package" workflow runs the linters, the tests (also with the
+race detector), `govulncheck`
 and builds for macOS (Apple Silicon), Linux and Windows on every pull request
 and on every push to `main`. The release workflow, which runs for version
 tags, runs the linters and tests again and publishes those three platforms. A test in
