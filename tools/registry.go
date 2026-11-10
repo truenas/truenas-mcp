@@ -1404,7 +1404,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["update_app"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "update_app",
-			Description: "Update an installed app's configuration. Job-based; use tasks_get with returned task_id to track progress. Use get_app_config first to retrieve current config, then pass modified values. Storage may be omitted to leave it unchanged, including existing ix_volume entries. A partial storage object has omitted slots filled from the current config before it is sent, so they do not revert to schema defaults. New or changed storage entries must use host_path with a cleaned path under /mnt/<pool>/ on an existing dataset. Changing the type or path of an existing slot requires allow_storage_change=true; the preview and confirmation name each changed slot and state that data is not migrated. Supports dry_run to preview changes. This is a write operation that modifies the system.",
+			Description: "Update an installed app's configuration. Job-based; use tasks_get with returned task_id to track progress. Use get_app_config first to retrieve current config, then pass modified values. Storage may be omitted to leave it unchanged, including existing ix_volume entries. A partial storage object has omitted slots filled from the current config before it is sent, so they do not revert to schema defaults. When a provided slot keeps the same type and location, omitted top-level keys (such as read_only) and omitted fields of host_path_config, nfs_config, and cifs_config are also filled from the current slot. New storage entries, and type or location changes that are not a same-type NFS or CIFS server/path change, must use host_path with a cleaned path under /mnt/<pool>/ on an existing dataset. Changing the type or location of an existing slot (including an NFS or CIFS server or path) requires allow_storage_change=true; the preview and confirmation name each changed slot and state that data is not migrated. A change to read_only or ACL settings (acl_enable or acl) on a slot whose type and location are unchanged does not need the flag, but is listed as a plan warning with the old and new values. Supports dry_run to preview changes. This is a write operation that modifies the system.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1414,7 +1414,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					},
 					"values": map[string]interface{}{
 						"type":        "object",
-						"description": "Updated configuration values. Use get_app_config to retrieve current values first. Storage may be omitted to leave current storage unchanged. If a partial storage object is sent, omitted slots are filled from the current config before the update is submitted. New or changed entries must be host_path; unchanged existing entries, including ix_volume, are left as they are.",
+						"description": "Updated configuration values. Use get_app_config to retrieve current values first. Storage may be omitted to leave current storage unchanged. If a partial storage object is sent, omitted slots are filled from the current config before the update is submitted. When a provided slot keeps the same type and location, omitted top-level keys and omitted fields of host_path_config, nfs_config, and cifs_config are also filled from the current slot. New entries, and type or location changes that are not a same-type NFS or CIFS server/path change, must be host_path; unchanged existing entries, including ix_volume, are left as they are.",
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -1423,7 +1423,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					},
 					"allow_storage_change": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Allow changing the type or path of an existing storage slot. Data is not migrated. Required when this update changes an existing slot's type or path (default: false).",
+						"description": "Allow changing the type or location of an existing storage slot, including an NFS or CIFS server or path. Data is not migrated. Required when this update changes an existing slot's type or location. Not required for a read_only or ACL-only change (default: false).",
 						"default":     false,
 					},
 				},

@@ -467,3 +467,252 @@ func TestIssue157UpdateAppStorage(t *testing.T) {
 		}
 	})
 }
+
+// Official 25.10 additional_storage share and host_path shapes from
+// catalog questions (jellyfin): nfs_config.server/path, cifs_config
+// server/path/username/password/domain, and top-level read_only.
+
+const issue157CIFSPassword = "review-cifs-secret"
+
+func issue157NFSEntry(server, sharePath, mountPath string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "nfs",
+		"read_only":  false,
+		"mount_path": mountPath,
+		"nfs_config": map[string]interface{}{
+			"server": server,
+			"path":   sharePath,
+		},
+	}
+}
+
+func issue157CIFSEntry(server, sharePath, mountPath string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "cifs",
+		"read_only":  false,
+		"mount_path": mountPath,
+		"cifs_config": map[string]interface{}{
+			"server":   server,
+			"path":     sharePath,
+			"username": "media",
+			"password": issue157CIFSPassword,
+			"domain":   "WORKGROUP",
+		},
+	}
+}
+
+func issue157HostPathWithReadOnly(p string, readOnly bool) map[string]interface{} {
+	return map[string]interface{}{
+		"type":      "host_path",
+		"read_only": readOnly,
+		"host_path_config": map[string]interface{}{
+			"path":       p,
+			"acl_enable": false,
+		},
+	}
+}
+
+func issue157ConfigWithAdditional(entry map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"storage": map[string]interface{}{
+			"config":             issue157IxVolume("config"),
+			"data":               issue157IxVolume("data"),
+			"additional_storage": []interface{}{entry},
+		},
+	}
+}
+
+func previewWarnings(preview string) []string {
+	var out struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(preview), &out); err != nil {
+		return nil
+	}
+	return out.Warnings
+}
+
+func warningMentionsReadOnlyChange(text string, from, to bool) bool {
+	fromS, toS := "true", "false"
+	if !from {
+		fromS = "false"
+	}
+	if to {
+		toS = "true"
+	}
+	warnings := previewWarnings(text)
+	if len(warnings) == 0 {
+		// Confirmation / elicitation text lists plan warnings after "Warnings:".
+		warnings = []string{text}
+	}
+	for _, w := range warnings {
+		low := strings.ToLower(w)
+		if !strings.Contains(low, "read_only") {
+			continue
+		}
+		// Require a warning that names the field and both values, not just
+		// a raw values dump that happens to contain the keys.
+		if strings.Contains(low, fromS) && strings.Contains(low, toS) &&
+			(strings.Contains(low, "changing") || strings.Contains(low, "from")) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestIssue157ReviewStorageNits(t *testing.T) {
+	t.Run("nfs path change requires allow_storage_change", func(t *testing.T) {
+		current := issue157ConfigWithAdditional(issue157NFSEntry("files.example.invalid", "/export/media", "/mnt/nfs"))
+		r, fake := issue157Registry(t, current, false)
+		values := cloneValues(current)
+		values["storage"].(map[string]interface{})["additional_storage"] = []interface{}{
+			issue157NFSEntry("files.example.invalid", "/export/other", "/mnt/nfs"),
+		}
+		out, err := callUpdateApp(t, r, values, nil)
+		if err == nil {
+			t.Fatalf("NFS path change was accepted without the flag: %s", out)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "allow_storage_change") {
+			t.Errorf("error %q, want allow_storage_change", err)
+		}
+		if !strings.Contains(msg, "/export/media") || !strings.Contains(msg, "/export/other") {
+			t.Errorf("error %q, want the old and new NFS paths", err)
+		}
+		if !strings.Contains(msg, "files.example.invalid") {
+			t.Errorf("error %q, want the NFS server", err)
+		}
+		if !strings.Contains(strings.ToLower(msg), "not migrated") {
+			t.Errorf("error %q, want it to state that data is not migrated", err)
+		}
+		if n := len(fake.called("app.update")); n != 0 {
+			t.Errorf("app.update called %d times", n)
+		}
+
+		preview, err := callUpdateApp(t, r, cloneValues(values), map[string]interface{}{
+			"allow_storage_change": true,
+			"dry_run":              true,
+		})
+		if err != nil {
+			t.Fatalf("dry_run with the flag: %v\n%s", err, preview)
+		}
+		if !strings.Contains(preview, "/export/media") || !strings.Contains(preview, "/export/other") {
+			t.Errorf("preview %s, want the old and new NFS paths", preview)
+		}
+		if !strings.Contains(strings.ToLower(preview), "not migrated") {
+			t.Errorf("preview %s, want it to state that data is not migrated", preview)
+		}
+	})
+
+	t.Run("cifs server change requires allow_storage_change", func(t *testing.T) {
+		current := issue157ConfigWithAdditional(issue157CIFSEntry("files.example.invalid", "/media", "/mnt/smb"))
+		r, fake := issue157Registry(t, current, false)
+		values := cloneValues(current)
+		values["storage"].(map[string]interface{})["additional_storage"] = []interface{}{
+			issue157CIFSEntry("other.example.invalid", "/media", "/mnt/smb"),
+		}
+		out, err := callUpdateApp(t, r, values, nil)
+		if err == nil {
+			t.Fatalf("CIFS server change was accepted without the flag: %s", out)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "allow_storage_change") {
+			t.Errorf("error %q, want allow_storage_change", err)
+		}
+		if !strings.Contains(msg, "files.example.invalid") || !strings.Contains(msg, "other.example.invalid") {
+			t.Errorf("error %q, want the old and new CIFS servers", err)
+		}
+		if strings.Contains(msg, issue157CIFSPassword) {
+			t.Errorf("error %q leaked the CIFS password", err)
+		}
+		if !strings.Contains(strings.ToLower(msg), "not migrated") {
+			t.Errorf("error %q, want it to state that data is not migrated", err)
+		}
+		if n := len(fake.called("app.update")); n != 0 {
+			t.Errorf("app.update called %d times", n)
+		}
+	})
+
+	t.Run("read_only is preserved on a same-location nested partial", func(t *testing.T) {
+		current := map[string]interface{}{
+			"storage": map[string]interface{}{
+				"config":             issue157IxVolume("config"),
+				"data":               issue157HostPathWithReadOnly("/mnt/tank/apps/jellyfin/data", true),
+				"additional_storage": []interface{}{},
+			},
+		}
+		r, fake := issue157Registry(t, current, false)
+		partial := map[string]interface{}{
+			"storage": map[string]interface{}{
+				"data": map[string]interface{}{
+					"type": "host_path",
+					"host_path_config": map[string]interface{}{
+						"path": "/mnt/tank/apps/jellyfin/data",
+					},
+				},
+			},
+		}
+		out, err := callUpdateApp(t, r, partial, nil)
+		if err != nil {
+			t.Fatalf("same-location nested partial was refused: %v\nout=%s", err, out)
+		}
+		payload := updateAppPayload(t, fake)
+		data, _ := storageOf(payload)["data"].(map[string]interface{})
+		if ro, ok := data["read_only"].(bool); !ok || !ro {
+			t.Errorf("storage.data=%v, want read_only:true to be preserved from the current config", data)
+		}
+		if entryType(storageOf(payload), "config") != "ix_volume" {
+			t.Errorf("omitted storage.config was not filled: %v", storageOf(payload)["config"])
+		}
+		cfg, _ := data["host_path_config"].(map[string]interface{})
+		if path, _ := cfg["path"].(string); path != "/mnt/tank/apps/jellyfin/data" {
+			t.Errorf("storage.data path=%v, want the provided path", cfg)
+		}
+	})
+
+	t.Run("read_only flip is warned without allow_storage_change", func(t *testing.T) {
+		current := map[string]interface{}{
+			"storage": map[string]interface{}{
+				"config":             issue157IxVolume("config"),
+				"data":               issue157HostPathWithReadOnly("/mnt/tank/apps/jellyfin/data", true),
+				"additional_storage": []interface{}{},
+			},
+		}
+		r, fake := issue157Registry(t, current, false)
+		values := cloneValues(current)
+		values["storage"].(map[string]interface{})["data"] = issue157HostPathWithReadOnly("/mnt/tank/apps/jellyfin/data", false)
+
+		preview, err := callUpdateApp(t, r, cloneValues(values), map[string]interface{}{"dry_run": true})
+		if err != nil {
+			t.Fatalf("read_only flip dry_run was refused: %v\n%s", err, preview)
+		}
+		if !warningMentionsReadOnlyChange(preview, true, false) {
+			t.Errorf("preview warnings are %v, want a plan warning of read_only true to false", previewWarnings(preview))
+		}
+
+		promptOut, promptErr := r.CallTool(t.Context(), "update_app", map[string]interface{}{
+			"app_name": "jellyfin",
+			"values":   cloneValues(values),
+		})
+		combined := promptOut
+		if promptErr != nil {
+			combined += promptErr.Error()
+		}
+		if !warningMentionsReadOnlyChange(combined, true, false) {
+			t.Errorf("confirmation prompt %s, want a warning of read_only true to false", combined)
+		}
+
+		if n := len(fake.called("app.update")); n != 0 {
+			t.Errorf("preview called app.update %d times", n)
+		}
+
+		out, err := callUpdateApp(t, r, values, nil)
+		if err != nil {
+			t.Fatalf("read_only flip without the flag was refused: %v\nout=%s", err, out)
+		}
+		data, _ := storageOf(updateAppPayload(t, fake))["data"].(map[string]interface{})
+		if ro, ok := data["read_only"].(bool); !ok || ro {
+			t.Errorf("storage.data=%v, want read_only:false", data)
+		}
+	})
+}

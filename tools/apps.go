@@ -1540,8 +1540,259 @@ func fillStorageFromCurrent(values, current map[string]interface{}) (map[string]
 			newStorage[key] = cloneJSON(val)
 		}
 	}
+	fillSameLocationProvidedSlots(newStorage, currentStorage)
 	out["storage"] = newStorage
 	return out, nil
+}
+
+// slotConfigKeys are the per-type config objects that are deep-filled from
+// the current slot when type and location are unchanged. Other nested
+// objects are not merged.
+var slotConfigKeys = []string{"host_path_config", "nfs_config", "cifs_config"}
+
+func fillSameLocationProvidedSlots(newStorage, currentStorage map[string]interface{}) {
+	if newStorage == nil || currentStorage == nil {
+		return
+	}
+	for key, val := range newStorage {
+		cur, ok := currentStorage[key]
+		if !ok {
+			continue
+		}
+		switch provided := val.(type) {
+		case map[string]interface{}:
+			currentSlot, ok := cur.(map[string]interface{})
+			if ok {
+				fillSameLocationSlot(provided, currentSlot)
+			}
+		case []interface{}:
+			currentList, ok := cur.([]interface{})
+			if !ok {
+				continue
+			}
+			for i, item := range provided {
+				entry, ok := item.(map[string]interface{})
+				if !ok || i >= len(currentList) {
+					continue
+				}
+				currentEntry, ok := currentList[i].(map[string]interface{})
+				if ok {
+					fillSameLocationSlot(entry, currentEntry)
+				}
+			}
+		}
+	}
+}
+
+func fillSameLocationSlot(provided, current map[string]interface{}) {
+	if provided == nil || current == nil {
+		return
+	}
+	if !sameTypeAndProvidedLocation(current, provided) {
+		return
+	}
+	for key, val := range current {
+		if _, ok := provided[key]; !ok {
+			provided[key] = cloneJSON(val)
+		}
+	}
+	for _, key := range slotConfigKeys {
+		providedCfg, pok := provided[key].(map[string]interface{})
+		currentCfg, cok := current[key].(map[string]interface{})
+		if !pok || !cok {
+			continue
+		}
+		for ck, cv := range currentCfg {
+			if _, ok := providedCfg[ck]; !ok {
+				providedCfg[ck] = cloneJSON(cv)
+			}
+		}
+	}
+}
+
+func sameTypeAndProvidedLocation(current, provided map[string]interface{}) bool {
+	if !providedHasLocationFields(provided, entryTypeOr(provided, current)) {
+		return false
+	}
+	cmp := provided
+	if storageEntryType(provided) == "" && storageEntryType(current) != "" {
+		tmp := cloneJSONMap(provided)
+		tmp["type"] = storageEntryType(current)
+		cmp = tmp
+	}
+	return storageLocationUnchanged(current, cmp)
+}
+
+func entryTypeOr(provided, current map[string]interface{}) string {
+	if typ := storageEntryType(provided); typ != "" {
+		return typ
+	}
+	return storageEntryType(current)
+}
+
+func providedHasLocationFields(entry map[string]interface{}, typ string) bool {
+	switch typ {
+	case "host_path":
+		cfg, _ := entry["host_path_config"].(map[string]interface{})
+		if cfg == nil {
+			return false
+		}
+		if p, ok := cfg["path"].(string); ok && p != "" {
+			return true
+		}
+		if aclEnable, _ := cfg["acl_enable"].(bool); aclEnable {
+			if acl, ok := cfg["acl"].(map[string]interface{}); ok {
+				if p, ok := acl["path"].(string); ok && p != "" {
+					return true
+				}
+			}
+		}
+		return false
+	case "nfs":
+		return shareHasServerAndPath(entry["nfs_config"])
+	case "cifs":
+		return shareHasServerAndPath(entry["cifs_config"])
+	case "ix_volume":
+		cfg, _ := entry["ix_volume_config"].(map[string]interface{})
+		name, _ := cfg["dataset_name"].(string)
+		return name != ""
+	default:
+		return false
+	}
+}
+
+func shareHasServerAndPath(raw interface{}) bool {
+	cfg, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	server, _ := cfg["server"].(string)
+	path, _ := cfg["path"].(string)
+	return server != "" && path != ""
+}
+
+func shareConfigLocation(typ string, raw interface{}) string {
+	cfg, _ := raw.(map[string]interface{})
+	server, _ := cfg["server"].(string)
+	path, _ := cfg["path"].(string)
+	if server == "" && path == "" {
+		return typ
+	}
+	return typ + " " + server + ":" + path
+}
+
+func isShareStorageType(typ string) bool {
+	return typ == "nfs" || typ == "cifs"
+}
+
+func validateShareConfig(entry map[string]interface{}, typ, loc string) error {
+	key := typ + "_config"
+	if !shareHasServerAndPath(entry[key]) {
+		return fmt.Errorf("storage at %s must have %s.server and %s.path", loc, key, key)
+	}
+	return nil
+}
+
+func boolField(entry map[string]interface{}, key string) (bool, bool) {
+	if entry == nil {
+		return false, false
+	}
+	v, ok := entry[key]
+	if !ok || v == nil {
+		return false, false
+	}
+	b, ok := v.(bool)
+	return b, ok
+}
+
+func formatJSONValue(v interface{}) string {
+	if v == nil {
+		return "null"
+	}
+	if b, ok := v.(bool); ok {
+		return fmt.Sprintf("%t", b)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
+}
+
+func accessChangeWarnings(slot string, current, next map[string]interface{}) []string {
+	if current == nil || next == nil {
+		return nil
+	}
+	var warnings []string
+	curRO, curROSet := boolField(current, "read_only")
+	nextRO, nextROSet := boolField(next, "read_only")
+	if curROSet || nextROSet {
+		if !curROSet {
+			curRO = false
+		}
+		if !nextROSet {
+			nextRO = false
+		}
+		if curRO != nextRO {
+			warnings = append(warnings, fmt.Sprintf("storage slot %s: changing read_only from %t to %t", slot, curRO, nextRO))
+		}
+	}
+	warnings = append(warnings, aclChangeWarnings(slot, "host_path_config", current, next)...)
+	warnings = append(warnings, aclChangeWarnings(slot, "ix_volume_config", current, next)...)
+	return warnings
+}
+
+func aclChangeWarnings(slot, configKey string, current, next map[string]interface{}) []string {
+	curCfg, _ := current[configKey].(map[string]interface{})
+	nextCfg, _ := next[configKey].(map[string]interface{})
+	if curCfg == nil && nextCfg == nil {
+		return nil
+	}
+	var warnings []string
+	curEnable, curSet := boolField(curCfg, "acl_enable")
+	nextEnable, nextSet := boolField(nextCfg, "acl_enable")
+	if curSet || nextSet {
+		if !curSet {
+			curEnable = false
+		}
+		if !nextSet {
+			nextEnable = false
+		}
+		if curEnable != nextEnable {
+			warnings = append(warnings, fmt.Sprintf("storage slot %s: changing %s.acl_enable from %t to %t", slot, configKey, curEnable, nextEnable))
+		}
+	}
+	aclKey := "acl"
+	if configKey == "ix_volume_config" {
+		_, curHas := curCfg["acl_entries"]
+		_, nextHas := nextCfg["acl_entries"]
+		if curHas || nextHas {
+			aclKey = "acl_entries"
+		}
+	}
+	var curACL, nextACL interface{}
+	if curCfg != nil {
+		curACL = curCfg[aclKey]
+	}
+	if nextCfg != nil {
+		nextACL = nextCfg[aclKey]
+	}
+	if !jsonValuesEqual(curACL, nextACL) && (curACL != nil || nextACL != nil) {
+		warnings = append(warnings, fmt.Sprintf("storage slot %s: changing %s.%s from %s to %s", slot, configKey, aclKey, formatJSONValue(curACL), formatJSONValue(nextACL)))
+	}
+	return warnings
+}
+
+func jsonValuesEqual(a, b interface{}) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	ab, err1 := json.Marshal(a)
+	bb, err2 := json.Marshal(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return string(ab) == string(bb)
 }
 
 func storageEntryType(entry map[string]interface{}) string {
@@ -1553,8 +1804,9 @@ func storageEntryType(entry map[string]interface{}) string {
 }
 
 // storageEntryLocation is the data location of a 25.10 catalog storage
-// slot: host_path_config.path (or acl.path when acl_enable is true), or
-// ix_volume plus the ix_volume_config.dataset_name.
+// slot: host_path_config.path (or acl.path when acl_enable is true),
+// ix_volume plus the ix_volume_config.dataset_name, or a share's
+// nfs_config/cifs_config server and path. Credential fields are omitted.
 func storageEntryLocation(entry map[string]interface{}) string {
 	if entry == nil {
 		return ""
@@ -1586,6 +1838,10 @@ func storageEntryLocation(entry map[string]interface{}) string {
 			}
 		}
 		return "ix_volume"
+	case "nfs":
+		return shareConfigLocation("nfs", entry["nfs_config"])
+	case "cifs":
+		return shareConfigLocation("cifs", entry["cifs_config"])
 	default:
 		if typ == "" {
 			return "unknown"
@@ -1631,9 +1887,12 @@ func asStorageEntry(raw interface{}, loc string) (map[string]interface{}, error)
 
 // prepareUpdateAppStorage implements the update_app storage rules: omit
 // storage to leave it unchanged; fill a partial storage object from the
-// current config; leave identical existing entries (including ix_volume)
-// alone; require host_path for new or changed entries; and require
-// allow_storage_change when an existing slot's type or path changes.
+// current config, including same-location slot top-level keys and
+// host_path_config/nfs_config/cifs_config fields; leave identical existing
+// entries (including ix_volume) alone; require host_path for new entries
+// and for type or path changes that are not a same-type NFS/CIFS location
+// change; and require allow_storage_change when an existing slot's type or
+// location changes. read_only and ACL-only changes are warned, not blocked.
 func prepareUpdateAppStorage(ctx context.Context, client *truenas.Client, schema, values, current map[string]interface{}, allowStorageChange bool) (map[string]interface{}, []string, []string, []string, error) {
 	if values == nil {
 		return nil, nil, nil, nil, fmt.Errorf("values parameter is required")
@@ -1670,16 +1929,18 @@ func prepareUpdateAppStorage(ctx context.Context, client *truenas.Client, schema
 
 	var changes []storageLocationChange
 	var collected []string
+	var accessWarnings []string
 	for _, slot := range slots {
 		if !storagePresent && isStorageSectionPath(slot.path) {
 			continue
 		}
-		ch, paths, err := inspectUpdateStorageSlot(ctx, client, prepared, current, slot, pools)
+		ch, paths, access, err := inspectUpdateStorageSlot(ctx, client, prepared, current, slot, pools)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
 		changes = append(changes, ch...)
 		collected = append(collected, paths...)
+		accessWarnings = append(accessWarnings, access...)
 	}
 
 	if len(changes) > 0 && !allowStorageChange {
@@ -1690,6 +1951,7 @@ func prepareUpdateAppStorage(ctx context.Context, client *truenas.Client, schema
 	for _, ch := range changes {
 		warnings = append(warnings, formatStorageChangeLine(ch))
 	}
+	warnings = append(warnings, accessWarnings...)
 
 	missing, err := verifyDatasetPathsExist(ctx, client, collected)
 	if err != nil {
@@ -1698,9 +1960,10 @@ func prepareUpdateAppStorage(ctx context.Context, client *truenas.Client, schema
 	return prepared, collected, missing, warnings, nil
 }
 
-func inspectUpdateStorageSlot(ctx context.Context, client *truenas.Client, values, current map[string]interface{}, slot storageSlot, pools map[string]bool) ([]storageLocationChange, []string, error) {
+func inspectUpdateStorageSlot(ctx context.Context, client *truenas.Client, values, current map[string]interface{}, slot storageSlot, pools map[string]bool) ([]storageLocationChange, []string, []string, error) {
 	if slot.kind == "hostpath" || slot.kind == "hostpathfile" || slot.kind == "hostpathdirectory" {
-		return inspectUpdateHostPathField(ctx, client, values, current, slot, pools)
+		ch, paths, err := inspectUpdateHostPathField(ctx, client, values, current, slot, pools)
+		return ch, paths, nil, err
 	}
 	if slot.list {
 		return inspectUpdateStorageList(values, current, slot, pools)
@@ -1759,14 +2022,14 @@ func inspectUpdateHostPathField(ctx context.Context, client *truenas.Client, val
 	return changes, collected, nil
 }
 
-func inspectUpdateStorageList(values, current map[string]interface{}, slot storageSlot, pools map[string]bool) ([]storageLocationChange, []string, error) {
+func inspectUpdateStorageList(values, current map[string]interface{}, slot storageSlot, pools map[string]bool) ([]storageLocationChange, []string, []string, error) {
 	raw, ok := lookupValuesPath(values, slot.path)
 	if !ok || raw == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	arr, ok := raw.([]interface{})
 	if !ok {
-		return nil, nil, fmt.Errorf("storage at %s must be a list of storage entries", slot.path)
+		return nil, nil, nil, fmt.Errorf("storage at %s must be a list of storage entries", slot.path)
 	}
 	var currentArr []interface{}
 	if cur, ok := lookupValuesPath(current, slot.path); ok {
@@ -1774,19 +2037,20 @@ func inspectUpdateStorageList(values, current map[string]interface{}, slot stora
 	}
 	var changes []storageLocationChange
 	var collected []string
+	var access []string
 	for i, item := range arr {
 		loc := fmt.Sprintf("%s[%d]", slot.path, i)
 		entry, err := asStorageEntry(item, loc)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		var curEntry map[string]interface{}
 		if i < len(currentArr) {
 			curEntry, _ = currentArr[i].(map[string]interface{})
 		}
-		ch, path, err := classifyStorageEntry(entry, curEntry, loc, pools)
+		ch, path, acc, err := classifyStorageEntry(entry, curEntry, loc, pools)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if ch != nil {
 			changes = append(changes, *ch)
@@ -1794,6 +2058,7 @@ func inspectUpdateStorageList(values, current map[string]interface{}, slot stora
 		if path != "" {
 			collected = append(collected, path)
 		}
+		access = append(access, acc...)
 	}
 	for i := len(arr); i < len(currentArr); i++ {
 		loc := fmt.Sprintf("%s[%d]", slot.path, i)
@@ -1804,25 +2069,25 @@ func inspectUpdateStorageList(values, current map[string]interface{}, slot stora
 		}
 		changes = append(changes, storageLocationChange{slot: loc, oldLoc: oldLoc, newLoc: "(removed)"})
 	}
-	return changes, collected, nil
+	return changes, collected, access, nil
 }
 
-func inspectUpdateStorageEntry(values, current map[string]interface{}, slot storageSlot, pools map[string]bool) ([]storageLocationChange, []string, error) {
+func inspectUpdateStorageEntry(values, current map[string]interface{}, slot storageSlot, pools map[string]bool) ([]storageLocationChange, []string, []string, error) {
 	raw, ok := lookupValuesPath(values, slot.path)
 	if !ok {
-		return nil, nil, fmt.Errorf("storage at %s is required and must use type='host_path' with host_path_config.path", slot.path)
+		return nil, nil, nil, fmt.Errorf("storage at %s is required and must use type='host_path' with host_path_config.path", slot.path)
 	}
 	entry, err := asStorageEntry(raw, slot.path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var curEntry map[string]interface{}
 	if cur, ok := lookupValuesPath(current, slot.path); ok {
 		curEntry, _ = cur.(map[string]interface{})
 	}
-	ch, path, err := classifyStorageEntry(entry, curEntry, slot.path, pools)
+	ch, path, acc, err := classifyStorageEntry(entry, curEntry, slot.path, pools)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var changes []storageLocationChange
 	if ch != nil {
@@ -1832,12 +2097,12 @@ func inspectUpdateStorageEntry(values, current map[string]interface{}, slot stor
 	if path != "" {
 		collected = append(collected, path)
 	}
-	return changes, collected, nil
+	return changes, collected, acc, nil
 }
 
-func classifyStorageEntry(entry, current map[string]interface{}, loc string, pools map[string]bool) (*storageLocationChange, string, error) {
+func classifyStorageEntry(entry, current map[string]interface{}, loc string, pools map[string]bool) (*storageLocationChange, string, []string, error) {
 	if current != nil && storageLocationUnchanged(current, entry) {
-		return nil, "", nil
+		return nil, "", accessChangeWarnings(loc, current, entry), nil
 	}
 	var change *storageLocationChange
 	if current != nil {
@@ -1846,12 +2111,19 @@ func classifyStorageEntry(entry, current map[string]interface{}, loc string, poo
 			oldLoc: storageEntryLocation(current),
 			newLoc: storageEntryLocation(entry),
 		}
+		typ := storageEntryType(entry)
+		if typ == storageEntryType(current) && isShareStorageType(typ) {
+			if err := validateShareConfig(entry, typ, loc); err != nil {
+				return nil, "", nil, err
+			}
+			return change, "", nil, nil
+		}
 	}
 	path, err := validateHostPathEntry(entry, loc, pools)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	return change, path, nil
+	return change, path, nil, nil
 }
 
 func collectSlotPaths(ctx context.Context, client *truenas.Client, values map[string]interface{}, slot storageSlot, pools map[string]bool, collected *[]string) error {
