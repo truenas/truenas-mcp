@@ -156,7 +156,7 @@ func (h *StdioHandler) runTool(ctx context.Context, name string, args map[string
 
 	select {
 	case o := <-done:
-		return toolResult(o.result, o.err), nil
+		return h.callResult(o.result, o.err), nil
 	case <-ctx.Done():
 		return h.interrupted(ctx, name, true)
 	}
@@ -175,9 +175,36 @@ func (h *StdioHandler) interrupted(ctx context.Context, name string, started boo
 	return toolResult("", fmt.Errorf("tool %s did not finish within %s; it may still complete on TrueNAS, so check the system state before retrying", name, h.callTimeout)), nil
 }
 
-// toolResult builds the tools/call result. Every result and error is
+// callResult builds the tools/call result. Every result and error is
 // redacted before it reaches the client: TrueNAS returns secrets
-// (passwords, keys, tokens) in many query results.
+// (passwords, keys, tokens) in many query results. The one exception is
+// the top-level confirmation_token of a destructive tool's reply, and only
+// when the registry confirms it issued that token (see
+// redact.ToolOutputKeeping). A *mcp.ReplyError is an error whose content is
+// its JSON reply.
+func (h *StdioHandler) callResult(result string, err error) *sdk.CallToolResult {
+	var keep func(string) bool
+	if tokens, ok := h.registry.(mcp.ConfirmationTokens); ok {
+		keep = tokens.IsConfirmationToken
+	}
+	var reply *mcp.ReplyError
+	if errors.As(err, &reply) {
+		return &sdk.CallToolResult{
+			Content: []sdk.Content{&sdk.TextContent{Text: redact.ToolOutputKeeping(reply.Reply, confirmationTokenKey, keep)}},
+			IsError: true,
+		}
+	}
+	if err != nil {
+		return toolResult("", err)
+	}
+	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: redact.ToolOutputKeeping(result, confirmationTokenKey, keep)}}}
+}
+
+// confirmationTokenKey is the result field that carries a confirmation
+// token (tools/confirm_token.go).
+const confirmationTokenKey = "confirmation_token"
+
+// toolResult builds a tools/call result with no token exemption.
 func toolResult(result string, err error) *sdk.CallToolResult {
 	if err != nil {
 		return &sdk.CallToolResult{

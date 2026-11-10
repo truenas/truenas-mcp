@@ -118,6 +118,12 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 				call["dry_run"] = bad.v
 				out, err := r.CallTool(t.Context(), name, call)
 				assertInvalidBooleanArg(t, name, "dry_run", "confirm=true plus "+bad.name, out, err)
+
+				// A valid token does not let a malformed dry_run through.
+				call = approve(t, r, name, base)
+				call["dry_run"] = bad.v
+				out, err = r.CallTool(t.Context(), name, call)
+				assertInvalidBooleanArg(t, name, "dry_run", "a valid token plus "+bad.name, out, err)
 			}
 			out, err := r.CallTool(t.Context(), name, mergeArgs(base, map[string]interface{}{"confirm": "true"}))
 			assertInvalidBooleanArg(t, name, "confirm", `string "true"`, out, err)

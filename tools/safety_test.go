@@ -162,7 +162,8 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"system_reboot": Destructive, "apply_update": Destructive, "delete_boot_environment": Destructive,
 		"delete_app": Destructive, "leave_directory_service": Destructive, "delete_scrub_schedule": Destructive,
 		"stop_app": Destructive, "upgrade_app": Destructive, "configure_directory_service": Destructive,
-		"download_update": Write, "install_app": Write, "update_app": Write,
+		"update_app":      Destructive,
+		"download_update": Write, "install_app": Write,
 		"start_app": Write, "refresh_directory_cache": Write,
 		"create_dataset": Write, "create_smb_share": Write, "create_nfs_share": Write,
 		"create_scrub_schedule": Write, "run_scrub": Write, "dismiss_alert": Write, "restore_alert": Write,
@@ -178,12 +179,12 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 			destructive++
 		}
 	}
-	if destructive != 9 {
-		t.Errorf("%d destructive tools, want 9; update the README and docs/full-features.md too", destructive)
+	if destructive != 10 {
+		t.Errorf("%d destructive tools, want 10; update the README and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
-		if s.Overwrites != (name == "update_app") {
-			t.Errorf("%s Overwrites = %v", name, s.Overwrites)
+		if s.Overwrites {
+			t.Errorf("%s Overwrites = true: a tool that replaces state in place is destructive (needs a confirmation token)", name)
 		}
 	}
 }
@@ -206,7 +207,7 @@ func TestReadOnlyHidesAndRefusesWrites(t *testing.T) {
 		if readOnly {
 			continue
 		}
-		for _, args := range []map[string]interface{}{{}, {"confirm": true}, {"dry_run": true}} {
+		for _, args := range []map[string]interface{}{{}, {"confirm": true}, {"confirmation_token": "x"}, {"dry_run": true}} {
 			_, err := r.CallTool(t.Context(), name, args)
 			if err == nil || !strings.Contains(err.Error(), "read-only mode") {
 				t.Errorf("read-only: CallTool(%s, %v) err = %v, want read-only refusal", name, args, err)
@@ -258,7 +259,7 @@ func TestAllowAndDenyLists(t *testing.T) {
 	}
 }
 
-func TestDestructiveToolsRequireConfirm(t *testing.T) {
+func TestDestructiveToolsRequireToken(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	seen := stubHandlers(r)
 	for name := range r.tools {
@@ -292,15 +293,20 @@ func TestDestructiveToolsRequireConfirm(t *testing.T) {
 		if _, err := r.CallTool(t.Context(), name, withFlag("dry_run")); err != nil {
 			t.Errorf("%s dry run: %v", name, err)
 		}
+		// The legacy confirm flag only previews.
 		if _, err := r.CallTool(t.Context(), name, withFlag("confirm")); err != nil {
 			t.Errorf("%s with confirm: %v", name, err)
 		}
+		if _, err := r.CallTool(t.Context(), name, approve(t, r, name, minimalArgs(r.tools[name]))); err != nil {
+			t.Errorf("%s with a token: %v", name, err)
+		}
 		calls := seen[name]
-		if len(calls) != 3 || calls[1]["dry_run"] != true || calls[2]["confirm"] != true || calls[2]["dry_run"] != nil {
+		if len(calls) != 4 || calls[1]["dry_run"] != true || calls[2]["dry_run"] != true || calls[3]["dry_run"] != nil ||
+			calls[3]["confirm"] != nil || calls[3]["confirmation_token"] != nil {
 			t.Errorf("%s: handler calls %v", name, calls)
 		}
 	}
-	// Write tools that are not destructive run without confirm.
+	// Write tools that are not destructive run without a token.
 	if _, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{"name": "tank/x"}); err != nil || len(seen["create_dataset"]) != 1 {
 		t.Errorf("create_dataset gated: %v", err)
 	}
@@ -324,7 +330,7 @@ func TestSystemRebootAgainstFakeTrueNAS(t *testing.T) {
 		t.Fatalf("system.reboot sent without confirm: %v", calls)
 	}
 
-	if _, err := r.CallTool(t.Context(), "system_reboot", map[string]interface{}{"confirm": true, "delay": float64(30)}); err != nil {
+	if _, err := r.CallTool(t.Context(), "system_reboot", approve(t, r, "system_reboot", map[string]interface{}{"delay": float64(30)})); err != nil {
 		t.Fatal(err)
 	}
 	calls := fake.called("system.reboot")
@@ -365,8 +371,11 @@ func TestAnnotationsPresent(t *testing.T) {
 			t.Errorf("%s annotations %+v do not match %v", tool.Name, *a, s.Access)
 		}
 		props := tool.InputSchema["properties"].(map[string]interface{})
-		if _, ok := props["confirm"]; ok != (s.Access == Destructive) {
-			t.Errorf("%s: confirm parameter present=%v", tool.Name, ok)
+		if _, ok := props["confirmation_token"]; ok != (s.Access == Destructive) {
+			t.Errorf("%s: confirmation_token parameter present=%v", tool.Name, ok)
+		}
+		if _, ok := props["confirm"]; ok {
+			t.Errorf("%s still declares confirm", tool.Name)
 		}
 		if s.Access == Destructive {
 			if _, ok := props["dry_run"]; !ok {
@@ -375,12 +384,9 @@ func TestAnnotationsPresent(t *testing.T) {
 		}
 	}
 
-	// update_app replaces config in place: destructiveHint without confirm.
-	if a := r.tools["update_app"].Definition.Annotations; !a.DestructiveHint {
-		t.Error("update_app: destructiveHint false")
-	}
-	if _, err := r.CallTool(t.Context(), "update_app", map[string]interface{}{}); err != nil && strings.Contains(err.Error(), "confirm") {
-		t.Errorf("update_app gated: %v", err)
+	// update_app replaces config in place and restarts the app: destructive.
+	if a := r.tools["update_app"].Definition.Annotations; !a.DestructiveHint || safetyOf("update_app").Access != Destructive {
+		t.Error("update_app: not destructive")
 	}
 
 	// destructiveHint defaults to true in the spec, so false must be sent.
@@ -423,8 +429,11 @@ func TestDryRunOnlyCountsWhereDeclared(t *testing.T) {
 	if err != nil || !strings.Contains(out, "confirmation_required") || ran != 0 {
 		t.Errorf("dry_run bypassed the gate: out=%s err=%v ran=%d", out, err, ran)
 	}
-	if _, err := r.CallTool(t.Context(), "test_unclassified", map[string]interface{}{"confirm": true}); err != nil || ran != 1 {
-		t.Errorf("confirm: err=%v ran=%d", err, ran)
+	if out, err := r.CallTool(t.Context(), "test_unclassified", map[string]interface{}{"confirm": true}); err != nil || ran != 0 || !strings.Contains(out, "confirmation_required") {
+		t.Errorf("confirm: out=%s err=%v ran=%d", out, err, ran)
+	}
+	if _, err := r.CallTool(t.Context(), "test_unclassified", approve(t, r, "test_unclassified", nil)); err != nil || ran != 1 {
+		t.Errorf("token: err=%v ran=%d", err, ran)
 	}
 }
 
@@ -626,7 +635,7 @@ func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
 	}
 
 	// Confirmed: the real handler runs and destroys exactly that environment.
-	if _, err := r.CallTool(t.Context(), "delete_boot_environment", map[string]interface{}{"id": "25.04.1", "confirm": true}); err != nil {
+	if _, err := r.CallTool(t.Context(), "delete_boot_environment", approve(t, r, "delete_boot_environment", map[string]interface{}{"id": "25.04.1"})); err != nil {
 		t.Fatal(err)
 	}
 	calls := fake.called("boot.environment.destroy")
@@ -636,8 +645,9 @@ func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
 }
 
 // TestDeleteBootEnvironmentConfirmedRefusesProtected checks that a confirmed
-// delete_boot_environment still refuses the running, the next-boot and the
-// protected boot environment, and never sends boot.environment.destroy.
+// delete_boot_environment (one carrying a valid token) still refuses the
+// running, the next-boot and the protected boot environment, and never sends
+// boot.environment.destroy.
 func TestDeleteBootEnvironmentConfirmedRefusesProtected(t *testing.T) {
 	bootEnvs := []interface{}{
 		map[string]interface{}{"id": "running", "active": true, "activated": false, "keep": false},
@@ -654,7 +664,7 @@ func TestDeleteBootEnvironmentConfirmedRefusesProtected(t *testing.T) {
 		"protected":       "keep flag is set",
 		"running-minimal": "currently running",
 	} {
-		_, err := r.CallTool(t.Context(), "delete_boot_environment", map[string]interface{}{"id": id, "confirm": true})
+		_, err := r.CallTool(t.Context(), "delete_boot_environment", approve(t, r, "delete_boot_environment", map[string]interface{}{"id": id}))
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("confirmed delete of %q: err = %v, want an error containing %q", id, err, want)
 		}

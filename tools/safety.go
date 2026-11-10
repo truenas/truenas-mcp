@@ -2,9 +2,11 @@ package tools
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/truenas/truenas-mcp/mcp"
 )
@@ -20,8 +22,10 @@ const (
 	// Write tools change state in a way that is additive or recoverable.
 	Write
 	// Destructive tools reboot the system, delete data or configuration,
-	// cut off users, make one-way changes, or interrupt running services.
-	// They require confirm=true to execute.
+	// cut off users, make one-way changes, interrupt running services, or
+	// replace configuration in place. They execute only with a
+	// confirmation_token from a preview of the same call
+	// (tools/confirm_token.go).
 	Destructive
 )
 
@@ -45,14 +49,17 @@ type Safety struct {
 	Idempotent bool
 	// Overwrites marks a write tool that replaces existing state in place.
 	// It advertises destructiveHint (MCP: "may perform destructive,
-	// non-additive updates") without requiring confirm. Destructive tools
-	// always advertise destructiveHint.
+	// non-additive updates") without requiring a confirmation token.
+	// Destructive tools always advertise destructiveHint. No tool uses it
+	// now: update_app, the only one that did, is destructive.
 	Overwrites bool
 }
 
 // toolSafety classifies every registered tool. A tool missing from this
 // table fails TestEveryToolIsClassified and is treated as destructive at
-// runtime.
+// runtime. Any tool that deletes data or configuration, interrupts a
+// running service, reboots, replaces configuration in place or makes a
+// one-way change must be Destructive.
 var toolSafety = map[string]Safety{
 	// System
 	"system_info":     {Access: Read},
@@ -113,7 +120,7 @@ var toolSafety = map[string]Safety{
 	"search_app_catalog":      {Access: Read},
 	"get_app_catalog_details": {Access: Read},
 	"install_app":             {Access: Write},
-	"update_app":              {Access: Write, Idempotent: true, Overwrites: true},
+	"update_app":              {Access: Destructive, Idempotent: true},
 	"upgrade_app":             {Access: Destructive},
 	"start_app":               {Access: Write, Idempotent: true},
 	"stop_app":                {Access: Destructive, Idempotent: true},
@@ -134,7 +141,7 @@ var readOnlyDryRunTools = map[string]bool{
 }
 
 // destructiveNote is appended to the description of every destructive tool.
-const destructiveNote = " **DESTRUCTIVE: requires confirm=true.** Without confirm the server only returns a preview; show it to the user and get their explicit approval before calling again with confirm=true."
+const destructiveNote = " **DESTRUCTIVE: requires a confirmation_token.** Called without one, the server changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments. Show the preview to the user, get their explicit approval, then call again with the same arguments plus confirmation_token."
 
 // safetyOf returns a tool's classification, failing closed for tools that
 // are missing from the table.
@@ -215,7 +222,8 @@ func (r *Registry) checkPolicy(name string) error {
 }
 
 // validateSafetyBooleans rejects a dry_run or confirm value that is present
-// but is not a JSON boolean. A string such as "true" or a number must not
+// but is not a JSON boolean (confirm is the pre-token flag that destructive
+// tools still accept and ignore). A string such as "true" or a number must not
 // fall through to a real write. The error names the argument, never echoes
 // the value, and states that nothing was executed.
 func validateSafetyBooleans(name string, args map[string]interface{}) error {
@@ -245,7 +253,8 @@ func (r *Registry) checkReadOnlyDryRun(name string, args map[string]interface{})
 }
 
 // readOnlyDryRunDefinition is how a readOnlyDryRunTools tool is listed in
-// read-only mode: dry_run is required and must be true, confirm is dropped,
+// read-only mode: dry_run is required and must be true, confirmation_token
+// is dropped (read-only mode issues no tokens),
 // the description says only dry runs are allowed, and the annotations
 // describe what the server will actually do (read only).
 func readOnlyDryRunDefinition(def mcp.Tool) mcp.Tool {
@@ -259,6 +268,7 @@ func readOnlyDryRunDefinition(def mcp.Tool) mcp.Tool {
 		props[k] = v
 	}
 	delete(props, "confirm")
+	delete(props, "confirmation_token")
 	props["dry_run"] = map[string]interface{}{
 		"type":        "boolean",
 		"const":       true,
@@ -284,8 +294,9 @@ func readOnlyDryRunDefinition(def mcp.Tool) mcp.Tool {
 	return def
 }
 
-// applySafety adds MCP annotations to every tool and the confirm parameter
-// to destructive tools, so the table above is the single source of truth.
+// applySafety adds MCP annotations to every tool and the confirmation_token
+// parameter to destructive tools, so the table above is the single source
+// of truth.
 func (r *Registry) applySafety() {
 	for name, tool := range r.tools {
 		s := safetyOf(name)
@@ -301,10 +312,9 @@ func (r *Registry) applySafety() {
 				props = map[string]interface{}{}
 				tool.Definition.InputSchema["properties"] = props
 			}
-			props["confirm"] = map[string]interface{}{
-				"type":        "boolean",
-				"description": "Required to execute: set to true only after the user has explicitly approved this destructive operation. Without it the server returns a preview and changes nothing.",
-				"default":     false,
+			props["confirmation_token"] = map[string]interface{}{
+				"type":        "string",
+				"description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
 			}
 			tool.Definition.Description += destructiveNote
 		}
@@ -319,27 +329,44 @@ func hasParam(tool Tool, name string) bool {
 	return ok
 }
 
-// requiresConfirmation reports whether a destructive call must be held for
-// explicit approval: confirm is not true and this is not a dry run.
-// dry_run only counts for tools that declare it; a handler without dry-run
-// support would otherwise execute for real.
-func requiresConfirmation(tool Tool, args map[string]interface{}) bool {
-	if confirm, _ := args["confirm"].(bool); confirm {
-		return false
+// callDestructive runs a destructive tool. dry_run=true (on a tool that
+// declares it) only previews. A valid confirmation_token for this tool and
+// these exact arguments executes the call, once. Anything else runs the
+// preview and returns it with a fresh token, or with an error when the
+// preview says the operation cannot proceed. legacyConfirm reports that the
+// caller sent the old confirm=true.
+func (r *Registry) callDestructive(name string, tool Tool, args map[string]interface{}, legacyConfirm bool) (string, error) {
+	if dryRun, _ := args["dry_run"].(bool); dryRun && hasParam(tool, "dry_run") {
+		return tool.Handler(r.client, withoutKeys(args, "confirmation_token"))
 	}
-	dryRun, _ := args["dry_run"].(bool)
-	return !(dryRun && hasParam(tool, "dry_run"))
+	argsHash, err := confirmationArgsHash(args)
+	if err != nil {
+		return "", fmt.Errorf("%s was NOT executed: its arguments could not be encoded; nothing was executed", name)
+	}
+	var rejected error
+	if v, sent := args["confirmation_token"]; sent {
+		tok, _ := v.(string)
+		if rejected = r.confirmTokens.redeem(tok, name, argsHash); rejected == nil {
+			return tool.Handler(r.client, withoutKeys(args, "confirmation_token", "dry_run"))
+		}
+	}
+	return r.confirmationRequired(name, tool, withoutKeys(args, "confirmation_token", "dry_run"), argsHash, rejected, legacyConfirm)
 }
 
-// confirmationRequired builds the non-error reply for a destructive call
-// made without confirm=true, including the tool's dry-run preview.
-func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]interface{}) (string, error) {
+// confirmationRequired runs the tool's dry-run preview and returns it with a
+// new confirmation token for these arguments. A preview that fails, or that
+// reports the operation cannot proceed, is an error and issues no token. When
+// a presented token was rejected, the reply (with the fresh preview and
+// token) is an error that gives the reason.
+func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]interface{}, argsHash [32]byte, rejected error, legacyConfirm bool) (string, error) {
 	reply := map[string]interface{}{
 		"status":   "confirmation_required",
 		"tool":     name,
 		"executed": false,
-		"message": fmt.Sprintf("%s is a destructive operation and was NOT executed. Show the user what it will do, "+
-			"ask them to explicitly approve it, and only then call %s again with the same arguments plus confirm=true.", name, name),
+	}
+	rejectedNote := ""
+	if rejected != nil {
+		rejectedNote = rejected.Error() + ". "
 	}
 	if hasParam(tool, "dry_run") {
 		preview := make(map[string]interface{}, len(args)+1)
@@ -349,8 +376,8 @@ func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]
 		preview["dry_run"] = true
 		out, err := tool.Handler(r.client, preview)
 		if err != nil {
-			return "", fmt.Errorf("%s was NOT executed. Preview failed: %w. Resolve this before confirming; "+
-				"the user must see a successful preview and explicitly approve it first", name, err)
+			return "", fmt.Errorf("%s%s was NOT executed. Preview failed: %w. Resolve this before confirming; "+
+				"the user must see a successful preview and explicitly approve it first", rejectedNote, name, err)
 		}
 		// The preview is a dry run: say so explicitly, next to executed.
 		reply["dry_run"] = true
@@ -359,6 +386,62 @@ func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]
 		} else {
 			reply["preview"] = out
 		}
+		if reasons := blockedReasons(out); len(reasons) > 0 {
+			msg := fmt.Sprintf("%s%s cannot proceed: %s; nothing was executed and no confirmation token was issued. "+
+				"Do not ask the user to confirm this call; resolve the problem shown in the preview first", rejectedNote, name, strings.Join(reasons, "; "))
+			reply["status"] = "blocked"
+			reply["error"] = msg
+			body, err := marshalJSON(reply)
+			if err != nil {
+				return "", errors.New(msg)
+			}
+			return "", &mcp.ReplyError{Message: msg, Reply: body}
+		}
 	}
-	return marshalJSON(reply)
+	tok, err := r.confirmTokens.issue(name, argsHash)
+	if err != nil {
+		return "", fmt.Errorf("%s%s was NOT executed: %w; nothing was executed", rejectedNote, name, err)
+	}
+	reply["confirmation_token"] = tok
+	reply["expires_in_seconds"] = int(confirmationTokenTTL / time.Second)
+	msg := fmt.Sprintf("%s is a destructive operation and was NOT executed. Show the user the preview, ask them to explicitly approve it, "+
+		"and only then call %s again with exactly the same arguments plus confirmation_token. The token is single use, "+
+		"expires in %d minutes and works only for these arguments; any change needs a new preview.", name, name, int(confirmationTokenTTL/time.Minute))
+	if legacyConfirm {
+		msg = "confirm=true no longer executes destructive tools: they need the confirmation_token returned with a preview. " + msg
+	}
+	reply["message"] = msg
+	body, err := marshalJSON(reply)
+	if err != nil {
+		return "", err
+	}
+	if rejected != nil {
+		errMsg := fmt.Sprintf("%s: %s; nothing was executed. A fresh preview and confirmation_token are attached: show the preview to the user "+
+			"and only after they approve it call %s again with the same arguments plus the new confirmation_token", name, rejected, name)
+		reply["error"] = errMsg
+		if withErr, err := marshalJSON(reply); err == nil {
+			body = withErr
+		}
+		return "", &mcp.ReplyError{Message: errMsg, Reply: body}
+	}
+	return body, nil
+}
+
+// blockedReasons returns the warnings of a dry-run preview that say the
+// operation cannot proceed (they start with "BLOCKED:", as in
+// delete_boot_environment on the running boot environment).
+func blockedReasons(preview string) []string {
+	var p struct {
+		Warnings []interface{} `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(preview), &p); err != nil {
+		return nil
+	}
+	var reasons []string
+	for _, w := range p.Warnings {
+		if s, ok := w.(string); ok && strings.HasPrefix(s, "BLOCKED:") {
+			reasons = append(reasons, strings.TrimSpace(strings.TrimPrefix(s, "BLOCKED:")))
+		}
+	}
+	return reasons
 }

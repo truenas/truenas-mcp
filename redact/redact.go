@@ -1000,6 +1000,45 @@ func ToolOutput(s string) string {
 	return string(enc)
 }
 
+// ToolOutputKeeping is ToolOutput, except that the string value of the
+// top-level field key of a JSON object result stays visible when keep
+// accepts it. It lets the server return a value the client needs although
+// its key looks sensitive (the confirmation_token of a destructive tool):
+// keep must accept only values the server itself issued, so the same key
+// anywhere else, or with any other value, is redacted as usual. Everything
+// else in the result is redacted exactly as by ToolOutput.
+func ToolOutputKeeping(s, key string, keep func(string) bool) string {
+	v, ok := decode([]byte(s))
+	if !ok || keep == nil {
+		return ToolOutput(s)
+	}
+	obj, isObj := v.(map[string]interface{})
+	if !isObj {
+		return ToolOutput(s)
+	}
+	kept, isStr := obj[key].(string)
+	if !isStr || !keep(kept) {
+		return ToolOutput(s)
+	}
+	rest := make(map[string]interface{}, len(obj))
+	for k, val := range obj {
+		if k != key {
+			rest[k] = val
+		}
+	}
+	out, _ := walkMap(rest, ctx{})
+	m, isMap := out.(map[string]interface{})
+	if !isMap {
+		return ToolOutput(s)
+	}
+	m[key] = kept
+	enc, err := encode(m, strings.Contains(s, "\n"))
+	if err != nil {
+		return ToolOutput(s)
+	}
+	return string(enc)
+}
+
 // maxScalarText is the length of the longest value isScalarText accepts.
 const maxScalarText = 40
 

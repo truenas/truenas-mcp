@@ -45,12 +45,15 @@ func TestReadOnlyListsUpgradeAppForDryRunsOnly(t *testing.T) {
 		if !strings.HasPrefix(tool.Description, "**READ-ONLY MODE: only dry runs are allowed.**") {
 			t.Errorf("description = %q", tool.Description)
 		}
-		if strings.Contains(tool.Description, "requires confirm=true") {
-			t.Errorf("read-only description still asks for confirm: %q", tool.Description)
+		if strings.Contains(tool.Description, "confirm") {
+			t.Errorf("read-only description still asks for confirmation: %q", tool.Description)
 		}
 		props := tool.InputSchema["properties"].(map[string]interface{})
 		if _, ok := props["confirm"]; ok {
 			t.Error("read-only schema still declares confirm")
+		}
+		if _, ok := props["confirmation_token"]; ok {
+			t.Error("read-only schema declares confirmation_token")
 		}
 		dryRun := props["dry_run"].(map[string]interface{})
 		if dryRun["const"] != true || !strings.Contains(dryRun["description"].(string), "read-only mode") {
@@ -75,7 +78,7 @@ func TestReadOnlyListsUpgradeAppForDryRunsOnly(t *testing.T) {
 	for _, tool := range r.ListTools() {
 		if tool.Name == "upgrade_app" {
 			props := tool.InputSchema["properties"].(map[string]interface{})
-			if _, ok := props["confirm"]; !ok || strings.Contains(tool.Description, "READ-ONLY MODE") {
+			if _, ok := props["confirmation_token"]; !ok || strings.Contains(tool.Description, "READ-ONLY MODE") {
 				t.Errorf("normal listing changed: %q", tool.Description)
 			}
 			if req := strings.Join(tool.InputSchema["required"].([]string), ","); req != "app_name" {
@@ -89,6 +92,7 @@ func TestReadOnlyDryRunMakesNoWrites(t *testing.T) {
 	for name, extra := range map[string]map[string]interface{}{
 		"dry_run":              {"dry_run": true},
 		"dry_run with confirm": {"dry_run": true, "confirm": true},
+		"dry_run with token":   {"dry_run": true, "confirmation_token": "x"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, f := readOnlyUpgradeRegistry(t)
@@ -119,6 +123,8 @@ func TestReadOnlyRefusesRealUpgrade(t *testing.T) {
 		"dry_run false":          {"dry_run": false},
 		"dry_run false, confirm": {"dry_run": false, "confirm": true},
 		"dry_run string":         {"dry_run": "true", "confirm": true},
+		"token":                  {"confirmation_token": "x"},
+		"dry_run false, token":   {"dry_run": false, "confirmation_token": "x"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, f := readOnlyUpgradeRegistry(t)

@@ -569,8 +569,9 @@ upgrade (current version, target version, changelog, planned steps) from a
 read-only server. In read-only mode its schema requires `"dry_run": true`, its
 description says only dry runs are allowed, and the preview only queries the
 system (`app.query`, `app.upgrade_summary`). Any other call (`dry_run` false
-or absent, with or without `confirm`) is refused with a read-only error and
-nothing is executed.
+or absent, with or without a `confirmation_token`) is refused with a
+read-only error and nothing is executed. Read-only mode never issues
+confirmation tokens.
 
 **Tool allowlist and denylist.** `--allow-tools` / `TRUENAS_MCP_ALLOW_TOOLS`
 takes a comma-separated list; only those tools are listed and callable.
@@ -584,11 +585,12 @@ is set (`upgrade_app` may be named; it stays limited to dry runs).
 # Monitoring only
 ./truenas-mcp --read-only
 
-# Monitoring plus app restarts (stop_app still needs confirm=true)
+# Monitoring plus app restarts (stop_app still needs a confirmation token)
 TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
-**Confirmation for destructive tools.** These tools need `"confirm": true` to execute:
+**Confirmation tokens for destructive tools.** These ten tools execute only
+with a `confirmation_token` from a preview of the same call:
 
 | Tool | Why it is destructive |
 |------|-----------------------|
@@ -598,27 +600,81 @@ TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 | `delete_app` | Removes an application and its configuration |
 | `stop_app` | Takes a running service offline |
 | `upgrade_app` | Takes the app offline; upgrades can run one-way migrations and there is no rollback tool |
+| `update_app` | Replaces the app's configuration in place and restarts the app |
 | `configure_directory_service` | Disabling or re-pointing a joined service cuts off domain users, like leaving |
 | `leave_directory_service` | Leaves the domain; domain users lose access to shares |
 | `delete_scrub_schedule` | Removes automatic data-integrity checks |
 
-Called without `confirm`, a destructive tool changes nothing and returns a
-normal (non-error) result with `"status": "confirmation_required"` and the
-tool's dry-run preview. The assistant should show the preview, get the user's
-explicit approval, and call again with the same arguments plus
-`"confirm": true`. If the preview itself fails, the call returns an error and
-nothing runs; resolve the problem before confirming. `"dry_run": true` still
-works without `confirm` (only on tools that declare `dry_run`, which all
-destructive tools do). `confirm` and `dry_run` must be JSON booleans
-(`true` or `false`); a string such as `"true"` or a number is rejected
-and nothing is executed.
+No other tool needs a token: the other write tools (`create_dataset`,
+`create_smb_share`, `create_nfs_share`, `install_app`, `start_app`,
+`download_update`, `create_scrub_schedule`, `run_scrub`, `dismiss_alert`,
+`restore_alert`, `refresh_directory_cache`) run directly and keep their
+optional `dry_run`, and read tools never take one.
 
-> **Breaking change:** clients or scripts that called these nine tools without
-> `confirm` now get a preview instead of the operation. Add `"confirm": true`
-> to execute them.
+The flow:
 
-**Argument validation.** Before anything runs (including a dry run or the
-confirmation preview), every `tools/call` is checked against the tool's own
+1. Call the tool without a token. Nothing is executed. The reply is a
+   normal (non-error) result with `"status": "confirmation_required"`,
+   `"executed": false`, the tool's dry-run `preview`, a `confirmation_token`
+   and `expires_in_seconds` (300).
+2. Show the preview to the user and get their explicit approval.
+3. Call the tool again with exactly the same arguments plus
+   `"confirmation_token": "<token>"`. The call executes once.
+
+The token is 128 bits from a cryptographically secure random source, single
+use, valid for 5 minutes, and held in the server's memory only (a restart
+invalidates every token). It is bound to the tool and to a SHA-256 hash of
+the canonical JSON of the arguments (keys sorted; `confirmation_token`,
+`dry_run` and the old `confirm` are left out; an optional argument sent as
+`null` counts as omitted). A token that is unknown, expired, already used,
+issued for another tool or issued for different arguments is rejected with
+an error that says why and that nothing was executed; that error result
+carries a fresh preview and a fresh token. A token presented for another
+tool or other arguments is used up by that attempt.
+
+If the preview reports that the operation cannot proceed (for example
+`delete_boot_environment` on the running, next-boot or protected boot
+environment), the call returns an error-shaped result with
+`"status": "blocked"` and the preview, and no token is issued. If the
+preview itself fails (for example `upgrade_app` when no upgrade is
+available), the call returns an error and no token is issued; resolve the
+problem first. `"dry_run": true` still returns only the preview and issues
+no token (a token sent with `dry_run: true` is not used up). `dry_run` must
+be a JSON boolean (`true` or `false`); a string such as `"true"` or a number
+is rejected and nothing is executed.
+
+**What the token does and does not prove.** It guarantees that a preview
+of these exact arguments was produced by this server within the last 5
+minutes and that the executed arguments match it. It does **not** prove
+that a human saw or approved the preview: the client holds the token and
+can send it straight back. Approval in the client (MCP elicitation) is
+planned as the primary path where the client supports it, with the token as
+the fallback. Hard enforcement is `--read-only`, `--allow-tools` /
+`--deny-tools`, and the TrueNAS role of the API key.
+
+The token is returned to the client in the tool result. Debug logs
+(`--debug`) never show it: it is redacted like any other value under a
+`token` key, both in the request that presents it and in the reply that
+returns it. In tool results only the top-level `confirmation_token` of a
+reply, and only while it is a live token issued by this server, is exempt
+from redaction.
+
+> **Breaking change (confirmation tokens):** `"confirm": true` no longer
+> executes a destructive tool. A call that sends it without a token gets the
+> preview, a token and a message explaining the new flow; repeat the call
+> with the returned `confirmation_token` instead. The `confirm` parameter is
+> gone from the schemas of the destructive tools (it is still accepted, and
+> must still be a JSON boolean, so clients with a cached schema get the
+> explanation rather than an unknown-argument error). `update_app` is now
+> destructive and needs a token too. Scripts must make two calls: the
+> preview, then the call with the token.
+>
+> **Earlier breaking change:** clients or scripts that called the
+> destructive tools without `confirm` get a preview instead of the
+> operation.
+
+**Argument validation.** Before anything runs (including a dry run, the
+confirmation preview or the check of a confirmation token), every `tools/call` is checked against the tool's own
 input schema, as listed in `tools/list`:
 
 - an argument the schema does not declare is rejected (`unknown argument`);
@@ -653,8 +709,8 @@ schema), `host_path_config.acl_enable` must also be a JSON boolean.
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`)
 derived from the same table, so clients can apply their own approval prompts.
-`destructiveHint` is true for the nine destructive tools and for `update_app`,
-which replaces app configuration in place but does not need `confirm`.
+`destructiveHint` is true for the ten destructive tools (the ones that need a
+confirmation token, `update_app` included) and false for every other tool.
 Annotations were added in MCP 2025-03-26; clients that negotiate
 `2024-11-05` ignore the extra field.
 
@@ -731,7 +787,7 @@ User: "Check task abc-123"
 Write operations support previewing changes before execution:
 
 **How to use:**
-Add `"dry_run": true` to any write operation to preview what would happen without making changes. Destructive tools return this preview automatically when called without `"confirm": true` (see [Safety Controls](#safety-controls)).
+Add `"dry_run": true` to any write operation to preview what would happen without making changes. Destructive tools return this preview automatically, with a confirmation token, when called without a valid `confirmation_token` (see [Safety Controls](#safety-controls)).
 
 **Example:**
 ```
@@ -763,7 +819,7 @@ Returns:
 }
 ```
 
-`upgrade_app` previews carry `"dry_run": true, "executed": false` (also on the `confirmation_required` reply returned without `confirm`); a started upgrade carries `"dry_run": false, "executed": true`. When no `version` is given, the upgrade step names the version the middleware resolved "latest" to. For a custom app, or a catalog app whose only update is new images, the plan is instead `redeploy` (pull updated images and redeploy; no snapshot is taken) followed by `verify`, with a warning that there is no rollback point. A preview of a STOPPED app warns that TrueNAS rejects upgrading it. The changelog and version details come from the middleware's `app.upgrade_summary` and may be empty.
+`upgrade_app` previews carry `"dry_run": true, "executed": false` (also on the `confirmation_required` reply returned without a `confirmation_token`); a started upgrade carries `"dry_run": false, "executed": true`. When no `version` is given, the upgrade step names the version the middleware resolved "latest" to. For a custom app, or a catalog app whose only update is new images, the plan is instead `redeploy` (pull updated images and redeploy; no snapshot is taken) followed by `verify`, with a warning that there is no rollback point. A preview of a STOPPED app warns that TrueNAS rejects upgrading it. The changelog and version details come from the middleware's `app.upgrade_summary` and may be empty.
 
 **Benefits:**
 - See exactly what will change before committing

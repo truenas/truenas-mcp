@@ -93,7 +93,7 @@ var dsTopLevelFields = map[string]dsField{
 }
 
 // dsControlArgs are tool-level arguments that never reach TrueNAS.
-var dsControlArgs = map[string]bool{"dry_run": true, "confirm": true}
+var dsControlArgs = map[string]bool{"dry_run": true, "confirmation_token": true}
 
 func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))

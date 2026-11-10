@@ -77,7 +77,7 @@ func TestUpgradeAppNoUpgradeAvailableExecute(t *testing.T) {
 	for _, failing := range []string{"app.upgrade_summary", "app.upgrade"} {
 		t.Run(failing, func(t *testing.T) {
 			r, fake := noUpgradeRegistry(t, failing)
-			out, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true})
+			out, err := r.CallTool(t.Context(), "upgrade_app", approve(t, r, "upgrade_app", map[string]interface{}{"app_name": "plex"}))
 			assertNoUpgradeError(t, err, out, `no upgrade available for app "plex"`, "(installed version 2.0.0_1.2.0)")
 			if failing == "app.upgrade_summary" {
 				if n := len(fake.called("app.upgrade")); n != 0 {

@@ -31,6 +31,10 @@ type Registry struct {
 	readOnly bool
 	allow    map[string]bool
 	deny     map[string]bool
+
+	// confirmTokens holds the confirmation tokens of destructive tools
+	// (tools/confirm_token.go).
+	confirmTokens *confirmationTokens
 }
 
 type Tool struct {
@@ -40,9 +44,10 @@ type Tool struct {
 
 func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
 	r := &Registry{
-		client:      client,
-		taskManager: taskManager,
-		tools:       make(map[string]Tool),
+		client:        client,
+		taskManager:   taskManager,
+		tools:         make(map[string]Tool),
+		confirmTokens: newConfirmationTokens(),
 	}
 	r.registerTools()
 	r.applySafety()
@@ -1992,6 +1997,16 @@ func (r *Registry) CallTool(ctx context.Context, name string, args map[string]in
 	if err := r.checkReadOnlyDryRun(name, args); err != nil {
 		return "", err
 	}
+	// confirm is no longer declared by destructive tools (they take
+	// confirmation_token), but a client with a stale schema may still send
+	// it. Accept it, so the call gets the preview and an explanation of the
+	// token flow instead of an unknown-argument error, and drop it here.
+	destructive := safetyOf(name).Access == Destructive
+	legacyConfirm := false
+	if _, sent := args["confirm"]; sent && destructive && !hasParam(tool, "confirm") {
+		legacyConfirm, _ = args["confirm"].(bool)
+		args = withoutKeys(args, "confirm")
+	}
 	// Reject arguments the schema does not declare before anything runs,
 	// including the dry-run preview of a destructive tool.
 	if err := validateArgs(name, tool, args); err != nil {
@@ -2009,8 +2024,8 @@ func (r *Registry) CallTool(ctx context.Context, name string, args map[string]in
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("tool %s was not run: %w", name, err)
 	}
-	if safetyOf(name).Access == Destructive && requiresConfirmation(tool, args) {
-		return r.confirmationRequired(name, tool, args)
+	if destructive {
+		return r.callDestructive(name, tool, args, legacyConfirm)
 	}
 
 	return tool.Handler(r.client, args)
