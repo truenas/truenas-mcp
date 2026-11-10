@@ -19,11 +19,14 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 
 ### Storage Management
 - **query_pools** - Query storage pools with status and capacity
+  - Returns a simplified list (id, name, status, size, health, path, scan summary); pool topology is not fetched
 - **query_datasets** - Query datasets with intelligent filtering and sorting
   - Returns simplified, human-readable dataset information (~15 fields instead of 40+)
-  - Filter by pool name, encryption status
+  - Filter by pool name (exact `pool` match, so `tank` does not include `tank2`), encryption status
+  - Asks the middleware for only the properties this tool uses, without nested `children` trees (`retrieve_children: false`); `children_count` is derived from dataset names
   - Sort by space usage (default), available space, or name
   - Limit results for manageable responses (default: 50, configurable)
+  - `total_datasets` is the count after `encrypted_only`, before `limit`
   - Shows capacity (used/available), compression ratios, encryption status, usage breakdown
   - Perfect for questions like "what datasets use the most space?" or "show me encrypted datasets"
 
@@ -36,12 +39,15 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Filter by dataset name, pool name, or holds presence (on 27.0 the middleware reports only its own `truenas` hold)
   - Sort by snapshot name (default, newest first), dataset, or creation time (`created`: newest first by `created_timestamp`, then `created_date`, then name)
   - Limit results for manageable responses (default: 50, configurable)
+  - An unfiltered query pushes `limit` and `order_by` to the middleware when sorting by `name` or `dataset`; if the page is full, a `count` query supplies `total_snapshots`
   - Perfect for questions like "what recent snapshots exist?" or "show snapshots with holds"
 
 - **query_shares** - Query SMB and NFS share configurations
+  - Requests and returns only the share fields this tool uses (id, name/path, enabled, access settings)
 
 ### Virtualization
 - **query_vms** - Query virtual machines with intelligent filtering and sorting
+  - Requests only the VM fields this tool uses
   - Returns simplified VM information with resource allocation, status, and device summary
   - Filter by VM name (partial match), state (RUNNING/STOPPED), or autostart setting
   - Sort by name (default, alphabetical), memory usage, or status (running first)

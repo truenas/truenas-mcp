@@ -647,7 +647,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 				"properties": map[string]interface{}{
 					"pool": map[string]interface{}{
 						"type":        "string",
-						"description": "Optional: Filter datasets by pool name",
+						"description": "Optional: Filter datasets by pool name (exact match; tank does not include tank2)",
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
@@ -2234,8 +2234,100 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 	return string(formatted), nil
 }
 
+// datasetQueryProperties are the ZFS properties query_datasets requests
+// (what simplifyDataset reads). Combined with retrieve_children=false,
+// this keeps pool.dataset.query from returning every property and a
+// nested children tree for each row.
+var datasetQueryProperties = []interface{}{
+	"used", "available", "usedbysnapshots", "usedbydataset", "usedbychildren",
+	"compression", "compressratio", "deduplication", "quota", "refquota",
+}
+
+var poolQuerySelect = []interface{}{"id", "name", "status", "size", "healthy", "path", "scan"}
+
+var smbShareQuerySelect = []interface{}{"id", "name", "path", "enabled", "comment", "purpose", "readonly", "browsable"}
+
+var nfsShareQuerySelect = []interface{}{"id", "path", "enabled", "comment", "ro", "networks", "hosts", "maproot_user", "maproot_group", "mapall_user", "mapall_group"}
+
+var vmQuerySelect = []interface{}{
+	"id", "name", "uuid", "description", "vcpus", "cores", "threads", "cpu_mode",
+	"memory", "min_memory", "bootloader", "autostart", "status", "devices",
+}
+
+// datasetChildrenCount returns how many names are direct children of name
+// (one path component under it). Used when retrieve_children is false.
+func datasetChildrenCount(name string, names []string) int {
+	prefix := name + "/"
+	n := 0
+	for _, other := range names {
+		if strings.HasPrefix(other, prefix) && !strings.Contains(other[len(prefix):], "/") {
+			n++
+		}
+	}
+	return n
+}
+
+// queryCount runs method(filters, {count: true}) and returns the integer
+// total when the middleware answers with a JSON number.
+func queryCount(client *truenas.Client, method string, filters []interface{}) (int, bool) {
+	raw, err := client.Call(method, filters, map[string]interface{}{"count": true})
+	if err != nil {
+		return 0, false
+	}
+	var n float64
+	if json.Unmarshal(raw, &n) != nil {
+		return 0, false
+	}
+	return int(n), true
+}
+
+func pickFields(m map[string]interface{}, keys []interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for _, key := range keys {
+		k, _ := key.(string)
+		if v, ok := m[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func simplifyPool(pool map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{
+		"id":     pool["id"],
+		"name":   pool["name"],
+		"status": pool["status"],
+	}
+	if v, ok := pool["healthy"]; ok {
+		out["healthy"] = v
+	}
+	if path, ok := pool["path"].(string); ok && path != "" {
+		out["path"] = path
+	}
+	if size, ok := pool["size"].(float64); ok {
+		out["size_bytes"] = size
+		out["size"] = formatBytes(int64(size))
+	}
+	if scan, ok := pool["scan"].(map[string]interface{}); ok {
+		scanOut := map[string]interface{}{}
+		if fn, ok := scan["function"].(string); ok {
+			scanOut["function"] = fn
+		}
+		if st, ok := scan["state"].(string); ok {
+			scanOut["state"] = st
+		}
+		if len(scanOut) > 0 {
+			out["scan"] = scanOut
+		}
+	}
+	return out
+}
+
 func handleQueryPools(client *truenas.Client, args map[string]interface{}) (string, error) {
-	result, err := client.Call("pool.query")
+	// Request only the fields the tool returns. Topology is omitted: it is
+	// large and is not shown in the simplified result.
+	options := map[string]interface{}{"select": poolQuerySelect}
+	result, err := client.Call("pool.query", []interface{}{}, options)
 	if err != nil {
 		return "", err
 	}
@@ -2245,7 +2337,12 @@ func handleQueryPools(client *truenas.Client, args map[string]interface{}) (stri
 		return "", fmt.Errorf("failed to parse pools (raw response: %s): %w", string(result), err)
 	}
 
-	formatted, err := json.MarshalIndent(pools, "", "  ")
+	simplified := make([]map[string]interface{}, 0, len(pools))
+	for _, pool := range pools {
+		simplified = append(simplified, simplifyPool(pool))
+	}
+
+	formatted, err := json.MarshalIndent(simplified, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -2254,16 +2351,19 @@ func handleQueryPools(client *truenas.Client, args map[string]interface{}) (stri
 }
 
 func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (string, error) {
-	// Build query filters - initialize as empty array, not nil (API expects [] not null)
 	filters := []interface{}{}
 	if pool, ok := args["pool"].(string); ok && pool != "" {
-		filters = []interface{}{
-			[]interface{}{"name", "^", pool},
-		}
+		// Equality on the pool field: a name prefix of "tank" would also
+		// match tank2/... datasets.
+		filters = append(filters, []interface{}{"pool", "=", pool})
 	}
 
-	// Options parameter (required by API even if empty)
-	options := map[string]interface{}{}
+	options := map[string]interface{}{
+		"extra": map[string]interface{}{
+			"retrieve_children": false,
+			"properties":        datasetQueryProperties,
+		},
+	}
 
 	result, err := client.Call("pool.dataset.query", filters, options)
 	if err != nil {
@@ -2275,14 +2375,24 @@ func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (s
 		return "", fmt.Errorf("failed to parse datasets: %w", err)
 	}
 
-	// Simplify response
+	names := make([]string, 0, len(datasets))
+	for _, ds := range datasets {
+		if n, ok := ds["name"].(string); ok {
+			names = append(names, n)
+		}
+	}
+
 	simplified := make([]map[string]interface{}, 0, len(datasets))
 	for _, ds := range datasets {
 		summary := simplifyDataset(ds)
+		if name, ok := summary["name"].(string); ok {
+			summary["children_count"] = datasetChildrenCount(name, names)
+		}
 		simplified = append(simplified, summary)
 	}
 
-	// Filter by encryption status if requested
+	// Filter by encryption after children_count so the count reflects the
+	// full hierarchy, not only encrypted neighbours.
 	if encryptedOnly, ok := args["encrypted_only"].(bool); ok && encryptedOnly {
 		filtered := make([]map[string]interface{}, 0)
 		for _, ds := range simplified {
@@ -2293,33 +2403,31 @@ func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (s
 		simplified = filtered
 	}
 
-	// Sort datasets
-	orderBy := "used" // default to sorting by space usage
+	orderBy := "used"
 	if order, ok := args["order_by"].(string); ok && order != "" {
 		orderBy = order
 	}
 	sortDatasets(simplified, orderBy)
 
-	// Apply limit (default to 50 for manageable response size)
 	limit := 50
 	if l, ok := args["limit"].(float64); ok && l > 0 {
 		limit = int(l)
 	}
+	total := len(simplified)
 	if len(simplified) > limit {
 		simplified = simplified[:limit]
 	}
 
-	// Add metadata wrapper
 	response := map[string]interface{}{
 		"datasets":       simplified,
 		"dataset_count":  len(simplified),
-		"total_datasets": len(datasets),
+		"total_datasets": total,
 	}
 	if pool, ok := args["pool"].(string); ok && pool != "" {
 		response["pool_filter"] = pool
 	}
-	if len(simplified) < len(datasets) {
-		response["note"] = fmt.Sprintf("Showing %d of %d datasets (limited)", len(simplified), len(datasets))
+	if len(simplified) < total {
+		response["note"] = fmt.Sprintf("Showing %d of %d datasets (limited)", len(simplified), total)
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -2479,9 +2587,8 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 
 	response := make(map[string]interface{})
 
-	// Query SMB shares
 	if shareType == "smb" || shareType == "all" {
-		result, err := client.Call("sharing.smb.query")
+		result, err := client.Call("sharing.smb.query", []interface{}{}, map[string]interface{}{"select": smbShareQuerySelect})
 		if err != nil {
 			return "", fmt.Errorf("failed to query SMB shares: %w", err)
 		}
@@ -2490,12 +2597,15 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 		if err := json.Unmarshal(result, &smbShares); err != nil {
 			return "", fmt.Errorf("failed to parse SMB shares: %w", err)
 		}
-		response["smb_shares"] = smbShares
+		simplified := make([]map[string]interface{}, 0, len(smbShares))
+		for _, share := range smbShares {
+			simplified = append(simplified, pickFields(share, smbShareQuerySelect))
+		}
+		response["smb_shares"] = simplified
 	}
 
-	// Query NFS shares
 	if shareType == "nfs" || shareType == "all" {
-		result, err := client.Call("sharing.nfs.query")
+		result, err := client.Call("sharing.nfs.query", []interface{}{}, map[string]interface{}{"select": nfsShareQuerySelect})
 		if err != nil {
 			return "", fmt.Errorf("failed to query NFS shares: %w", err)
 		}
@@ -2504,7 +2614,11 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 		if err := json.Unmarshal(result, &nfsShares); err != nil {
 			return "", fmt.Errorf("failed to parse NFS shares: %w", err)
 		}
-		response["nfs_shares"] = nfsShares
+		simplified := make([]map[string]interface{}, 0, len(nfsShares))
+		for _, share := range nfsShares {
+			simplified = append(simplified, pickFields(share, nfsShareQuerySelect))
+		}
+		response["nfs_shares"] = simplified
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -2538,6 +2652,35 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 	}
 	options := map[string]interface{}{"extra": extra}
 
+	orderBy := "name"
+	if order, ok := args["order_by"].(string); ok && order != "" {
+		orderBy = order
+	}
+	limit := 50
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	// Unfiltered calls can return every snapshot on the NAS. Push limit
+	// and order_by when the sort key is a middleware field. holds_only
+	// and "created" still need the full list (post-filter or computed sort).
+	unfiltered := true
+	if dataset, ok := args["dataset"].(string); ok && dataset != "" {
+		unfiltered = false
+	}
+	if pool, ok := args["pool"].(string); ok && pool != "" {
+		unfiltered = false
+	}
+	pushLimit := unfiltered && !holdsOnly && (orderBy == "name" || orderBy == "dataset")
+	if pushLimit {
+		options["limit"] = limit
+		if orderBy == "name" {
+			options["order_by"] = []string{"-snapshot_name"}
+		} else {
+			options["order_by"] = []string{"dataset"}
+		}
+	}
+
 	result, err := client.Call("pool.snapshot.query", filters, options)
 	if err != nil {
 		return "", err
@@ -2566,19 +2709,16 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 		simplified = filtered
 	}
 
-	// Sort snapshots
-	orderBy := "name" // default to sorting by snapshot name descending
-	if order, ok := args["order_by"].(string); ok && order != "" {
-		orderBy = order
-	}
 	sortSnapshots(simplified, orderBy)
 
-	// Apply limit (default to 50 for manageable response size)
-	limit := 50
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
 	totalSnapshots := len(simplified)
+	// A count query is only needed when the page was full; otherwise the
+	// returned rows are the complete result.
+	if pushLimit && len(snapshots) >= limit {
+		if n, ok := queryCount(client, "pool.snapshot.query", filters); ok {
+			totalSnapshots = n
+		}
+	}
 	if len(simplified) > limit {
 		simplified = simplified[:limit]
 	}
@@ -2764,8 +2904,9 @@ func sortSnapshots(snapshots []map[string]interface{}, orderBy string) {
 }
 
 func handleQueryVMs(client *truenas.Client, args map[string]interface{}) (string, error) {
-	// Call vm.query with no filters (we'll filter in post-processing)
-	result, err := client.Call("vm.query")
+	// Request only the fields simplifyVM uses; filter and limit stay
+	// client-side because name is a partial match.
+	result, err := client.Call("vm.query", []interface{}{}, map[string]interface{}{"select": vmQuerySelect})
 	if err != nil {
 		return "", err
 	}
