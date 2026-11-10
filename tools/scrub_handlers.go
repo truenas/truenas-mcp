@@ -127,18 +127,10 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 		return "", fmt.Errorf("failed to parse schedules: %w", err)
 	}
 
-	// Query running jobs
-	jobsResult, err := client.Call("core.get_jobs", []interface{}{
-		[]interface{}{"method", "=", "pool.scrub.scrub"},
-		[]interface{}{"state", "in", []string{"RUNNING", "WAITING"}},
-	})
+	// Query running jobs (25.x pool.scrub.scrub and 26+ zpool.scrub.run)
+	jobs, err := queryScrubJobs(client, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to query jobs: %w", err)
-	}
-
-	var jobs []map[string]interface{}
-	if err := json.Unmarshal(jobsResult, &jobs); err != nil {
-		return "", fmt.Errorf("failed to parse jobs: %w", err)
 	}
 
 	// Build status for each pool
@@ -196,30 +188,27 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 
 		// Find running scrub job
 		for _, job := range jobs {
-			jobArgs, ok := job["arguments"].([]interface{})
-			if ok && len(jobArgs) > 0 {
-				if jobPoolName, ok := jobArgs[0].(string); ok && jobPoolName == poolName {
-					scrubNowCount++
-					progress, _ := job["progress"].(map[string]interface{})
-					percent, _ := progress["percent"].(float64)
-					description, _ := progress["description"].(string)
+			if jobPoolName, ok := scrubJobPoolName(job); ok && jobPoolName == poolName {
+				scrubNowCount++
+				progress, _ := job["progress"].(map[string]interface{})
+				percent, _ := progress["percent"].(float64)
+				description, _ := progress["description"].(string)
 
-					timeStarted, _ := job["time_started"].(map[string]interface{})
-					startedSec, _ := timeStarted["$date"].(float64)
-					started := time.Unix(int64(startedSec/1000), 0)
+				timeStarted, _ := job["time_started"].(map[string]interface{})
+				startedSec, _ := timeStarted["$date"].(float64)
+				started := time.Unix(int64(startedSec/1000), 0)
 
-					cur := map[string]interface{}{
-						"running":     true,
-						"progress":    percent,
-						"description": description,
-						"started":     formatInLocation(started, loc),
-					}
-					if id, ok := floatField(job, "id"); ok {
-						cur["job_id"] = int(id)
-					}
-					status["current_scrub"] = cur
-					break
+				cur := map[string]interface{}{
+					"running":     true,
+					"progress":    percent,
+					"description": description,
+					"started":     formatInLocation(started, loc),
 				}
+				if id, ok := floatField(job, "id"); ok {
+					cur["job_id"] = int(id)
+				}
+				status["current_scrub"] = cur
+				break
 			}
 		}
 
@@ -393,45 +382,44 @@ func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interf
 	if err != nil {
 		return "", err
 	}
-	if err := errIfPoolOffline(poolInfo, poolName); err != nil {
+	if err := errIfPoolCannotScrub(poolInfo, poolName); err != nil {
+		return "", err
+	}
+	if err := errIfPoolResilvering(poolInfo, poolName); err != nil {
 		return "", err
 	}
 
-	// Check if scrub already running
-	jobsResult, err := client.Call("core.get_jobs", []interface{}{
-		[]interface{}{"method", "=", "pool.scrub.scrub"},
-		[]interface{}{"state", "in", []string{"RUNNING", "WAITING"}},
-	})
+	jobs, err := queryScrubJobs(client, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to check running scrubs: %w", err)
 	}
-
-	var jobs []map[string]interface{}
-	if err := json.Unmarshal(jobsResult, &jobs); err != nil {
-		return "", fmt.Errorf("failed to parse jobs: %w", err)
-	}
-
 	for _, job := range jobs {
-		if jobArgs, ok := job["arguments"].([]interface{}); ok && len(jobArgs) > 0 {
-			if jobPoolName, ok := jobArgs[0].(string); ok && jobPoolName == poolName {
-				return "", fmt.Errorf("scrub already running on pool '%s' (job id: %v)", poolName, job["id"])
-			}
+		if jobPoolName, ok := scrubJobPoolName(job); ok && jobPoolName == poolName {
+			return "", fmt.Errorf("scrub already running on pool '%s' (job id: %v)", poolName, job["id"])
 		}
 	}
-
-	// Start scrub
-	_, err = client.Call("pool.scrub.run", poolName, threshold)
-	if err != nil {
-		return "", fmt.Errorf("failed to start scrub: %w", err)
+	if scrubScanRunning(poolInfo) {
+		return "", fmt.Errorf("scrub already running on pool '%s'", poolName)
 	}
 
-	// Wait a moment for job to be created
-	time.Sleep(500 * time.Millisecond)
+	if end := lastFinishedScrubEnd(poolInfo); lastScrubWithinThreshold(end, threshold) {
+		daysAgo := int(time.Since(*end).Hours() / 24)
+		response := map[string]interface{}{
+			"pool":          poolName,
+			"scrub_started": false,
+			"reason":        fmt.Sprintf("last scrub finished %d days ago, within the threshold of %d days", daysAgo, threshold),
+			"message":       fmt.Sprintf("No scrub started on pool '%s': last scrub finished %d days ago, within the threshold of %d days", poolName, daysAgo, threshold),
+		}
+		formatted, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(formatted), nil
+	}
 
-	// Find the newly created job
-	jobID, err := findLatestScrubJob(client, poolName)
+	jobID, err := startScrubJob(client, poolName)
 	if err != nil {
-		return "", fmt.Errorf("scrub started but failed to find job: %w", err)
+		return "", err
 	}
 
 	// Create task for tracking
@@ -451,7 +439,7 @@ func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interf
 		"job_id":        jobID,
 		"task_id":       task.TaskID,
 		"task_status":   task.Status,
-		"poll_interval": 30,
+		"poll_interval": task.PollInterval,
 		"message":       fmt.Sprintf("Scrub started on pool '%s'. Track progress: (1) tasks_get with task_id: %s, or (2) get_scrub_status", poolName, task.TaskID),
 	}
 	if size, ok := poolSizeBytes(poolInfo); ok {
@@ -715,7 +703,10 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 	if err != nil {
 		return nil, err
 	}
-	if err := errIfPoolOffline(poolInfo, poolName); err != nil {
+	if err := errIfPoolCannotScrub(poolInfo, poolName); err != nil {
+		return nil, err
+	}
+	if err := errIfPoolResilvering(poolInfo, poolName); err != nil {
 		return nil, err
 	}
 
@@ -723,30 +714,20 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 	sizeBytes, hasSize := poolSizeBytes(poolInfo)
 	_, sizeHuman := poolSizeFields(poolInfo)
 
-	// Check running scrub
-	jobsResult, err := client.Call("core.get_jobs", []interface{}{
-		[]interface{}{
-			[]interface{}{"method", "=", "pool.scrub.scrub"},
-			[]interface{}{"state", "in", []string{"RUNNING", "WAITING"}},
-		},
-	})
+	jobs, err := queryScrubJobs(client, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check running scrubs: %w", err)
 	}
 
-	var jobs []map[string]interface{}
-	if err := json.Unmarshal(jobsResult, &jobs); err != nil {
-		return nil, fmt.Errorf("failed to parse jobs: %w", err)
-	}
-
 	scrubRunning := false
 	for _, job := range jobs {
-		if jobArgs, ok := job["arguments"].([]interface{}); ok && len(jobArgs) > 0 {
-			if jobPoolName, ok := jobArgs[0].(string); ok && jobPoolName == poolName {
-				scrubRunning = true
-				break
-			}
+		if jobPoolName, ok := scrubJobPoolName(job); ok && jobPoolName == poolName {
+			scrubRunning = true
+			break
 		}
+	}
+	if scrubScanRunning(poolInfo) {
+		scrubRunning = true
 	}
 
 	// Get last scrub info
@@ -797,7 +778,7 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 		warnings = append(warnings, "Performance may be impacted during scrub")
 		if lastScrub != nil {
 			daysAgo, _ := lastScrub["days_ago"].(int)
-			if daysAgo < threshold {
+			if lastScrubWithinThreshold(lastFinishedScrubEnd(poolInfo), threshold) {
 				warnings = append(warnings, fmt.Sprintf("Last scrub was %d days ago (within threshold of %d days)", daysAgo, threshold))
 			} else {
 				warnings = append(warnings, fmt.Sprintf("Last scrub was %d days ago (exceeds threshold of %d days)", daysAgo, threshold))
@@ -825,7 +806,7 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 
 	requirements := &Requirements{
 		Conditions: []string{
-			fmt.Sprintf("Pool must be ONLINE (current: %s)", status),
+			fmt.Sprintf("Pool must be ONLINE or DEGRADED (current: %s)", status),
 			fmt.Sprintf("No existing scrub running (current: %v)", map[bool]string{true: "running", false: "none"}[scrubRunning]),
 		},
 	}
@@ -1248,17 +1229,13 @@ func poolSizeFields(pool map[string]interface{}) (interface{}, string) {
 
 // poolIsOffline reports whether a pool.query record is not imported
 // (status OFFLINE: exported, missing disks, or failed import). Size is
-// typically null in that case. Other status checks (for example allowing
-// only ONLINE/DEGRADED, or refusing a resilver) can be added next to this
-// when run_scrub's start path is updated for TrueNAS 26+.
+// typically null in that case.
 func poolIsOffline(pool map[string]interface{}) bool {
 	status, _ := pool["status"].(string)
 	return status == "OFFLINE"
 }
 
-// errIfPoolOffline refuses run_scrub (and its dry run) when the pool is
-// not imported. TrueNAS will not start a scrub on an OFFLINE pool, and a
-// later unchecked size assertion would panic after a start was attempted.
+// errIfPoolOffline refuses a start when the pool is not imported.
 func errIfPoolOffline(pool map[string]interface{}, poolName string) error {
 	if !poolIsOffline(pool) {
 		return nil
@@ -1267,6 +1244,42 @@ func errIfPoolOffline(pool map[string]interface{}, poolName string) error {
 		poolName = name
 	}
 	return fmt.Errorf("cannot run a scrub on pool %q: the pool is OFFLINE (not imported); nothing was started", poolName)
+}
+
+// errIfPoolCannotScrub refuses run_scrub (and its dry run) unless the pool
+// is ONLINE or DEGRADED. FAULTED, UNAVAIL, REMOVED, and OFFLINE are rejected
+// before any start call.
+func errIfPoolCannotScrub(pool map[string]interface{}, poolName string) error {
+	if name, _ := pool["name"].(string); name != "" {
+		poolName = name
+	}
+	if err := errIfPoolOffline(pool, poolName); err != nil {
+		return err
+	}
+	status, _ := pool["status"].(string)
+	if status == "ONLINE" || status == "DEGRADED" {
+		return nil
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	return fmt.Errorf("cannot run a scrub on pool %q: the pool is %s (only ONLINE or DEGRADED pools can be scrubbed); nothing was started", poolName, status)
+}
+
+func errIfPoolResilvering(pool map[string]interface{}, poolName string) error {
+	scan, ok := mapField(pool, "scan")
+	if !ok {
+		return nil
+	}
+	fn, _ := scan["function"].(string)
+	state, _ := scan["state"].(string)
+	if fn != "RESILVER" || state != "SCANNING" {
+		return nil
+	}
+	if name, _ := pool["name"].(string); name != "" {
+		poolName = name
+	}
+	return fmt.Errorf("cannot run a scrub on pool %q: a resilver is running; nothing was started", poolName)
 }
 
 func getPoolByName(client *truenas.Client, poolName string) (map[string]interface{}, error) {
@@ -1289,44 +1302,111 @@ func getPoolByName(client *truenas.Client, poolName string) (map[string]interfac
 	return pools[0], nil
 }
 
-func findLatestScrubJob(client *truenas.Client, poolName string) (int, error) {
-	result, err := client.Call("core.get_jobs", []interface{}{
-		[]interface{}{"method", "=", "pool.scrub.scrub"},
-	})
-	if err != nil {
-		return 0, fmt.Errorf("failed to query jobs: %w", err)
+// scrubJobFilters is the core.get_jobs filter list that matches both the
+// 25.x job method and the 26+ zpool.scrub.run method.
+func scrubJobFilters(runningOnly bool) []interface{} {
+	methods := []interface{}{
+		"OR",
+		[]interface{}{
+			[]interface{}{"method", "=", "pool.scrub.scrub"},
+			[]interface{}{"method", "=", "zpool.scrub.run"},
+		},
 	}
+	if runningOnly {
+		return []interface{}{methods, []interface{}{"state", "in", []string{"RUNNING", "WAITING"}}}
+	}
+	return []interface{}{methods}
+}
 
+func queryScrubJobs(client *truenas.Client, runningOnly bool) ([]map[string]interface{}, error) {
+	result, err := client.Call("core.get_jobs", scrubJobFilters(runningOnly))
+	if err != nil {
+		return nil, err
+	}
 	var jobs []map[string]interface{}
 	if err := json.Unmarshal(result, &jobs); err != nil {
-		return 0, fmt.Errorf("failed to parse jobs: %w", err)
+		return nil, err
 	}
+	return jobs, nil
+}
 
-	// Find most recent job for this pool
-	var latestJob map[string]interface{}
-	var latestTime float64
-
-	for _, job := range jobs {
-		if jobArgs, ok := job["arguments"].([]interface{}); ok && len(jobArgs) > 0 {
-			if jobPoolName, ok := jobArgs[0].(string); ok && jobPoolName == poolName {
-				if timeStarted, ok := job["time_started"].(map[string]interface{}); ok {
-					if startSec, ok := timeStarted["$date"].(float64); ok {
-						if startSec > latestTime {
-							latestTime = startSec
-							latestJob = job
-						}
-					}
-				}
-			}
+// scrubJobPoolName reads the pool from a pool.scrub.scrub job (string
+// argument) or a zpool.scrub.run job ({"pool_name": ...}).
+func scrubJobPoolName(job map[string]interface{}) (string, bool) {
+	args, ok := job["arguments"].([]interface{})
+	if !ok || len(args) == 0 {
+		return "", false
+	}
+	if s, ok := args[0].(string); ok && s != "" {
+		return s, true
+	}
+	if m, ok := args[0].(map[string]interface{}); ok {
+		if s, ok := m["pool_name"].(string); ok && s != "" {
+			return s, true
 		}
 	}
+	return "", false
+}
 
-	if latestJob == nil {
-		return 0, fmt.Errorf("no scrub job found for pool '%s'", poolName)
+// lastScrubWithinThreshold reports whether the last finished scrub is still
+// inside middleware's skip window: age < (threshold-1)*24h. threshold <= 1
+// (or a missing end time) means a start is due. threshold <= 0 disables
+// the check, matching the tool's "0 means do not skip" behaviour.
+func lastScrubWithinThreshold(end *time.Time, threshold int) bool {
+	return lastScrubWithinThresholdAt(end, threshold, time.Now())
+}
+
+func lastScrubWithinThresholdAt(end *time.Time, threshold int, now time.Time) bool {
+	if threshold <= 1 || end == nil {
+		return false
 	}
+	return now.Sub(*end) < time.Duration(threshold-1)*24*time.Hour
+}
 
-	jobID, _ := latestJob["id"].(float64)
-	return int(jobID), nil
+// startScrubJob starts a scrub with pool.scrub.scrub, which is present
+// on TrueNAS 25.04–27 and fails the job when the start fails. zpool.scrub.run
+// (26+) can finish successfully without starting a scrub (HA standby, a
+// race with a scheduled run, or the concurrent-scrub limit), so it is not
+// used for the start call. Threshold is enforced in the handler first.
+func startScrubJob(client *truenas.Client, poolName string) (int, error) {
+	result, err := client.Call("pool.scrub.scrub", poolName, "START")
+	if err != nil {
+		return 0, fmt.Errorf("failed to start scrub: %w", err)
+	}
+	jobID, err := parseScrubJobID(result)
+	if err != nil {
+		return 0, err
+	}
+	return jobID, nil
+}
+
+func parseScrubJobID(result json.RawMessage) (int, error) {
+	errNoID := fmt.Errorf("scrub start returned no job id; nothing was confirmed started")
+	if len(result) == 0 || string(result) == "null" {
+		return 0, errNoID
+	}
+	var id int
+	if err := json.Unmarshal(result, &id); err == nil {
+		if id == 0 {
+			return 0, errNoID
+		}
+		return id, nil
+	}
+	var f float64
+	if err := json.Unmarshal(result, &f); err == nil {
+		if f == 0 {
+			return 0, errNoID
+		}
+		return int(f), nil
+	}
+	var arr []int
+	if err := json.Unmarshal(result, &arr); err == nil && len(arr) > 0 {
+		if arr[0] == 0 {
+			return 0, errNoID
+		}
+		return arr[0], nil
+	}
+	return 0, errNoID
 }
 
 func estimateScrubDuration(poolSizeBytes int64) int {

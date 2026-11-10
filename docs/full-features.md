@@ -439,10 +439,15 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Best practices: Weekly for production, monthly for home use
 
 - **run_scrub** - Manually start a scrub
-  - Returns task ID for progress tracking
+  - Returns task ID for progress tracking; `poll_interval` is the task manager's poll interval
+  - Starts with `pool.scrub.scrub` on every version (present on TrueNAS 25.04–27; deprecated on 26+ but still working) and tracks the job id that call returns. `zpool.scrub.run` is not used to start, because it can finish successfully without starting a scrub (HA standby, a race with a scheduled run, or the concurrent-scrub limit)
+  - Job lookups still match both `pool.scrub.scrub` (string argument) and `zpool.scrub.run` (`pool_name` argument), including scheduled scrubs
+  - If a start returns no job id, reports an error instead of `scrub_started: true` with `job_id` 0
+  - If the last scrub is newer than the threshold (default 7 days), returns `scrub_started: false` and does not start a scrub. The threshold matches middleware: a start is due once `(threshold-1)*24h` have passed since the last finished scrub
   - Safety checks prevent double-scrubbing
-  - Refuses an `OFFLINE` (not imported) pool and does not report a started scrub
-  - Dry-run shows estimated duration and impact, or the same OFFLINE refusal
+  - Allows only `ONLINE` or `DEGRADED` pools; `FAULTED`, `UNAVAIL`, `REMOVED`, and `OFFLINE` are refused before any start call
+  - Duration-estimate fields are left out when pool size is unknown
+  - Dry-run shows estimated duration and impact, or the same status refusal
   - Integrates with task manager for monitoring
   - Use before backups or after hardware changes
 
