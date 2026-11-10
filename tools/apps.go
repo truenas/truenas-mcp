@@ -1023,18 +1023,15 @@ func planDeleteApp(ctx context.Context, client *truenas.Client, args map[string]
 		removeImages = ri
 	}
 
-	storagePaths := []string{}
-	if config, ok := app["config"].(map[string]interface{}); ok {
-		if persistence, ok := config["persistence"].(map[string]interface{}); ok {
-			for _, vol := range persistence {
-				if volMap, ok := vol.(map[string]interface{}); ok {
-					if hostPath, ok := volMap["hostPath"].(string); ok {
-						storagePaths = append(storagePaths, hostPath)
-					}
-				}
-			}
-		}
+	// 25.10 app.query omits the values object unless extra.retrieve_config
+	// is true. Fetch it with app.config (get_current_app_config) so the
+	// preview can list real host-path storage. Fail closed if that read
+	// fails, rather than showing an empty list.
+	config, err := queryAppConfig(ctx, client, appName)
+	if err != nil {
+		return nil, err
 	}
+	storagePaths := deleteAppHostPathStoragePaths(config)
 
 	warnings := []string{
 		"IMPORTANT: Host-path datasets will NOT be deleted",
@@ -1066,6 +1063,69 @@ func planDeleteApp(ctx context.Context, client *truenas.Client, args map[string]
 		EstimatedTime: &EstimatedTime{MinSeconds: 10, MaxSeconds: 60, Note: "Time depends on app shutdown gracefully"},
 		TargetName:    appName,
 	}, nil
+}
+
+// queryAppConfig returns the 25.10 app.config values object for appName
+// (user-specified YAML from get_current_app_config). A null or non-object
+// result is an error so callers cannot treat a failed read as empty storage.
+func queryAppConfig(ctx context.Context, client *truenas.Client, appName string) (map[string]interface{}, error) {
+	result, err := client.Call(ctx, "app.config", appName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get app config: %w", err)
+	}
+	var config map[string]interface{}
+	if err := json.Unmarshal(result, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse app config: %w", err)
+	}
+	if config == nil {
+		return nil, fmt.Errorf("failed to parse app config: expected an object")
+	}
+	return config, nil
+}
+
+// deleteAppHostPathStoragePaths collects host_path_config.path values from
+// a 25.10 values object (storage.<slot> and additional_storage lists).
+// Entries with type ix_volume are skipped: their dataset_name is not a
+// host path. Paths are sorted and de-duplicated for a stable preview.
+func deleteAppHostPathStoragePaths(values map[string]interface{}) []string {
+	paths := []string{}
+	collectDeleteAppHostPaths(values, &paths)
+	sort.Strings(paths)
+	out := paths[:0]
+	var prev string
+	for i, p := range paths {
+		if i == 0 || p != prev {
+			out = append(out, p)
+			prev = p
+		}
+	}
+	return out
+}
+
+func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
+	if obj == nil {
+		return
+	}
+	typ, _ := obj["type"].(string)
+	if typ != "ix_volume" {
+		if cfg, ok := obj["host_path_config"].(map[string]interface{}); ok {
+			if path, ok := cfg["path"].(string); ok && path != "" {
+				*paths = append(*paths, path)
+			}
+		}
+	}
+	for _, value := range obj {
+		if nested, ok := value.(map[string]interface{}); ok {
+			collectDeleteAppHostPaths(nested, paths)
+		}
+		if array, ok := value.([]interface{}); ok {
+			for _, item := range array {
+				if itemObj, ok := item.(map[string]interface{}); ok {
+					collectDeleteAppHostPaths(itemObj, paths)
+				}
+			}
+		}
+	}
 }
 
 func (r *Registry) handleDeleteAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
