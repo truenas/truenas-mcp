@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
@@ -163,29 +161,17 @@ func TestCreateDatasetEncryptionDescriptionsAreHonest(t *testing.T) {
 	}
 }
 
-func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
-	const wantNote = "train and version were ignored"
-	ignoredArgs := func() map[string]interface{} {
-		return map[string]interface{}{"train": "NIGHTLY-TRAIN", "version": "99.99-BOGUS"}
-	}
-	checkNoEcho := func(t *testing.T, text string) {
-		t.Helper()
-		if strings.Contains(text, "NIGHTLY-TRAIN") || strings.Contains(text, "99.99-BOGUS") {
-			t.Errorf("requested train/version echoed:\n%s", text)
-		}
-	}
+func TestDownloadUpdateAlreadyDownloadedWithoutRequestKeepsShortCircuit(t *testing.T) {
+	downloaded := updateStatusResult("NORMAL", updateStatusDetails(updateStatusNewVersion("25.10.1")), nil, map[string]interface{}{
+		"percent": float64(100), "version": "25.10.1", "description": "Update downloaded.",
+	})
 
-	t.Run("already downloaded reports the real version", func(t *testing.T) {
-		client, _ := newFakeClientWith(t, map[string]interface{}{
-			"update.status": updateStatusResult("NORMAL", updateStatusDetails(updateStatusNewVersion("25.10.1")), nil, map[string]interface{}{
-				"percent": float64(100), "version": "25.10.1", "description": "Update downloaded.",
-			}),
-		}, nil)
-		out, err := NewRegistry(client, nil).handleDownloadUpdate(context.Background(), client, ignoredArgs())
+	t.Run("omitted train and version", func(t *testing.T) {
+		client, fake := newFakeClientWith(t, map[string]interface{}{"update.status": downloaded}, nil)
+		out, err := NewRegistry(client, nil).handleDownloadUpdate(context.Background(), client, map[string]interface{}{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		checkNoEcho(t, out)
 		var resp map[string]interface{}
 		if err := json.Unmarshal([]byte(out), &resp); err != nil {
 			t.Fatal(err)
@@ -193,78 +179,27 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 		if resp["version"] != "25.10.1" || resp["already_downloaded"] != true {
 			t.Errorf("response = %v", resp)
 		}
-		if _, ok := resp["train"]; ok {
-			t.Errorf("response has a train: %v", resp)
+		if _, ok := resp["warning"]; ok {
+			t.Errorf("unexpected warning: %v", resp)
 		}
-		if w, _ := resp["warning"].(string); !strings.Contains(w, wantNote) {
-			t.Errorf("warning = %q", w)
-		}
-	})
-
-	t.Run("started download", func(t *testing.T) {
-		client, fake := newFakeClientWith(t, map[string]interface{}{"update.status": updateStatusAvailable("25.10.1"), "update.download": 7}, nil)
-		mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second})
-		out, err := NewRegistry(client, mgr).handleDownloadUpdate(context.Background(), client, ignoredArgs())
-		if err != nil {
-			t.Fatal(err)
-		}
-		checkNoEcho(t, out)
-		var resp map[string]interface{}
-		if err := json.Unmarshal([]byte(out), &resp); err != nil {
-			t.Fatal(err)
-		}
-		for _, k := range []string{"train", "version"} {
-			if _, ok := resp[k]; ok {
-				t.Errorf("response has %q: %v", k, resp)
-			}
-		}
-		if w, _ := resp["warning"].(string); !strings.Contains(w, wantNote) {
-			t.Errorf("warning = %q", w)
-		}
-		if resp["job_id"] != float64(7) || len(fake.called("update.download")) != 1 {
-			t.Errorf("download not started as expected: %v", resp)
-		}
-		if params := string(fake.called("update.download")[0].Params); strings.Contains(params, "BOGUS") || strings.Contains(params, "NIGHTLY") {
-			t.Errorf("update.download params carry the ignored arguments: %s", params)
-		}
-		task, err := mgr.Get(resp["task_id"].(string))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := task.Arguments["train"]; ok {
-			t.Errorf("task arguments keep train: %v", task.Arguments)
-		}
-		if _, ok := task.Arguments["version"]; ok {
-			t.Errorf("task arguments keep version: %v", task.Arguments)
+		if n := len(fake.called("update.download")); n != 0 {
+			t.Errorf("update.download called %d times", n)
 		}
 	})
 
-	t.Run("no ignored arguments, no warning", func(t *testing.T) {
-		client, _ := newFakeClientWith(t, map[string]interface{}{
-			"update.status": updateStatusResult("NORMAL", updateStatusDetails(updateStatusNewVersion("25.10.1")), nil, map[string]interface{}{
-				"percent": float64(100), "version": "25.10.1", "description": "Update downloaded.",
-			}),
-		}, nil)
-		out, err := NewRegistry(client, nil).handleDownloadUpdate(context.Background(), client, map[string]interface{}{})
-		if err != nil || strings.Contains(out, "warning") {
-			t.Errorf("out = %s, err = %v", out, err)
-		}
-	})
-
-	t.Run("dry run", func(t *testing.T) {
-		client, _ := newFakeClient(t)
-		res, err := (&downloadUpdateDryRun{}).ExecuteDryRun(context.Background(), client, ignoredArgs())
+	t.Run("same requested version is still skipped", func(t *testing.T) {
+		client, fake := newFakeClientWith(t, map[string]interface{}{"update.status": downloaded}, nil)
+		out, err := NewRegistry(client, nil).handleDownloadUpdate(context.Background(), client, map[string]interface{}{
+			"train": "TrueNAS-SCALE-Fangtooth", "version": "25.10.1",
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, _ := json.Marshal(res)
-		checkNoEcho(t, string(b))
-		if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], wantNote) {
-			t.Errorf("warnings = %v", res.Warnings)
+		if !strings.Contains(out, `"already_downloaded": true`) || !strings.Contains(out, "25.10.1") {
+			t.Errorf("response = %s", out)
 		}
-		res, err = (&downloadUpdateDryRun{}).ExecuteDryRun(context.Background(), client, map[string]interface{}{})
-		if err != nil || len(res.Warnings) != 0 {
-			t.Errorf("no-arg dry run: %v, %v", res, err)
+		if n := len(fake.called("update.download")); n != 0 {
+			t.Errorf("update.download called %d times", n)
 		}
 	})
 }

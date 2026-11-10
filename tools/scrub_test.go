@@ -969,6 +969,13 @@ func newFakeClientFilteringPools(t *testing.T, results map[string]interface{}) (
 	t.Helper()
 	fake := &fakeMiddleware{results: results}
 	fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if method == "pool.scrub.query" {
+			all, ok := results["pool.scrub.query"].([]interface{})
+			if !ok {
+				return nil, nil, false
+			}
+			return filterPoolScrubQuery(params, all), nil, true
+		}
 		if method != "pool.query" {
 			return nil, nil, false
 		}
@@ -1164,6 +1171,20 @@ func TestScrubToolsTolerateNullPoolSize(t *testing.T) {
 	})
 
 	t.Run("create_scrub_schedule dry-run reports unknown size", func(t *testing.T) {
+		results := poolsWithOfflineNeighbor()
+		// A schedule already exists for backup in the shared fixture; drop it
+		// so this preview can still run (a shared plan now errors when one exists).
+		results["pool.scrub.query"] = []interface{}{
+			map[string]interface{}{
+				"id": 1.0, "pool": 1.0, "pool_name": "tank", "enabled": true,
+				"threshold": 35.0,
+				"schedule": map[string]interface{}{
+					"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*",
+				},
+			},
+		}
+		client, fake := newFakeClientFilteringPools(t, results)
+		r := NewRegistry(client, nil)
 		out, err := r.CallTool(t.Context(), "create_scrub_schedule", map[string]interface{}{
 			"pool":     "backup",
 			"dry_run":  true,

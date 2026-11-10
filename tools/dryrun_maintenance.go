@@ -137,73 +137,122 @@ func executeSystemReboot(ctx context.Context, client *truenas.Client, _ map[stri
 }
 
 func handleDismissAlertWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &alertDryRun{tool: "dismiss_alert", method: "alert.dismiss"}, handleDismissAlert)
+	plan, err := planDismissAlert(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return executeAlertAction(ctx, client, plan, "dismissed")
 }
 
 func handleRestoreAlertWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &alertDryRun{tool: "restore_alert", method: "alert.restore"}, handleRestoreAlert)
+	plan, err := planRestoreAlert(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return executeAlertAction(ctx, client, plan, "restored")
 }
 
-type alertDryRun struct{ tool, method string }
+const (
+	alertDismissMethod = "alert.dismiss"
+	alertRestoreMethod = "alert.restore"
+)
 
-func (a *alertDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	uuid, ok := args["uuid"].(string)
-	if !ok || uuid == "" {
-		return nil, fmt.Errorf("uuid parameter is required")
-	}
-	result, err := client.Call(ctx, "alert.list")
+func planDismissAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
+	uuid, current, err := lookupAlert(ctx, client, args)
 	if err != nil {
 		return nil, err
 	}
-	var alerts []map[string]interface{}
-	if err := json.Unmarshal(result, &alerts); err != nil {
-		return nil, fmt.Errorf("failed to parse alerts: %w", err)
-	}
-	var current map[string]interface{}
-	for _, alert := range alerts {
-		if alert["uuid"] == uuid {
-			current = alert
-			break
-		}
-	}
-	if current == nil {
-		return nil, fmt.Errorf("alert not found: %s", uuid)
-	}
-	return &DryRunResult{
-		Tool:         a.tool,
+	return &writePlan{
+		Tool:         "dismiss_alert",
+		Method:       alertDismissMethod,
+		CallParams:   []interface{}{uuid},
+		ParamNames:   []string{"uuid"},
+		TargetName:   uuid,
 		CurrentState: current,
-		PlannedActions: []PlannedAction{{
+		Actions: []PlannedAction{{
 			Step:        1,
-			Description: fmt.Sprintf("Call %s for alert %s", a.method, uuid),
+			Description: fmt.Sprintf("Call %s for alert %s", alertDismissMethod, uuid),
 			Operation:   "update",
-			Target:      a.method,
+			Target:      alertDismissMethod,
 		}},
 	}, nil
 }
 
-func handleRefreshDirectoryCacheWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &refreshDirectoryCacheDryRun{}, handleRefreshDirectoryCache)
-}
-
-type refreshDirectoryCacheDryRun struct{}
-
-func (d *refreshDirectoryCacheDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	status, err := getDirectoryServiceStatus(ctx, client)
+func planRestoreAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
+	uuid, current, err := lookupAlert(ctx, client, args)
 	if err != nil {
 		return nil, err
 	}
-	result := &DryRunResult{
-		Tool:         "refresh_directory_cache",
-		CurrentState: status,
-		PlannedActions: []PlannedAction{{
+	return &writePlan{
+		Tool:         "restore_alert",
+		Method:       alertRestoreMethod,
+		CallParams:   []interface{}{uuid},
+		ParamNames:   []string{"uuid"},
+		TargetName:   uuid,
+		CurrentState: current,
+		Actions: []PlannedAction{{
 			Step:        1,
-			Description: "Refresh cached directory users and groups",
-			Operation:   "refresh",
-			Target:      "directoryservices.cache_refresh",
+			Description: fmt.Sprintf("Call %s for alert %s", alertRestoreMethod, uuid),
+			Operation:   "update",
+			Target:      alertRestoreMethod,
 		}},
+	}, nil
+}
+
+func lookupAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, map[string]interface{}, error) {
+	uuid, ok := args["uuid"].(string)
+	if !ok || uuid == "" {
+		return "", nil, fmt.Errorf("uuid parameter is required")
 	}
-	if status.Type == "none" || !status.Enabled {
-		result.Warnings = []string{"No directory service is enabled; the refresh would fail."}
+	result, err := client.Call(ctx, "alert.list")
+	if err != nil {
+		return "", nil, err
 	}
-	return result, nil
+	var alerts []map[string]interface{}
+	if err := json.Unmarshal(result, &alerts); err != nil {
+		return "", nil, fmt.Errorf("failed to parse alerts: %w", err)
+	}
+	for _, alert := range alerts {
+		if alert["uuid"] == uuid {
+			return uuid, alert, nil
+		}
+	}
+	return "", nil, fmt.Errorf("alert not found: %s", uuid)
+}
+
+func executeAlertAction(ctx context.Context, client *truenas.Client, plan *writePlan, verb string) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Alert %s %s successfully: %s", plan.TargetName, verb, string(result)), nil
+}
+
+func handleRefreshDirectoryCacheWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planRefreshDirectoryCache(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return executeRefreshDirectoryCache(ctx, client, args, plan)
 }
