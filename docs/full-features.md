@@ -121,6 +121,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Encryption with auto-generated keys or passphrases
   - Compression (LZ4, ZSTD, GZIP), quotas, and ACL configuration
   - Dry-run mode to preview before creating
+  - `create_ancestors` defaults to true; the dry-run preview lists any missing parent datasets that would be created, in order from parent to child (`ancestors_to_create`)
   - Wizard-style guidance for SMB/NFS/iSCSI setup
 
 ### Share Management
