@@ -228,7 +228,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 	t.Run("within threshold does not start a scrub", func(t *testing.T) {
 		days := 2
 		r, fake, _ := newScrubRunRegistry(t, scrubRunResults("25.10.0", scrubPoolRecord("tank", "ONLINE", 1.0e12, &days), nil))
-		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		out, err := r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "tank"})
 		if err != nil {
 			t.Fatalf("run_scrub: %v", err)
 		}
@@ -253,7 +253,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 			"time_started": map[string]interface{}{"$date": dateDaysAgoMS(40)},
 		}
 		r, fake, _ := newScrubRunRegistry(t, scrubRunResults("25.10.0", scrubPoolRecord("tank", "ONLINE", 1.0e12, &days), []interface{}{oldJob}))
-		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		out, err := r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "tank"})
 		if err != nil {
 			t.Fatalf("run_scrub: %v", err)
 		}
@@ -289,7 +289,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 		results := scrubRunResults("27.0.0", scrubPoolRecord("tank", "ONLINE", 1.0e12, &days), []interface{}{running})
 		r, fake, _ := newScrubRunRegistry(t, results)
 
-		out, err := r.CallTool("get_scrub_status", map[string]interface{}{"pool": "tank"})
+		out, err := r.CallTool(t.Context(), "get_scrub_status", map[string]interface{}{"pool": "tank"})
 		if err != nil {
 			t.Fatalf("get_scrub_status: %v", err)
 		}
@@ -303,7 +303,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 			t.Errorf("get_scrub_status missed zpool.scrub.run job: %v", cur)
 		}
 
-		out, err = r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		out, err = r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "tank"})
 		if err == nil {
 			t.Fatalf("second run_scrub should be blocked by the running zpool job; out=%s", out)
 		}
@@ -319,7 +319,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 		// only used for job lookups (scheduled scrubs).
 		results = scrubRunResults("27.0.0", scrubPoolRecord("tank", "ONLINE", 1.0e12, &days), nil)
 		r, fake, _ = newScrubRunRegistry(t, results)
-		out, err = r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		out, err = r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "tank"})
 		if err != nil {
 			t.Fatalf("27.x run_scrub: %v", err)
 		}
@@ -341,7 +341,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 	t.Run("dry-run core.get_jobs filters pass validate_filters", func(t *testing.T) {
 		days := 30
 		r, fake, _ := newScrubRunRegistry(t, scrubRunResults("25.10.0", scrubPoolRecord("tank", "ONLINE", 1.0e12, &days), nil))
-		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "tank", "dry_run": true})
+		out, err := r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "tank", "dry_run": true})
 		if err != nil {
 			t.Fatalf("run_scrub dry-run: %v (filters may have been rejected)", err)
 		}
@@ -360,7 +360,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 		results["pool.scrub.scrub"] = nil
 		results["pool.scrub.run"] = nil
 		r, _, _ := newScrubRunRegistry(t, results)
-		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		out, err := r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "tank"})
 		if err == nil {
 			t.Fatalf("run_scrub succeeded without a job id: %s", out)
 		}
@@ -378,7 +378,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 				if dry {
 					args["dry_run"] = true
 				}
-				out, err := r.CallTool("run_scrub", args)
+				out, err := r.CallTool(t.Context(), "run_scrub", args)
 				if err == nil {
 					t.Fatalf("dry_run=%v on %s succeeded: %s", dry, status, out)
 				}
@@ -396,7 +396,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 	t.Run("27.x start uses pool.scrub.scrub not zpool.scrub.run", func(t *testing.T) {
 		days := 30
 		r, fake, _ := newScrubRunRegistry(t, scrubRunResults("27.0.0", scrubPoolRecord("tank", "ONLINE", 1.0e12, &days), nil))
-		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		out, err := r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "tank"})
 		if err != nil {
 			t.Fatalf("27.x run_scrub: %v", err)
 		}
@@ -424,7 +424,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 			"end_time": map[string]interface{}{"$date": float64(ended.Unix() * 1000)},
 		}
 		r, fake, _ := newScrubRunRegistry(t, scrubRunResults("25.10.0", pool, nil))
-		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		out, err := r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "tank"})
 		if err != nil {
 			t.Fatalf("6.5-day run_scrub: %v", err)
 		}
@@ -443,7 +443,7 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 	t.Run("DEGRADED pool is allowed", func(t *testing.T) {
 		days := 30
 		r, fake, _ := newScrubRunRegistry(t, scrubRunResults("25.10.0", scrubPoolRecord("tank", "DEGRADED", 1.0e12, &days), nil))
-		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		out, err := r.CallTool(t.Context(), "run_scrub", map[string]interface{}{"pool": "tank"})
 		if err != nil {
 			t.Fatalf("DEGRADED run_scrub: %v", err)
 		}
