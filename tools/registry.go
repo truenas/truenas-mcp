@@ -641,7 +641,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["query_datasets"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_datasets",
-			Description: "Query datasets with optional filtering and sorting. Returns simplified dataset information with capacity, encryption status, and usage details. Use 'limit' to control result size, 'order_by' to sort by size, and 'encrypted_only' to filter.",
+			Description: "Query datasets with optional filtering and sorting. Returns simplified dataset information with capacity, encryption status, and usage details. Use 'limit' to control result size (default: 50, maximum: 1000), 'order_by' to sort by size, and 'encrypted_only' to filter.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -651,7 +651,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Optional: Maximum number of datasets to return (default: 50 for manageable response size)",
+						"description": "Optional: Maximum number of datasets to return (default: 50, maximum: 1000)",
 					},
 					"order_by": map[string]interface{}{
 						"type":        "string",
@@ -672,7 +672,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["query_snapshots"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_snapshots",
-			Description: "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, sizes and dataset. Holds are included only with 'include_holds' or 'holds_only' (they cost an extra lookup per snapshot). Use 'limit' to control result size, 'order_by' to sort.",
+			Description: "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, sizes and dataset. Holds are included only with 'include_holds' or 'holds_only' (they cost an extra lookup per snapshot). Use 'limit' to control result size (default: 50, maximum: 1000), 'order_by' to sort.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -686,7 +686,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Optional: Maximum number of snapshots to return (default: 50 for manageable response size)",
+						"description": "Optional: Maximum number of snapshots to return (default: 50, maximum: 1000)",
 					},
 					"order_by": map[string]interface{}{
 						"type":        "string",
@@ -2260,22 +2260,6 @@ const (
 	maxQueryLimit     = 1000
 )
 
-var poolQuerySelect = []interface{}{
-	"id", "name", "status", "size", "allocated", "free", "healthy",
-	"warning", "status_code", "status_detail", "path", "scan",
-}
-
-var smbShareQuerySelect = []interface{}{
-	"id", "name", "path", "enabled", "comment", "purpose", "readonly", "browsable",
-	"options", "access_based_share_enumeration", "audit", "locked",
-}
-
-var nfsShareQuerySelect = []interface{}{
-	"id", "path", "enabled", "comment", "ro", "networks", "hosts",
-	"maproot_user", "maproot_group", "mapall_user", "mapall_group",
-	"security", "expose_snapshots", "locked",
-}
-
 var vmQuerySelect = []interface{}{
 	"id", "name", "uuid", "description", "vcpus", "cores", "threads", "cpu_mode",
 	"memory", "min_memory", "bootloader", "autostart", "status", "devices",
@@ -2296,15 +2280,23 @@ func datasetChildrenCount(name string, names []string) int {
 
 // queryCount runs method(filters, {count: true}) and returns the integer
 // total when the middleware answers with a JSON number.
-func queryLimit(args map[string]interface{}) int {
+func joinNote(existing interface{}, add string) string {
+	if s, ok := existing.(string); ok && s != "" {
+		return s + "; " + add
+	}
+	return add
+}
+
+func queryLimit(args map[string]interface{}) (limit int, capped bool) {
 	l, ok := args["limit"].(float64)
-	if !ok || l < 1 {
-		return defaultQueryLimit
+	// !(l >= 1) also rejects NaN and -Inf, which a plain l < 1 would not.
+	if !ok || !(l >= 1) {
+		return defaultQueryLimit, false
 	}
 	if l > float64(maxQueryLimit) {
-		return maxQueryLimit
+		return maxQueryLimit, true
 	}
-	return int(l)
+	return int(l), false
 }
 
 func queryCount(client *truenas.Client, method string, filters []interface{}) (int, bool) {
@@ -2319,43 +2311,8 @@ func queryCount(client *truenas.Client, method string, filters []interface{}) (i
 	return int(n), true
 }
 
-func pickFields(m map[string]interface{}, keys []interface{}) map[string]interface{} {
-	out := map[string]interface{}{}
-	for _, key := range keys {
-		k, _ := key.(string)
-		if v, ok := m[k]; ok {
-			out[k] = v
-		}
-	}
-	return out
-}
-
-func simplifyPool(pool map[string]interface{}) map[string]interface{} {
-	out := map[string]interface{}{
-		"id":     pool["id"],
-		"name":   pool["name"],
-		"status": pool["status"],
-	}
-	for _, key := range []string{"healthy", "warning", "status_code", "status_detail", "path", "allocated", "free"} {
-		if v, ok := pool[key]; ok {
-			out[key] = v
-		}
-	}
-	if size, ok := pool["size"].(float64); ok {
-		out["size_bytes"] = size
-		out["size"] = formatBytes(int64(size))
-	}
-	if scan, ok := pool["scan"].(map[string]interface{}); ok {
-		out["scan"] = scan
-	}
-	return out
-}
-
 func handleQueryPools(client *truenas.Client, args map[string]interface{}) (string, error) {
-	// Request only the fields the tool returns. Topology is omitted: it is
-	// large and is not shown in the simplified result.
-	options := map[string]interface{}{"select": poolQuerySelect}
-	result, err := client.Call("pool.query", []interface{}{}, options)
+	result, err := client.Call("pool.query")
 	if err != nil {
 		return "", err
 	}
@@ -2365,12 +2322,7 @@ func handleQueryPools(client *truenas.Client, args map[string]interface{}) (stri
 		return "", fmt.Errorf("failed to parse pools (raw response: %s): %w", string(result), err)
 	}
 
-	simplified := make([]map[string]interface{}, 0, len(pools))
-	for _, pool := range pools {
-		simplified = append(simplified, simplifyPool(pool))
-	}
-
-	formatted, err := json.MarshalIndent(simplified, "", "  ")
+	formatted, err := json.MarshalIndent(pools, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -2439,7 +2391,7 @@ func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (s
 	}
 	sortDatasets(simplified, orderBy)
 
-	limit := queryLimit(args)
+	limit, capped := queryLimit(args)
 	total := len(simplified)
 	if len(simplified) > limit {
 		simplified = simplified[:limit]
@@ -2455,6 +2407,9 @@ func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (s
 	}
 	if len(simplified) < total {
 		response["note"] = fmt.Sprintf("Showing %d of %d datasets (limited)", len(simplified), total)
+	}
+	if capped {
+		response["note"] = joinNote(response["note"], "limit was capped to 1000")
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -2615,7 +2570,7 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 	response := make(map[string]interface{})
 
 	if shareType == "smb" || shareType == "all" {
-		result, err := client.Call("sharing.smb.query", []interface{}{}, map[string]interface{}{"select": smbShareQuerySelect})
+		result, err := client.Call("sharing.smb.query")
 		if err != nil {
 			return "", fmt.Errorf("failed to query SMB shares: %w", err)
 		}
@@ -2624,15 +2579,11 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 		if err := json.Unmarshal(result, &smbShares); err != nil {
 			return "", fmt.Errorf("failed to parse SMB shares: %w", err)
 		}
-		simplified := make([]map[string]interface{}, 0, len(smbShares))
-		for _, share := range smbShares {
-			simplified = append(simplified, pickFields(share, smbShareQuerySelect))
-		}
-		response["smb_shares"] = simplified
+		response["smb_shares"] = smbShares
 	}
 
 	if shareType == "nfs" || shareType == "all" {
-		result, err := client.Call("sharing.nfs.query", []interface{}{}, map[string]interface{}{"select": nfsShareQuerySelect})
+		result, err := client.Call("sharing.nfs.query")
 		if err != nil {
 			return "", fmt.Errorf("failed to query NFS shares: %w", err)
 		}
@@ -2641,11 +2592,7 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 		if err := json.Unmarshal(result, &nfsShares); err != nil {
 			return "", fmt.Errorf("failed to parse NFS shares: %w", err)
 		}
-		simplified := make([]map[string]interface{}, 0, len(nfsShares))
-		for _, share := range nfsShares {
-			simplified = append(simplified, pickFields(share, nfsShareQuerySelect))
-		}
-		response["nfs_shares"] = simplified
+		response["nfs_shares"] = nfsShares
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -2683,7 +2630,7 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 	if order, ok := args["order_by"].(string); ok && order != "" {
 		orderBy = order
 	}
-	limit := queryLimit(args)
+	limit, capped := queryLimit(args)
 
 	// Unfiltered calls can return every snapshot on the NAS. Push limit
 	// and order_by when the sort key is a middleware field. holds_only
@@ -2772,6 +2719,9 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 	}
 	if totalKnown && len(simplified) < totalSnapshots {
 		response["note"] = fmt.Sprintf("Showing %d of %d snapshots (limited)", len(simplified), totalSnapshots)
+	}
+	if capped {
+		response["note"] = joinNote(response["note"], "limit was capped to 1000")
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")

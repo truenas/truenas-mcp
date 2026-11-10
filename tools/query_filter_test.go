@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -402,20 +403,20 @@ func TestQueryPoolsAndSharesRequestSelect(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, opts := parseQueryParams(t, methods["pool.query"])
-	if !selectContains(opts, "name") || selectContains(opts, "topology") {
-		t.Errorf("pool.query options = %s, want select without topology", methods["pool.query"])
-	}
-	if strings.Contains(out, "topology") || !strings.Contains(out, `"name": "tank"`) {
-		t.Errorf("query_pools should omit topology and keep the name: %s", out)
+	if _, ok := opts["select"]; ok {
+		t.Errorf("pool.query options = %s, want no select so fields match main", methods["pool.query"])
 	}
 	pools := decodeList(t, out)
 	if len(pools) != 1 {
 		t.Fatalf("query_pools = %s", out)
 	}
-	for _, key := range []string{"allocated", "free", "warning", "status_code", "status_detail"} {
+	for key := range fullPool {
 		if _, ok := pools[0][key]; !ok {
 			t.Errorf("query_pools missing %s (present on main): %s", key, out)
 		}
+	}
+	if _, isNum := pools[0]["size"].(float64); !isNum {
+		t.Errorf("query_pools size = %v (%T), want an integer as on main", pools[0]["size"], pools[0]["size"])
 	}
 	scan, _ := pools[0]["scan"].(map[string]interface{})
 	for _, key := range []string{"errors", "percentage", "end_time"} {
@@ -450,8 +451,23 @@ func TestQueryPoolsAndSharesRequestSelect(t *testing.T) {
 			t.Errorf("query_shares NFS missing %s (present on main): %s", key, out)
 		}
 	}
-	if strings.Contains(out, "secret") {
-		t.Errorf("query_shares leaked unselected field: %s", out)
+	for key := range fullSMB {
+		if _, ok := smb[key]; !ok {
+			t.Errorf("query_shares SMB missing %s (present on main): %s", key, out)
+		}
+	}
+	for key := range fullNFS {
+		if _, ok := nfs[key]; !ok {
+			t.Errorf("query_shares NFS missing %s (present on main): %s", key, out)
+		}
+	}
+	_, smbOpts := parseQueryParams(t, methods["sharing.smb.query"])
+	_, nfsOpts := parseQueryParams(t, methods["sharing.nfs.query"])
+	if _, ok := smbOpts["select"]; ok {
+		t.Errorf("sharing.smb.query options = %s, want no select", methods["sharing.smb.query"])
+	}
+	if _, ok := nfsOpts["select"]; ok {
+		t.Errorf("sharing.nfs.query options = %s, want no select", methods["sharing.nfs.query"])
 	}
 
 	if _, err := r.CallTool("query_vms", map[string]interface{}{}); err != nil {
@@ -471,6 +487,17 @@ func selectContains(options map[string]interface{}, field string) bool {
 		}
 	}
 	return false
+}
+
+func pickFields(m map[string]interface{}, keys []interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for _, key := range keys {
+		k, _ := key.(string)
+		if v, ok := m[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 func findDataset(resp map[string]interface{}, name string) (map[string]interface{}, bool) {
@@ -505,15 +532,40 @@ func TestQueryLimitIsClamped(t *testing.T) {
 		}
 	}}
 	r := queryFilterRegistry(t, fake)
-	if _, err := r.CallTool("query_datasets", map[string]interface{}{"limit": 1e300}); err != nil {
+	dsOut, err := r.CallTool("query_datasets", map[string]interface{}{"limit": 1e300})
+	if err != nil {
 		t.Fatalf("query_datasets huge limit: %v", err)
 	}
-	if _, err := r.CallTool("query_snapshots", map[string]interface{}{"limit": 1e300}); err != nil {
+	dsNote, _ := decode(t, dsOut)["note"].(string)
+	if !strings.Contains(dsNote, "capped to 1000") {
+		t.Errorf("query_datasets capped note = %q, want cap mentioned; body=%s", dsNote, dsOut)
+	}
+	snapOut, err := r.CallTool("query_snapshots", map[string]interface{}{"limit": 1e300})
+	if err != nil {
 		t.Fatalf("query_snapshots huge limit: %v", err)
+	}
+	snapNote, _ := decode(t, snapOut)["note"].(string)
+	if !strings.Contains(snapNote, "capped to 1000") {
+		t.Errorf("query_snapshots capped note = %q, want cap mentioned; body=%s", snapNote, snapOut)
 	}
 	limit, _ := snapOpts["limit"].(float64)
 	if limit <= 0 || limit > 1000 {
 		t.Errorf("snapshot limit sent to middleware = %v, want 1..1000; options=%v", snapOpts["limit"], snapOpts)
+	}
+}
+
+func TestQueryLimitGuardsNaNAndInf(t *testing.T) {
+	if got, capped := queryLimit(map[string]interface{}{"limit": math.NaN()}); got != defaultQueryLimit || capped {
+		t.Errorf("NaN = %d capped=%v, want default %d", got, capped, defaultQueryLimit)
+	}
+	if got, capped := queryLimit(map[string]interface{}{"limit": math.Inf(1)}); got != maxQueryLimit || !capped {
+		t.Errorf("+Inf = %d capped=%v, want %d capped", got, capped, maxQueryLimit)
+	}
+	if got, capped := queryLimit(map[string]interface{}{"limit": math.Inf(-1)}); got != defaultQueryLimit || capped {
+		t.Errorf("-Inf = %d capped=%v, want default %d", got, capped, defaultQueryLimit)
+	}
+	if got, capped := queryLimit(map[string]interface{}{"limit": 10.0}); got != 10 || capped {
+		t.Errorf("10 = %d capped=%v, want 10", got, capped)
 	}
 }
 
