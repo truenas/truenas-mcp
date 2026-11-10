@@ -91,6 +91,17 @@ type Client struct {
 	pending   map[string]*pendingCall
 
 	requestID atomic.Uint64
+
+	// versionMu protects the cached TrueNAS version, which is read from
+	// system.info once per session and again after a reconnect.
+	// versionFetchMu serializes a cache miss so concurrent callers share
+	// one system.info call.
+	versionMu      sync.Mutex
+	versionFetchMu sync.Mutex
+	versionLoaded  bool
+	versionGen     uint64
+	nasVersion     Version
+	versionErr     error
 }
 
 type pendingCall struct {
@@ -135,10 +146,12 @@ type responseResult struct {
 	err  error
 }
 
-// apiPath is TrueNAS's versioned JSON-RPC 2.0 endpoint, available since
-// TrueNAS 25.04 (the oldest supported release). It replaces the legacy
-// /websocket protocol, which is deprecated and planned for removal in
-// TrueNAS 28.
+// apiPath is TrueNAS's JSON-RPC 2.0 endpoint. This server keeps
+// /api/current (rather than pinning a versioned path such as
+// /api/v25.10) and gates tools by the connected release. The
+// oldest supported release is TrueNAS 25.10; the version is checked
+// after login. /api/current replaces the legacy /websocket protocol,
+// which is deprecated and planned for removal in TrueNAS 28.
 const apiPath = "/api/current"
 
 // legacyPath is the old DDP-style endpoint. URLs naming it are rewritten to
@@ -355,9 +368,9 @@ func (c *Client) connect() error {
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			if u.Path == apiPath {
-				err = fmt.Errorf("%w (HTTP 404 for %s: TrueNAS 25.04 or later required)", err, logURL(u))
+				err = fmt.Errorf("%w (HTTP 404 for %s: TrueNAS 25.10 or later required)", err, logURL(u))
 			} else {
-				err = fmt.Errorf("%w (HTTP 404 for %s: check the path; the JSON-RPC endpoint is %s, and TrueNAS 25.04 or later required)", err, logURL(u), apiPath)
+				err = fmt.Errorf("%w (HTTP 404 for %s: check the path; the JSON-RPC endpoint is %s, and TrueNAS 25.10 or later is required)", err, logURL(u), apiPath)
 			}
 		} else if hint := tlsHint(err, u.Hostname()); hint != "" {
 			err = fmt.Errorf("%w (%s)", err, hint)

@@ -113,11 +113,16 @@ Binaries report their version with `--version`. `make` takes the version from `g
 
 ## Installation
 
-**Requirements:** TrueNAS 25.04 or later. The server uses the JSON-RPC 2.0
-endpoint (`/api/current`) and `auth.login_ex`, both introduced in 25.04; there
-is no fallback to the legacy `/websocket` protocol, so TrueNAS 24.10 and older
-are not supported. An older server answers the handshake with HTTP 404, which
-is reported as "TrueNAS 25.04 or later required".
+**Requirements:** TrueNAS 25.10 or later. The server uses the JSON-RPC 2.0
+endpoint (`/api/current`) and `auth.login_ex`. After login it reads
+`system.info` and exits if the connected release is older than 25.10, with
+a message that names the version it found and the 25.10 minimum. There is
+no fallback to the legacy `/websocket` protocol, so TrueNAS 24.10 and older
+are not supported. A server that predates the JSON-RPC API answers the
+handshake with HTTP 404, which is reported as "TrueNAS 25.10 or later
+required". The endpoint is kept at `/api/current` (not pinned to a
+versioned path such as `/api/v25.10`); tools that a given release cannot
+run are hidden and refused, as listed in [TrueNAS version compatibility](#truenas-version-compatibility).
 
 ### Step 1: Download or Build Binary
 
@@ -392,11 +397,11 @@ export TRUENAS_API_USER=your-api-user
 
 The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 
-1. **Uses secure WebSocket (wss://)**: Connects to the JSON-RPC 2.0 endpoint `wss://your-truenas:443/api/current` (TrueNAS 25.04 or later; no `/websocket` fallback)
+1. **Uses secure WebSocket (wss://)**: Connects to the JSON-RPC 2.0 endpoint `wss://your-truenas:443/api/current` (TrueNAS 25.10 or later; no `/websocket` fallback)
 2. **Verifies certificates by default**: trust the TrueNAS self-signed certificate with `--tls-ca` (see [TLS with a self-signed certificate](#step-3-configure-your-mcp-client))
 3. **Authenticates via API key**: Logs in with `auth.login_ex` (`API_KEY_PLAIN` mechanism, user from `--api-user`)
 
-The connection and login happen once, at startup, before the server reads any MCP request. If TrueNAS cannot be reached, or the login fails, the server logs the reason to stderr (`Could not connect to TrueNAS (no login was attempted): ...` when the connection fails, `Failed to authenticate with TrueNAS: ...` when the login is rejected, or `invalid TrueNAS host or URL: ...` for an unusable host setting) and exits with a non-zero status instead of starting without a working connection. This is intentional: the MCP client then shows the server as failed, and its log holds that message. Fix the cause (host, port, proxy, certificate or API key, see [Troubleshooting](#troubleshooting)) and restart the client.
+The connection, login, and version check happen once, at startup, before the server reads any MCP request. If TrueNAS cannot be reached, the login fails, or the release is older than 25.10, the server logs the reason to stderr (`Could not connect to TrueNAS (no login was attempted): ...` when the connection fails, `Failed to authenticate with TrueNAS: ...` when the login is rejected, `TrueNAS 25.04.2 is not supported; TrueNAS 25.10 or later is required` when the version is too old, or `invalid TrueNAS host or URL: ...` for an unusable host setting) and exits with a non-zero status instead of starting without a working connection. This is intentional: the MCP client then shows the server as failed, and its log holds that message. Fix the cause (host, port, proxy, certificate, API key, or TrueNAS version, see [Troubleshooting](#troubleshooting)) and restart the client. After a reconnect mid-session (for example after a reboot), the version is read again and tool calls are refused if the new release is below 25.10.
 
 ### MCP Protocol
 
@@ -536,7 +541,8 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - "Could not connect to TrueNAS (no login was attempted)" means the TCP, proxy, TLS or WebSocket step failed; "Failed to authenticate with TrueNAS" means the connection worked and the login was rejected. If the connection drops during login and reconnecting fails, the message says so ("the connection was lost during login, and reconnecting failed") instead. The URL is logged without any query, fragment or user info, and error messages never quote them (at most they quote the host name or a short URL scheme)
 - Verify TrueNAS is accessible from your machine
 - Check firewall allows port 443 (wss), or the port you configured
-- `HTTP 404` / "TrueNAS 25.04 or later required": the server predates the JSON-RPC API; upgrade TrueNAS
+- `HTTP 404` / "TrueNAS 25.10 or later required": the JSON-RPC endpoint was not found (the server predates that API, which was introduced in 25.04); upgrade TrueNAS to 25.10 or later
+- "TrueNAS … is not supported; TrueNAS 25.10 or later is required": the server connected and logged in, but `system.info` reported a release older than 25.10 (including 25.04); upgrade TrueNAS
 - Verify the API key is valid and its owner has the privileges required for the tools you enable (see [Using Administrator Logins](https://www.truenas.com/docs/scale/25.10/scaletutorials/credentials/adminroles/))
 - "connecting via proxy ... proxy unreachable": the proxy named in the message (and the variable it came from) is not listening; check it, or bypass it with `NO_PROXY` or `--proxy none`
 - "connecting via proxy ... the proxy is reachable but could not connect to the TrueNAS host ...": the SOCKS5 proxy answered but could not open a connection to TrueNAS (the SOCKS5 reply, such as "general failure" or "host unreachable", is shown at the end); check the TrueNAS host and port, that the system is up, and that the proxy's network (for example your tailnet or VPN) can route to it
@@ -752,6 +758,30 @@ derived from the same table, so clients can apply their own approval prompts.
 confirmation token, `update_app` included) and false for every other tool.
 Annotations were added in MCP 2025-03-26; clients that negotiate
 `2024-11-05` ignore the extra field.
+
+## TrueNAS version compatibility
+
+> **Breaking change:** the minimum supported TrueNAS release is now 25.10.
+> Earlier releases, including 25.04, are refused at startup. Clients that
+> pointed this server at a 25.04 system need to upgrade TrueNAS (or use an
+> older server build) before it will start.
+
+The server stays on `/api/current` and records the connected release after
+login. Tools the connected release cannot run are omitted from `tools/list`
+and refused if called, with a message that names the tool and the version
+it needs, and states that nothing was executed. The per-tool range lives
+next to the safety table in `tools/version.go`.
+
+All current tools are available on TrueNAS 25.10 and later, with no upper
+bound:
+
+| Tools | TrueNAS versions |
+|-------|------------------|
+| Every tool listed in [docs/full-features.md](docs/full-features.md) | 25.10 and later |
+
+A later tool that exists only on 26, 27, or a single train will be added
+to the table with a min or max version and will be hidden on releases
+outside that range.
 
 ## Example Usage
 
