@@ -6,8 +6,6 @@ import (
 	"math"
 	"strings"
 	"testing"
-
-	"github.com/truenas/truenas-mcp/redact"
 )
 
 func parseQueryParams(t *testing.T, params json.RawMessage) (filters []interface{}, options map[string]interface{}) {
@@ -344,9 +342,10 @@ func TestDatasetChildrenCountFromNames(t *testing.T) {
 }
 
 // TestQueryPoolsAndSharesReturnCompleteRecords checks that query_pools and
-// query_shares do not narrow middleware records with a select list, so the
-// fields returned on main stay present. A "secret" sentinel on an SMB share
-// must be masked in the tool result. query_vms still requests a select list.
+// query_shares keep the useful fields they returned before allow lists, via
+// a middleware select and an output allow list. Extra keys such as a
+// "secret" sentinel are dropped (not merely redacted). query_vms still
+// requests a select list.
 func TestQueryPoolsAndSharesReturnCompleteRecords(t *testing.T) {
 	var methods = map[string]json.RawMessage{}
 	fullPool := map[string]interface{}{
@@ -409,16 +408,16 @@ func TestQueryPoolsAndSharesReturnCompleteRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, opts := parseQueryParams(t, methods["pool.query"])
-	if _, ok := opts["select"]; ok {
-		t.Errorf("pool.query options = %s, want no select so fields match main", methods["pool.query"])
+	if !selectContains(opts, "name") || !selectContains(opts, "scan") {
+		t.Errorf("pool.query options = %s, want a select list of allow-listed fields", methods["pool.query"])
 	}
 	pools := decodeList(t, out)
 	if len(pools) != 1 {
 		t.Fatalf("query_pools = %s", out)
 	}
-	for key := range fullPool {
+	for _, key := range []string{"id", "name", "status", "size", "allocated", "free", "healthy", "warning", "status_code", "status_detail", "path", "scan", "topology"} {
 		if _, ok := pools[0][key]; !ok {
-			t.Errorf("query_pools missing %s (present on main): %s", key, out)
+			t.Errorf("query_pools missing %s: %s", key, out)
 		}
 	}
 	if _, isNum := pools[0]["size"].(float64); !isNum {
@@ -427,7 +426,7 @@ func TestQueryPoolsAndSharesReturnCompleteRecords(t *testing.T) {
 	scan, _ := pools[0]["scan"].(map[string]interface{})
 	for _, key := range []string{"errors", "percentage", "end_time"} {
 		if _, ok := scan[key]; !ok {
-			t.Errorf("query_pools scan missing %s (present on main): %s", key, out)
+			t.Errorf("query_pools scan missing %s: %s", key, out)
 		}
 	}
 
@@ -443,52 +442,35 @@ func TestQueryPoolsAndSharesReturnCompleteRecords(t *testing.T) {
 	}
 	smb := smbList[0].(map[string]interface{})
 	nfs := nfsList[0].(map[string]interface{})
-	for _, key := range []string{"options", "access_based_share_enumeration", "audit", "locked"} {
+	for _, key := range []string{"id", "name", "path", "enabled", "comment", "purpose", "readonly", "browsable", "options", "access_based_share_enumeration", "audit", "locked"} {
 		if _, ok := smb[key]; !ok {
-			t.Errorf("query_shares SMB missing %s (present on main): %s", key, out)
+			t.Errorf("query_shares SMB missing %s: %s", key, out)
 		}
 	}
 	smbOptions, _ := smb["options"].(map[string]interface{})
 	if _, ok := smbOptions["hostsallow"]; !ok {
 		t.Errorf("query_shares SMB options missing hostsallow: %s", out)
 	}
-	for _, key := range []string{"security", "expose_snapshots", "locked"} {
+	for _, key := range []string{"id", "path", "enabled", "ro", "comment", "networks", "hosts", "maproot_user", "maproot_group", "mapall_user", "mapall_group", "security", "expose_snapshots", "locked"} {
 		if _, ok := nfs[key]; !ok {
-			t.Errorf("query_shares NFS missing %s (present on main): %s", key, out)
+			t.Errorf("query_shares NFS missing %s: %s", key, out)
 		}
 	}
-	for key := range fullSMB {
-		if _, ok := smb[key]; !ok {
-			t.Errorf("query_shares SMB missing %s (present on main): %s", key, out)
-		}
+	// Extra keys such as "secret" are dropped by the allow list, so they
+	// never reach redact.ToolOutput.
+	if _, ok := smb["secret"]; ok {
+		t.Errorf("query_shares SMB still has secret: %s", out)
 	}
-	// CallTool returns the handler text; the server redacts it with
-	// redact.ToolOutput before the model sees it. The secret sentinel must
-	// not survive that step.
-	masked := redact.ToolOutput(out)
-	var maskedShares map[string]interface{}
-	if err := json.Unmarshal([]byte(masked), &maskedShares); err != nil {
-		t.Fatalf("masked query_shares: %v (%s)", err, masked)
-	}
-	maskedSMB, _ := maskedShares["smb_shares"].([]interface{})[0].(map[string]interface{})
-	if maskedSMB["secret"] != redact.Marker {
-		t.Errorf("query_shares SMB secret = %v, want %s", maskedSMB["secret"], redact.Marker)
-	}
-	if strings.Contains(masked, "ignore") {
-		t.Errorf("query_shares leaked the secret sentinel: %s", masked)
-	}
-	for key := range fullNFS {
-		if _, ok := nfs[key]; !ok {
-			t.Errorf("query_shares NFS missing %s (present on main): %s", key, out)
-		}
+	if strings.Contains(out, "ignore") {
+		t.Errorf("query_shares leaked the secret sentinel: %s", out)
 	}
 	_, smbOpts := parseQueryParams(t, methods["sharing.smb.query"])
 	_, nfsOpts := parseQueryParams(t, methods["sharing.nfs.query"])
-	if _, ok := smbOpts["select"]; ok {
-		t.Errorf("sharing.smb.query options = %s, want no select", methods["sharing.smb.query"])
+	if !selectContains(smbOpts, "name") {
+		t.Errorf("sharing.smb.query options = %s, want a select list", methods["sharing.smb.query"])
 	}
-	if _, ok := nfsOpts["select"]; ok {
-		t.Errorf("sharing.nfs.query options = %s, want no select", methods["sharing.nfs.query"])
+	if !selectContains(nfsOpts, "path") {
+		t.Errorf("sharing.nfs.query options = %s, want a select list", methods["sharing.nfs.query"])
 	}
 
 	if _, err := r.CallTool(t.Context(), "query_vms", map[string]interface{}{}); err != nil {
