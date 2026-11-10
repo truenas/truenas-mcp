@@ -120,6 +120,72 @@ func TestNitsCatalogDefaultsNestResourcesAndHonorRunAsCondition(t *testing.T) {
 	if !strings.Contains(desc, "run_as_custom_user") {
 		t.Errorf("description should mention the run_as_custom_user condition: %s", desc)
 	}
+
+	// ix-app: resources.limits apply only when enable_resource_limits is true.
+	withLimitsFlag := catalogRunAsResourcesSchema(1000, 2000, 8, 2048)
+	qs = withLimitsFlag["questions"].([]interface{})
+	withLimitsFlag["questions"] = append([]interface{}{
+		map[string]interface{}{
+			"variable": "enable_resource_limits",
+			"label":    "Enable Resource Limits",
+			"schema":   map[string]interface{}{"type": "boolean", "default": false},
+		},
+	}, qs...)
+	got = extractSchemaDefaults(withLimitsFlag)
+	if res, _ := got["resources"].(map[string]interface{}); res != nil {
+		if _, ok := res["limits"]; ok {
+			t.Errorf("resources.limits present when enable_resource_limits defaults to false: %v", got)
+		}
+	}
+	if _, ok := got["run_as"]; !ok {
+		t.Errorf("run_as missing when only resources.limits should be omitted: %v", got)
+	}
+
+	withLimitsTrue := catalogRunAsResourcesSchema(1000, 2000, 8, 2048)
+	qs = withLimitsTrue["questions"].([]interface{})
+	withLimitsTrue["questions"] = append([]interface{}{
+		map[string]interface{}{
+			"variable": "enable_resource_limits",
+			"label":    "Enable Resource Limits",
+			"schema":   map[string]interface{}{"type": "boolean", "default": true},
+		},
+	}, qs...)
+	got = extractSchemaDefaults(withLimitsTrue)
+	res, _ := got["resources"].(map[string]interface{})
+	if res == nil {
+		t.Fatalf("resources omitted when enable_resource_limits defaults to true: %v", got)
+	}
+	if _, ok := res["limits"]; !ok {
+		t.Errorf("resources.limits omitted when enable_resource_limits defaults to true: %v", got)
+	}
+
+	// Same gate when the flag is nested under the resources question.
+	nested := catalogRunAsResourcesSchema(1000, 2000, 8, 2048)
+	for _, q := range nested["questions"].([]interface{}) {
+		qm := q.(map[string]interface{})
+		if qm["variable"] != "resources" {
+			continue
+		}
+		schemaMap := qm["schema"].(map[string]interface{})
+		attrs := schemaMap["attrs"].([]interface{})
+		schemaMap["attrs"] = append([]interface{}{
+			map[string]interface{}{
+				"variable": "enable_resource_limits",
+				"label":    "Enable Resource Limits",
+				"schema":   map[string]interface{}{"type": "boolean", "default": false},
+			},
+		}, attrs...)
+	}
+	got = extractSchemaDefaults(nested)
+	if res, _ := got["resources"].(map[string]interface{}); res != nil {
+		if _, ok := res["limits"]; ok {
+			t.Errorf("nested enable_resource_limits=false still left resources.limits: %v", got)
+		}
+	}
+
+	if !strings.Contains(desc, "enable_resource_limits") {
+		t.Errorf("description should mention the enable_resource_limits condition: %s", desc)
+	}
 }
 
 // ---- 3. zfsPropValue: scalars pass through, composites are dropped ----

@@ -500,8 +500,9 @@ func summarizeQuestion(question map[string]interface{}) map[string]interface{} {
 // the schema nesting (for example resources.limits.cpus). Only numeric
 // defaults are passed through. In ix-app, run_as applies only when
 // run_as_custom_user is true, so run_as is omitted when that flag's
-// default is false. Fields and the whole object are omitted when the
-// schema has no such default.
+// default is false. Likewise, resources.limits is omitted when
+// enable_resource_limits defaults to false. Fields and the whole object
+// are omitted when the schema has no such default.
 func extractSchemaDefaults(schema map[string]interface{}) map[string]interface{} {
 	if schema == nil {
 		return nil
@@ -527,15 +528,54 @@ func extractSchemaDefaults(schema map[string]interface{}) map[string]interface{}
 			}
 		}
 	}
+	includeResourceLimits := schemaFlagEnabled(schema, "enable_resource_limits", "enableResourceLimits")
 	if q, _ := schemaQuestionByVariable(schema, "resources"); q != nil {
 		if resources := extractNestedNumericDefaults(q); len(resources) > 0 {
-			out["resources"] = resources
+			if !includeResourceLimits {
+				delete(resources, "limits")
+			}
+			if len(resources) > 0 {
+				out["resources"] = resources
+			}
 		}
 	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+// schemaFlagEnabled reports whether a boolean schema flag is enabled.
+// A missing flag, or one with no boolean default, is treated as enabled
+// so catalog apps that do not define the flag keep their defaults. A
+// default of false (top-level or nested under resources, as in ix-app)
+// disables the flagged section.
+func schemaFlagEnabled(schema map[string]interface{}, names ...string) bool {
+	if q, _ := schemaQuestionByVariable(schema, names...); q != nil {
+		if d, ok := schemaQuestionBoolDefault(q); ok {
+			return d
+		}
+	}
+	if q, _ := schemaQuestionByVariable(schema, "resources"); q != nil {
+		if d, ok := schemaBoolAttrDefault(q, names...); ok {
+			return d
+		}
+	}
+	return true
+}
+
+func schemaBoolAttrDefault(question map[string]interface{}, names ...string) (bool, bool) {
+	for _, name := range names {
+		v, ok := findSchemaAttrDefault(question, name)
+		if !ok {
+			continue
+		}
+		b, ok := v.(bool)
+		if ok {
+			return b, true
+		}
+	}
+	return false, false
 }
 
 func schemaQuestionBoolDefault(question map[string]interface{}) (bool, bool) {
