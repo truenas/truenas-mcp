@@ -391,15 +391,13 @@ func TestConfirmAndDryRunMustBeBooleans(t *testing.T) {
 	for _, v := range []interface{}{"true", 1.0, nil, []interface{}{true}, map[string]interface{}{"x": true}} {
 		for _, key := range []string{"confirm", "dry_run"} {
 			out, err := r.CallTool("delete_app", map[string]interface{}{"app_name": "plex", key: v})
-			if err != nil || !strings.Contains(out, "confirmation_required") {
-				t.Errorf("%s=%#v: out=%s err=%v, want preview", key, v, out, err)
+			if err == nil || !strings.Contains(err.Error(), key+" must be a JSON boolean") || !strings.Contains(err.Error(), "nothing was executed") {
+				t.Errorf("%s=%#v: out=%s err=%v, want invalid %s", key, v, out, err, key)
 			}
 		}
 	}
-	for _, args := range seen["delete_app"] {
-		if args["dry_run"] != true {
-			t.Errorf("delete_app handler ran without dry_run: %v", args)
-		}
+	if len(seen["delete_app"]) != 0 {
+		t.Errorf("delete_app handler ran: %v", seen["delete_app"])
 	}
 }
 

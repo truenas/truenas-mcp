@@ -22,6 +22,17 @@ func declaredKeys(tool Tool) []string {
 	return keys
 }
 
+// sampleDeclaredArg returns a value that is accepted for the named
+// argument when only the key (not a type) is being checked. confirm and
+// dry_run must be real booleans; a string would be rejected by the
+// safety-flag type check.
+func sampleDeclaredArg(key string) interface{} {
+	if key == "confirm" || key == "dry_run" {
+		return true
+	}
+	return "x"
+}
+
 func TestUnknownArgumentRejected(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	seen := stubHandlers(r)
@@ -126,10 +137,11 @@ func TestEveryDeclaredArgumentIsAccepted(t *testing.T) {
 		keys := declaredKeys(tool)
 		all := map[string]interface{}{}
 		for _, key := range keys {
-			all[key] = "x"
+			val := sampleDeclaredArg(key)
+			all[key] = val
 			// confirm keeps destructive tools from stopping at the gate;
 			// either way validation must let the key through.
-			args := map[string]interface{}{key: "x", "confirm": hasParam(tool, "confirm")}
+			args := map[string]interface{}{key: val, "confirm": hasParam(tool, "confirm")}
 			if !hasParam(tool, "confirm") {
 				delete(args, "confirm")
 			}
