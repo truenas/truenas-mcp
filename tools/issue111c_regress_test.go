@@ -110,9 +110,14 @@ func TestDeleteBootEnvironmentDryRunListsBlocked(t *testing.T) {
 	out, err := r.CallTool(t.Context(), "delete_boot_environment", map[string]interface{}{
 		"id": "running", "dry_run": true,
 	})
-	if err != nil {
-		t.Fatalf("dry run: %v", err)
+	if err == nil {
+		t.Fatalf("blocked dry run returned no error:\n%s", out)
 	}
+	var reply *mcp.ReplyError
+	if !errors.As(err, &reply) {
+		t.Fatalf("want a ReplyError, got %T %v", err, err)
+	}
+	out = reply.Reply
 	var preview struct {
 		Blocked  []string `json:"blocked"`
 		Warnings []string `json:"warnings"`

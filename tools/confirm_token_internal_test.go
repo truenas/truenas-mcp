@@ -121,6 +121,9 @@ func TestConfirmTokenBlockedReplyHasNoToken(t *testing.T) {
 		return `{"tool":"delete_boot_environment","warnings":["BLOCKED: Cannot delete active boot environment 'x' (currently running)"]}`, nil
 	}
 	tool.Plan = stubToolPlan("delete_boot_environment")
+	tool.Execute = func(_ context.Context, _ *truenas.Client, args map[string]interface{}, _ *writePlan) (string, error) {
+		return tool.Handler(t.Context(), nil, args)
+	}
 	r.tools["delete_boot_environment"] = tool
 	_, err := r.CallTool(t.Context(), "delete_boot_environment", map[string]interface{}{"id": "x"})
 	var reply *mcp.ReplyError
@@ -227,6 +230,9 @@ func TestConfirmTokenSingleUseUnderConcurrency(t *testing.T) {
 		return `{"ok":true}`, nil
 	}
 	tool.Plan = stubToolPlan("stop_app")
+	tool.Execute = func(_ context.Context, _ *truenas.Client, args map[string]interface{}, _ *writePlan) (string, error) {
+		return tool.Handler(t.Context(), nil, args)
+	}
 	r.tools["stop_app"] = tool
 	tok := previewToken(t, r, "stop_app", map[string]interface{}{"app_name": "plex"})
 	var wg sync.WaitGroup

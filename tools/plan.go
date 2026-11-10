@@ -38,7 +38,7 @@ type writePlan struct {
 
 func (p *writePlan) dryRunResult() *DryRunResult {
 	dry, executed := true, false
-	return &DryRunResult{
+	result := &DryRunResult{
 		Tool:           p.Tool,
 		CurrentState:   p.CurrentState,
 		PlannedActions: p.plannedActions(),
@@ -49,6 +49,10 @@ func (p *writePlan) dryRunResult() *DryRunResult {
 		DryRun:         &dry,
 		Executed:       &executed,
 	}
+	if len(p.Blocked) > 0 {
+		result.Status = "blocked"
+	}
+	return result
 }
 
 // blockedReply is nil when the plan can proceed. Otherwise it is an error
@@ -90,11 +94,15 @@ func (p *writePlan) previewDetails() interface{} {
 		return nil
 	}
 	if len(p.ParamNames) > 0 {
-		named := make(map[string]interface{}, len(p.ParamNames))
-		for i, name := range p.ParamNames {
-			if i < len(p.CallParams) {
-				named[name] = p.CallParams[i]
+		named := make(map[string]interface{}, len(p.CallParams))
+		for i, v := range p.CallParams {
+			if i < len(p.ParamNames) {
+				named[p.ParamNames[i]] = v
+				continue
 			}
+			// A shorter ParamNames list must still show every CallParams
+			// entry, so the preview cannot silently drop arguments.
+			named[fmt.Sprintf("param_%d", i)] = v
 		}
 		return planPreviewDetails(named, nil)
 	}

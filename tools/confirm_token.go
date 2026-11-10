@@ -176,7 +176,7 @@ func (c *confirmationTokens) redeemWithPlan(tok, tool string, argsHash, planHash
 	case e.argsHash != argsHash:
 		return fmt.Errorf("%w: it was issued for different arguments; repeat the previewed call with exactly the same arguments", errTokenRejected)
 	case e.planHash != planHash:
-		return fmt.Errorf("%w: it was issued for a different planned operation (the system state changed since the preview); nothing was executed", errTokenRejected)
+		return fmt.Errorf("%w: it was issued for a different planned operation (the system state changed since the preview)", errTokenRejected)
 	}
 	return nil
 }

@@ -349,7 +349,7 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 	if tool.Plan != nil {
 		plan, err = tool.Plan(ctx, r.client, withoutKeys(args, "confirmation_token", "dry_run"))
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("%s was NOT executed: %w; nothing was executed", name, err)
 		}
 		planHash, err = plan.planHash()
 		if err != nil {
@@ -368,7 +368,11 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 			if err := plan.blockedReply(); err != nil {
 				return "", err
 			}
-			return tool.Handler(ctx, r.client, withoutKeys(args, "confirmation_token", "dry_run"))
+			callArgs := withoutKeys(args, "confirmation_token", "dry_run")
+			if tool.Execute != nil {
+				return tool.Execute(ctx, r.client, callArgs, plan)
+			}
+			return tool.Handler(ctx, r.client, callArgs)
 		}
 	}
 	return r.confirmationRequired(ctx, name, tool, withoutKeys(args, "confirmation_token", "dry_run"), argsHash, planHash, rejected, legacyConfirm)

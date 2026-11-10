@@ -45,6 +45,10 @@ type Tool struct {
 	// that plan (issueWithPlan/redeemWithPlan) so a token cannot be
 	// used for a different planned operation.
 	Plan func(context.Context, *truenas.Client, map[string]interface{}) (*writePlan, error)
+	// Execute, when set, runs the verified plan after a token is
+	// redeemed. callDestructive passes the plan it just hashed, so
+	// the handler does not rebuild it.
+	Execute func(context.Context, *truenas.Client, map[string]interface{}, *writePlan) (string, error)
 }
 
 func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
@@ -243,6 +247,7 @@ func (r *Registry) registerTools() {
 		},
 		Handler: r.handleDeleteBootEnvironmentWithDryRun,
 		Plan:    planDeleteBootEnvironment,
+		Execute: executeDeleteBootEnvironment,
 	}
 
 	r.tools["get_current_boot_environment"] = Tool{
@@ -410,6 +415,8 @@ func (r *Registry) registerTools() {
 			},
 		},
 		Handler: r.handleDeleteScrubScheduleWithDryRun,
+		Plan:    planDeleteScrubSchedule,
+		Execute: executeDeleteScrubSchedule,
 	}
 
 	// Directory Services
@@ -1420,6 +1427,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 		},
 		Handler: r.handleStopAppWithDryRun,
 		Plan:    planStopApp,
+		Execute: r.executeStopApp,
 	}
 
 	// Get app config
@@ -1822,6 +1830,8 @@ Returns task_id for tracking progress with tasks_get.
 			},
 		},
 		Handler: r.handleDeleteAppWithDryRun,
+		Plan:    planDeleteApp,
+		Execute: r.executeDeleteApp,
 	}
 
 	// Query jobs
@@ -6708,19 +6718,16 @@ func (r *Registry) handleDeleteBootEnvironmentWithDryRun(ctx context.Context, cl
 	if err != nil {
 		return "", err
 	}
-	// A dry run of a blocked delete still returns the structured preview
-	// (deletion_allowed false, blocked reasons, no planned action) rather
-	// than an error, matching the previous dry-run behaviour.
-	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		return marshalJSON(plan.dryRunResult())
-	}
 	if err := plan.blockedReply(); err != nil {
 		return "", err
 	}
-	return executeDeleteBootEnvironment(ctx, client, plan)
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return marshalJSON(plan.dryRunResult())
+	}
+	return executeDeleteBootEnvironment(ctx, client, args, plan)
 }
 
-func executeDeleteBootEnvironment(ctx context.Context, client *truenas.Client, plan *writePlan) (string, error) {
+func executeDeleteBootEnvironment(ctx context.Context, client *truenas.Client, _ map[string]interface{}, plan *writePlan) (string, error) {
 	if err := plan.blockedReply(); err != nil {
 		return "", err
 	}

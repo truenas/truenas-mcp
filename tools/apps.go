@@ -815,12 +815,25 @@ func (r *Registry) handleInstallAppWithDryRun(ctx context.Context, client *truen
 // Section 3: Deletion Handler and Dry-Run
 // ============================================================================
 
-// handleDeleteApp deletes an installed app
-func handleDeleteApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, taskManager *tasks.Manager) (string, error) {
-	// Extract parameters
+const deleteAppMethod = "app.delete"
+
+// planDeleteApp builds the delete_app plan used by both the dry-run preview
+// and the real call. Host-path datasets are not deleted; that stays a warning.
+func planDeleteApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
-		return "", fmt.Errorf("app_name is required")
+		return nil, fmt.Errorf("app_name is required")
+	}
+
+	app, err := queryApp(ctx, client, appName)
+	if err != nil {
+		return nil, err
+	}
+
+	stateVal := app["state"]
+	state, ok := stateVal.(string)
+	if !ok || state == "" {
+		return nil, fmt.Errorf("failed to parse app state: expected a string")
 	}
 
 	removeImages := false
@@ -828,95 +841,6 @@ func handleDeleteApp(ctx context.Context, client *truenas.Client, args map[strin
 		removeImages = ri
 	}
 
-	// Call app.delete API
-	params := map[string]interface{}{
-		"remove_images": removeImages,
-	}
-
-	result, err := client.Call(ctx, "app.delete", appName, params)
-	if err != nil {
-		return "", fmt.Errorf("failed to delete app: %v", err)
-	}
-
-	// Parse job ID (app.delete may return an array [job_id] or just job_id)
-	var jobID int
-	// First try to parse as an integer
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		// If that fails, try parsing as an array and extract the first element
-		var jobIDArray []int
-		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
-			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
-		}
-		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("app.delete returned empty job ID array")
-		}
-		jobID = jobIDArray[0]
-	}
-
-	// Create task for tracking
-	task, err := taskManager.CreateJobTask(ctx,
-		"delete_app",
-		args,
-		jobID,
-		30*time.Minute, // 30 minute TTL
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to create task: %w", err)
-	}
-
-	response := map[string]interface{}{
-		"app_name":      appName,
-		"remove_images": removeImages,
-		"task_id":       task.TaskID,
-		"task_status":   task.Status,
-		"poll_interval": task.PollInterval,
-		"job_id":        jobID,
-		"message":       fmt.Sprintf("Deletion started. Track progress with tasks_get using task_id: %s", task.TaskID),
-	}
-
-	formatted, err := json.MarshalIndent(response, "", "  ")
-	if err != nil {
-		return "", err
-	}
-
-	return string(formatted), nil
-}
-
-// deleteAppDryRun implements dry-run for app deletion
-type deleteAppDryRun struct{}
-
-func (d *deleteAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	appName, ok := args["app_name"].(string)
-	if !ok || appName == "" {
-		return nil, fmt.Errorf("app_name is required")
-	}
-
-	// Query app details
-	result, err := client.Call(ctx, "app.query",
-		[]interface{}{
-			[]interface{}{"name", "=", appName},
-		},
-		map[string]interface{}{},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query app: %v", err)
-	}
-
-	var apps []interface{}
-	if err := json.Unmarshal(result, &apps); err != nil {
-		return nil, fmt.Errorf("failed to parse app query: %v", err)
-	}
-
-	if len(apps) == 0 {
-		return nil, fmt.Errorf("app not found: %s", appName)
-	}
-
-	app, ok := apps[0].(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("unexpected app.query result for %s", appName)
-	}
-
-	// Extract storage paths if available
 	storagePaths := []string{}
 	if config, ok := app["config"].(map[string]interface{}); ok {
 		if persistence, ok := config["persistence"].(map[string]interface{}); ok {
@@ -930,29 +854,11 @@ func (d *deleteAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Cli
 		}
 	}
 
-	// Build planned actions
-	actions := []PlannedAction{
-		{
-			Step:        1,
-			Description: "Stop app containers",
-			Operation:   "stop",
-			Target:      "app",
-		},
-		{
-			Step:        2,
-			Description: "Remove app configuration and containers",
-			Operation:   "delete",
-			Target:      "app.delete",
-		},
-	}
-
-	// Build warnings
 	warnings := []string{
 		"IMPORTANT: Host-path datasets will NOT be deleted",
 		"Data will be preserved in original locations",
 		"To remove data, manually delete datasets after app removal",
 	}
-
 	if len(storagePaths) > 0 {
 		warnings = append(warnings, "The following data paths will be preserved:")
 		for _, path := range storagePaths {
@@ -960,32 +866,93 @@ func (d *deleteAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Cli
 		}
 	}
 
-	result2 := &DryRunResult{
-		Tool: "delete_app",
+	return &writePlan{
+		Tool:        "delete_app",
+		Method:      deleteAppMethod,
+		CallParams:  []interface{}{appName, map[string]interface{}{"remove_images": removeImages}},
+		JobMethod:   deleteAppMethod,
+		Description: fmt.Sprintf("Remove application %q", appName),
+		Operation:   "delete",
+		ParamNames:  []string{"app_name", "options"},
 		CurrentState: map[string]interface{}{
 			"app_name":      appName,
-			"state":         app["state"],
+			"state":         state,
 			"version":       app["version"],
 			"storage_paths": storagePaths,
 		},
-		PlannedActions: actions,
-		Warnings:       warnings,
-		EstimatedTime: &EstimatedTime{
-			MinSeconds: 10,
-			MaxSeconds: 60,
-			Note:       "Time depends on app shutdown gracefully",
-		},
-	}
-
-	return result2, nil
+		Warnings:      warnings,
+		EstimatedTime: &EstimatedTime{MinSeconds: 10, MaxSeconds: 60, Note: "Time depends on app shutdown gracefully"},
+		TargetName:    appName,
+	}, nil
 }
 
-// handleDeleteAppWithDryRun wraps handleDeleteApp with dry-run support
 func (r *Registry) handleDeleteAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	dryRun := &deleteAppDryRun{}
-	return ExecuteWithDryRun(ctx, client, args, dryRun, func(ctx context.Context, c *truenas.Client, a map[string]interface{}) (string, error) {
-		return handleDeleteApp(ctx, c, a, r.taskManager)
-	})
+	plan, err := planDeleteApp(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return marshalJSON(plan.dryRunResult())
+	}
+	return r.executeDeleteApp(ctx, client, args, plan)
+}
+
+func (r *Registry) executeDeleteApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
+	if err != nil {
+		return "", fmt.Errorf("failed to delete app: %w", err)
+	}
+
+	var jobID int
+	if err := json.Unmarshal(result, &jobID); err != nil {
+		var jobIDArray []int
+		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
+			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
+		}
+		if len(jobIDArray) == 0 {
+			return "", fmt.Errorf("%s returned empty job ID array", plan.Method)
+		}
+		jobID = jobIDArray[0]
+	}
+
+	opts := []tasks.TaskOption{}
+	if plan.JobMethod != "" {
+		opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+	}
+	task, err := r.taskManager.CreateJobTask(ctx, "delete_app", args, jobID, 30*time.Minute, opts...)
+	if err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
+	}
+
+	removeImages := false
+	if len(plan.CallParams) > 1 {
+		if params, ok := plan.CallParams[1].(map[string]interface{}); ok {
+			if ri, ok := params["remove_images"].(bool); ok {
+				removeImages = ri
+			}
+		}
+	}
+
+	response := map[string]interface{}{
+		"app_name":      plan.TargetName,
+		"remove_images": removeImages,
+		"task_id":       task.TaskID,
+		"task_status":   task.Status,
+		"poll_interval": task.PollInterval,
+		"job_id":        jobID,
+		"message":       fmt.Sprintf("Deletion started. Track progress with tasks_get using task_id: %s", task.TaskID),
+	}
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(formatted), nil
 }
 
 // ============================================================================

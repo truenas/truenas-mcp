@@ -458,53 +458,105 @@ func (r *Registry) handleRunScrub(ctx context.Context, client *truenas.Client, a
 	return string(formatted), nil
 }
 
-func handleDeleteScrubSchedule(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+const poolScrubDeleteMethod = "pool.scrub.delete"
+
+func planDeleteScrubSchedule(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	scheduleID, ok := args["id"].(float64)
 	if !ok {
-		return "", fmt.Errorf("id is required")
+		return nil, fmt.Errorf("id is required")
 	}
-
 	id := int(scheduleID)
 
-	// Query schedule to verify it exists
 	result, err := client.Call(ctx, "pool.scrub.query", []interface{}{
 		[]interface{}{"id", "=", id},
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to query schedule: %w", err)
+		return nil, fmt.Errorf("failed to query schedule: %w", err)
 	}
 
 	var schedules []map[string]interface{}
 	if err := json.Unmarshal(result, &schedules); err != nil {
-		return "", fmt.Errorf("failed to parse schedules: %w", err)
+		return nil, fmt.Errorf("failed to parse schedules: %w", err)
 	}
-
 	if len(schedules) == 0 {
-		return "", fmt.Errorf("schedule with id %d not found", id)
+		return nil, fmt.Errorf("schedule with id %d not found", id)
 	}
 
 	schedule := schedules[0]
 	poolName, _ := schedule["pool_name"].(string)
+	schedObj, _ := schedule["schedule"].(map[string]interface{})
 
-	// Delete schedule
-	_, err = client.Call(ctx, "pool.scrub.delete", id)
+	simplified := map[string]interface{}{
+		"id":             id,
+		"pool":           poolName,
+		"schedule_human": formatCronSchedule(schedObj),
+		"enabled":        schedule["enabled"],
+		"threshold":      schedule["threshold"],
+	}
+
+	return &writePlan{
+		Tool:        "delete_scrub_schedule",
+		Method:      poolScrubDeleteMethod,
+		CallParams:  []interface{}{id},
+		Description: fmt.Sprintf("Delete scrub schedule for pool '%s'", poolName),
+		Operation:   "delete",
+		ParamNames:  []string{"id"},
+		CurrentState: map[string]interface{}{
+			"schedule": simplified,
+		},
+		Warnings: []string{
+			fmt.Sprintf("PERMANENT: Pool '%s' will no longer have automatic scrubbing", poolName),
+			"RECOMMENDATION: Run manual scrubs monthly to maintain data integrity",
+			"You can still run scrubs with run_scrub tool",
+			"Consider creating new schedule instead if adjusting timing",
+		},
+		TargetName: poolName,
+	}, nil
+}
+
+func (r *Registry) handleDeleteScrubScheduleWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planDeleteScrubSchedule(ctx, client, args)
 	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return marshalJSON(plan.dryRunResult())
+	}
+	return executeDeleteScrubSchedule(ctx, client, args, plan)
+}
+
+func executeDeleteScrubSchedule(ctx context.Context, client *truenas.Client, _ map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if _, err := callPlan(ctx, client, plan); err != nil {
 		return "", fmt.Errorf("failed to delete schedule: %w", err)
+	}
+
+	id := 0
+	if len(plan.CallParams) > 0 {
+		switch v := plan.CallParams[0].(type) {
+		case int:
+			id = v
+		case float64:
+			id = int(v)
+		}
 	}
 
 	response := map[string]interface{}{
 		"deleted":        true,
 		"id":             id,
-		"pool":           poolName,
-		"message":        fmt.Sprintf("Scrub schedule deleted for pool '%s'. IMPORTANT: Run manual scrubs monthly to maintain data integrity.", poolName),
+		"pool":           plan.TargetName,
+		"message":        fmt.Sprintf("Scrub schedule deleted for pool '%s'. IMPORTANT: Run manual scrubs monthly to maintain data integrity.", plan.TargetName),
 		"recommendation": "Use run_scrub tool for manual scrubs, or create a new schedule with create_scrub_schedule",
 	}
-
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
 }
 
@@ -516,10 +568,6 @@ func (r *Registry) handleCreateScrubScheduleWithDryRun(ctx context.Context, clie
 
 func (r *Registry) handleRunScrubWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	return ExecuteWithDryRun(ctx, client, args, &runScrubDryRun{}, r.handleRunScrub)
-}
-
-func (r *Registry) handleDeleteScrubScheduleWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &deleteScrubScheduleDryRun{}, handleDeleteScrubSchedule)
 }
 
 // Dry-run implementations
@@ -837,71 +885,6 @@ func (r *runScrubDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Clie
 		}
 	}
 	return result, nil
-}
-
-type deleteScrubScheduleDryRun struct{}
-
-func (d *deleteScrubScheduleDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	scheduleID, ok := args["id"].(float64)
-	if !ok {
-		return nil, fmt.Errorf("id is required")
-	}
-
-	id := int(scheduleID)
-
-	// Query schedule
-	result, err := client.Call(ctx, "pool.scrub.query", []interface{}{
-		[]interface{}{"id", "=", id},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query schedule: %w", err)
-	}
-
-	var schedules []map[string]interface{}
-	if err := json.Unmarshal(result, &schedules); err != nil {
-		return nil, fmt.Errorf("failed to parse schedules: %w", err)
-	}
-
-	if len(schedules) == 0 {
-		return nil, fmt.Errorf("schedule with id %d not found", id)
-	}
-
-	schedule := schedules[0]
-	poolName, _ := schedule["pool_name"].(string)
-	schedObj, _ := schedule["schedule"].(map[string]interface{})
-
-	simplified := map[string]interface{}{
-		"id":             id,
-		"pool":           poolName,
-		"schedule_human": formatCronSchedule(schedObj),
-		"enabled":        schedule["enabled"],
-		"threshold":      schedule["threshold"],
-	}
-
-	warnings := []string{
-		fmt.Sprintf("PERMANENT: Pool '%s' will no longer have automatic scrubbing", poolName),
-		"RECOMMENDATION: Run manual scrubs monthly to maintain data integrity",
-		"You can still run scrubs with run_scrub tool",
-		"Consider creating new schedule instead if adjusting timing",
-	}
-
-	actions := []PlannedAction{
-		{
-			Step:        1,
-			Description: fmt.Sprintf("Delete scrub schedule for pool '%s'", poolName),
-			Operation:   "delete",
-			Target:      poolName,
-		},
-	}
-
-	return &DryRunResult{
-		Tool: "delete_scrub_schedule",
-		CurrentState: map[string]interface{}{
-			"schedule": simplified,
-		},
-		PlannedActions: actions,
-		Warnings:       warnings,
-	}, nil
 }
 
 // Helper functions for scrub management

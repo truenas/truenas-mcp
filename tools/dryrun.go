@@ -14,6 +14,8 @@ type DryRunnable interface {
 
 // DryRunResult represents the preview of changes that would be made
 type DryRunResult struct {
+	// Status is "blocked" when the plan cannot proceed. Omitted otherwise.
+	Status         string          `json:"status,omitempty"`
 	Tool           string          `json:"tool"`
 	CurrentState   interface{}     `json:"current_state"`
 	PlannedActions []PlannedAction `json:"planned_actions"`
