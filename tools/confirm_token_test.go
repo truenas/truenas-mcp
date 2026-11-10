@@ -289,9 +289,9 @@ func TestReadOnlyIssuesNoTokens(t *testing.T) {
 // preview round trip, so their middleware call counts stay unchanged.
 func approve(t *testing.T, r *Registry, name string, args map[string]interface{}) map[string]interface{} {
 	t.Helper()
-	a := withoutKeys(args, "confirm", "confirmation_token")
 	tool := r.tools[name]
-	h, err := confirmationArgsHash(dropNullOptionals(tool.Definition.InputSchema, a))
+	a := dropNullOptionals(tool.Definition.InputSchema, withoutKeys(args, "confirm", "confirmation_token"))
+	h, err := confirmationArgsHash(a)
 	if err != nil {
 		t.Fatal(err)
 	}

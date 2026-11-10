@@ -34,6 +34,14 @@ type writePlan struct {
 	// TargetName is an optional label used in execute responses (for
 	// example the app name for start_app).
 	TargetName string
+	// Actions, when non-nil, is the preview's planned_actions. Use this
+	// when the preview describes several steps that a single middleware
+	// call will perform (for example upgrade_app). The real call is still
+	// Method and CallParams; paramNamesOK still applies.
+	Actions []PlannedAction
+	// Result is execute-only data produced while planning. It is not
+	// shown in the preview.
+	Result map[string]interface{}
 }
 
 func (p *writePlan) dryRunResult() (*DryRunResult, error) {
@@ -85,6 +93,12 @@ func (p *writePlan) blockedReply() error {
 func (p *writePlan) plannedActions() ([]PlannedAction, error) {
 	if p == nil || len(p.Blocked) > 0 {
 		return []PlannedAction{}, p.paramNamesOK()
+	}
+	if err := p.paramNamesOK(); err != nil {
+		return nil, err
+	}
+	if p.Actions != nil {
+		return p.Actions, nil
 	}
 	details, err := p.previewDetails()
 	if err != nil {

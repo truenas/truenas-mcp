@@ -564,7 +564,7 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		}},
 	}
 	allowed := func(method string) bool {
-		for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", "upgrade_summary", ".pool_choices"} {
+		for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", "upgrade_summary", ".pool_choices", ".available", ".get_app_details"} {
 			if strings.HasSuffix(method, suffix) {
 				return true
 			}

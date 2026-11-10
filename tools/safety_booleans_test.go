@@ -10,7 +10,7 @@ import (
 const secretDryRunValue = "true-secret-must-not-be-echoed"
 
 func writeishMiddlewareMethod(method string) bool {
-	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices"} {
+	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details"} {
 		if strings.HasSuffix(method, suffix) {
 			return false
 		}
@@ -39,7 +39,7 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 		"start_app":               {"app_name": "plex"},
 		"upgrade_app":             {"app_name": "plex", "version": "2.0.0"},
 		"install_app":             {"app_name": "plex", "train": "stable"},
-		"update_app":              {"app_name": "plex"},
+		"update_app":              {"app_name": "plex", "values": validHostPathValues()},
 		"leave_directory_service": {"credential": map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"}},
 		"configure_directory_service": {"service_type": "ACTIVEDIRECTORY", "enable": true,
 			"credential":    map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"},
@@ -71,7 +71,11 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 // write to the middleware.
 func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 	client, fake := newFakeClientWith(t, map[string]interface{}{
-		"app.query": []interface{}{appEntry("plex", "RUNNING")},
+		"app.query":               []interface{}{appEntry("plex", "RUNNING")},
+		"app.upgrade_summary":     upgradeSummaryFixture("x"),
+		"catalog.get_app_details": hostPathCatalogDetails(),
+		"app.available":           []interface{}{map[string]interface{}{"name": "plex", "train": "community"}},
+		"app.config":              map[string]interface{}{},
 		"boot.environment.query": []interface{}{
 			map[string]interface{}{"id": "25.04.1", "active": false, "activated": false, "keep": false},
 		},
