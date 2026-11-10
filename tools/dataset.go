@@ -144,6 +144,10 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 			"estimated_path": fmt.Sprintf("/mnt/%s", name),
 		}
 
+		if err := checkCreateDatasetPreflight(client, name); err != nil {
+			return "", err
+		}
+
 		// create_ancestors defaults to true: list missing parents that
 		// would be created, in order from parent to child, so the client
 		// can report them before confirming.
@@ -153,6 +157,9 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 				return "", err
 			}
 			preview["ancestors_to_create"] = missing
+			if len(missing) > 0 {
+				preview["ancestors_note"] = ancestorsInheritNote
+			}
 		} else {
 			preview["ancestors_to_create"] = []string{}
 		}
@@ -226,6 +233,49 @@ func datasetAncestorNames(name string) []string {
 	return ancestors
 }
 
+// ancestorsInheritNote explains that missing parents are created as plain
+// filesystems that inherit from their parent, not with the leaf's properties.
+const ancestorsInheritNote = "Missing ancestors are created with no properties of their own; they inherit compression, ACL type, quota and encryption from their parent. They do not receive this dataset's share_type, compression, quota or encryption. Under an unencrypted parent, ancestors of an encrypted dataset are unencrypted."
+
+// maxDatasetNameLen is OpenZFS's ZFS_MAX_DATASET_NAME_LEN minus the NUL.
+const maxDatasetNameLen = 255
+
+func datasetNameExists(client *truenas.Client, name string) (bool, error) {
+	result, err := client.Call("pool.dataset.query",
+		[]interface{}{[]interface{}{"name", "=", name}},
+		map[string]interface{}{},
+	)
+	if err != nil {
+		return false, fmt.Errorf("failed to check dataset %s: %w", name, err)
+	}
+	var rows []interface{}
+	if err := json.Unmarshal(result, &rows); err != nil {
+		return false, fmt.Errorf("failed to parse dataset query for %s: %w", name, err)
+	}
+	return len(rows) > 0, nil
+}
+
+// checkCreateDatasetPreflight rejects a dry-run preview that would read as
+// if the create would succeed when the middleware would refuse it.
+func checkCreateDatasetPreflight(client *truenas.Client, name string) error {
+	pool := strings.SplitN(name, "/", 2)[0]
+	pools, err := listPoolNames(client)
+	if err != nil {
+		return err
+	}
+	if !pools[pool] {
+		return fmt.Errorf("pool %q does not exist", pool)
+	}
+	exists, err := datasetNameExists(client, name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("dataset %q already exists", name)
+	}
+	return nil
+}
+
 // missingAncestorDatasets returns ancestors of name that do not yet exist,
 // in parent-to-child order.
 func missingAncestorDatasets(client *truenas.Client, name string) ([]string, error) {
@@ -235,23 +285,20 @@ func missingAncestorDatasets(client *truenas.Client, name string) ([]string, err
 	}
 	missing := make([]string, 0, len(ancestors))
 	for _, ancestor := range ancestors {
-		result, err := client.Call("pool.dataset.query",
-			[]interface{}{[]interface{}{"name", "=", ancestor}},
-			map[string]interface{}{},
-		)
+		exists, err := datasetNameExists(client, ancestor)
 		if err != nil {
-			return nil, fmt.Errorf("failed to check ancestor dataset %s: %w", ancestor, err)
+			return nil, err
 		}
-		var rows []interface{}
-		if err := json.Unmarshal(result, &rows); err != nil {
-			return nil, fmt.Errorf("failed to parse ancestor query for %s: %w", ancestor, err)
-		}
-		if len(rows) == 0 {
+		if !exists {
 			missing = append(missing, ancestor)
 		}
 	}
 	return missing, nil
 }
+
+// datasetNameInvalidChars matches characters ZFS (and this tool) reject
+// in a dataset name.
+var datasetNameInvalidChars = regexp.MustCompile(`[^a-zA-Z0-9/_.-]`)
 
 // validateDatasetName validates the dataset name format
 func validateDatasetName(name string) error {
@@ -264,9 +311,12 @@ func validateDatasetName(name string) error {
 		return fmt.Errorf("dataset name must include pool name (e.g., 'pool/dataset')")
 	}
 
+	if len(name) > maxDatasetNameLen {
+		return fmt.Errorf("dataset name is too long (maximum %d characters)", maxDatasetNameLen)
+	}
+
 	// Check for invalid characters
-	invalidChars := regexp.MustCompile(`[^a-zA-Z0-9/_.-]`)
-	if invalidChars.MatchString(name) {
+	if datasetNameInvalidChars.MatchString(name) {
 		return fmt.Errorf("dataset name contains invalid characters (only alphanumeric, /, _, ., - allowed)")
 	}
 
@@ -278,6 +328,12 @@ func validateDatasetName(name string) error {
 	// Cannot have consecutive slashes
 	if strings.Contains(name, "//") {
 		return fmt.Errorf("dataset name cannot contain consecutive slashes")
+	}
+
+	for _, part := range strings.Split(name, "/") {
+		if part == "." || part == ".." {
+			return fmt.Errorf("dataset name cannot contain '.' or '..' path components")
+		}
 	}
 
 	return nil

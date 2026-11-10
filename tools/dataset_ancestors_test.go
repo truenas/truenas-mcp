@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/truenas/truenas-mcp/truenas"
@@ -79,6 +80,20 @@ func ancestorStrings(preview map[string]interface{}) []string {
 	return out
 }
 
+func requireAncestors(t *testing.T, preview map[string]interface{}, want []string) {
+	t.Helper()
+	raw, ok := preview["ancestors_to_create"]
+	if !ok {
+		t.Fatalf("ancestors_to_create is missing, want %v", want)
+	}
+	if raw == nil {
+		t.Fatalf("ancestors_to_create is null, want %v", want)
+	}
+	got := ancestorStrings(preview)
+	if !sameStrings(got, want) {
+		t.Errorf("ancestors_to_create = %v, want %v", got, want)
+	}
+}
 func sameStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
@@ -100,11 +115,7 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 		preview := createDatasetDryRun(t, client, map[string]interface{}{
 			"name": "tank/apps/jellyfin/config",
 		})
-		got := ancestorStrings(preview)
-		want := []string{"tank/apps", "tank/apps/jellyfin"}
-		if !sameStrings(got, want) {
-			t.Errorf("ancestors_to_create = %v, want %v (parent to child)", got, want)
-		}
+		requireAncestors(t, preview, []string{"tank/apps", "tank/apps/jellyfin"})
 		payload, _ := preview["payload"].(map[string]interface{})
 		if payload["create_ancestors"] != true {
 			t.Errorf("default create_ancestors = %v, want true", payload["create_ancestors"])
@@ -119,11 +130,7 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 		preview := createDatasetDryRun(t, client, map[string]interface{}{
 			"name": "tank/apps/jellyfin/config",
 		})
-		got := ancestorStrings(preview)
-		want := []string{"tank/apps/jellyfin"}
-		if !sameStrings(got, want) {
-			t.Errorf("ancestors_to_create = %v, want %v", got, want)
-		}
+		requireAncestors(t, preview, []string{"tank/apps/jellyfin"})
 	})
 
 	t.Run("empty list when all ancestors exist", func(t *testing.T) {
@@ -131,10 +138,7 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 		preview := createDatasetDryRun(t, client, map[string]interface{}{
 			"name": "tank/apps/jellyfin/config",
 		})
-		got := ancestorStrings(preview)
-		if !sameStrings(got, []string{}) {
-			t.Errorf("ancestors_to_create = %v, want an empty list", got)
-		}
+		requireAncestors(t, preview, []string{})
 	})
 
 	t.Run("empty list when there are no intermediate ancestors", func(t *testing.T) {
@@ -142,12 +146,11 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 		preview := createDatasetDryRun(t, client, map[string]interface{}{
 			"name": "tank/config",
 		})
-		got := ancestorStrings(preview)
-		if !sameStrings(got, []string{}) {
-			t.Errorf("ancestors_to_create = %v, want an empty list", got)
-		}
-		if n := len(fake.called("pool.dataset.query")); n != 0 {
-			t.Errorf("queried ancestors %d times for a pool/leaf name, want 0", n)
+		requireAncestors(t, preview, []string{})
+		// Preflight may query the target once to see if it already exists;
+		// there are no intermediate ancestors to look up.
+		if n := len(fake.called("pool.dataset.query")); n > 1 {
+			t.Errorf("queried datasets %d times for a pool/leaf name, want at most 1", n)
 		}
 	})
 
@@ -157,10 +160,7 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 			"name":             "tank/apps/jellyfin/config",
 			"create_ancestors": false,
 		})
-		got := ancestorStrings(preview)
-		if len(got) != 0 {
-			t.Errorf("create_ancestors=false but ancestors_to_create = %v, want none", got)
-		}
+		requireAncestors(t, preview, []string{})
 		payload, _ := preview["payload"].(map[string]interface{})
 		if payload["create_ancestors"] != false {
 			t.Errorf("payload create_ancestors = %v, want false", payload["create_ancestors"])
@@ -169,4 +169,99 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 			t.Errorf("dry-run called pool.dataset.create %d times", n)
 		}
 	})
+
+	t.Run("exact match not a prefix sibling", func(t *testing.T) {
+		client, _ := ancestorDryRunFake(t, []string{"tank", "tank/ab"})
+		preview := createDatasetDryRun(t, client, map[string]interface{}{
+			"name": "tank/a/b",
+		})
+		requireAncestors(t, preview, []string{"tank/a"})
+	})
+
+	t.Run("notes that ancestors inherit and are unencrypted under an unencrypted parent", func(t *testing.T) {
+		client, _ := ancestorDryRunFake(t, []string{"tank"})
+		preview := createDatasetDryRun(t, client, map[string]interface{}{
+			"name":       "tank/apps/jellyfin/config",
+			"encryption": true,
+			"encryption_options": map[string]interface{}{
+				"generate_key": true,
+			},
+		})
+		requireAncestors(t, preview, []string{"tank/apps", "tank/apps/jellyfin"})
+		note, _ := preview["ancestors_note"].(string)
+		low := strings.ToLower(note)
+		for _, want := range []string{"inherit", "encryption", "unencrypted"} {
+			if !strings.Contains(low, want) {
+				t.Errorf("ancestors_note = %q, want it to mention %q", note, want)
+			}
+		}
+	})
+}
+
+// TestCreateDatasetDryRunRejectsNamesTheCreateWouldReject is the follow-up
+// for the ancestor preview listing parents for a name the middleware would
+// refuse: a missing pool, an existing target, '.'/'..' components, and a
+// name over the ZFS length limit.
+func TestCreateDatasetDryRunRejectsNamesTheCreateWouldReject(t *testing.T) {
+	t.Run("missing pool", func(t *testing.T) {
+		client, fake := ancestorDryRunFake(t, []string{})
+		_, err := createDatasetDryRunMaybe(t, client, map[string]interface{}{
+			"name": "nopool/a/b/c",
+		})
+		if err == nil {
+			t.Fatal("dry-run of nopool/a/b/c succeeded")
+		}
+		if !strings.Contains(err.Error(), "nopool") || !strings.Contains(err.Error(), "does not exist") {
+			t.Errorf("error %q, want a missing-pool message", err)
+		}
+		if n := len(fake.called("pool.dataset.create")); n != 0 {
+			t.Errorf("dry-run called pool.dataset.create %d times", n)
+		}
+	})
+
+	t.Run("target already exists", func(t *testing.T) {
+		client, fake := ancestorDryRunFake(t, []string{"tank", "tank/apps", "tank/apps/jellyfin", "tank/apps/jellyfin/config"})
+		_, err := createDatasetDryRunMaybe(t, client, map[string]interface{}{
+			"name": "tank/apps/jellyfin/config",
+		})
+		if err == nil {
+			t.Fatal("dry-run of an existing dataset succeeded")
+		}
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Errorf("error %q, want already exists", err)
+		}
+		if n := len(fake.called("pool.dataset.create")); n != 0 {
+			t.Errorf("dry-run called pool.dataset.create %d times", n)
+		}
+	})
+
+	t.Run("dot-dot components", func(t *testing.T) {
+		client, fake := ancestorDryRunFake(t, []string{"tank"})
+		_, err := createDatasetDryRunMaybe(t, client, map[string]interface{}{
+			"name": "tank/../x/y",
+		})
+		if err == nil {
+			t.Fatal("dry-run of tank/../x/y succeeded")
+		}
+		if !strings.Contains(err.Error(), "'.' or '..'") {
+			t.Errorf("error %q, want a '.'/'..' message", err)
+		}
+		if n := len(fake.called("pool.dataset.query")); n != 0 {
+			t.Errorf("queried datasets %d times for an invalid name", n)
+		}
+	})
+}
+
+func createDatasetDryRunMaybe(t *testing.T, client *truenas.Client, args map[string]interface{}) (map[string]interface{}, error) {
+	t.Helper()
+	args["dry_run"] = true
+	out, err := handleCreateDataset(client, args)
+	if err != nil {
+		return nil, err
+	}
+	var preview map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &preview); err != nil {
+		t.Fatalf("parse preview: %v; body=%s", err, out)
+	}
+	return preview, nil
 }

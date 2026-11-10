@@ -48,13 +48,17 @@ func handleSearchAppCatalog(client *truenas.Client, args map[string]interface{})
 	if l, ok := args["limit"].(float64); ok {
 		limit = int(l)
 	}
+	if limit <= 0 {
+		return "", fmt.Errorf("limit must be at least 1; nothing was executed")
+	}
 
 	// Build filters
 	filters := []interface{}{}
 
-	// Add query filter if provided
+	// Escape the query so the middleware's regex operator does a literal
+	// substring match. Characters like + and ( would otherwise be special.
 	if query != "" {
-		filters = append(filters, []interface{}{"name", "~", query})
+		filters = append(filters, []interface{}{"name", "~", regexp.QuoteMeta(query)})
 	}
 
 	// Add category filter if provided
@@ -546,9 +550,9 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 		return "", fmt.Errorf("catalog_app is required")
 	}
 
-	train := "stable"
-	if t, ok := args["train"].(string); ok && t != "" {
-		train = t
+	train, err := catalogTrainForInstall(client, catalogApp, args)
+	if err != nil {
+		return "", err
 	}
 
 	version := "latest"
@@ -651,9 +655,9 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	if !ok || catalogApp == "" {
 		return nil, fmt.Errorf("catalog_app is required")
 	}
-	train := "stable"
-	if t, ok := args["train"].(string); ok && t != "" {
-		train = t
+	train, err := catalogTrainForInstall(client, catalogApp, args)
+	if err != nil {
+		return nil, err
 	}
 
 	// Validate app name
@@ -973,14 +977,27 @@ func (r *Registry) handleDeleteAppWithDryRun(client *truenas.Client, args map[st
 // Section 4: Helper Functions
 // ============================================================================
 
+// catalogTrainForInstall returns the catalog train for an install: the
+// caller's train when given, otherwise the preferred train that has the
+// catalog app (same lookup as get_app_catalog_details).
+func catalogTrainForInstall(client *truenas.Client, catalogApp string, args map[string]interface{}) (string, error) {
+	if t, ok := args["train"].(string); ok && t != "" {
+		return t, nil
+	}
+	train, _, err := resolveCatalogTrain(client, catalogApp)
+	return train, err
+}
+
+// appNamePattern is the TrueNAS app instance name rule.
+var appNamePattern = regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
+
 // validateAppName validates app instance name follows TrueNAS requirements
 func validateAppName(name string) error {
 	if len(name) == 0 || len(name) > 40 {
 		return fmt.Errorf("app name must be 1-40 characters, got %d", len(name))
 	}
 
-	pattern := regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
-	if !pattern.MatchString(name) {
+	if !appNamePattern.MatchString(name) {
 		return fmt.Errorf("app name must be lowercase, start with letter, and contain only letters/numbers/hyphens (no leading/trailing hyphens)")
 	}
 

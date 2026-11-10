@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -267,5 +268,213 @@ func TestCatalogTrainSchemaDefaults(t *testing.T) {
 	details := r.tools["get_app_catalog_details"].Definition.InputSchema["properties"].(map[string]interface{})["train"].(map[string]interface{})
 	if d, has := details["default"]; has {
 		t.Errorf("get_app_catalog_details train default = %v, want none", d)
+	}
+	install := r.tools["install_app"].Definition.InputSchema["properties"].(map[string]interface{})["train"].(map[string]interface{})
+	if d, has := install["default"]; has {
+		t.Errorf("install_app train default = %v, want none", d)
+	}
+}
+
+// search_app_catalog must send the query as a literal pattern, not as a
+// regex: characters like + and ( are escaped. limit <= 0 is rejected and
+// nothing is sent to the middleware.
+func TestSearchAppCatalogEscapesQueryAndRejectsNonPositiveLimit(t *testing.T) {
+	out, err, fake := callCatalogTool(t, "search_app_catalog", map[string]interface{}{"query": "c++"})
+	if err != nil {
+		t.Fatalf("c++ query: %v (%s)", err, out)
+	}
+	calls := fake.called("app.available")
+	if len(calls) != 1 {
+		t.Fatalf("app.available called %d times", len(calls))
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal(calls[0].Params, &raw); err != nil || len(raw) == 0 {
+		t.Fatalf("params = %s (%v)", calls[0].Params, err)
+	}
+	var filters [][]interface{}
+	if err := json.Unmarshal(raw[0], &filters); err != nil {
+		t.Fatalf("filters = %s (%v)", raw[0], err)
+	}
+	escaped := regexp.QuoteMeta("c++")
+	found := false
+	for _, f := range filters {
+		if len(f) >= 3 && f[0] == "name" && f[1] == "~" && f[2] == escaped {
+			found = true
+		}
+		if len(f) >= 3 && f[0] == "name" && f[2] == "c++" {
+			t.Errorf("query was sent unescaped: %s", calls[0].Params)
+		}
+	}
+	if !found {
+		t.Errorf("app.available filters = %s, want name ~ %q", calls[0].Params, escaped)
+	}
+
+	for _, limit := range []float64{0, -1} {
+		_, err, fake := callCatalogTool(t, "search_app_catalog", map[string]interface{}{"query": "app", "limit": limit})
+		if err == nil {
+			t.Errorf("limit %v: no error", limit)
+			continue
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "limit") || !strings.Contains(msg, "nothing was executed") {
+			t.Errorf("limit %v: error %q, want limit and nothing was executed", limit, msg)
+		}
+		if n := len(fake.called("app.available")); n != 0 {
+			t.Errorf("limit %v: app.available called %d times, want 0", limit, n)
+		}
+	}
+}
+
+func installCatalogRegistry(t *testing.T) (*Registry, *fakeMiddleware) {
+	t.Helper()
+	existing := map[string]bool{
+		"tank/apps/jellyfin/config": true,
+		"tank/apps/jellyfin/data":   true,
+	}
+	base := catalogHandle(t)
+	fake := &fakeMiddleware{
+		results: map[string]interface{}{
+			"pool.query": []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+			"app.query":  []interface{}{},
+			"app.create": 101,
+		},
+		handle: func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+			switch method {
+			case "app.available":
+				return base(method, params)
+			case "catalog.get_app_details":
+				res, rpcErr, ok := base(method, params)
+				if !ok || rpcErr != nil {
+					return res, rpcErr, ok
+				}
+				details := hostPathCatalogDetails()
+				if m, ok := res.(map[string]interface{}); ok {
+					if name, ok := m["name"]; ok {
+						details["name"] = name
+					}
+				}
+				return details, nil, true
+			case "pool.dataset.query":
+				var args []interface{}
+				if err := json.Unmarshal(params, &args); err != nil || len(args) == 0 {
+					return []interface{}{}, nil, true
+				}
+				filters, _ := args[0].([]interface{})
+				name := ""
+				if len(filters) > 0 {
+					if f, ok := filters[0].([]interface{}); ok && len(f) >= 3 {
+						if s, ok := f[2].(string); ok {
+							name = s
+						}
+					}
+				}
+				if existing[name] {
+					return []interface{}{map[string]interface{}{"name": name}}, nil, true
+				}
+				return []interface{}{}, nil, true
+			default:
+				return nil, nil, false
+			}
+		},
+	}
+	client, _ := newFakeClientFrom(t, fake)
+	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
+	t.Cleanup(mgr.Shutdown)
+	return NewRegistry(client, mgr), fake
+}
+
+func installCatalogArgs(catalogApp string, extra map[string]interface{}) map[string]interface{} {
+	args := map[string]interface{}{
+		"app_name":    catalogApp,
+		"catalog_app": catalogApp,
+		"values":      validHostPathValues(),
+	}
+	for k, v := range extra {
+		args[k] = v
+	}
+	return args
+}
+
+func appCreateTrain(t *testing.T, fake *fakeMiddleware) string {
+	t.Helper()
+	calls := fake.called("app.create")
+	if len(calls) != 1 {
+		t.Fatalf("app.create called %d times, want 1", len(calls))
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal(calls[0].Params, &raw); err != nil || len(raw) == 0 {
+		t.Fatalf("app.create params = %s (%v)", calls[0].Params, err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(raw[0], &payload); err != nil {
+		t.Fatalf("app.create payload = %s (%v)", raw[0], err)
+	}
+	train, _ := payload["train"].(string)
+	return train
+}
+
+// Without a train, install_app looks up the catalog train, so a
+// community-only app is installed from community rather than stable.
+func TestInstallAppResolvesTrain(t *testing.T) {
+	for _, c := range []struct {
+		app, want string
+	}{
+		{"communityapp", "community"},
+		{"stableapp", "stable"},
+		{"bothapp", "stable"},
+	} {
+		r, fake := installCatalogRegistry(t)
+		out, err := r.CallTool(t.Context(), "install_app", installCatalogArgs(c.app, nil))
+		if err != nil {
+			t.Errorf("%s: %v (%s)", c.app, err, out)
+			continue
+		}
+		resp := decode(t, out)
+		if resp["train"] != c.want {
+			t.Errorf("%s: train = %v, want %s", c.app, resp["train"], c.want)
+		}
+		if got := appCreateTrain(t, fake); got != c.want {
+			t.Errorf("%s: app.create train = %q, want %s", c.app, got, c.want)
+		}
+	}
+
+	r, fake := installCatalogRegistry(t)
+	out, err := r.CallTool(t.Context(), "install_app", installCatalogArgs("communityapp", map[string]interface{}{"dry_run": true}))
+	if err != nil {
+		t.Fatalf("dry-run: %v (%s)", err, out)
+	}
+	if n := len(fake.called("app.create")); n != 0 {
+		t.Errorf("dry-run called app.create %d times", n)
+	}
+	preview := decode(t, out)
+	actions, _ := preview["planned_actions"].([]interface{})
+	found := false
+	for _, a := range actions {
+		m, _ := a.(map[string]interface{})
+		details, _ := m["details"].(map[string]interface{})
+		if details["train"] == "community" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("dry-run preview = %s, want train community", out)
+	}
+}
+
+// An explicit train is used as given, without a lookup.
+func TestInstallAppHonorsTrain(t *testing.T) {
+	r, fake := installCatalogRegistry(t)
+	out, err := r.CallTool(t.Context(), "install_app", installCatalogArgs("bothapp", map[string]interface{}{"train": "community"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp := decode(t, out); resp["train"] != "community" {
+		t.Errorf("train = %v, want community", resp["train"])
+	}
+	if got := appCreateTrain(t, fake); got != "community" {
+		t.Errorf("app.create train = %q, want community", got)
+	}
+	if n := len(fake.called("app.available")); n != 0 {
+		t.Errorf("app.available called %d times with an explicit train", n)
 	}
 }

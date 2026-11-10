@@ -103,7 +103,10 @@ func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface
 }
 
 func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (string, error) {
-	poolFilter, hasPoolFilter := args["pool"].(string)
+	poolFilter, _ := args["pool"].(string)
+	// An empty pool is treated as unset, so the caller gets every pool
+	// instead of an empty list.
+	hasPoolFilter := poolFilter != ""
 
 	// Query all pools
 	poolsResult, err := client.Call("pool.query", []interface{}{})
