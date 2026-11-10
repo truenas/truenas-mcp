@@ -329,6 +329,9 @@ func hostPathACLConfig(path, aclPath string) map[string]interface{} {
 	}
 }
 
+// hostPathFieldSchema mirrors the real catalog shapes (truenas/apps): the
+// list item's variable name (share_entry, module, conf) is not a key in
+// values, and nextcloud custom_confs items are typed hostpath, not hostpathfile.
 func hostPathFieldSchema() map[string]interface{} {
 	schema := hostPathTestSchema()
 	questions, _ := schema["questions"].([]interface{})
@@ -342,20 +345,13 @@ func hostPathFieldSchema() map[string]interface{} {
 			"default": []interface{}{},
 			"items": []interface{}{
 				map[string]interface{}{
+					"variable": "share_entry",
 					"schema": map[string]interface{}{
 						"type": "dict",
 						"attrs": []interface{}{
 							map[string]interface{}{
-								"variable": "share_entry",
-								"schema": map[string]interface{}{
-									"type": "dict",
-									"attrs": []interface{}{
-										map[string]interface{}{
-											"variable": "host_path",
-											"schema":   map[string]interface{}{"type": "hostpath"},
-										},
-									},
-								},
+								"variable": "host_path",
+								"schema":   map[string]interface{}{"type": "hostpath", "required": true},
 							},
 						},
 					},
@@ -377,20 +373,13 @@ func hostPathFieldSchema() map[string]interface{} {
 							"default": []interface{}{},
 							"items": []interface{}{
 								map[string]interface{}{
+									"variable": "module",
 									"schema": map[string]interface{}{
 										"type": "dict",
 										"attrs": []interface{}{
 											map[string]interface{}{
-												"variable": "module",
-												"schema": map[string]interface{}{
-													"type": "dict",
-													"attrs": []interface{}{
-														map[string]interface{}{
-															"variable": "host_path",
-															"schema":   map[string]interface{}{"type": "hostpath"},
-														},
-													},
-												},
+												"variable": "host_path",
+												"schema":   map[string]interface{}{"type": "hostpath", "required": true},
 											},
 										},
 									},
@@ -417,7 +406,10 @@ func hostPathFieldSchema() map[string]interface{} {
 										"type":    "list",
 										"default": []interface{}{},
 										"items": []interface{}{
-											map[string]interface{}{"schema": map[string]interface{}{"type": "hostpathfile"}},
+											map[string]interface{}{
+												"variable": "conf",
+												"schema":   map[string]interface{}{"type": "hostpath", "required": true},
+											},
 										},
 									},
 								},
@@ -539,19 +531,19 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 		mustRefuse(t, "install_app", values, "create_dataset", nil)
 	})
 
-	t.Run("webdav share_entry.host_path /etc is rejected", func(t *testing.T) {
+	t.Run("webdav shares[].host_path /etc is rejected", func(t *testing.T) {
 		values := cloneValues(validHostPathValues())
 		values["storage"].(map[string]interface{})["shares"] = []interface{}{
-			map[string]interface{}{"share_entry": map[string]interface{}{"host_path": "/etc"}},
+			map[string]interface{}{"name": "share1", "host_path": "/etc"},
 		}
 		mustRefuse(t, "install_app", values, "invalid path", nil)
 	})
 
-	t.Run("rsyncd module.host_path /etc is rejected", func(t *testing.T) {
+	t.Run("rsyncd rsync_modules[].host_path /etc is rejected", func(t *testing.T) {
 		values := cloneValues(validHostPathValues())
 		values["rsyncd"] = map[string]interface{}{
 			"rsync_modules": []interface{}{
-				map[string]interface{}{"module": map[string]interface{}{"host_path": "/etc"}},
+				map[string]interface{}{"name": "module1", "host_path": "/etc"},
 			},
 		}
 		mustRefuse(t, "install_app", values, "invalid path", nil)
@@ -698,6 +690,115 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 		}
 		if n := len(fake.called("app.create")); n != 0 {
 			t.Errorf("app.create called %d times", n)
+		}
+	})
+}
+
+// TestAppHostPathCatalogFollowups covers the post-merge review nits: fail
+// closed on an unusable schema, nextcloud custom_confs mounted as files,
+// and an allow list for off-schema storage types.
+func TestAppHostPathCatalogFollowups(t *testing.T) {
+	callInstall := func(t *testing.T, schema map[string]interface{}, values map[string]interface{}, dry bool) (string, error, *fakeMiddleware) {
+		t.Helper()
+		r, fake := hostPathReviewFake(t, schema, nil)
+		args := map[string]interface{}{
+			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": values,
+		}
+		if dry {
+			args["dry_run"] = true
+		}
+		out, err := r.CallTool(t.Context(), "install_app", args)
+		return out, err, fake
+	}
+	mustRefuseWrite := func(t *testing.T, schema map[string]interface{}, values map[string]interface{}, want string, dry bool) {
+		t.Helper()
+		out, err, fake := callInstall(t, schema, values, dry)
+		if err == nil {
+			t.Fatalf("dry_run=%v accepted: %s", dry, out)
+		}
+		if want != "" && !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Errorf("dry_run=%v error %q, want it to mention %q", dry, err, want)
+		}
+		creates, updates := writeCalls(fake)
+		if creates != 0 || updates != 0 {
+			t.Errorf("dry_run=%v app.create=%d app.update=%d, want no write", dry, creates, updates)
+		}
+	}
+
+	bareEtc := cloneValues(validHostPathValues())
+	bareEtc["storage"].(map[string]interface{})["shares"] = []interface{}{
+		map[string]interface{}{"name": "share1", "host_path": "/etc"},
+	}
+
+	t.Run("missing questions list refuses including dry-run", func(t *testing.T) {
+		schema := hostPathTestSchema()
+		delete(schema, "questions")
+		mustRefuseWrite(t, schema, bareEtc, "questions", false)
+		mustRefuseWrite(t, schema, bareEtc, "questions", true)
+	})
+
+	t.Run("empty questions list refuses", func(t *testing.T) {
+		schema := hostPathTestSchema()
+		schema["questions"] = []interface{}{}
+		mustRefuseWrite(t, schema, bareEtc, "questions", false)
+	})
+
+	t.Run("non-list questions refuses", func(t *testing.T) {
+		schema := hostPathTestSchema()
+		schema["questions"] = "not-a-list"
+		mustRefuseWrite(t, schema, bareEtc, "questions", false)
+	})
+
+	t.Run("unparseable questions item refuses", func(t *testing.T) {
+		schema := hostPathTestSchema()
+		schema["questions"] = []interface{}{"not-a-map"}
+		mustRefuseWrite(t, schema, bareEtc, "questions", false)
+	})
+
+	t.Run("unparseable list items refuses", func(t *testing.T) {
+		schema := hostPathTestSchema()
+		qs := schema["questions"].([]interface{})
+		st := qs[0].(map[string]interface{})["schema"].(map[string]interface{})
+		attrs := st["attrs"].([]interface{})
+		st["attrs"] = append(attrs, map[string]interface{}{
+			"variable": "shares",
+			"schema": map[string]interface{}{
+				"type":  "list",
+				"items": "not-parseable",
+			},
+		})
+		mustRefuseWrite(t, schema, validHostPathValues(), "items", false)
+	})
+
+	t.Run("nextcloud custom_confs file under an existing dataset is accepted", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["network"] = map[string]interface{}{
+			"nginx": map[string]interface{}{
+				"custom_confs": []interface{}{"/mnt/tank/apps/jellyfin/config/custom.conf"},
+			},
+		}
+		out, err, fake := callInstall(t, hostPathFieldSchema(), values, false)
+		if err != nil {
+			t.Fatalf("valid custom_confs file was refused: %v (out=%s)", err, out)
+		}
+		if n := len(fake.called("app.create")); n != 1 {
+			t.Errorf("app.create called %d times, want 1", n)
+		}
+	})
+
+	t.Run("nextcloud custom_confs /etc is rejected", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["network"] = map[string]interface{}{
+			"nginx": map[string]interface{}{"custom_confs": []interface{}{"/etc/nginx/custom.conf"}},
+		}
+		mustRefuseWrite(t, hostPathFieldSchema(), values, "invalid path", false)
+	})
+
+	t.Run("off-schema storage types NFS anonymous and volume are rejected", func(t *testing.T) {
+		for _, typ := range []string{"NFS", "anonymous", "volume"} {
+			values := cloneValues(validHostPathValues())
+			values["storage"].(map[string]interface{})["extra"] = map[string]interface{}{"type": typ}
+			mustRefuseWrite(t, hostPathTestSchema(), values, "host_path", false)
 		}
 	})
 }
