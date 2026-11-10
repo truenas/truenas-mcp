@@ -1190,7 +1190,7 @@ func validateStorageRecursive(obj map[string]interface{}, path string, pools map
 	// Check type field FIRST (before iterating) to ensure consistent error messages
 	if typeVal, ok := obj["type"]; ok {
 		if typeStr, ok := typeVal.(string); ok {
-			if isForbiddenStorageType(typeStr) {
+			if isStorageLikeType(typeStr) && typeStr != "host_path" {
 				loc := path
 				if loc == "" {
 					loc = "values"
@@ -1276,9 +1276,14 @@ func datasetsMustExistError(missing []string, action string) error {
 		action, strings.Join(missing, "\n  - "))
 }
 
-func isForbiddenStorageType(typeStr string) bool {
-	switch typeStr {
-	case "ix_volume", "nfs", "cifs", "tmpfs", "temporary", "smb", "smb_share":
+// isStorageLikeType reports whether typeStr is a volume/storage type used
+// in the TrueNAS app catalog (or an obvious alias). Comparison is
+// case-insensitive so off-schema values such as "NFS" are still caught.
+// The only type this tool accepts is the exact string "host_path".
+func isStorageLikeType(typeStr string) bool {
+	switch strings.ToLower(typeStr) {
+	case "host_path", "ix_volume", "nfs", "cifs", "tmpfs", "temporary",
+		"anonymous", "volume", "smb", "smb_share":
 		return true
 	default:
 		return false
@@ -1376,8 +1381,12 @@ func checkAppHostPathStorage(client *truenas.Client, schema, values map[string]i
 	if err != nil {
 		return nil, nil, err
 	}
+	slots, err := collectStorageSlots(schema)
+	if err != nil {
+		return nil, nil, err
+	}
 	var collected []string
-	for _, slot := range collectStorageSlots(schema) {
+	for _, slot := range slots {
 		if err := collectSlotPaths(values, slot, pools, &collected); err != nil {
 			return nil, nil, err
 		}
@@ -1460,24 +1469,38 @@ func collectSlotPaths(values map[string]interface{}, slot storageSlot, pools map
 	return nil
 }
 
-func collectStorageSlots(schema map[string]interface{}) []storageSlot {
+func collectStorageSlots(schema map[string]interface{}) ([]storageSlot, error) {
+	raw, ok := schema["questions"]
+	if !ok {
+		return nil, fmt.Errorf("app schema has no questions list; refusing to validate storage")
+	}
+	questions, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("app schema questions is not a list; refusing to validate storage")
+	}
+	if len(questions) == 0 {
+		return nil, fmt.Errorf("app schema has an empty questions list; refusing to validate storage")
+	}
 	var slots []storageSlot
-	questions, _ := schema["questions"].([]interface{})
-	for _, q := range questions {
-		if qm, ok := q.(map[string]interface{}); ok {
-			walkSchemaQuestion(qm, "", &slots)
+	for i, q := range questions {
+		qm, ok := q.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("app schema questions[%d] cannot be parsed; refusing to validate storage", i)
+		}
+		if err := walkSchemaQuestion(qm, "", &slots); err != nil {
+			return nil, err
 		}
 	}
-	return slots
+	return slots, nil
 }
 
-func walkSchemaQuestion(q map[string]interface{}, prefix string, slots *[]storageSlot) {
+func walkSchemaQuestion(q map[string]interface{}, prefix string, slots *[]storageSlot) error {
 	variable, _ := q["variable"].(string)
 	sch, _ := q["schema"].(map[string]interface{})
 	if sch == nil {
-		return
+		return nil
 	}
-	walkSchemaNode(sch, joinValuePath(prefix, variable), slots)
+	return walkSchemaNode(sch, joinValuePath(prefix, variable), slots)
 }
 
 func joinValuePath(prefix, name string) string {
@@ -1490,38 +1513,44 @@ func joinValuePath(prefix, name string) string {
 	return prefix + "." + name
 }
 
-func walkSchemaNode(schema map[string]interface{}, valuePath string, slots *[]storageSlot) {
+func walkSchemaNode(schema map[string]interface{}, valuePath string, slots *[]storageSlot) error {
 	typ := appSchemaType(schema)
 	if typ == "list" {
 		item := listItemSchema(schema)
 		if item == nil {
-			return
+			loc := valuePath
+			if loc == "" {
+				loc = "schema"
+			}
+			return fmt.Errorf("app schema list at %s has items that cannot be parsed; refusing to validate storage", loc)
 		}
 		if isStorageDictSchema(item) {
 			*slots = append(*slots, storageSlot{path: valuePath, list: true, kind: "storage"})
-			return
+			return nil
 		}
 		if kind := hostPathSchemaKind(item); kind != "" {
 			*slots = append(*slots, storageSlot{path: valuePath, list: true, kind: kind})
-			return
+			return nil
 		}
 		// Descend into list items with a [] marker so lookup expands each element.
-		walkSchemaNode(item, valuePath+"[]", slots)
-		return
+		return walkSchemaNode(item, valuePath+"[]", slots)
 	}
 	if kind := hostPathSchemaKind(schema); kind != "" {
 		*slots = append(*slots, storageSlot{path: valuePath, list: false, kind: kind})
-		return
+		return nil
 	}
 	if isStorageDictSchema(schema) {
 		// Stop here so host_path_config.path is handled by validateHostPathEntry
 		// (which also covers acl.path) rather than as a bare hostpath field.
 		*slots = append(*slots, storageSlot{path: valuePath, list: false, kind: "storage"})
-		return
+		return nil
 	}
 	for _, attr := range schemaAttrs(schema) {
-		walkSchemaQuestion(attr, valuePath, slots)
+		if err := walkSchemaQuestion(attr, valuePath, slots); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func hostPathSchemaKind(schema map[string]interface{}) string {
@@ -1720,7 +1749,10 @@ func hostPathDatasetTarget(p, kind, loc string, pools map[string]bool) (string, 
 	if err := validateHostPathLocation(p, loc, pools); err != nil {
 		return "", err
 	}
-	if kind == "hostpathfile" {
+	// hostpathfile is explicit. hostpath is typed as a directory in the
+	// catalog, but some templates (nextcloud custom_confs) bind-mount a
+	// file; treat a last component with a "." as a file so valid configs work.
+	if kind == "hostpathfile" || (kind == "hostpath" && hostPathLooksLikeFile(p)) {
 		parent := path.Dir(p)
 		if err := validateHostPathLocation(parent, loc, pools); err != nil {
 			return "", fmt.Errorf("invalid path %q at %s: file must be under a dataset below the pool (not the pool root)", p, loc)
@@ -1728,6 +1760,14 @@ func hostPathDatasetTarget(p, kind, loc string, pools map[string]bool) (string, 
 		return parent, nil
 	}
 	return p, nil
+}
+
+func hostPathLooksLikeFile(p string) bool {
+	base := path.Base(p)
+	if base == "" || base == "." || base == ".." {
+		return false
+	}
+	return strings.Contains(base, ".")
 }
 
 type locatedValue struct {
