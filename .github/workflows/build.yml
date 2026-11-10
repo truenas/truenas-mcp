@@ -34,17 +34,11 @@ jobs:
     - name: Run linters
       run: make lint
 
-    - name: Run tests
-      run: make test
-
-    - name: Run tests with the race detector
-      run: go test -race ./...
+    - name: Run tests with the race detector and coverage
+      run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
     - name: Run govulncheck
       run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
-
-    - name: Run tests with coverage
-      run: go test -coverprofile=coverage.out -covermode=atomic ./...
 
     - name: Generate coverage report
       run: |
