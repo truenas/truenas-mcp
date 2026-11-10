@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"sort"
 	"strings"
@@ -42,7 +43,7 @@ func TestListAlertsDismissedFilter(t *testing.T) {
 		{"dismissed false, no include", map[string]interface{}{"dismissed": false, "include_dismissed": false}, []string{active1, active2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := handleListAlerts(client, tc.args)
+			out, err := handleListAlerts(context.Background(), client, tc.args)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -95,7 +96,7 @@ func TestListAlertsRejectsInvalidArguments(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, fake := newFakeClientWith(t, map[string]interface{}{"alert.list": []interface{}{}}, nil)
-			_, err := handleListAlerts(client, tc.args)
+			_, err := handleListAlerts(context.Background(), client, tc.args)
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("err = %v\nwant %s", err, tc.want)
 			}
@@ -122,7 +123,7 @@ func TestListAlertsRejectsInvalidArguments(t *testing.T) {
 
 	// JSON null means the argument is not set.
 	client, fake = newFakeClientWith(t, map[string]interface{}{"alert.list": []interface{}{}}, nil)
-	if _, err := handleListAlerts(client, map[string]interface{}{"dismissed": nil, "include_dismissed": nil}); err != nil {
+	if _, err := handleListAlerts(context.Background(), client, map[string]interface{}{"dismissed": nil, "include_dismissed": nil}); err != nil {
 		t.Errorf("null arguments: %v", err)
 	}
 	if len(fake.called("alert.list")) != 1 {

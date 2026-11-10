@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -318,25 +319,25 @@ func logURL(u *url.URL) string {
 }
 
 // wsDial performs the WebSocket handshake. Tests may replace it.
-var wsDial = func(d *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
-	return d.Dial(urlStr, nil)
+var wsDial = func(ctx context.Context, d *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
+	return d.DialContext(ctx, urlStr, nil)
 }
 
 // safeDial calls wsDial and converts an unexpected panic into an error, so
 // a failed dial never takes the process down.
-func safeDial(d *websocket.Dialer, urlStr string) (conn *websocket.Conn, resp *http.Response, err error) {
+func safeDial(ctx context.Context, d *websocket.Dialer, urlStr string) (conn *websocket.Conn, resp *http.Response, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			conn, resp = nil, nil
 			err = fmt.Errorf("websocket dial failed unexpectedly: %v", r)
 		}
 	}()
-	return wsDial(d, urlStr)
+	return wsDial(ctx, d, urlStr)
 }
 
 // connect establishes the WebSocket connection and starts the read loop.
-// Must be called with connMu held.
-func (c *Client) connect() error {
+// Must be called with connMu held. ctx cancels the handshake.
+func (c *Client) connect(ctx context.Context) error {
 	if c.conn != nil {
 		return nil
 	}
@@ -364,7 +365,7 @@ func (c *Client) connect() error {
 	}
 
 	log.Printf("Connecting to %s%s...", logURL(u), via)
-	conn, resp, err := safeDial(&wsDialer, u.String())
+	conn, resp, err := safeDial(ctx, &wsDialer, u.String())
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			if u.Path == apiPath {
@@ -752,16 +753,16 @@ func validIPv6(s string) bool {
 }
 
 // Authenticate connects if needed and logs in with auth.login_ex.
-func (c *Client) Authenticate() error {
-	_, _, err := c.session(true, true)
+func (c *Client) Authenticate(ctx context.Context) error {
+	_, _, err := c.session(ctx, true, true)
 	return err
 }
 
 // SessionGeneration connects and logs in if needed, then returns the login
 // generation of the current session. It changes on every reconnect or new
 // login, so callers can key per-session caches by it.
-func (c *Client) SessionGeneration() (uint64, error) {
-	_, gen, err := c.session(false, false)
+func (c *Client) SessionGeneration(ctx context.Context) (uint64, error) {
+	_, gen, err := c.session(ctx, false, false)
 	return gen, err
 }
 
@@ -792,7 +793,10 @@ func (c *Client) forgetSession(conn *websocket.Conn, gen uint64) {
 //
 // A failure to connect is logged here unless quiet is set, for callers that
 // report the returned error themselves (startup), so it is logged once.
-func (c *Client) session(force, quiet bool) (*websocket.Conn, uint64, error) {
+func (c *Client) session(ctx context.Context, force, quiet bool) (*websocket.Conn, uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	if !force {
 		if conn, gen := c.authedSession(); conn != nil {
 			return conn, gen, nil
@@ -800,6 +804,9 @@ func (c *Client) session(force, quiet bool) (*websocket.Conn, uint64, error) {
 	}
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	if !force {
 		// Another caller may have logged in while we waited.
 		if conn, gen := c.authedSession(); conn != nil {
@@ -808,8 +815,11 @@ func (c *Client) session(force, quiet bool) (*websocket.Conn, uint64, error) {
 	}
 
 	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		c.connMu.Lock()
-		err := c.connect()
+		err := c.connect(ctx)
 		conn := c.conn
 		c.connMu.Unlock()
 		if err != nil {
@@ -827,7 +837,7 @@ func (c *Client) session(force, quiet bool) (*websocket.Conn, uint64, error) {
 			return nil, 0, err
 		}
 
-		err = c.login(conn)
+		err = c.login(ctx, conn)
 		c.connMu.Lock()
 		current := c.conn == conn
 		gen := c.authGen
@@ -855,7 +865,7 @@ func (c *Client) session(force, quiet bool) (*websocket.Conn, uint64, error) {
 }
 
 // login sends auth.login_ex on conn.
-func (c *Client) login(conn *websocket.Conn) error {
+func (c *Client) login(ctx context.Context, conn *websocket.Conn) error {
 	log.Println("Authenticating with TrueNAS middleware...")
 
 	// auth.login_ex replaces auth.login_with_api_key, which is deprecated and
@@ -866,7 +876,9 @@ func (c *Client) login(conn *websocket.Conn) error {
 		"username":  c.apiUser,
 		"api_key":   c.apiKey,
 	}}
-	resp, err := c.roundTrip(conn, "auth.login_ex", params, loginTimeout)
+	loginCtx, cancel := context.WithTimeout(ctx, loginTimeout)
+	defer cancel()
+	resp, err := c.roundTrip(loginCtx, conn, "auth.login_ex", params, loginTimeout)
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
@@ -893,26 +905,33 @@ func (c *Client) login(conn *websocket.Conn) error {
 // needed. A request is retried once only when it is known not to have run:
 // it never reached the socket, or the server refused it as not
 // authenticated (then after logging in again). Safe for concurrent use.
-func (c *Client) Call(method string, params ...interface{}) (json.RawMessage, error) {
-	return c.CallWithTimeout(callTimeout, method, params...)
+func (c *Client) Call(ctx context.Context, method string, params ...interface{}) (json.RawMessage, error) {
+	return c.CallWithTimeout(ctx, callTimeout, method, params...)
 }
 
 // CallWithTimeout is Call with a per-request response timeout instead of
-// the default.
-func (c *Client) CallWithTimeout(timeout time.Duration, method string, params ...interface{}) (json.RawMessage, error) {
+// the default. ctx cancellation stops waiting for a response; a request
+// already written is not withdrawn and may still complete on TrueNAS.
+func (c *Client) CallWithTimeout(ctx context.Context, timeout time.Duration, method string, params ...interface{}) (json.RawMessage, error) {
 	if params == nil {
 		params = []interface{}{} // JSON-RPC: always send params as an array
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	for attempt := 0; ; attempt++ {
 		retry := attempt == 0
-		conn, gen, err := c.session(false, false)
+		conn, gen, err := c.session(ctx, false, false)
 		if err != nil {
 			return nil, err
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 
-		resp, err := c.roundTrip(conn, method, params, timeout)
+		resp, err := c.roundTrip(ctx, conn, method, params, timeout)
 		if err != nil {
-			if retry && errors.Is(err, errNotSent) {
+			if retry && errors.Is(err, errNotSent) && ctx.Err() == nil {
 				log.Printf("Retrying %s on a new connection: %v", method, err)
 				continue
 			}
@@ -977,7 +996,7 @@ func redactParams(method string, params []interface{}) []interface{} {
 // roundTrip sends one request on conn and waits up to timeout for its
 // response via the pending map. It never retries. A failed write is wrapped
 // in errNotSent; a request that cannot be encoded is never written.
-func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interface{}, timeout time.Duration) (*rpcResponse, error) {
+func (c *Client) roundTrip(ctx context.Context, conn *websocket.Conn, method string, params []interface{}, timeout time.Duration) (*rpcResponse, error) {
 	id := c.requestID.Add(1)
 	key := strconv.FormatUint(id, 10)
 
@@ -1037,7 +1056,8 @@ func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interfa
 		return nil, fmt.Errorf("failed to send request: %w: %w", errNotSent, err)
 	}
 
-	// Wait for the response router to deliver our response
+	// Wait for the response router to deliver our response, or until
+	// the per-request timeout or ctx (tool cancellation / deadline) fires.
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
@@ -1046,6 +1066,11 @@ func (c *Client) roundTrip(conn *websocket.Conn, method string, params []interfa
 			return nil, result.err
 		}
 		return result.resp, nil
+	case <-ctx.Done():
+		c.pendingMu.Lock()
+		delete(c.pending, key)
+		c.pendingMu.Unlock()
+		return nil, fmt.Errorf("request cancelled (method: %s): %w", method, ctx.Err())
 	case <-timer.C:
 		// Timeout - clean up pending entry
 		c.pendingMu.Lock()

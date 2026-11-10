@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -28,6 +29,13 @@ type fakeMiddleware struct {
 	// handle, when set, answers a call first: a non-nil rpcErr is sent as
 	// the JSON-RPC error; ok=false falls through to the tables above.
 	handle func(method string, params json.RawMessage) (result interface{}, rpcErr map[string]interface{}, ok bool)
+	// holdMethod, when set, delays the reply to that method until hold is
+	// closed. Login is never held. held, if non-nil, is closed when the
+	// first held call has been recorded, so a test can cancel at that point.
+	holdMethod string
+	hold       <-chan struct{}
+	held       chan struct{}
+	heldOnce   sync.Once
 }
 
 type fakeCall struct {
@@ -72,7 +80,17 @@ func (f *fakeMiddleware) serve(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			result = f.fallback
 		}
+		hold := f.holdMethod != "" && req.Method == f.holdMethod && req.Method != "auth.login_ex"
+		heldCh, holdCh := f.held, f.hold
 		f.mu.Unlock()
+		if hold {
+			if heldCh != nil {
+				f.heldOnce.Do(func() { close(heldCh) })
+			}
+			if holdCh != nil {
+				<-holdCh
+			}
+		}
 		resp := map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": result}
 		if rpcErr != nil {
 			resp = map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "error": rpcErr}
@@ -126,7 +144,7 @@ func stubHandlers(r *Registry) map[string][]map[string]interface{} {
 	seen := map[string][]map[string]interface{}{}
 	for name, tool := range r.tools {
 		name := name
-		tool.Handler = func(_ *truenas.Client, args map[string]interface{}) (string, error) {
+		tool.Handler = func(_ context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
 			seen[name] = append(seen[name], args)
 			return `{"ok":true}`, nil
 		}
@@ -420,7 +438,7 @@ func TestDryRunOnlyCountsWhereDeclared(t *testing.T) {
 	// through and the confirmation gate itself is what is tested.
 	r.tools["test_unclassified"] = Tool{
 		Definition: mcp.Tool{Name: "test_unclassified", InputSchema: map[string]interface{}{"type": "object", "additionalProperties": true}},
-		Handler: func(*truenas.Client, map[string]interface{}) (string, error) {
+		Handler: func(context.Context, *truenas.Client, map[string]interface{}) (string, error) {
 			ran++
 			return "done", nil
 		},
@@ -440,7 +458,7 @@ func TestDryRunOnlyCountsWhereDeclared(t *testing.T) {
 func TestPreviewFailureDoesNotInviteConfirm(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	tool := r.tools["delete_app"]
-	tool.Handler = func(*truenas.Client, map[string]interface{}) (string, error) {
+	tool.Handler = func(context.Context, *truenas.Client, map[string]interface{}) (string, error) {
 		return "", fmt.Errorf("app not found: plex")
 	}
 	r.tools["delete_app"] = tool
@@ -454,7 +472,7 @@ func TestPreviewFailureDoesNotInviteConfirm(t *testing.T) {
 func TestCallToolRecoversFromPanics(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	tool := r.tools["query_pools"]
-	tool.Handler = func(*truenas.Client, map[string]interface{}) (string, error) {
+	tool.Handler = func(context.Context, *truenas.Client, map[string]interface{}) (string, error) {
 		var m map[string]interface{}
 		return m["x"].(string), nil
 	}

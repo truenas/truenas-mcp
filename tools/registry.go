@@ -39,7 +39,7 @@ type Registry struct {
 
 type Tool struct {
 	Definition mcp.Tool
-	Handler    func(*truenas.Client, map[string]interface{}) (string, error)
+	Handler    func(context.Context, *truenas.Client, map[string]interface{}) (string, error)
 }
 
 func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
@@ -1964,8 +1964,9 @@ func (r *Registry) HasTool(name string) bool {
 }
 
 // CallTool runs a tool. It is safe for concurrent use once SetPolicy has
-// returned. A call whose ctx is already done runs nothing; handlers do not
-// observe ctx yet, so a cancelled call that has started runs to completion.
+// returned. A call whose ctx is already done runs nothing. Handlers and
+// the TrueNAS client observe ctx, so a cancelled call stops waiting for
+// an in-flight middleware request.
 func (r *Registry) CallTool(ctx context.Context, name string, args map[string]interface{}) (result string, err error) {
 	// A panicking handler must not take down the server. Log the details to
 	// stderr (the panic value only for runtime errors, which carry no
@@ -2028,20 +2029,20 @@ func (r *Registry) CallTool(ctx context.Context, name string, args map[string]in
 	}
 	// Hide-and-refuse tools the connected TrueNAS release cannot run,
 	// and refuse every tool if the NAS is below the 25.10 minimum.
-	if err := r.checkVersion(name); err != nil {
+	if err := r.checkVersion(ctx, name); err != nil {
 		return "", err
 	}
 	if destructive {
-		return r.callDestructive(name, tool, args, legacyConfirm)
+		return r.callDestructive(ctx, name, tool, args, legacyConfirm)
 	}
 
-	return tool.Handler(r.client, args)
+	return tool.Handler(ctx, r.client, args)
 }
 
 // Tool handlers
 
-func handleSystemInfo(client *truenas.Client, args map[string]interface{}) (string, error) {
-	result, err := client.Call("system.info")
+func handleSystemInfo(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	result, err := client.Call(ctx, "system.info")
 	if err != nil {
 		return "", err
 	}
@@ -2061,9 +2062,9 @@ func handleSystemInfo(client *truenas.Client, args map[string]interface{}) (stri
 	return string(formatted), nil
 }
 
-func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleSystemHealth(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Get alerts
-	result, err := client.Call("alert.list")
+	result, err := client.Call(ctx, "alert.list")
 	if err != nil {
 		return "", err
 	}
@@ -2074,7 +2075,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 	}
 
 	// Get active jobs
-	jobsResult, err := client.Call("core.get_jobs", []interface{}{
+	jobsResult, err := client.Call(ctx, "core.get_jobs", []interface{}{
 		[]interface{}{"state", "=", "RUNNING"},
 	})
 	if err != nil {
@@ -2105,7 +2106,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 	capacityWarnings := make([]string, 0)
 
 	// Quick capacity check using reporting data (last hour)
-	cpuResult, err := client.Call("reporting.get_data", []interface{}{
+	cpuResult, err := client.Call(ctx, "reporting.get_data", []interface{}{
 		map[string]interface{}{
 			"name":       "cpu",
 			"identifier": nil,
@@ -2128,7 +2129,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 	}
 
 	// Check memory
-	sysInfoResult, err := client.Call("system.info")
+	sysInfoResult, err := client.Call(ctx, "system.info")
 	var totalMemory float64
 	if err == nil {
 		var sysInfo map[string]interface{}
@@ -2141,7 +2142,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 
 	arcFreshnessNote := ""
 	if totalMemory > 0 {
-		memResult, err := client.Call("reporting.get_data", []interface{}{
+		memResult, err := client.Call(ctx, "reporting.get_data", []interface{}{
 			map[string]interface{}{
 				"name":       "memory",
 				"identifier": nil,
@@ -2158,7 +2159,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 					// the latest complete available sample, not the hourly average.
 					avgAvailable := calculateAverage(dataPoints)
 					label, suffix := "Memory utilization", " (may include ZFS ARC cache)"
-					if arcBytes, freshKnown, err := currentArcBytes(client, nasReferenceTime(memData[0])); err == nil {
+					if arcBytes, freshKnown, err := currentArcBytes(ctx, client, nasReferenceTime(memData[0])); err == nil {
 						avgAvailable = mem.latest + arcBytes
 						label, suffix = "Memory utilization excluding ZFS ARC", ""
 						if !freshKnown {
@@ -2179,7 +2180,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 	}
 
 	// Check pool capacity
-	poolResult, err := client.Call("pool.query")
+	poolResult, err := client.Call(ctx, "pool.query")
 	if err == nil {
 		var pools []map[string]interface{}
 		if err := json.Unmarshal(poolResult, &pools); err == nil {
@@ -2202,7 +2203,7 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 
 	// Check directory service status
 	var directoryServiceStatus map[string]interface{}
-	dirStatusResult, err := client.Call("directoryservices.status")
+	dirStatusResult, err := client.Call(ctx, "directoryservices.status")
 	if err == nil {
 		var dirStatus map[string]interface{}
 		if err := json.Unmarshal(dirStatusResult, &dirStatus); err == nil {
@@ -2356,8 +2357,8 @@ func queryLimit(args map[string]interface{}) (limit int, capped bool) {
 	return int(l), false
 }
 
-func queryCount(client *truenas.Client, method string, filters []interface{}) (int, bool) {
-	raw, err := client.Call(method, filters, map[string]interface{}{"count": true})
+func queryCount(ctx context.Context, client *truenas.Client, method string, filters []interface{}) (int, bool) {
+	raw, err := client.Call(ctx, method, filters, map[string]interface{}{"count": true})
 	if err != nil {
 		return 0, false
 	}
@@ -2368,8 +2369,8 @@ func queryCount(client *truenas.Client, method string, filters []interface{}) (i
 	return int(n), true
 }
 
-func handleQueryPools(client *truenas.Client, args map[string]interface{}) (string, error) {
-	result, err := client.Call("pool.query")
+func handleQueryPools(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	result, err := client.Call(ctx, "pool.query")
 	if err != nil {
 		return "", err
 	}
@@ -2387,7 +2388,7 @@ func handleQueryPools(client *truenas.Client, args map[string]interface{}) (stri
 	return string(formatted), nil
 }
 
-func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleQueryDatasets(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Always include a structured filter. With retrieve_children=false and
 	// no filters, 25.10 and 27.0 middleware do not recurse below pool roots.
 	filters := []interface{}{datasetTypeFilter}
@@ -2404,7 +2405,7 @@ func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (s
 		},
 	}
 
-	result, err := client.Call("pool.dataset.query", filters, options)
+	result, err := client.Call(ctx, "pool.dataset.query", filters, options)
 	if err != nil {
 		return "", err
 	}
@@ -2618,7 +2619,7 @@ func sortDatasets(datasets []map[string]interface{}, orderBy string) {
 	})
 }
 
-func handleQueryShares(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleQueryShares(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	shareType := "all"
 	if st, ok := args["share_type"].(string); ok && st != "" {
 		shareType = st
@@ -2627,7 +2628,7 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 	response := make(map[string]interface{})
 
 	if shareType == "smb" || shareType == "all" {
-		result, err := client.Call("sharing.smb.query")
+		result, err := client.Call(ctx, "sharing.smb.query")
 		if err != nil {
 			return "", fmt.Errorf("failed to query SMB shares: %w", err)
 		}
@@ -2640,7 +2641,7 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 	}
 
 	if shareType == "nfs" || shareType == "all" {
-		result, err := client.Call("sharing.nfs.query")
+		result, err := client.Call(ctx, "sharing.nfs.query")
 		if err != nil {
 			return "", fmt.Errorf("failed to query NFS shares: %w", err)
 		}
@@ -2660,7 +2661,7 @@ func handleQueryShares(client *truenas.Client, args map[string]interface{}) (str
 	return string(formatted), nil
 }
 
-func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleQuerySnapshots(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Build query filters - initialize as empty array, not nil (API expects [] not null)
 	filters := []interface{}{}
 	if dataset, ok := args["dataset"].(string); ok && dataset != "" {
@@ -2709,7 +2710,7 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 		}
 	}
 
-	result, err := client.Call("pool.snapshot.query", filters, options)
+	result, err := client.Call(ctx, "pool.snapshot.query", filters, options)
 	if err != nil {
 		return "", err
 	}
@@ -2744,7 +2745,7 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 	// A count query is only needed when the page was full; otherwise the
 	// returned rows are the complete result.
 	if pushLimit && len(snapshots) >= limit {
-		if n, ok := queryCount(client, "pool.snapshot.query", filters); ok {
+		if n, ok := queryCount(ctx, client, "pool.snapshot.query", filters); ok {
 			totalSnapshots = n
 		} else {
 			totalKnown = false
@@ -2941,10 +2942,10 @@ func sortSnapshots(snapshots []map[string]interface{}, orderBy string) {
 	})
 }
 
-func handleQueryVMs(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleQueryVMs(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Request only the fields simplifyVM uses; filter and limit stay
 	// client-side because name is a partial match.
-	result, err := client.Call("vm.query", []interface{}{}, map[string]interface{}{"select": vmQuerySelect})
+	result, err := client.Call(ctx, "vm.query", []interface{}{}, map[string]interface{}{"select": vmQuerySelect})
 	if err != nil {
 		return "", err
 	}
@@ -3251,7 +3252,7 @@ func sortVMs(vms []map[string]interface{}, orderBy string) {
 
 // Alert management handlers
 
-func handleListAlerts(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleListAlerts(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Validate every argument before calling the API. A value that is not a
 	// boolean is rejected rather than ignored, and values are not echoed.
 	dismissed, hasDismissed := false, false
@@ -3279,7 +3280,7 @@ func handleListAlerts(client *truenas.Client, args map[string]interface{}) (stri
 
 	// alert.list doesn't take filter parameters in the same way as other queries
 	// It just returns all alerts, so we'll filter in post-processing if needed
-	result, err := client.Call("alert.list")
+	result, err := client.Call(ctx, "alert.list")
 	if err != nil {
 		return "", err
 	}
@@ -3322,13 +3323,13 @@ func handleListAlerts(client *truenas.Client, args map[string]interface{}) (stri
 	return string(formatted), nil
 }
 
-func handleDismissAlert(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleDismissAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	uuid, ok := args["uuid"].(string)
 	if !ok || uuid == "" {
 		return "", fmt.Errorf("uuid parameter is required")
 	}
 
-	result, err := client.Call("alert.dismiss", uuid)
+	result, err := client.Call(ctx, "alert.dismiss", uuid)
 	if err != nil {
 		return "", err
 	}
@@ -3336,13 +3337,13 @@ func handleDismissAlert(client *truenas.Client, args map[string]interface{}) (st
 	return fmt.Sprintf("Alert %s dismissed successfully: %s", uuid, string(result)), nil
 }
 
-func handleRestoreAlert(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleRestoreAlert(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	uuid, ok := args["uuid"].(string)
 	if !ok || uuid == "" {
 		return "", fmt.Errorf("uuid parameter is required")
 	}
 
-	result, err := client.Call("alert.restore", uuid)
+	result, err := client.Call(ctx, "alert.restore", uuid)
 	if err != nil {
 		return "", err
 	}
@@ -3352,7 +3353,7 @@ func handleRestoreAlert(client *truenas.Client, args map[string]interface{}) (st
 
 // Reporting handlers
 
-func handleGetSystemMetrics(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetSystemMetrics(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	unit := "HOUR"
 	if u, ok := args["unit"].(string); ok && u != "" {
 		unit = u
@@ -3388,7 +3389,7 @@ func handleGetSystemMetrics(client *truenas.Client, args map[string]interface{})
 			continue
 		}
 
-		result, err := client.Call("reporting.get_data", []interface{}{
+		result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 			map[string]interface{}{
 				"name":       apiGraph,
 				"identifier": nil,
@@ -3420,7 +3421,7 @@ func handleGetSystemMetrics(client *truenas.Client, args map[string]interface{})
 	return string(formatted), nil
 }
 
-func handleGetNetworkMetrics(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetNetworkMetrics(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	unit := "HOUR"
 	if u, ok := args["unit"].(string); ok && u != "" {
 		unit = u
@@ -3434,7 +3435,7 @@ func handleGetNetworkMetrics(client *truenas.Client, args map[string]interface{}
 		interfaces = []string{iface}
 	} else {
 		// Query for available network interfaces
-		result, err := client.Call("interface.query")
+		result, err := client.Call(ctx, "interface.query")
 		if err != nil {
 			return "", fmt.Errorf("failed to query interfaces: %w", err)
 		}
@@ -3460,7 +3461,7 @@ func handleGetNetworkMetrics(client *truenas.Client, args map[string]interface{}
 	allMetrics := make(map[string]interface{})
 
 	for _, ifaceName := range interfaces {
-		result, err := client.Call("reporting.get_data", []interface{}{
+		result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 			map[string]interface{}{
 				"name":       "interface",
 				"identifier": ifaceName,
@@ -3527,7 +3528,7 @@ func handleGetNetworkMetrics(client *truenas.Client, args map[string]interface{}
 	return string(formatted), nil
 }
 
-func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetDiskMetrics(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	unit := "HOUR"
 	if u, ok := args["unit"].(string); ok && u != "" {
 		unit = u
@@ -3541,7 +3542,7 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// First, get available reporting graphs
-	graphsResult, err := client.Call("reporting.graphs")
+	graphsResult, err := client.Call(ctx, "reporting.graphs")
 	if err != nil {
 		return "", fmt.Errorf("failed to query reporting graphs: %w", err)
 	}
@@ -3597,7 +3598,7 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 			diskName = identifier[:idx]
 		}
 
-		result, err := client.Call("reporting.get_data", []interface{}{
+		result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 			map[string]interface{}{
 				"name":       graphType,
 				"identifier": identifier,
@@ -3691,8 +3692,8 @@ var discoveryTimeout = 10 * time.Second
 // reporting.get_data's schema rejects, so the accepted names from
 // core.get_methods are intersected with it. Only a complete discovery is
 // cached (per session); a failed or partial one is retried next call.
-func supportedArcGraphs(client *truenas.Client) []string {
-	gen, err := client.SessionGeneration()
+func supportedArcGraphs(ctx context.Context, client *truenas.Client) []string {
+	gen, err := client.SessionGeneration(ctx)
 	if err != nil {
 		return fallbackArcGraphs
 	}
@@ -3701,7 +3702,7 @@ func supportedArcGraphs(client *truenas.Client) []string {
 			return e.graphs
 		}
 	}
-	graphs, complete := discoverArcGraphs(client)
+	graphs, complete := discoverArcGraphs(ctx, client)
 	if complete {
 		arcGraphCache.Store(client, arcGraphEntry{gen: gen, graphs: graphs})
 	}
@@ -3717,7 +3718,7 @@ func recoverDiscovery(source string) {
 
 // discoverArcGraphs returns the supported ARC graphs and whether discovery
 // was complete (both sources answered and at least one ARC graph matched).
-func discoverArcGraphs(client *truenas.Client) ([]string, bool) {
+func discoverArcGraphs(ctx context.Context, client *truenas.Client) ([]string, bool) {
 	var accepted, offered []string
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -3726,12 +3727,12 @@ func discoverArcGraphs(client *truenas.Client) ([]string, bool) {
 	go func() {
 		defer wg.Done()
 		defer recoverDiscovery("get_data schema")
-		accepted = getDataAcceptedGraphs(client)
+		accepted = getDataAcceptedGraphs(ctx, client)
 	}()
 	go func() {
 		defer wg.Done()
 		defer recoverDiscovery("reporting.graphs")
-		offered = reportingGraphNames(client)
+		offered = reportingGraphNames(ctx, client)
 	}()
 	wg.Wait()
 
@@ -3763,8 +3764,8 @@ func discoverArcGraphs(client *truenas.Client) ([]string, bool) {
 }
 
 // reportingGraphNames returns the names from reporting.graphs, or nil.
-func reportingGraphNames(client *truenas.Client) []string {
-	result, err := client.CallWithTimeout(discoveryTimeout, "reporting.graphs")
+func reportingGraphNames(ctx context.Context, client *truenas.Client) []string {
+	result, err := client.CallWithTimeout(ctx, discoveryTimeout, "reporting.graphs")
 	if err != nil {
 		return nil
 	}
@@ -3789,8 +3790,8 @@ func reportingGraphNames(client *truenas.Client) []string {
 // getDataAcceptedGraphs returns the graph names allowed by the
 // reporting.get_data argument schema (graphs[].name enum) as published by
 // core.get_methods, or nil if unavailable.
-func getDataAcceptedGraphs(client *truenas.Client) []string {
-	result, err := client.CallWithTimeout(discoveryTimeout, "core.get_methods", "reporting")
+func getDataAcceptedGraphs(ctx context.Context, client *truenas.Client) []string {
+	result, err := client.CallWithTimeout(ctx, discoveryTimeout, "core.get_methods", "reporting")
 	if err != nil {
 		return nil
 	}
@@ -3884,14 +3885,14 @@ func conciseError(err error) string {
 	return strings.TrimSpace(msg)
 }
 
-func handleGetArcMetrics(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetArcMetrics(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	unit := "HOUR"
 	if u, ok := args["unit"].(string); ok && u != "" {
 		unit = u
 	}
 
 	// Default to every ARC graph the server supports.
-	supported := supportedArcGraphs(client)
+	supported := supportedArcGraphs(ctx, client)
 	graphs := supported
 	if g, ok := args["graphs"].([]interface{}); ok && len(g) > 0 {
 		graphs = make([]string, 0, len(g))
@@ -3908,7 +3909,7 @@ func handleGetArcMetrics(client *truenas.Client, args map[string]interface{}) (s
 	failures := make(map[string]string)
 
 	for _, graph := range graphs {
-		result, err := client.Call("reporting.get_data", []interface{}{
+		result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 			map[string]interface{}{
 				"name":       graph,
 				"identifier": nil,
@@ -3977,7 +3978,7 @@ func handleGetArcMetrics(client *truenas.Client, args map[string]interface{}) (s
 	return string(formatted), nil
 }
 
-func handleGetUpsMetrics(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetUpsMetrics(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	unit := "HOUR"
 	if u, ok := args["unit"].(string); ok && u != "" {
 		unit = u
@@ -4000,7 +4001,7 @@ func handleGetUpsMetrics(client *truenas.Client, args map[string]interface{}) (s
 		if graph == "upsvoltage" {
 			// upsvoltage has per-identifier data (battery, input, output)
 			// Discover identifiers from reporting.graphs
-			graphsResult, err := client.Call("reporting.graphs")
+			graphsResult, err := client.Call(ctx, "reporting.graphs")
 			if err != nil {
 				response[graph] = map[string]string{"error": fmt.Sprintf("failed to query reporting graphs: %v", err)}
 				continue
@@ -4039,7 +4040,7 @@ func handleGetUpsMetrics(client *truenas.Client, args map[string]interface{}) (s
 				if identifier != "" {
 					callIdentifier = identifier
 				}
-				result, err := client.Call("reporting.get_data", []interface{}{
+				result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 					map[string]interface{}{
 						"name":       "upsvoltage",
 						"identifier": callIdentifier,
@@ -4090,7 +4091,7 @@ func handleGetUpsMetrics(client *truenas.Client, args map[string]interface{}) (s
 			response[graph] = voltageData
 		} else {
 			// All other UPS graphs use nil identifier
-			result, err := client.Call("reporting.get_data", []interface{}{
+			result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 				map[string]interface{}{
 					"name":       graph,
 					"identifier": nil,
@@ -4144,7 +4145,7 @@ func handleGetUpsMetrics(client *truenas.Client, args map[string]interface{}) (s
 	return string(formatted), nil
 }
 
-func handleQueryApps(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleQueryApps(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	appName, _ := args["app_name"].(string)
 	includeConfig, _ := args["include_config"].(bool)
 
@@ -4163,7 +4164,7 @@ func handleQueryApps(client *truenas.Client, args map[string]interface{}) (strin
 		},
 	}
 
-	result, err := client.Call("app.query", filters, options)
+	result, err := client.Call(ctx, "app.query", filters, options)
 	if err != nil {
 		return "", fmt.Errorf("failed to query apps: %w", err)
 	}
@@ -4230,7 +4231,7 @@ func handleQueryApps(client *truenas.Client, args map[string]interface{}) (strin
 	return string(formatted), nil
 }
 
-func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleUpgradeApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return "", fmt.Errorf("app_name is required")
@@ -4251,12 +4252,12 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 	}
 
 	// First, get upgrade summary to show what will be upgraded
-	summaryResult, err := client.Call("app.upgrade_summary", appName, map[string]interface{}{
+	summaryResult, err := client.Call(ctx, "app.upgrade_summary", appName, map[string]interface{}{
 		"app_version": version,
 	})
 	if err != nil {
 		if isNoUpgradeAvailable(err) {
-			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(client, appName))
+			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(ctx, client, appName))
 		}
 		return "", fmt.Errorf("failed to get upgrade summary: %w", err)
 	}
@@ -4274,10 +4275,10 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 		"snapshot_hostpaths": snapshotHostpaths,
 	}
 
-	result, err := client.Call("app.upgrade", appName, upgradeOptions)
+	result, err := client.Call(ctx, "app.upgrade", appName, upgradeOptions)
 	if err != nil {
 		if isNoUpgradeAvailable(err) {
-			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(client, appName))
+			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(ctx, client, appName))
 		}
 		return "", fmt.Errorf("failed to upgrade app: %w", err)
 	}
@@ -4299,7 +4300,7 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 
 	// Create task to track upgrade progress. The task only completes once the
 	// app is seen RUNNING after the job finishes.
-	task, err := r.taskManager.CreateJobTask(
+	task, err := r.taskManager.CreateJobTask(ctx,
 		"upgrade_app",
 		args,
 		jobID,
@@ -4337,14 +4338,14 @@ func (r *Registry) handleUpgradeApp(client *truenas.Client, args map[string]inte
 }
 
 // handleUpgradeAppWithDryRun wraps the upgrade handler with dry-run support
-func (r *Registry) handleUpgradeAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &upgradeAppDryRun{}, r.handleUpgradeApp)
+func (r *Registry) handleUpgradeAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &upgradeAppDryRun{}, r.handleUpgradeApp)
 }
 
 // upgradeAppDryRun implements dry-run preview for app upgrades
 type upgradeAppDryRun struct{}
 
-func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (u *upgradeAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
@@ -4366,7 +4367,7 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	}
 
 	// Get current app state
-	currentResult, err := client.Call("app.query", []interface{}{
+	currentResult, err := client.Call(ctx, "app.query", []interface{}{
 		[]interface{}{"name", "=", appName},
 	})
 	if err != nil {
@@ -4384,7 +4385,7 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	currentApp := apps[0]
 
 	// Get upgrade summary
-	summaryResult, err := client.Call("app.upgrade_summary", appName, map[string]interface{}{
+	summaryResult, err := client.Call(ctx, "app.upgrade_summary", appName, map[string]interface{}{
 		"app_version": version,
 	})
 	if err != nil {
@@ -4491,13 +4492,13 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	return result, nil
 }
 
-func (r *Registry) handleStartApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleStartApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return "", fmt.Errorf("app_name is required")
 	}
 
-	result, err := client.Call("app.start", appName)
+	result, err := client.Call(ctx, "app.start", appName)
 	if err != nil {
 		return "", fmt.Errorf("failed to start app: %w", err)
 	}
@@ -4514,7 +4515,7 @@ func (r *Registry) handleStartApp(client *truenas.Client, args map[string]interf
 		jobID = jobIDArray[0]
 	}
 
-	task, err := r.taskManager.CreateJobTask("start_app", args, jobID, 10*time.Minute)
+	task, err := r.taskManager.CreateJobTask(ctx, "start_app", args, jobID, 10*time.Minute)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
@@ -4534,19 +4535,19 @@ func (r *Registry) handleStartApp(client *truenas.Client, args map[string]interf
 	return string(formatted), nil
 }
 
-func (r *Registry) handleStartAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &startAppDryRun{}, r.handleStartApp)
+func (r *Registry) handleStartAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &startAppDryRun{}, r.handleStartApp)
 }
 
 type startAppDryRun struct{}
 
-func (s *startAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (s *startAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
 	}
 
-	currentResult, err := client.Call("app.query", []interface{}{
+	currentResult, err := client.Call(ctx, "app.query", []interface{}{
 		[]interface{}{"name", "=", appName},
 	})
 	if err != nil {
@@ -4582,13 +4583,13 @@ func (s *startAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 	}, nil
 }
 
-func (r *Registry) handleStopApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleStopApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return "", fmt.Errorf("app_name is required")
 	}
 
-	result, err := client.Call("app.stop", appName)
+	result, err := client.Call(ctx, "app.stop", appName)
 	if err != nil {
 		return "", fmt.Errorf("failed to stop app: %w", err)
 	}
@@ -4605,7 +4606,7 @@ func (r *Registry) handleStopApp(client *truenas.Client, args map[string]interfa
 		jobID = jobIDArray[0]
 	}
 
-	task, err := r.taskManager.CreateJobTask("stop_app", args, jobID, 5*time.Minute)
+	task, err := r.taskManager.CreateJobTask(ctx, "stop_app", args, jobID, 5*time.Minute)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
@@ -4625,19 +4626,19 @@ func (r *Registry) handleStopApp(client *truenas.Client, args map[string]interfa
 	return string(formatted), nil
 }
 
-func (r *Registry) handleStopAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &stopAppDryRun{}, r.handleStopApp)
+func (r *Registry) handleStopAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &stopAppDryRun{}, r.handleStopApp)
 }
 
 type stopAppDryRun struct{}
 
-func (s *stopAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (s *stopAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
 	}
 
-	currentResult, err := client.Call("app.query", []interface{}{
+	currentResult, err := client.Call(ctx, "app.query", []interface{}{
 		[]interface{}{"name", "=", appName},
 	})
 	if err != nil {
@@ -4674,13 +4675,13 @@ func (s *stopAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]in
 }
 
 // handleGetAppConfig retrieves the user-specified config for an app
-func handleGetAppConfig(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetAppConfig(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return "", fmt.Errorf("app_name is required")
 	}
 
-	result, err := client.Call("app.config", appName)
+	result, err := client.Call(ctx, "app.config", appName)
 	if err != nil {
 		return "", fmt.Errorf("failed to get app config: %w", err)
 	}
@@ -4702,7 +4703,7 @@ func handleGetAppConfig(client *truenas.Client, args map[string]interface{}) (st
 }
 
 // handleUpdateApp performs the actual app.update API call
-func (r *Registry) handleUpdateApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleUpdateApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return "", fmt.Errorf("app_name is required")
@@ -4713,17 +4714,17 @@ func (r *Registry) handleUpdateApp(client *truenas.Client, args map[string]inter
 		return "", fmt.Errorf("values is required and must be an object")
 	}
 
-	schema, err := fetchInstalledAppSchema(client, appName)
+	schema, err := fetchInstalledAppSchema(ctx, client, appName)
 	if err != nil {
 		return "", err
 	}
-	if _, missing, err := checkAppHostPathStorage(client, schema, values); err != nil {
+	if _, missing, err := checkAppHostPathStorage(ctx, client, schema, values); err != nil {
 		return "", fmt.Errorf("storage validation failed: %v", err)
 	} else if len(missing) > 0 {
 		return "", datasetsMustExistError(missing, "update")
 	}
 
-	result, err := client.Call("app.update", appName, map[string]interface{}{
+	result, err := client.Call(ctx, "app.update", appName, map[string]interface{}{
 		"values": values,
 	})
 	if err != nil {
@@ -4742,7 +4743,7 @@ func (r *Registry) handleUpdateApp(client *truenas.Client, args map[string]inter
 		jobID = jobIDArray[0]
 	}
 
-	task, err := r.taskManager.CreateJobTask("update_app", args, jobID, 30*time.Minute)
+	task, err := r.taskManager.CreateJobTask(ctx, "update_app", args, jobID, 30*time.Minute)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
@@ -4762,13 +4763,13 @@ func (r *Registry) handleUpdateApp(client *truenas.Client, args map[string]inter
 	return string(formatted), nil
 }
 
-func (r *Registry) handleUpdateAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &updateAppDryRun{}, r.handleUpdateApp)
+func (r *Registry) handleUpdateAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &updateAppDryRun{}, r.handleUpdateApp)
 }
 
 type updateAppDryRun struct{}
 
-func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (u *updateAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
@@ -4779,16 +4780,16 @@ func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 		return nil, fmt.Errorf("values is required and must be an object")
 	}
 
-	schema, err := fetchInstalledAppSchema(client, appName)
+	schema, err := fetchInstalledAppSchema(ctx, client, appName)
 	if err != nil {
 		return nil, err
 	}
-	datasetPaths, missing, err := checkAppHostPathStorage(client, schema, values)
+	datasetPaths, missing, err := checkAppHostPathStorage(ctx, client, schema, values)
 	if err != nil {
 		return nil, fmt.Errorf("storage validation failed: %v", err)
 	}
 
-	currentResult, err := client.Call("app.config", appName)
+	currentResult, err := client.Call(ctx, "app.config", appName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current config: %w", err)
 	}
@@ -4840,7 +4841,7 @@ var jobStates = map[string]bool{"WAITING": true, "RUNNING": true, "SUCCESS": tru
 
 const validJobStatesText = "RUNNING, WAITING, SUCCESS, FAILED, ABORTED, or all (case-insensitive)"
 
-func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleQueryJobs(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// No state (or "all", any case) means every state, reported as "ALL".
 	// Values are checked before anything is sent; they are not echoed.
 	state := "ALL"
@@ -4896,7 +4897,7 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 		"order_by": []string{"-time_started"}, // Most recent first
 	}
 
-	result, err := client.Call("core.get_jobs", filters, options)
+	result, err := client.Call(ctx, "core.get_jobs", filters, options)
 	if err != nil {
 		return "", fmt.Errorf("failed to query jobs: %w", err)
 	}
@@ -4915,7 +4916,7 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 		// The full count is a separate cheap query; if it fails the list is
 		// still returned, flagged has_more, without a total.
 		totalKnown = false
-		if raw, err := client.Call("core.get_jobs", filters, map[string]interface{}{"count": true}); err == nil {
+		if raw, err := client.Call(ctx, "core.get_jobs", filters, map[string]interface{}{"count": true}); err == nil {
 			var n float64
 			if json.Unmarshal(raw, &n) == nil && int(n) >= len(jobs) {
 				total = int(n)
@@ -5008,7 +5009,7 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 
 // Capacity analysis handlers
 
-func handleAnalyzeCapacity(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleAnalyzeCapacity(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	timeRange := "MONTH"
 	if tr, ok := args["time_range"].(string); ok && tr != "" {
 		timeRange = tr
@@ -5035,28 +5036,28 @@ func handleAnalyzeCapacity(client *truenas.Client, args map[string]interface{}) 
 	for _, metric := range metrics {
 		switch metric {
 		case "cpu":
-			cpuAnalysis, err := analyzeCPUCapacity(client, timeRange)
+			cpuAnalysis, err := analyzeCPUCapacity(ctx, client, timeRange)
 			if err != nil {
 				analysis["cpu"] = map[string]string{"error": err.Error()}
 			} else {
 				analysis["cpu"] = cpuAnalysis
 			}
 		case "memory":
-			memAnalysis, err := analyzeMemoryCapacity(client, timeRange)
+			memAnalysis, err := analyzeMemoryCapacity(ctx, client, timeRange)
 			if err != nil {
 				analysis["memory"] = map[string]string{"error": err.Error()}
 			} else {
 				analysis["memory"] = memAnalysis
 			}
 		case "network":
-			netAnalysis, err := analyzeNetworkCapacity(client, timeRange)
+			netAnalysis, err := analyzeNetworkCapacity(ctx, client, timeRange)
 			if err != nil {
 				analysis["network"] = map[string]string{"error": err.Error()}
 			} else {
 				analysis["network"] = netAnalysis
 			}
 		case "disk":
-			diskAnalysis, err := analyzeDiskCapacity(client, timeRange)
+			diskAnalysis, err := analyzeDiskCapacity(ctx, client, timeRange)
 			if err != nil {
 				analysis["disk"] = map[string]string{"error": err.Error()}
 			} else {
@@ -5076,9 +5077,9 @@ func handleAnalyzeCapacity(client *truenas.Client, args map[string]interface{}) 
 	return string(formatted), nil
 }
 
-func analyzeCPUCapacity(client *truenas.Client, timeRange string) (map[string]interface{}, error) {
+func analyzeCPUCapacity(ctx context.Context, client *truenas.Client, timeRange string) (map[string]interface{}, error) {
 	// Get CPU metrics for time range
-	result, err := client.Call("reporting.get_data", []interface{}{
+	result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 		map[string]interface{}{
 			"name":       "cpu",
 			"identifier": nil,
@@ -5139,9 +5140,9 @@ func analyzeCPUCapacity(client *truenas.Client, timeRange string) (map[string]in
 	return analysis, nil
 }
 
-func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string]interface{}, error) {
+func analyzeMemoryCapacity(ctx context.Context, client *truenas.Client, timeRange string) (map[string]interface{}, error) {
 	// Get system info to find total memory
-	sysInfoResult, err := client.Call("system.info")
+	sysInfoResult, err := client.Call(ctx, "system.info")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get system info: %w", err)
 	}
@@ -5160,7 +5161,7 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 	}
 
 	// Get memory metrics
-	result, err := client.Call("reporting.get_data", []interface{}{
+	result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 		map[string]interface{}{
 			"name":       "memory",
 			"identifier": nil,
@@ -5226,7 +5227,7 @@ func analyzeMemoryCapacity(client *truenas.Client, timeRange string) (map[string
 	// latest ARC size is known, so it is compared with the latest complete
 	// available sample rather than an average over the range.
 	statusPct := currentPct
-	arcBytes, arcFreshKnown, arcErr := currentArcBytes(client, nasReferenceTime(metricsData[0]))
+	arcBytes, arcFreshKnown, arcErr := currentArcBytes(ctx, client, nasReferenceTime(metricsData[0]))
 	if arcErr == nil {
 		if !arcFreshKnown {
 			analysis["arc_freshness_note"] = arcFreshnessUnknownNote
@@ -5347,8 +5348,8 @@ func nasReferenceTime(graph map[string]interface{}) float64 {
 // graph's "end". A sample more than arcMaxAge older than the
 // reference yields errArcStale. With no reference at all, freshness is
 // unknown: the sample is returned with freshKnown false.
-func currentArcBytes(client *truenas.Client, memRef float64) (bytes float64, freshKnown bool, err error) {
-	result, err := client.Call("reporting.get_data", []interface{}{
+func currentArcBytes(ctx context.Context, client *truenas.Client, memRef float64) (bytes float64, freshKnown bool, err error) {
+	result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 		map[string]interface{}{"name": "arcsize", "identifier": nil},
 	}, map[string]interface{}{"unit": "HOUR"})
 	if err != nil {
@@ -5411,9 +5412,9 @@ func memoryUsedPct(total, available float64) float64 {
 	return math.Max(0, math.Min(100, pct))
 }
 
-func analyzeNetworkCapacity(client *truenas.Client, timeRange string) (map[string]interface{}, error) {
+func analyzeNetworkCapacity(ctx context.Context, client *truenas.Client, timeRange string) (map[string]interface{}, error) {
 	// Get all network interfaces
-	ifaceResult, err := client.Call("interface.query")
+	ifaceResult, err := client.Call(ctx, "interface.query")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query interfaces: %w", err)
 	}
@@ -5440,7 +5441,7 @@ func analyzeNetworkCapacity(client *truenas.Client, timeRange string) (map[strin
 		}
 
 		// Get network metrics for this interface
-		result, err := client.Call("reporting.get_data", []interface{}{
+		result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 			map[string]interface{}{
 				"name":       "interface",
 				"identifier": ifaceName,
@@ -5522,9 +5523,9 @@ func networkSeriesInfo(dataPointsMbps, completeMbps []float64, linkSpeed float64
 	return metricInfo
 }
 
-func analyzeDiskCapacity(client *truenas.Client, timeRange string) (map[string]interface{}, error) {
+func analyzeDiskCapacity(ctx context.Context, client *truenas.Client, timeRange string) (map[string]interface{}, error) {
 	// Get available disk graphs
-	graphsResult, err := client.Call("reporting.graphs")
+	graphsResult, err := client.Call(ctx, "reporting.graphs")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query reporting graphs: %w", err)
 	}
@@ -5563,7 +5564,7 @@ func analyzeDiskCapacity(client *truenas.Client, timeRange string) (map[string]i
 			diskName = identifier[:idx]
 		}
 
-		result, err := client.Call("reporting.get_data", []interface{}{
+		result, err := client.Call(ctx, "reporting.get_data", []interface{}{
 			map[string]interface{}{
 				"name":       "disk",
 				"identifier": identifier,
@@ -5619,11 +5620,11 @@ func analyzeDiskCapacity(client *truenas.Client, timeRange string) (map[string]i
 	return diskAnalysis, nil
 }
 
-func handleGetPoolCapacityDetails(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetPoolCapacityDetails(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	poolName, _ := args["pool_name"].(string)
 
 	// Get pool information
-	poolResult, err := client.Call("pool.query")
+	poolResult, err := client.Call(ctx, "pool.query")
 	if err != nil {
 		return "", err
 	}
@@ -5652,7 +5653,7 @@ func handleGetPoolCapacityDetails(client *truenas.Client, args map[string]interf
 
 		// Get datasets for this pool
 		var datasets []map[string]interface{}
-		datasetResult, err := client.Call("pool.dataset.query",
+		datasetResult, err := client.Call(ctx, "pool.dataset.query",
 			[]interface{}{[]interface{}{"name", "^", pool["name"]}})
 		if err == nil {
 			if err := json.Unmarshal(datasetResult, &datasets); err == nil {
@@ -6008,7 +6009,7 @@ func analyzeDatasetCapacity(datasets []map[string]interface{}) []map[string]inte
 }
 
 // handleTasksList lists all active and recent tasks
-func (r *Registry) handleTasksList(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleTasksList(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	cursor := ""
 	if c, ok := args["cursor"].(string); ok {
 		cursor = c
@@ -6036,7 +6037,7 @@ func (r *Registry) handleTasksList(client *truenas.Client, args map[string]inter
 }
 
 // handleTasksGet retrieves a specific task by ID
-func (r *Registry) handleTasksGet(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleTasksGet(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	taskID, ok := args["task_id"].(string)
 	if !ok || taskID == "" {
 		return "", fmt.Errorf("task_id is required")
@@ -6054,8 +6055,8 @@ func (r *Registry) handleTasksGet(client *truenas.Client, args map[string]interf
 // System Update Handlers
 
 // handleCheckUpdates checks for available TrueNAS system updates
-func handleCheckUpdates(client *truenas.Client, args map[string]interface{}) (string, error) {
-	result, err := client.Call("update.available_versions")
+func handleCheckUpdates(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	result, err := client.Call(ctx, "update.available_versions")
 	if err != nil {
 		return "", fmt.Errorf("failed to check for updates: %w", err)
 	}
@@ -6074,8 +6075,8 @@ func handleCheckUpdates(client *truenas.Client, args map[string]interface{}) (st
 }
 
 // handleUpdateStatus gets current system update status
-func handleUpdateStatus(client *truenas.Client, args map[string]interface{}) (string, error) {
-	result, err := client.Call("update.status")
+func handleUpdateStatus(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	result, err := client.Call(ctx, "update.status")
 	if err != nil {
 		return "", fmt.Errorf("failed to get update status: %w", err)
 	}
@@ -6094,14 +6095,14 @@ func handleUpdateStatus(client *truenas.Client, args map[string]interface{}) (st
 }
 
 // handleDownloadUpdate downloads a TrueNAS system update
-func (r *Registry) handleDownloadUpdate(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleDownloadUpdate(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// train and version are declared for compatibility but ignored:
 	// update.download takes no parameters and fetches whatever the system's
 	// configured train offers. Nothing below reports them as applied.
 	ignored := downloadUpdateIgnoredNote(args)
 
 	// Check if update is already downloaded
-	statusResult, err := client.Call("update.status")
+	statusResult, err := client.Call(ctx, "update.status")
 	if err == nil {
 		var status map[string]interface{}
 		if err := json.Unmarshal(statusResult, &status); err == nil {
@@ -6128,7 +6129,7 @@ func (r *Registry) handleDownloadUpdate(client *truenas.Client, args map[string]
 
 	// Start the download (update.download typically takes no parameters)
 	// TrueNAS downloads based on the configured train automatically
-	result, err := client.Call("update.download")
+	result, err := client.Call(ctx, "update.download")
 	if err != nil {
 		return "", fmt.Errorf("failed to start update download: %w", err)
 	}
@@ -6140,7 +6141,7 @@ func (r *Registry) handleDownloadUpdate(client *truenas.Client, args map[string]
 	}
 
 	// Create task to track download progress
-	task, err := r.taskManager.CreateJobTask(
+	task, err := r.taskManager.CreateJobTask(ctx,
 		"download_update",
 		withoutKeys(args, "train", "version"),
 		jobID,
@@ -6170,16 +6171,16 @@ func (r *Registry) handleDownloadUpdate(client *truenas.Client, args map[string]
 }
 
 // handleDownloadUpdateWithDryRun wraps the download handler with dry-run support
-func (r *Registry) handleDownloadUpdateWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &downloadUpdateDryRun{}, r.handleDownloadUpdate)
+func (r *Registry) handleDownloadUpdateWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &downloadUpdateDryRun{}, r.handleDownloadUpdate)
 }
 
 // downloadUpdateDryRun implements dry-run preview for update downloads
 type downloadUpdateDryRun struct{}
 
-func (d *downloadUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (d *downloadUpdateDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	// Get current system info
-	sysInfoResult, err := client.Call("system.info")
+	sysInfoResult, err := client.Call(ctx, "system.info")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get system info: %w", err)
 	}
@@ -6258,7 +6259,7 @@ func withoutKeys(args map[string]interface{}, keys ...string) map[string]interfa
 }
 
 // handleApplyUpdate applies a downloaded TrueNAS system update
-func (r *Registry) handleApplyUpdate(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleApplyUpdate(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	reboot := false
 	if r, ok := args["reboot"].(bool); ok {
 		reboot = r
@@ -6270,7 +6271,7 @@ func (r *Registry) handleApplyUpdate(client *truenas.Client, args map[string]int
 	}
 
 	// Start the update
-	result, err := client.Call("update.run", updateOptions)
+	result, err := client.Call(ctx, "update.run", updateOptions)
 	if err != nil {
 		return "", fmt.Errorf("failed to start update: %w", err)
 	}
@@ -6282,7 +6283,7 @@ func (r *Registry) handleApplyUpdate(client *truenas.Client, args map[string]int
 	}
 
 	// Create job-based task to track update progress
-	task, err := r.taskManager.CreateJobTask(
+	task, err := r.taskManager.CreateJobTask(ctx,
 		"apply_update",
 		args,
 		jobID,
@@ -6314,21 +6315,21 @@ func (r *Registry) handleApplyUpdate(client *truenas.Client, args map[string]int
 }
 
 // handleApplyUpdateWithDryRun wraps the apply handler with dry-run support
-func (r *Registry) handleApplyUpdateWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &applyUpdateDryRun{}, r.handleApplyUpdate)
+func (r *Registry) handleApplyUpdateWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &applyUpdateDryRun{}, r.handleApplyUpdate)
 }
 
 // applyUpdateDryRun implements dry-run preview for update application
 type applyUpdateDryRun struct{}
 
-func (a *applyUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (a *applyUpdateDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	reboot := false
 	if r, ok := args["reboot"].(bool); ok {
 		reboot = r
 	}
 
 	// Get current system info
-	sysInfoResult, err := client.Call("system.info")
+	sysInfoResult, err := client.Call(ctx, "system.info")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get system info: %w", err)
 	}
@@ -6344,7 +6345,7 @@ func (a *applyUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[strin
 	}
 
 	// Check update status to get target version
-	statusResult, err := client.Call("update.status")
+	statusResult, err := client.Call(ctx, "update.status")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get update status: %w", err)
 	}
@@ -6418,7 +6419,7 @@ func (a *applyUpdateDryRun) ExecuteDryRun(client *truenas.Client, args map[strin
 }
 
 // handleSystemReboot reboots the TrueNAS system
-func handleSystemReboot(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleSystemReboot(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Call system.reboot with reason parameter
 	reason := "System reboot requested via MCP"
 	params := []interface{}{reason}
@@ -6429,7 +6430,7 @@ func handleSystemReboot(client *truenas.Client, args map[string]interface{}) (st
 	if delay > 0 {
 		params = append(params, map[string]interface{}{"delay": delay})
 	}
-	result, err := client.Call("system.reboot", params...)
+	result, err := client.Call(ctx, "system.reboot", params...)
 	if err != nil {
 		return "", fmt.Errorf("failed to initiate system reboot: %w", err)
 	}
@@ -6460,9 +6461,9 @@ func handleSystemReboot(client *truenas.Client, args map[string]interface{}) (st
 
 // Boot Environment Management Handlers
 
-func handleQueryBootEnvironments(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleQueryBootEnvironments(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Query all boot environments
-	result, err := client.Call("boot.environment.query", []interface{}{})
+	result, err := client.Call(ctx, "boot.environment.query", []interface{}{})
 	if err != nil {
 		return "", fmt.Errorf("failed to query boot environments: %w", err)
 	}
@@ -6579,14 +6580,14 @@ func handleQueryBootEnvironments(client *truenas.Client, args map[string]interfa
 	return string(formatted), nil
 }
 
-func handleDeleteBootEnvironment(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleDeleteBootEnvironment(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	id, ok := args["id"].(string)
 	if !ok || id == "" {
 		return "", fmt.Errorf("id parameter is required")
 	}
 
 	// Query all boot environments and find the one to delete
-	result, err := client.Call("boot.environment.query", []interface{}{})
+	result, err := client.Call(ctx, "boot.environment.query", []interface{}{})
 	if err != nil {
 		return "", fmt.Errorf("failed to query boot environments: %w", err)
 	}
@@ -6633,7 +6634,7 @@ func handleDeleteBootEnvironment(client *truenas.Client, args map[string]interfa
 	params := map[string]interface{}{
 		"id": id,
 	}
-	_, err = client.Call("boot.environment.destroy", params)
+	_, err = client.Call(ctx, "boot.environment.destroy", params)
 	if err != nil {
 		return "", fmt.Errorf("failed to delete boot environment: %w", err)
 	}
@@ -6655,9 +6656,9 @@ func handleDeleteBootEnvironment(client *truenas.Client, args map[string]interfa
 	return string(formatted), nil
 }
 
-func handleGetCurrentBootEnvironment(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetCurrentBootEnvironment(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Query all boot environments
-	result, err := client.Call("boot.environment.query", []interface{}{})
+	result, err := client.Call(ctx, "boot.environment.query", []interface{}{})
 	if err != nil {
 		return "", fmt.Errorf("failed to query boot environments: %w", err)
 	}
@@ -6790,14 +6791,14 @@ func formatBytes(bytes int64) string {
 
 type deleteBootEnvironmentDryRun struct{}
 
-func (d *deleteBootEnvironmentDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (d *deleteBootEnvironmentDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	id, ok := args["id"].(string)
 	if !ok || id == "" {
 		return nil, fmt.Errorf("id parameter is required")
 	}
 
 	// Query all boot environments and find the one to delete
-	result, err := client.Call("boot.environment.query", []interface{}{})
+	result, err := client.Call(ctx, "boot.environment.query", []interface{}{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query boot environments: %w", err)
 	}
@@ -6875,6 +6876,6 @@ func (d *deleteBootEnvironmentDryRun) ExecuteDryRun(client *truenas.Client, args
 	}, nil
 }
 
-func (r *Registry) handleDeleteBootEnvironmentWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &deleteBootEnvironmentDryRun{}, handleDeleteBootEnvironment)
+func (r *Registry) handleDeleteBootEnvironmentWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &deleteBootEnvironmentDryRun{}, handleDeleteBootEnvironment)
 }

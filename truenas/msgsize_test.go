@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -14,13 +15,13 @@ import (
 func TestOversizedRequestNotSent(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.maxMessage = maxRequestBytes })
 	c := insecureClient(t, f, Options{})
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 	before, _, _ := f.snapshot()
 
 	big := strings.Repeat("x", 70*1024)
-	_, err := c.Call("filesystem.mkdir", map[string]interface{}{"path": big})
+	_, err := c.Call(context.Background(), "filesystem.mkdir", map[string]interface{}{"path": big})
 	if err == nil {
 		t.Fatal("70 KiB request: got no error")
 	}
@@ -39,7 +40,7 @@ func TestOversizedRequestNotSent(t *testing.T) {
 		t.Errorf("error echoes the input: %.200s", err)
 	}
 
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("Call after the oversized request: %v", err)
 	}
 	after, _, conns := f.snapshot()
@@ -55,7 +56,7 @@ func TestOversizedRequestNotSent(t *testing.T) {
 func TestRequestSizeLimitBoundary(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.maxMessage = maxRequestBytes })
 	c := insecureClient(t, f, Options{})
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 	// The next request id; ids here stay in the same number of digits.
@@ -64,10 +65,10 @@ func TestRequestSizeLimitBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	pad := maxRequestBytes - len(base)
-	if _, err := c.Call("system.info", strings.Repeat("x", pad)); err != nil {
+	if _, err := c.Call(context.Background(), "system.info", strings.Repeat("x", pad)); err != nil {
 		t.Errorf("request of exactly %d bytes: %v", maxRequestBytes, err)
 	}
-	_, err = c.Call("system.info", strings.Repeat("x", pad+1))
+	_, err = c.Call(context.Background(), "system.info", strings.Repeat("x", pad+1))
 	if err == nil || !strings.Contains(err.Error(), "request too large") {
 		t.Errorf("request of %d bytes: got %v, want a request too large error", maxRequestBytes+1, err)
 	}
@@ -83,7 +84,7 @@ func TestMessageTooBigCloseIsExplained(t *testing.T) {
 	// A server limit below ours, so the request is sent and refused there.
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.maxMessage = 1024 })
 	c := insecureClient(t, f, Options{})
-	_, err := c.Call("filesystem.mkdir", map[string]interface{}{"path": strings.Repeat("x", 2048)})
+	_, err := c.Call(context.Background(), "filesystem.mkdir", map[string]interface{}{"path": strings.Repeat("x", 2048)})
 	if err == nil {
 		t.Fatal("got no error")
 	}
@@ -106,7 +107,7 @@ func TestMessageTooBigCloseIsExplained(t *testing.T) {
 	}
 
 	waitDisconnected(t, c)
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("Call after the 1009 close: %v", err)
 	}
 	if _, _, conns := f.snapshot(); conns != 2 {

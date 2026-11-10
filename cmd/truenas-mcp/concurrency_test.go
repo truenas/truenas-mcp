@@ -128,8 +128,9 @@ func TestCancelledNotificationCancelsToolContext(t *testing.T) {
 }
 
 // A cancelled call returns at once even if its tool does not observe ctx
-// (tool handlers do not take a context yet); the tool finishes in the
-// background and its result is dropped.
+// (the test "slow" tool ignores it); the tool finishes in the background
+// and its result is dropped. Production handlers pass ctx through to
+// Client.Call, so they return promptly and release their slot.
 func TestCancelledCallReturnsWhileToolStillRuns(t *testing.T) {
 	reg := newBlockingRegistry(t)
 	c, run := session(t, newTestHandler(reg, false))

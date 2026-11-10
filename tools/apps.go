@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +26,7 @@ type StorageVolume struct {
 // ============================================================================
 
 // handleSearchAppCatalog searches the TrueNAS app catalog
-func handleSearchAppCatalog(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleSearchAppCatalog(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Extract parameters
 	query := ""
 	if q, ok := args["query"].(string); ok {
@@ -81,7 +82,7 @@ func handleSearchAppCatalog(client *truenas.Client, args map[string]interface{})
 	}
 
 	// Call app.available API
-	result, err := client.Call("app.available", filters, options)
+	result, err := client.Call(ctx, "app.available", filters, options)
 	if err != nil {
 		return "", fmt.Errorf("failed to search app catalog: %w", err)
 	}
@@ -152,7 +153,7 @@ func formatAppSearchResults(apps []interface{}) string {
 }
 
 // handleGetAppCatalogDetails retrieves detailed information about a specific app
-func handleGetAppCatalogDetails(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetAppCatalogDetails(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Extract parameters
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
@@ -168,14 +169,14 @@ func handleGetAppCatalogDetails(client *truenas.Client, args map[string]interfac
 	var trains []string
 	if train == "" {
 		var err error
-		train, trains, err = resolveCatalogTrain(client, appName)
+		train, trains, err = resolveCatalogTrain(ctx, client, appName)
 		if err != nil {
 			return "", err
 		}
 	}
 
 	// Call catalog.get_app_details API
-	result, err := client.Call("catalog.get_app_details", appName, map[string]interface{}{
+	result, err := client.Call(ctx, "catalog.get_app_details", appName, map[string]interface{}{
 		"train": train,
 	})
 	if err != nil {
@@ -215,8 +216,8 @@ var catalogTrainPreference = []string{"stable", "enterprise", "community"}
 // resolveCatalogTrain looks up which catalog trains have appName and returns
 // the preferred one plus all of them (sorted by preference). If the lookup
 // itself fails it falls back to stable, the previous default.
-func resolveCatalogTrain(client *truenas.Client, appName string) (string, []string, error) {
-	result, err := client.Call("app.available",
+func resolveCatalogTrain(ctx context.Context, client *truenas.Client, appName string) (string, []string, error) {
+	result, err := client.Call(ctx, "app.available",
 		[]interface{}{[]interface{}{"name", "=", appName}},
 		map[string]interface{}{},
 	)
@@ -541,7 +542,7 @@ func generateWizardGuidance(schema map[string]interface{}) map[string]interface{
 // ============================================================================
 
 // handleInstallApp installs an app from the catalog
-func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskManager *tasks.Manager) (string, error) {
+func handleInstallApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, taskManager *tasks.Manager) (string, error) {
 	// Extract parameters
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
@@ -553,7 +554,7 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 		return "", fmt.Errorf("catalog_app is required")
 	}
 
-	train, trainNote, err := catalogTrainForInstall(client, catalogApp, args)
+	train, trainNote, err := catalogTrainForInstall(ctx, client, catalogApp, args)
 	if err != nil {
 		return "", err
 	}
@@ -576,11 +577,11 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 
 	// CRITICAL SECURITY: every schema storage entry must be a host_path
 	// under /mnt/<pool>/, and those datasets must already exist.
-	schema, err := fetchCatalogAppSchema(client, catalogApp, train, version)
+	schema, err := fetchCatalogAppSchema(ctx, client, catalogApp, train, version)
 	if err != nil {
 		return "", err
 	}
-	if _, missing, err := checkAppHostPathStorage(client, schema, values); err != nil {
+	if _, missing, err := checkAppHostPathStorage(ctx, client, schema, values); err != nil {
 		return "", fmt.Errorf("storage validation failed: %v", err)
 	} else if len(missing) > 0 {
 		return "", datasetsMustExistError(missing, "installation")
@@ -595,7 +596,7 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 		"values":      values,
 	}
 
-	result, err := client.Call("app.create", params)
+	result, err := client.Call(ctx, "app.create", params)
 	if err != nil {
 		return "", fmt.Errorf("failed to install app: %v", err)
 	}
@@ -616,7 +617,7 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 	}
 
 	// Create task for tracking
-	task, err := taskManager.CreateJobTask(
+	task, err := taskManager.CreateJobTask(ctx,
 		"install_app",
 		args,
 		jobID,
@@ -652,7 +653,7 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 // installAppDryRun implements dry-run for app installation
 type installAppDryRun struct{}
 
-func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (d *installAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
@@ -661,7 +662,7 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	if !ok || catalogApp == "" {
 		return nil, fmt.Errorf("catalog_app is required")
 	}
-	train, trainNote, err := catalogTrainForInstall(client, catalogApp, args)
+	train, trainNote, err := catalogTrainForInstall(ctx, client, catalogApp, args)
 	if err != nil {
 		return nil, err
 	}
@@ -682,17 +683,17 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		version = v
 	}
 
-	schema, err := fetchCatalogAppSchema(client, catalogApp, train, version)
+	schema, err := fetchCatalogAppSchema(ctx, client, catalogApp, train, version)
 	if err != nil {
 		return nil, err
 	}
-	datasetPaths, missing, err := checkAppHostPathStorage(client, schema, valuesParam)
+	datasetPaths, missing, err := checkAppHostPathStorage(ctx, client, schema, valuesParam)
 	if err != nil {
 		return nil, fmt.Errorf("storage validation failed: %v", err)
 	}
 
 	// Check if app already exists
-	existingApps, err := client.Call("app.query",
+	existingApps, err := client.Call(ctx, "app.query",
 		[]interface{}{
 			[]interface{}{"name", "=", appName},
 		},
@@ -707,7 +708,7 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	appExists := len(apps) > 0
 
 	// Get app details for version info
-	appDetails, err := client.Call("catalog.get_app_details", catalogApp, map[string]interface{}{
+	appDetails, err := client.Call(ctx, "catalog.get_app_details", catalogApp, map[string]interface{}{
 		"train": train,
 	})
 
@@ -803,10 +804,10 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 }
 
 // handleInstallAppWithDryRun wraps handleInstallApp with dry-run support
-func (r *Registry) handleInstallAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleInstallAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	dryRun := &installAppDryRun{}
-	return ExecuteWithDryRun(client, args, dryRun, func(c *truenas.Client, a map[string]interface{}) (string, error) {
-		return handleInstallApp(c, a, r.taskManager)
+	return ExecuteWithDryRun(ctx, client, args, dryRun, func(ctx context.Context, c *truenas.Client, a map[string]interface{}) (string, error) {
+		return handleInstallApp(ctx, c, a, r.taskManager)
 	})
 }
 
@@ -815,7 +816,7 @@ func (r *Registry) handleInstallAppWithDryRun(client *truenas.Client, args map[s
 // ============================================================================
 
 // handleDeleteApp deletes an installed app
-func handleDeleteApp(client *truenas.Client, args map[string]interface{}, taskManager *tasks.Manager) (string, error) {
+func handleDeleteApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, taskManager *tasks.Manager) (string, error) {
 	// Extract parameters
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
@@ -832,7 +833,7 @@ func handleDeleteApp(client *truenas.Client, args map[string]interface{}, taskMa
 		"remove_images": removeImages,
 	}
 
-	result, err := client.Call("app.delete", appName, params)
+	result, err := client.Call(ctx, "app.delete", appName, params)
 	if err != nil {
 		return "", fmt.Errorf("failed to delete app: %v", err)
 	}
@@ -853,7 +854,7 @@ func handleDeleteApp(client *truenas.Client, args map[string]interface{}, taskMa
 	}
 
 	// Create task for tracking
-	task, err := taskManager.CreateJobTask(
+	task, err := taskManager.CreateJobTask(ctx,
 		"delete_app",
 		args,
 		jobID,
@@ -884,14 +885,14 @@ func handleDeleteApp(client *truenas.Client, args map[string]interface{}, taskMa
 // deleteAppDryRun implements dry-run for app deletion
 type deleteAppDryRun struct{}
 
-func (d *deleteAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (d *deleteAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
 	}
 
 	// Query app details
-	result, err := client.Call("app.query",
+	result, err := client.Call(ctx, "app.query",
 		[]interface{}{
 			[]interface{}{"name", "=", appName},
 		},
@@ -980,10 +981,10 @@ func (d *deleteAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 }
 
 // handleDeleteAppWithDryRun wraps handleDeleteApp with dry-run support
-func (r *Registry) handleDeleteAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleDeleteAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	dryRun := &deleteAppDryRun{}
-	return ExecuteWithDryRun(client, args, dryRun, func(c *truenas.Client, a map[string]interface{}) (string, error) {
-		return handleDeleteApp(c, a, r.taskManager)
+	return ExecuteWithDryRun(ctx, client, args, dryRun, func(ctx context.Context, c *truenas.Client, a map[string]interface{}) (string, error) {
+		return handleDeleteApp(ctx, c, a, r.taskManager)
 	})
 }
 
@@ -995,11 +996,11 @@ func (r *Registry) handleDeleteAppWithDryRun(client *truenas.Client, args map[st
 // caller's train when given, otherwise the preferred train that has the
 // catalog app (same lookup as get_app_catalog_details). If the lookup
 // itself fails, it falls back to stable and returns a note saying so.
-func catalogTrainForInstall(client *truenas.Client, catalogApp string, args map[string]interface{}) (string, string, error) {
+func catalogTrainForInstall(ctx context.Context, client *truenas.Client, catalogApp string, args map[string]interface{}) (string, string, error) {
 	if t, ok := args["train"].(string); ok && t != "" {
 		return t, "", nil
 	}
-	train, trains, err := resolveCatalogTrain(client, catalogApp)
+	train, trains, err := resolveCatalogTrain(ctx, client, catalogApp)
 	if err != nil {
 		return "", "", err
 	}
@@ -1099,7 +1100,7 @@ func parseStoragePath(path string) (pool string, dataset string, err error) {
 }
 
 // verifyDatasetsExist checks if datasets exist for all storage volumes
-func verifyDatasetsExist(client *truenas.Client, volumes []StorageVolume) ([]string, error) {
+func verifyDatasetsExist(ctx context.Context, client *truenas.Client, volumes []StorageVolume) ([]string, error) {
 	var missing []string
 
 	for _, vol := range volumes {
@@ -1109,7 +1110,7 @@ func verifyDatasetsExist(client *truenas.Client, volumes []StorageVolume) ([]str
 		}
 
 		// Query dataset
-		result, err := client.Call("pool.dataset.query",
+		result, err := client.Call(ctx, "pool.dataset.query",
 			[]interface{}{
 				[]interface{}{"name", "=", dataset},
 			},
@@ -1354,11 +1355,11 @@ func isStorageLikeObject(obj map[string]interface{}, typeStr string) bool {
 	return isStorageLikeType(typeStr) || hasVolumeConfigKey(obj)
 }
 
-func fetchCatalogAppSchema(client *truenas.Client, catalogApp, train, version string) (map[string]interface{}, error) {
+func fetchCatalogAppSchema(ctx context.Context, client *truenas.Client, catalogApp, train, version string) (map[string]interface{}, error) {
 	if train == "" {
 		train = "stable"
 	}
-	result, err := client.Call("catalog.get_app_details", catalogApp, map[string]interface{}{
+	result, err := client.Call(ctx, "catalog.get_app_details", catalogApp, map[string]interface{}{
 		"train": train,
 	})
 	if err != nil {
@@ -1371,8 +1372,8 @@ func fetchCatalogAppSchema(client *truenas.Client, catalogApp, train, version st
 	return extractAppSchemaVersion(details, version)
 }
 
-func fetchInstalledAppSchema(client *truenas.Client, appName string) (map[string]interface{}, error) {
-	result, err := client.Call("app.query",
+func fetchInstalledAppSchema(ctx context.Context, client *truenas.Client, appName string) (map[string]interface{}, error) {
+	result, err := client.Call(ctx, "app.query",
 		[]interface{}{[]interface{}{"name", "=", appName}},
 		map[string]interface{}{},
 	)
@@ -1401,17 +1402,17 @@ func fetchInstalledAppSchema(client *truenas.Client, appName string) (map[string
 		}
 	}
 	if train == "" {
-		resolved, _, err := resolveCatalogTrain(client, catalogApp)
+		resolved, _, err := resolveCatalogTrain(ctx, client, catalogApp)
 		if err != nil {
 			return nil, err
 		}
 		train = resolved
 	}
-	return fetchCatalogAppSchema(client, catalogApp, train, version)
+	return fetchCatalogAppSchema(ctx, client, catalogApp, train, version)
 }
 
-func listPoolNames(client *truenas.Client) (map[string]bool, error) {
-	result, err := client.Call("pool.query", []interface{}{})
+func listPoolNames(ctx context.Context, client *truenas.Client) (map[string]bool, error) {
+	result, err := client.Call(ctx, "pool.query", []interface{}{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query pools: %v", err)
 	}
@@ -1434,14 +1435,14 @@ func listPoolNames(client *truenas.Client) (map[string]bool, error) {
 // update_app (and their dry runs). It requires every schema storage entry to
 // be present as type host_path with a cleaned path under /mnt/<pool>/, then
 // reports which of those datasets are missing.
-func checkAppHostPathStorage(client *truenas.Client, schema, values map[string]interface{}) ([]string, []string, error) {
+func checkAppHostPathStorage(ctx context.Context, client *truenas.Client, schema, values map[string]interface{}) ([]string, []string, error) {
 	if values == nil {
 		return nil, nil, fmt.Errorf("values parameter is required")
 	}
 	if schema == nil {
 		return nil, nil, fmt.Errorf("app schema is required to enforce host_path storage")
 	}
-	pools, err := listPoolNames(client)
+	pools, err := listPoolNames(ctx, client)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1451,21 +1452,21 @@ func checkAppHostPathStorage(client *truenas.Client, schema, values map[string]i
 	}
 	var collected []string
 	for _, slot := range slots {
-		if err := collectSlotPaths(client, values, slot, pools, &collected); err != nil {
+		if err := collectSlotPaths(ctx, client, values, slot, pools, &collected); err != nil {
 			return nil, nil, err
 		}
 	}
 	if err := validateStorageRecursive(values, "", pools); err != nil {
 		return nil, nil, err
 	}
-	missing, err := verifyDatasetPathsExist(client, collected)
+	missing, err := verifyDatasetPathsExist(ctx, client, collected)
 	if err != nil {
 		return nil, nil, err
 	}
 	return collected, missing, nil
 }
 
-func collectSlotPaths(client *truenas.Client, values map[string]interface{}, slot storageSlot, pools map[string]bool, collected *[]string) error {
+func collectSlotPaths(ctx context.Context, client *truenas.Client, values map[string]interface{}, slot storageSlot, pools map[string]bool, collected *[]string) error {
 	if slot.kind == "hostpath" || slot.kind == "hostpathfile" || slot.kind == "hostpathdirectory" {
 		dotted := slot.path
 		if slot.list && !strings.Contains(dotted, "[]") {
@@ -1486,7 +1487,7 @@ func collectSlotPaths(client *truenas.Client, values map[string]interface{}, slo
 			if p == "" {
 				return fmt.Errorf("host path at %s must be a non-empty string", lv.loc)
 			}
-			target, err := hostPathDatasetTarget(client, p, slot.kind, lv.loc, pools)
+			target, err := hostPathDatasetTarget(ctx, client, p, slot.kind, lv.loc, pools)
 			if err != nil {
 				return err
 			}
@@ -1859,7 +1860,7 @@ func validateHostPathLocation(p, loc string, pools map[string]bool) error {
 	return nil
 }
 
-func hostPathDatasetTarget(client *truenas.Client, p, kind, loc string, pools map[string]bool) (string, error) {
+func hostPathDatasetTarget(ctx context.Context, client *truenas.Client, p, kind, loc string, pools map[string]bool) (string, error) {
 	if err := validateHostPathLocation(p, loc, pools); err != nil {
 		return "", err
 	}
@@ -1872,7 +1873,7 @@ func hostPathDatasetTarget(client *truenas.Client, p, kind, loc string, pools ma
 		// Catalog type hostpath is used for both directories (webdav,
 		// rsyncd) and files (nextcloud custom_confs). Classify by
 		// whether the path exists as a dataset, not by a "." in the name.
-		return resolveHostPathTarget(client, p, loc, pools)
+		return resolveHostPathTarget(ctx, client, p, loc, pools)
 	default:
 		return p, nil
 	}
@@ -1894,8 +1895,8 @@ func hostPathFileParent(p, loc string, pools map[string]bool) (string, error) {
 // returned so the missing-dataset check can report it. A typo for a missing
 // subdirectory whose parent dataset exists is accepted as a file;
 // distinguishing that from a real file would need a filesystem stat.
-func resolveHostPathTarget(client *truenas.Client, p, loc string, pools map[string]bool) (string, error) {
-	exists, err := hostPathDatasetExists(client, p)
+func resolveHostPathTarget(ctx context.Context, client *truenas.Client, p, loc string, pools map[string]bool) (string, error) {
+	exists, err := hostPathDatasetExists(ctx, client, p)
 	if err != nil {
 		return "", err
 	}
@@ -1909,7 +1910,7 @@ func resolveHostPathTarget(client *truenas.Client, p, loc string, pools map[stri
 		// gives the create_dataset hint; dry-run warns).
 		return p, nil
 	}
-	parentExists, err := hostPathDatasetExists(client, parent)
+	parentExists, err := hostPathDatasetExists(ctx, client, parent)
 	if err != nil {
 		return "", err
 	}
@@ -1921,8 +1922,8 @@ func resolveHostPathTarget(client *truenas.Client, p, loc string, pools map[stri
 	return p, nil
 }
 
-func hostPathDatasetExists(client *truenas.Client, p string) (bool, error) {
-	missing, err := verifyDatasetPathsExist(client, []string{p})
+func hostPathDatasetExists(ctx context.Context, client *truenas.Client, p string) (bool, error) {
+	missing, err := verifyDatasetPathsExist(ctx, client, []string{p})
 	if err != nil {
 		return false, err
 	}
@@ -2039,7 +2040,7 @@ func collectPaths(obj map[string]interface{}, paths *[]string) {
 }
 
 // verifyDatasetPathsExist checks if datasets exist for all paths
-func verifyDatasetPathsExist(client *truenas.Client, paths []string) ([]string, error) {
+func verifyDatasetPathsExist(ctx context.Context, client *truenas.Client, paths []string) ([]string, error) {
 	missing := []string{}
 
 	for _, path := range paths {
@@ -2048,7 +2049,7 @@ func verifyDatasetPathsExist(client *truenas.Client, paths []string) ([]string, 
 			return nil, err
 		}
 
-		result, err := client.Call("pool.dataset.query",
+		result, err := client.Call(ctx, "pool.dataset.query",
 			[]interface{}{
 				[]interface{}{"name", "=", dataset},
 			},

@@ -60,7 +60,7 @@ func TestPollerPanicMarksTaskFailedAndContinues(t *testing.T) {
 		}
 	}
 
-	p.pollAllTasksSafely() // must not panic
+	p.pollAllTasksSafely(context.Background()) // must not panic
 
 	for _, id := range []string{"bad", "good1", "good2"} {
 		if _, ok := polled.Load(id); !ok {

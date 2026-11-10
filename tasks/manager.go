@@ -91,7 +91,7 @@ func WithAppHealthCheck(appName string, timeout time.Duration) TaskOption {
 
 // PollNow polls every active task once, outside the background schedule.
 func (m *Manager) PollNow() {
-	m.poller.pollAllTasks()
+	m.poller.pollAllTasks(m.ctx)
 }
 
 // cleanOnce runs one cleanup pass. A panic is logged to stderr and the next
@@ -113,7 +113,7 @@ func (m *Manager) cleanOnce() {
 // once to record its identity (method and start time) and the client's
 // session generation, so that the poller can tell the job apart from a later
 // job that reuses its id after a middleware restart.
-func (m *Manager) CreateJobTask(toolName string, args map[string]interface{}, jobID int, ttl time.Duration, opts ...TaskOption) (*Task, error) {
+func (m *Manager) CreateJobTask(ctx context.Context, toolName string, args map[string]interface{}, jobID int, ttl time.Duration, opts ...TaskOption) (*Task, error) {
 	task := &Task{
 		TaskID:        uuid.New().String(),
 		Status:        TaskStatusWorking,
@@ -132,7 +132,7 @@ func (m *Manager) CreateJobTask(toolName string, args map[string]interface{}, jo
 	}
 
 	if m.client != nil {
-		m.poller.recordIdentity(task)
+		m.poller.recordIdentity(ctx, task)
 	}
 
 	if err := m.store.Add(task); err != nil {

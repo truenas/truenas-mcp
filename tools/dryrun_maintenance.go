@@ -12,8 +12,8 @@ import (
 // Dry-run support for system_reboot, dismiss_alert, restore_alert and
 // refresh_directory_cache.
 
-func handleSystemRebootWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &systemRebootDryRun{}, handleSystemReboot)
+func handleSystemRebootWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &systemRebootDryRun{}, handleSystemReboot)
 }
 
 // maxRebootDelay caps system_reboot's delay at one day: no tool can cancel a
@@ -35,12 +35,12 @@ func rebootDelay(args map[string]interface{}) (int, error) {
 
 type systemRebootDryRun struct{}
 
-func (s *systemRebootDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (s *systemRebootDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	delay, err := rebootDelay(args)
 	if err != nil {
 		return nil, err
 	}
-	result, err := client.Call("system.info")
+	result, err := client.Call(ctx, "system.info")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get system info: %w", err)
 	}
@@ -74,22 +74,22 @@ func (s *systemRebootDryRun) ExecuteDryRun(client *truenas.Client, args map[stri
 	}, nil
 }
 
-func handleDismissAlertWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &alertDryRun{tool: "dismiss_alert", method: "alert.dismiss"}, handleDismissAlert)
+func handleDismissAlertWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &alertDryRun{tool: "dismiss_alert", method: "alert.dismiss"}, handleDismissAlert)
 }
 
-func handleRestoreAlertWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &alertDryRun{tool: "restore_alert", method: "alert.restore"}, handleRestoreAlert)
+func handleRestoreAlertWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &alertDryRun{tool: "restore_alert", method: "alert.restore"}, handleRestoreAlert)
 }
 
 type alertDryRun struct{ tool, method string }
 
-func (a *alertDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (a *alertDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	uuid, ok := args["uuid"].(string)
 	if !ok || uuid == "" {
 		return nil, fmt.Errorf("uuid parameter is required")
 	}
-	result, err := client.Call("alert.list")
+	result, err := client.Call(ctx, "alert.list")
 	if err != nil {
 		return nil, err
 	}
@@ -119,14 +119,14 @@ func (a *alertDryRun) ExecuteDryRun(client *truenas.Client, args map[string]inte
 	}, nil
 }
 
-func handleRefreshDirectoryCacheWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &refreshDirectoryCacheDryRun{}, handleRefreshDirectoryCache)
+func handleRefreshDirectoryCacheWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &refreshDirectoryCacheDryRun{}, handleRefreshDirectoryCache)
 }
 
 type refreshDirectoryCacheDryRun struct{}
 
-func (d *refreshDirectoryCacheDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	status, err := getDirectoryServiceStatus(context.Background(), client)
+func (d *refreshDirectoryCacheDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+	status, err := getDirectoryServiceStatus(ctx, client)
 	if err != nil {
 		return nil, err
 	}

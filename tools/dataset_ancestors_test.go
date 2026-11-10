@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -48,7 +49,7 @@ func ancestorDryRunFake(t *testing.T, existing []string) (*truenas.Client, *fake
 func createDatasetDryRun(t *testing.T, client *truenas.Client, args map[string]interface{}) map[string]interface{} {
 	t.Helper()
 	args["dry_run"] = true
-	out, err := handleCreateDataset(client, args)
+	out, err := handleCreateDataset(context.Background(), client, args)
 	if err != nil {
 		t.Fatalf("create_dataset dry-run: %v", err)
 	}
@@ -258,7 +259,7 @@ func TestCreateDatasetDryRunRejectsNamesTheCreateWouldReject(t *testing.T) {
 func createDatasetDryRunMaybe(t *testing.T, client *truenas.Client, args map[string]interface{}) (map[string]interface{}, error) {
 	t.Helper()
 	args["dry_run"] = true
-	out, err := handleCreateDataset(client, args)
+	out, err := handleCreateDataset(context.Background(), client, args)
 	if err != nil {
 		return nil, err
 	}

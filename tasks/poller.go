@@ -45,7 +45,7 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.pollAllTasksSafely()
+			p.pollAllTasksSafely(ctx)
 		}
 	}
 }
@@ -53,28 +53,28 @@ func (p *Poller) Run(ctx context.Context) {
 // pollAllTasksSafely runs one polling pass. A panic must not end the loop
 // (and with it all task updates, or the whole process): it is logged to
 // stderr and the next tick polls again.
-func (p *Poller) pollAllTasksSafely() {
+func (p *Poller) pollAllTasksSafely(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("task poller panicked: %s\n%s", safego.Describe(r), debug.Stack())
 		}
 	}()
-	p.pollAllTasks()
+	p.pollAllTasks(ctx)
 }
 
 // pollAllTasks polls all active tasks
-func (p *Poller) pollAllTasks() {
+func (p *Poller) pollAllTasks(ctx context.Context) {
 	activeTasks := p.store.GetActive()
 
 	for _, task := range activeTasks {
-		p.pollOne(task)
+		p.pollOne(ctx, task)
 	}
 }
 
 // pollOne polls a single task. If that panics, the task is marked failed so
 // it is not retried (and does not panic again) on every tick, and the
 // remaining tasks are still polled.
-func (p *Poller) pollOne(task *Task) {
+func (p *Poller) pollOne(ctx context.Context, task *Task) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("task poller panicked on task %s: %s\n%s", task.TaskID, safego.Describe(r), debug.Stack())
@@ -88,7 +88,7 @@ func (p *Poller) pollOne(task *Task) {
 		return
 	}
 	if task.OperationType == OperationTypeJob {
-		p.pollJobTask(task)
+		p.pollJobTask(ctx, task)
 	}
 }
 
@@ -109,8 +109,8 @@ func (p *Poller) pollErrorPolls() int {
 // readJob reads one job row by id. It returns nil (and no error) when
 // core.get_jobs has no such job, and the client's session generation after
 // the read, so a reconnect during the read is seen as a new session.
-func (p *Poller) readJob(jobID int) (job map[string]interface{}, gen uint64, err error) {
-	result, err := p.client.Call("core.get_jobs", []interface{}{
+func (p *Poller) readJob(ctx context.Context, jobID int) (job map[string]interface{}, gen uint64, err error) {
+	result, err := p.client.Call(ctx, "core.get_jobs", []interface{}{
 		[]interface{}{"id", "=", jobID},
 	})
 	if err != nil {
@@ -120,7 +120,7 @@ func (p *Poller) readJob(jobID int) (job map[string]interface{}, gen uint64, err
 	if err := json.Unmarshal(result, &jobs); err != nil {
 		return nil, 0, fmt.Errorf("unexpected core.get_jobs result: %w", err)
 	}
-	gen, err = p.client.SessionGeneration()
+	gen, err = p.client.SessionGeneration(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -145,14 +145,14 @@ func jobIdentity(job map[string]interface{}) (method, started string) {
 // recordIdentity reads the task's job once, at creation, and records its
 // identity and the session it was read in. If the read fails the identity is
 // recorded by the first poll that still sees the same session.
-func (p *Poller) recordIdentity(task *Task) {
+func (p *Poller) recordIdentity(ctx context.Context, task *Task) {
 	if task.JobID == nil {
 		return
 	}
-	job, gen, err := p.readJob(*task.JobID)
+	job, gen, err := p.readJob(ctx, *task.JobID)
 	if err != nil {
 		log.Printf("task %s (%s): could not read job %d at creation: %s", task.TaskID, task.ToolName, *task.JobID, redact.Text(err.Error()))
-		if g, gerr := p.client.SessionGeneration(); gerr == nil {
+		if g, gerr := p.client.SessionGeneration(ctx); gerr == nil {
 			task.sessionGen, task.genKnown = g, true
 		}
 		return
@@ -183,12 +183,12 @@ func (p *Poller) failTask(task *Task, msg string) {
 // same job the task was created for (same method and start time); a job that
 // is gone, or whose id now belongs to another job, ends the task as failed.
 // Read errors keep the task working but are reported once they repeat.
-func (p *Poller) pollJobTask(task *Task) {
+func (p *Poller) pollJobTask(ctx context.Context, task *Task) {
 	if task.JobID == nil {
 		return
 	}
 
-	job, gen, err := p.readJob(*task.JobID)
+	job, gen, err := p.readJob(ctx, *task.JobID)
 	if err != nil {
 		p.pollFailed(task, err)
 		return
@@ -249,7 +249,7 @@ func (p *Poller) pollJobTask(task *Task) {
 	case dirty:
 		p.store.Save(task)
 	}
-	p.updateTaskFromJob(task, job)
+	p.updateTaskFromJob(ctx, task, job)
 }
 
 // pollFailed records a failed poll. After PollErrorPolls consecutive
@@ -271,7 +271,7 @@ func (p *Poller) pollFailed(task *Task, err error) {
 }
 
 // updateTaskFromJob updates task state based on TrueNAS job state
-func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
+func (p *Poller) updateTaskFromJob(ctx context.Context, task *Task, job map[string]interface{}) {
 	state, ok := job["state"].(string)
 	if !ok {
 		return
@@ -305,7 +305,7 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 			// A finished job is not a healthy app: hold the task open until
 			// the app is observed running, or report what state it is in.
 			// The result is reported in the bounded job summary.
-			newStatus, statusMessage = p.verifyApp(task)
+			newStatus, statusMessage = p.verifyApp(ctx, task)
 		} else if result, ok := job["result"]; ok && result != nil {
 			task.Result, task.ResultTruncated, task.ResultSizeBytes = BoundResult(result)
 			if !task.ResultTruncated {
@@ -348,13 +348,13 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 // still starting is worded as such: the upgrade itself succeeded and the app
 // may simply be slow, so the caller does not roll back or retry a healthy
 // upgrade.
-func (p *Poller) verifyApp(task *Task) (TaskStatus, string) {
+func (p *Poller) verifyApp(ctx context.Context, task *Task) (TaskStatus, string) {
 	if task.VerifyStartedAt.IsZero() {
 		task.VerifyStartedAt = time.Now()
 	}
 	expired := time.Since(task.VerifyStartedAt) >= task.VerifyTimeout
 
-	h, err := p.appHealth(task.VerifyApp)
+	h, err := p.appHealth(ctx, task.VerifyApp)
 	refreshJobApp(task, h, err)
 	if err == nil && h.state == "RUNNING" && len(h.crashed) == 0 && len(h.starting) == 0 {
 		msg := fmt.Sprintf("Upgrade completed; app %s is RUNNING", task.VerifyApp)
@@ -450,9 +450,9 @@ type appHealthInfo struct {
 // app state, not a separate signal. "created" containers also make an app
 // DEPLOYING, so they cannot appear in a RUNNING app; "exited" ones (init and
 // one-shot containers) are legitimate and are not counted.
-func (p *Poller) appHealth(appName string) (appHealthInfo, error) {
+func (p *Poller) appHealth(ctx context.Context, appName string) (appHealthInfo, error) {
 	var h appHealthInfo
-	raw, err := p.client.Call("app.query", []interface{}{
+	raw, err := p.client.Call(ctx, "app.query", []interface{}{
 		[]interface{}{"name", "=", appName},
 	})
 	if err != nil {

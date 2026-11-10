@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -402,7 +403,7 @@ func TestQueryScrubSchedulesUsesNASTimezone(t *testing.T) {
 		},
 	}, nil)
 
-	out, err := handleQueryScrubSchedules(client, map[string]interface{}{})
+	out, err := handleQueryScrubSchedules(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +470,7 @@ func TestQueryScrubSchedulesTimezoneFallback(t *testing.T) {
 		},
 	}, nil)
 
-	out, err := handleQueryScrubSchedules(client, map[string]interface{}{})
+	out, err := handleQueryScrubSchedules(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,9 +497,9 @@ func TestNasTimezoneInvalidFallsBackToUTC(t *testing.T) {
 			"timezone": "Not/A_Real_Zone",
 		},
 	}, nil)
-	loc, name, assumed := nasTimezone(client)
+	loc, name, assumed := nasTimezone(context.Background(), client)
 	if !assumed || name != "UTC" || loc != time.UTC {
-		t.Fatalf("nasTimezone() = %v %q assumed=%v, want UTC fallback", loc, name, assumed)
+		t.Fatalf("nasTimezone(context.Background()) = %v %q assumed=%v, want UTC fallback", loc, name, assumed)
 	}
 }
 
@@ -783,7 +784,7 @@ func TestQueryScrubSchedulesNextScrubEstimate(t *testing.T) {
 		},
 	}, nil)
 
-	out, err := handleQueryScrubSchedules(client, map[string]interface{}{})
+	out, err := handleQueryScrubSchedules(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -815,7 +816,7 @@ func TestQueryScrubSchedulesNextScrubEstimate(t *testing.T) {
 			},
 		},
 	}, nil)
-	out2, err := handleQueryScrubSchedules(client2, map[string]interface{}{})
+	out2, err := handleQueryScrubSchedules(context.Background(), client2, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -898,7 +899,7 @@ func TestGetScrubStatusTimestampsUseNASTimezone(t *testing.T) {
 		},
 	}, nil)
 
-	out, err := handleGetScrubStatus(client, map[string]interface{}{})
+	out, err := handleGetScrubStatus(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}

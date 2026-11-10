@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -11,9 +12,9 @@ import (
 
 // Pool scrub management handlers
 
-func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleQueryScrubSchedules(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Query all scrub schedules
-	result, err := client.Call("pool.scrub.query", []interface{}{})
+	result, err := client.Call(ctx, "pool.scrub.query", []interface{}{})
 	if err != nil {
 		return "", fmt.Errorf("failed to query scrub schedules: %w", err)
 	}
@@ -24,7 +25,7 @@ func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface
 	}
 
 	// Pool scan end times are needed for next_scrub_estimate.
-	poolsResult, err := client.Call("pool.query", []interface{}{})
+	poolsResult, err := client.Call(ctx, "pool.query", []interface{}{})
 	if err != nil {
 		return "", fmt.Errorf("failed to query pools: %w", err)
 	}
@@ -53,7 +54,7 @@ func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface
 
 	filtered := []map[string]interface{}{}
 	poolsWithSchedules := make(map[string]bool)
-	loc, _, assumedUTC := nasTimezone(client)
+	loc, _, assumedUTC := nasTimezone(ctx, client)
 
 	for _, schedule := range schedules {
 		poolName, _ := schedule["pool_name"].(string)
@@ -102,14 +103,14 @@ func handleQueryScrubSchedules(client *truenas.Client, args map[string]interface
 	return string(formatted), nil
 }
 
-func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleGetScrubStatus(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	poolFilter, _ := args["pool"].(string)
 	// An empty pool is treated as unset, so the caller gets every pool
 	// instead of an empty list.
 	hasPoolFilter := poolFilter != ""
 
 	// Query all pools
-	poolsResult, err := client.Call("pool.query", []interface{}{})
+	poolsResult, err := client.Call(ctx, "pool.query", []interface{}{})
 	if err != nil {
 		return "", fmt.Errorf("failed to query pools: %w", err)
 	}
@@ -120,7 +121,7 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Query scrub schedules
-	schedulesResult, err := client.Call("pool.scrub.query", []interface{}{})
+	schedulesResult, err := client.Call(ctx, "pool.scrub.query", []interface{}{})
 	if err != nil {
 		return "", fmt.Errorf("failed to query schedules: %w", err)
 	}
@@ -131,7 +132,7 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Query running jobs (25.x pool.scrub.scrub and 26+ zpool.scrub.run)
-	jobs, err := queryScrubJobs(client, true)
+	jobs, err := queryScrubJobs(ctx, client, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to query jobs: %w", err)
 	}
@@ -141,7 +142,7 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 	scrubNowCount := 0
 	withSchedules := 0
 	withoutSchedules := 0
-	loc, _, assumedUTC := nasTimezone(client)
+	loc, _, assumedUTC := nasTimezone(ctx, client)
 
 	for _, pool := range pools {
 		poolName, _ := pool["name"].(string)
@@ -277,7 +278,7 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 	return string(formatted), nil
 }
 
-func (r *Registry) handleCreateScrubSchedule(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleCreateScrubSchedule(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	poolName, ok := args["pool"].(string)
 	if !ok || poolName == "" {
 		return "", fmt.Errorf("pool is required")
@@ -289,7 +290,7 @@ func (r *Registry) handleCreateScrubSchedule(client *truenas.Client, args map[st
 	}
 
 	// Get pool ID
-	poolInfo, err := getPoolByName(client, poolName)
+	poolInfo, err := getPoolByName(ctx, client, poolName)
 	if err != nil {
 		return "", err
 	}
@@ -310,7 +311,7 @@ func (r *Registry) handleCreateScrubSchedule(client *truenas.Client, args map[st
 	}
 
 	// Check if schedule already exists
-	existingResult, err := client.Call("pool.scrub.query", []interface{}{
+	existingResult, err := client.Call(ctx, "pool.scrub.query", []interface{}{
 		[]interface{}{"pool", "=", poolInfo["id"]},
 	})
 	if err != nil {
@@ -335,7 +336,7 @@ func (r *Registry) handleCreateScrubSchedule(client *truenas.Client, args map[st
 		"schedule":    scheduleObj,
 	}
 
-	result, err := client.Call("pool.scrub.create", createArgs)
+	result, err := client.Call(ctx, "pool.scrub.create", createArgs)
 	if err != nil {
 		return "", fmt.Errorf("failed to create schedule: %w", err)
 	}
@@ -345,7 +346,7 @@ func (r *Registry) handleCreateScrubSchedule(client *truenas.Client, args map[st
 		return "", fmt.Errorf("failed to parse result: %w", err)
 	}
 
-	loc, _, assumedUTC := nasTimezone(client)
+	loc, _, assumedUTC := nasTimezone(ctx, client)
 	nextRun := calculateNextRun(scheduleObj, time.Now(), loc)
 	response := map[string]interface{}{
 		"pool":           poolName,
@@ -369,7 +370,7 @@ func (r *Registry) handleCreateScrubSchedule(client *truenas.Client, args map[st
 	return string(formatted), nil
 }
 
-func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleRunScrub(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	poolName, ok := args["pool"].(string)
 	if !ok || poolName == "" {
 		return "", fmt.Errorf("pool is required")
@@ -381,7 +382,7 @@ func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interf
 	}
 
 	// Get pool info
-	poolInfo, err := getPoolByName(client, poolName)
+	poolInfo, err := getPoolByName(ctx, client, poolName)
 	if err != nil {
 		return "", err
 	}
@@ -392,7 +393,7 @@ func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interf
 		return "", err
 	}
 
-	jobs, err := queryScrubJobs(client, true)
+	jobs, err := queryScrubJobs(ctx, client, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to check running scrubs: %w", err)
 	}
@@ -420,13 +421,13 @@ func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interf
 		return string(formatted), nil
 	}
 
-	jobID, err := startScrubJob(client, poolName)
+	jobID, err := startScrubJob(ctx, client, poolName)
 	if err != nil {
 		return "", err
 	}
 
 	// Create task for tracking
-	task, err := r.taskManager.CreateJobTask(
+	task, err := r.taskManager.CreateJobTask(ctx,
 		"run_scrub",
 		args,
 		jobID,
@@ -457,7 +458,7 @@ func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interf
 	return string(formatted), nil
 }
 
-func handleDeleteScrubSchedule(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleDeleteScrubSchedule(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	scheduleID, ok := args["id"].(float64)
 	if !ok {
 		return "", fmt.Errorf("id is required")
@@ -466,7 +467,7 @@ func handleDeleteScrubSchedule(client *truenas.Client, args map[string]interface
 	id := int(scheduleID)
 
 	// Query schedule to verify it exists
-	result, err := client.Call("pool.scrub.query", []interface{}{
+	result, err := client.Call(ctx, "pool.scrub.query", []interface{}{
 		[]interface{}{"id", "=", id},
 	})
 	if err != nil {
@@ -486,7 +487,7 @@ func handleDeleteScrubSchedule(client *truenas.Client, args map[string]interface
 	poolName, _ := schedule["pool_name"].(string)
 
 	// Delete schedule
-	_, err = client.Call("pool.scrub.delete", id)
+	_, err = client.Call(ctx, "pool.scrub.delete", id)
 	if err != nil {
 		return "", fmt.Errorf("failed to delete schedule: %w", err)
 	}
@@ -509,23 +510,23 @@ func handleDeleteScrubSchedule(client *truenas.Client, args map[string]interface
 
 // Dry-run wrappers
 
-func (r *Registry) handleCreateScrubScheduleWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &createScrubScheduleDryRun{}, r.handleCreateScrubSchedule)
+func (r *Registry) handleCreateScrubScheduleWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &createScrubScheduleDryRun{}, r.handleCreateScrubSchedule)
 }
 
-func (r *Registry) handleRunScrubWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &runScrubDryRun{}, r.handleRunScrub)
+func (r *Registry) handleRunScrubWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &runScrubDryRun{}, r.handleRunScrub)
 }
 
-func (r *Registry) handleDeleteScrubScheduleWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &deleteScrubScheduleDryRun{}, handleDeleteScrubSchedule)
+func (r *Registry) handleDeleteScrubScheduleWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &deleteScrubScheduleDryRun{}, handleDeleteScrubSchedule)
 }
 
 // Dry-run implementations
 
 type createScrubScheduleDryRun struct{}
 
-func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (c *createScrubScheduleDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	poolName, ok := args["pool"].(string)
 	if !ok || poolName == "" {
 		return nil, fmt.Errorf("pool is required")
@@ -537,7 +538,7 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 	}
 
 	// Get pool info
-	poolInfo, err := getPoolByName(client, poolName)
+	poolInfo, err := getPoolByName(ctx, client, poolName)
 	if err != nil {
 		return nil, err
 	}
@@ -553,7 +554,7 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 	}
 
 	// Check existing schedule
-	existingResult, err := client.Call("pool.scrub.query", []interface{}{
+	existingResult, err := client.Call(ctx, "pool.scrub.query", []interface{}{
 		[]interface{}{"pool", "=", poolInfo["id"]},
 	})
 	if err != nil {
@@ -571,7 +572,7 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 	}
 
 	// Get last scrub info
-	poolsResult, err := client.Call("pool.query", []interface{}{
+	poolsResult, err := client.Call(ctx, "pool.query", []interface{}{
 		[]interface{}{"name", "=", poolName},
 	})
 	if err != nil {
@@ -584,7 +585,7 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 	}
 
 	scheduleHuman := formatCronSchedule(scheduleObj)
-	loc, _, assumedUTC := nasTimezone(client)
+	loc, _, assumedUTC := nasTimezone(ctx, client)
 
 	var lastScrubDate string
 	if len(pools) > 0 {
@@ -690,7 +691,7 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 
 type runScrubDryRun struct{}
 
-func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (r *runScrubDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	poolName, ok := args["pool"].(string)
 	if !ok || poolName == "" {
 		return nil, fmt.Errorf("pool is required")
@@ -702,7 +703,7 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 	}
 
 	// Get pool info
-	poolInfo, err := getPoolByName(client, poolName)
+	poolInfo, err := getPoolByName(ctx, client, poolName)
 	if err != nil {
 		return nil, err
 	}
@@ -717,7 +718,7 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 	sizeBytes, hasSize := poolSizeBytes(poolInfo)
 	_, sizeHuman := poolSizeFields(poolInfo)
 
-	jobs, err := queryScrubJobs(client, true)
+	jobs, err := queryScrubJobs(ctx, client, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check running scrubs: %w", err)
 	}
@@ -734,7 +735,7 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 	}
 
 	// Get last scrub info
-	poolsResult, err := client.Call("pool.query", []interface{}{
+	poolsResult, err := client.Call(ctx, "pool.query", []interface{}{
 		[]interface{}{"name", "=", poolName},
 	})
 	if err != nil {
@@ -746,7 +747,7 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 		return nil, fmt.Errorf("failed to parse pool: %w", err)
 	}
 
-	loc, _, _ := nasTimezone(client)
+	loc, _, _ := nasTimezone(ctx, client)
 
 	var lastScrub map[string]interface{}
 	if len(pools) > 0 {
@@ -840,7 +841,7 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 
 type deleteScrubScheduleDryRun struct{}
 
-func (d *deleteScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+func (d *deleteScrubScheduleDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 	scheduleID, ok := args["id"].(float64)
 	if !ok {
 		return nil, fmt.Errorf("id is required")
@@ -849,7 +850,7 @@ func (d *deleteScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 	id := int(scheduleID)
 
 	// Query schedule
-	result, err := client.Call("pool.scrub.query", []interface{}{
+	result, err := client.Call(ctx, "pool.scrub.query", []interface{}{
 		[]interface{}{"id", "=", id},
 	})
 	if err != nil {
@@ -996,8 +997,8 @@ func formatInLocation(t time.Time, loc *time.Location) string {
 	return t.In(loc).Format(time.RFC3339)
 }
 
-func nasTimezone(client *truenas.Client) (loc *time.Location, name string, assumedUTC bool) {
-	result, err := client.Call("system.info")
+func nasTimezone(ctx context.Context, client *truenas.Client) (loc *time.Location, name string, assumedUTC bool) {
+	result, err := client.Call(ctx, "system.info")
 	if err != nil {
 		return time.UTC, "UTC", true
 	}
@@ -1285,8 +1286,8 @@ func errIfPoolResilvering(pool map[string]interface{}, poolName string) error {
 	return fmt.Errorf("cannot run a scrub on pool %q: a resilver is running; nothing was started", poolName)
 }
 
-func getPoolByName(client *truenas.Client, poolName string) (map[string]interface{}, error) {
-	result, err := client.Call("pool.query", []interface{}{
+func getPoolByName(ctx context.Context, client *truenas.Client, poolName string) (map[string]interface{}, error) {
+	result, err := client.Call(ctx, "pool.query", []interface{}{
 		[]interface{}{"name", "=", poolName},
 	})
 	if err != nil {
@@ -1321,8 +1322,8 @@ func scrubJobFilters(runningOnly bool) []interface{} {
 	return []interface{}{methods}
 }
 
-func queryScrubJobs(client *truenas.Client, runningOnly bool) ([]map[string]interface{}, error) {
-	result, err := client.Call("core.get_jobs", scrubJobFilters(runningOnly))
+func queryScrubJobs(ctx context.Context, client *truenas.Client, runningOnly bool) ([]map[string]interface{}, error) {
+	result, err := client.Call(ctx, "core.get_jobs", scrubJobFilters(runningOnly))
 	if err != nil {
 		return nil, err
 	}
@@ -1371,8 +1372,8 @@ func lastScrubWithinThresholdAt(end *time.Time, threshold int, now time.Time) bo
 // (26+) can finish successfully without starting a scrub (HA standby, a
 // race with a scheduled run, or the concurrent-scrub limit), so it is not
 // used for the start call. Threshold is enforced in the handler first.
-func startScrubJob(client *truenas.Client, poolName string) (int, error) {
-	result, err := client.Call("pool.scrub.scrub", poolName, "START")
+func startScrubJob(ctx context.Context, client *truenas.Client, poolName string) (int, error) {
+	result, err := client.Call(ctx, "pool.scrub.scrub", poolName, "START")
 	if err != nil {
 		return 0, fmt.Errorf("failed to start scrub: %w", err)
 	}

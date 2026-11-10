@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"strings"
@@ -59,7 +60,7 @@ func TestCreateDatasetEncryptionPayloads(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client, fake := newFakeClientWith(t, encFakeResults(), nil)
-			_, err := handleCreateDataset(client, map[string]interface{}{
+			_, err := handleCreateDataset(context.Background(), client, map[string]interface{}{
 				"name": "tank/secure", "encryption": true, "encryption_options": tt.opts,
 			})
 			if err != nil {
@@ -90,7 +91,7 @@ func TestCreateDatasetEncryptionPayloads(t *testing.T) {
 
 func TestCreateDatasetWithoutEncryptionUnchanged(t *testing.T) {
 	client, fake := newFakeClientWith(t, encFakeResults(), nil)
-	if _, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/plain", "encryption": false}); err != nil {
+	if _, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/plain", "encryption": false}); err != nil {
 		t.Fatal(err)
 	}
 	p := createPayload(t, fake)
@@ -102,7 +103,7 @@ func TestCreateDatasetWithoutEncryptionUnchanged(t *testing.T) {
 
 	// inherit_encryption alone keeps working as before.
 	client, fake = newFakeClientWith(t, encFakeResults(), nil)
-	if _, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/plain", "inherit_encryption": true}); err != nil {
+	if _, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/plain", "inherit_encryption": true}); err != nil {
 		t.Fatal(err)
 	}
 	if p := createPayload(t, fake); p["inherit_encryption"] != true {
@@ -111,7 +112,7 @@ func TestCreateDatasetWithoutEncryptionUnchanged(t *testing.T) {
 
 	// An empty encryption_options object is a no-op.
 	client, fake = newFakeClientWith(t, encFakeResults(), nil)
-	if _, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/plain", "encryption_options": map[string]interface{}{}}); err != nil {
+	if _, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/plain", "encryption_options": map[string]interface{}{}}); err != nil {
 		t.Fatal(err)
 	}
 	if p := createPayload(t, fake); p["encryption_options"] != nil || p["encryption"] != nil {
@@ -151,7 +152,7 @@ func TestCreateDatasetEncryptionValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			client, fake := newFakeClientWith(t, encFakeResults(), nil)
 			tt.args["name"] = "tank/secure"
-			_, err := handleCreateDataset(client, tt.args)
+			_, err := handleCreateDataset(context.Background(), client, tt.args)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want containing %q", err, tt.want)
 			}
@@ -175,7 +176,7 @@ func TestCreateDatasetDryRunMasksSecrets(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			client, fake := newFakeClientWith(t, encFakeResults(), nil)
-			out, err := handleCreateDataset(client, map[string]interface{}{
+			out, err := handleCreateDataset(context.Background(), client, map[string]interface{}{
 				"name": "tank/secure", "encryption": true, "encryption_options": opts, "dry_run": true,
 			})
 			if err != nil {
@@ -233,7 +234,7 @@ func TestCreateDatasetSuccessResponseHasNoSecrets(t *testing.T) {
 			"encrypted": true, "key_loaded": true,
 		},
 	}, nil)
-	out, err := handleCreateDataset(client, map[string]interface{}{
+	out, err := handleCreateDataset(context.Background(), client, map[string]interface{}{
 		"name": "tank/secure", "encryption": true,
 		"encryption_options": map[string]interface{}{"passphrase": testPassphrase},
 	})
@@ -260,7 +261,7 @@ func TestCreateDatasetMiddlewareErrorMasksSecrets(t *testing.T) {
 				return nil, nil, false
 			}}
 			client, _ := newFakeClientFrom(t, fake)
-			_, err := handleCreateDataset(client, map[string]interface{}{
+			_, err := handleCreateDataset(context.Background(), client, map[string]interface{}{
 				"name": "tank/secure", "encryption": true, "encryption_options": opts,
 			})
 			if err == nil {
@@ -387,7 +388,7 @@ func TestKeyBackupGuidancePerMode(t *testing.T) {
 		{map[string]interface{}{"key": testKeyHex}, []string{"must keep a copy", "does not return"}},
 	} {
 		client, _ := newFakeClientWith(t, encFakeResults(), nil)
-		out, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": tt.opts})
+		out, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": tt.opts})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -407,13 +408,13 @@ func TestKeyBackupGuidancePerMode(t *testing.T) {
 	}
 	// A plain dataset gets no warning.
 	client, _ := newFakeClientWith(t, map[string]interface{}{"pool.dataset.create": map[string]interface{}{"id": "tank/p", "name": "tank/p", "encrypted": false, "key_loaded": true}}, nil)
-	out, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/p"})
+	out, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/p"})
 	if err != nil || strings.Contains(out, "encryption_warning") {
 		t.Errorf("unexpected warning: %s %v", out, err)
 	}
 	// An encrypted child that inherits gets the generic note.
 	client, _ = newFakeClientWith(t, map[string]interface{}{"pool.dataset.create": map[string]interface{}{"id": "tank/e/c", "name": "tank/e/c", "encrypted": true}}, nil)
-	out, err = handleCreateDataset(client, map[string]interface{}{"name": "tank/e/c"})
+	out, err = handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/e/c"})
 	if err != nil || !strings.Contains(out, "This dataset is encrypted") {
 		t.Errorf("generic note missing: %s %v", out, err)
 	}
@@ -460,7 +461,7 @@ func TestCreateDatasetMiddlewareErrorScrubsLiteralSecrets(t *testing.T) {
 				return nil, nil, false
 			}}
 			client, _ := newFakeClientFrom(t, fake)
-			_, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": opts})
+			_, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": opts})
 			if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[REDACTED]") {
 				t.Errorf("err = %v", err)
 			}
@@ -516,7 +517,7 @@ func createWithEchoingMiddleware(t *testing.T, name, msg string, opts map[string
 		return nil, nil, false
 	}}
 	client, _ := newFakeClientFrom(t, fake)
-	_, err := handleCreateDataset(client, map[string]interface{}{"name": name, "encryption": true, "encryption_options": opts})
+	_, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": name, "encryption": true, "encryption_options": opts})
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -614,7 +615,7 @@ func TestCreateDatasetErrorScrubCoversDetailsAndTrace(t *testing.T) {
 		return nil, nil, false
 	}}
 	client, _ := newFakeClientFrom(t, fake)
-	_, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": map[string]interface{}{"passphrase": testPassphrase}})
+	_, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": map[string]interface{}{"passphrase": testPassphrase}})
 	if err == nil {
 		t.Fatal("expected an error")
 	}

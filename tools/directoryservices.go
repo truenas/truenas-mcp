@@ -24,7 +24,7 @@ type DirectoryServiceStatus struct {
 
 func getDirectoryServiceStatus(ctx context.Context, client *truenas.Client) (*DirectoryServiceStatus, error) {
 	// Use the unified directoryservices.status API
-	result, err := client.Call("directoryservices.status")
+	result, err := client.Call(ctx, "directoryservices.status")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query directory service status: %w", err)
 	}
@@ -119,8 +119,7 @@ func checkDirectoryServiceForShareWarnings(ctx context.Context, client *truenas.
 
 // Read-only handlers
 
-func handleGetDirectoryServiceStatus(client *truenas.Client, args map[string]interface{}) (string, error) {
-	ctx := context.Background()
+func handleGetDirectoryServiceStatus(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	status, err := getDirectoryServiceStatus(ctx, client)
 	if err != nil {
 		return "", err
@@ -144,11 +143,10 @@ func handleGetDirectoryServiceStatus(client *truenas.Client, args map[string]int
 	return string(formatted), nil
 }
 
-func handleQueryDirectoryServices(client *truenas.Client, args map[string]interface{}) (string, error) {
-	ctx := context.Background()
+func handleQueryDirectoryServices(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 
 	// Use the unified directoryservices.config API
-	result, err := client.Call("directoryservices.config")
+	result, err := client.Call(ctx, "directoryservices.config")
 	if err != nil {
 		return "", fmt.Errorf("failed to query directory service config: %w", err)
 	}
@@ -183,9 +181,9 @@ func handleQueryDirectoryServices(client *truenas.Client, args map[string]interf
 	return string(formatted), nil
 }
 
-func handleListDirectoryCertificates(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleListDirectoryCertificates(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Query all certificates
-	result, err := client.Call("certificate.query")
+	result, err := client.Call(ctx, "certificate.query")
 	if err != nil {
 		return "", fmt.Errorf("failed to query certificates: %w", err)
 	}
@@ -225,8 +223,7 @@ func handleListDirectoryCertificates(client *truenas.Client, args map[string]int
 	return string(formatted), nil
 }
 
-func handleRefreshDirectoryCache(client *truenas.Client, args map[string]interface{}) (string, error) {
-	ctx := context.Background()
+func handleRefreshDirectoryCache(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 
 	// Check which directory service is enabled
 	status, err := getDirectoryServiceStatus(ctx, client)
@@ -243,7 +240,7 @@ func handleRefreshDirectoryCache(client *truenas.Client, args map[string]interfa
 	}
 
 	// Call unified cache refresh method
-	_, err = client.Call("directoryservices.cache_refresh")
+	_, err = client.Call(ctx, "directoryservices.cache_refresh")
 	if err != nil {
 		return "", fmt.Errorf("failed to refresh cache: %w", err)
 	}
@@ -285,7 +282,7 @@ func parseJobID(result json.RawMessage) int {
 	return 0
 }
 
-func (r *Registry) handleConfigureDirectoryService(client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleConfigureDirectoryService(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	payload, err := buildDirectoryServiceUpdatePayload(args)
 	if err != nil {
 		return "", err
@@ -298,7 +295,7 @@ func (r *Registry) handleConfigureDirectoryService(client *truenas.Client, args 
 	}
 
 	// directoryservices.update is a job: the call returns its job ID.
-	result, err := client.Call("directoryservices.update", payload)
+	result, err := client.Call(ctx, "directoryservices.update", payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to configure %s: %w", label, err)
 	}
@@ -320,7 +317,7 @@ func (r *Registry) handleConfigureDirectoryService(client *truenas.Client, args 
 
 	if jobID > 0 {
 		// Never keep the credential values in the stored task arguments.
-		task, err := r.taskManager.CreateJobTask(
+		task, err := r.taskManager.CreateJobTask(ctx,
 			"configure_directory_service",
 			maskDirectoryServicePayload(args),
 			jobID,
@@ -343,8 +340,7 @@ func (r *Registry) handleConfigureDirectoryService(client *truenas.Client, args 
 	return string(formatted), nil
 }
 
-func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[string]interface{}) (string, error) {
-	ctx := context.Background()
+func (r *Registry) handleLeaveDirectoryService(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 
 	payload, err := buildDirectoryServiceLeavePayload(args)
 	if err != nil {
@@ -361,7 +357,7 @@ func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[
 	}
 
 	// directoryservices.leave is a job: the call returns its job ID.
-	result, err := client.Call("directoryservices.leave", payload)
+	result, err := client.Call(ctx, "directoryservices.leave", payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to leave %s: %w", status.Type, err)
 	}
@@ -376,7 +372,7 @@ func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[
 
 	if jobID > 0 {
 		// Never keep the credential values in the stored task arguments.
-		task, err := r.taskManager.CreateJobTask(
+		task, err := r.taskManager.CreateJobTask(ctx,
 			"leave_directory_service",
 			maskDirectoryServicePayload(args),
 			jobID,
@@ -403,8 +399,7 @@ func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[
 
 type configureDirectoryServiceDryRun struct{}
 
-func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	ctx := context.Background()
+func (d *configureDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 
 	payload, err := buildDirectoryServiceUpdatePayload(args)
 	if err != nil {
@@ -533,8 +528,7 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, 
 
 type leaveDirectoryServiceDryRun struct{}
 
-func (d *leaveDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	ctx := context.Background()
+func (d *leaveDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
 
 	payload, err := buildDirectoryServiceLeavePayload(args)
 	if err != nil {
@@ -608,10 +602,10 @@ func (d *leaveDirectoryServiceDryRun) ExecuteDryRun(client *truenas.Client, args
 
 // WithDryRun wrappers
 
-func (r *Registry) handleConfigureDirectoryServiceWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &configureDirectoryServiceDryRun{}, r.handleConfigureDirectoryService)
+func (r *Registry) handleConfigureDirectoryServiceWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &configureDirectoryServiceDryRun{}, r.handleConfigureDirectoryService)
 }
 
-func (r *Registry) handleLeaveDirectoryServiceWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &leaveDirectoryServiceDryRun{}, r.handleLeaveDirectoryService)
+func (r *Registry) handleLeaveDirectoryServiceWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	return ExecuteWithDryRun(ctx, client, args, &leaveDirectoryServiceDryRun{}, r.handleLeaveDirectoryService)
 }

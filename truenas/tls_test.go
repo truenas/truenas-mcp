@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -29,7 +30,7 @@ func authWithTLSConfig(t *testing.T, srv *httptest.Server, cfg *tls.Config) erro
 		t.Fatalf("NewClientWithOptions: %v", err)
 	}
 	defer client.Close()
-	return client.Authenticate()
+	return client.Authenticate(context.Background())
 }
 
 // serverCertPEM writes srv's self-signed certificate to a temp PEM file.

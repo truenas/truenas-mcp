@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -108,10 +109,10 @@ func TestEndpointURL(t *testing.T) {
 func TestFramesAreJSONRPC(t *testing.T) {
 	f := newFakeTrueNAS(t, nil)
 	c := insecureClient(t, f, Options{})
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	if _, err := c.Call("pool.query", []interface{}{}); err != nil {
+	if _, err := c.Call(context.Background(), "pool.query", []interface{}{}); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 	raws, paths, _ := f.snapshot()
@@ -151,7 +152,7 @@ func TestLoginExPayload(t *testing.T) {
 	for _, tc := range []struct{ user, want string }{{"svc-mcp", "svc-mcp"}, {"truenas_admin", "truenas_admin"}} {
 		f := newFakeTrueNAS(t, nil)
 		c := insecureClient(t, f, Options{APIUser: tc.user})
-		if err := c.Authenticate(); err != nil {
+		if err := c.Authenticate(context.Background()); err != nil {
 			t.Fatalf("Authenticate: %v", err)
 		}
 		raws, _, _ := f.snapshot()
@@ -174,7 +175,7 @@ func TestLoginRejectsNonSuccess(t *testing.T) {
 	for _, rt := range []string{"AUTH_ERR", "EXPIRED", "OTP_REQUIRED", "REDIRECT", ""} {
 		f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.loginType = rt })
 		c := insecureClient(t, f, Options{})
-		err := c.Authenticate()
+		err := c.Authenticate(context.Background())
 		if err == nil {
 			t.Errorf("response_type %q accepted", rt)
 			continue
@@ -203,7 +204,7 @@ func TestErrorDataReachesToolText(t *testing.T) {
 		}
 	})
 	c := insecureClient(t, f, Options{})
-	_, err := c.Call("pool.dataset.create", map[string]interface{}{"name": "tank/x"})
+	_, err := c.Call(context.Background(), "pool.dataset.create", map[string]interface{}{"name": "tank/x"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -229,7 +230,7 @@ func TestErrnamePrefixedWhenMissingFromReason(t *testing.T) {
 		}
 	})
 	c := insecureClient(t, f, Options{})
-	_, err := c.Call("pool.get")
+	_, err := c.Call(context.Background(), "pool.get")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -245,7 +246,7 @@ func TestErrorWithoutData(t *testing.T) {
 		f.errors["no.such"] = map[string]interface{}{"code": -32601, "message": "Method not found"}
 	})
 	c := insecureClient(t, f, Options{})
-	_, err := c.Call("no.such")
+	_, err := c.Call(context.Background(), "no.such")
 	if err == nil || !strings.Contains(err.Error(), "Method not found") || !strings.Contains(err.Error(), "(code -32601)") {
 		t.Errorf("got %v", err)
 	}
@@ -254,7 +255,7 @@ func TestErrorWithoutData(t *testing.T) {
 func TestNotificationsAndStringIDsRouted(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.notify = true; f.stringIDs = true })
 	c := insecureClient(t, f, Options{})
-	res, err := c.Call("system.info")
+	res, err := c.Call(context.Background(), "system.info")
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -266,7 +267,7 @@ func TestNotificationsAndStringIDsRouted(t *testing.T) {
 func TestConcurrentCallsWithNotifications(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.notify = true })
 	c := insecureClient(t, f, Options{})
-	if err := c.Authenticate(); err != nil {
+	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
 	var wg sync.WaitGroup
@@ -275,7 +276,7 @@ func TestConcurrentCallsWithNotifications(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := c.Call("system.info"); err != nil {
+			if _, err := c.Call(context.Background(), "system.info"); err != nil {
 				errs <- err
 			}
 		}()
@@ -291,7 +292,7 @@ func TestReconnectReauthenticates(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.closeAfter = 1 })
 	c := insecureClient(t, f, Options{})
 	for i := 0; i < 2; i++ {
-		if _, err := c.Call("system.info"); err != nil {
+		if _, err := c.Call(context.Background(), "system.info"); err != nil {
 			t.Fatalf("Call %d: %v", i, err)
 		}
 		// A call written to a socket that then dies is not retried, so let
