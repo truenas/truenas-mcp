@@ -33,7 +33,7 @@ clean:
 
 test:
 	@echo "Running tests..."
-	go test -v ./...
+	go test -v -race ./...
 
 lint:
 	@echo "Running linters..."

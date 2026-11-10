@@ -673,8 +673,9 @@ func TestTextLongLinesLinear(t *testing.T) {
 	size, budget := 1<<20, 10*time.Second
 	if raceEnabled {
 		// The race detector slows this down about 15x; a quarter of the size
-		// would still take minutes if the work were quadratic.
-		size, budget = 1<<18, 60*time.Second
+		// would still take minutes if the work were quadratic. The budget is
+		// 180s because a 60s budget once elapsed at ~98s on a loaded runner.
+		size, budget = 1<<18, 180*time.Second
 	}
 	line := func(prefix, unit string) string {
 		return prefix + strings.Repeat(unit, (size-len(prefix))/len(unit))
@@ -841,7 +842,7 @@ func TestTextLongLinesLinear(t *testing.T) {
 func TestTextLargeBlob(t *testing.T) {
 	size, budget := 5<<20, 30*time.Second
 	if raceEnabled {
-		size, budget = 1<<20, 60*time.Second
+		size, budget = 1<<20, 180*time.Second
 	}
 	units := []string{
 		`sshpass -vp fake-gap-pw ssh -p 22 h; `,
