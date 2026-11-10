@@ -200,6 +200,7 @@ func callHostPathTool(t *testing.T, r *Registry, tool string, values map[string]
 	t.Helper()
 	args := map[string]interface{}{"app_name": "jellyfin", "values": values}
 	if tool == "install_app" {
+		args["app_name"] = "media"
 		args["catalog_app"] = "jellyfin"
 		args["train"] = "community"
 	}
@@ -627,7 +628,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 		values["storage"].(map[string]interface{})["config"] = hostPathACLConfig(
 			"/mnt/tank/apps/jellyfin/config", "/mnt/tank/apps/jellyfin/data")
 		out, err := r.CallTool(t.Context(), "install_app", map[string]interface{}{
-			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": values,
+			"app_name": "media", "catalog_app": "jellyfin", "train": "community", "values": values,
 		})
 		if err != nil {
 			t.Fatalf("valid acl.path was refused: %v (out=%s)", err, out)
@@ -650,7 +651,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 			return nil, nil, false
 		}
 		_, err := r.CallTool(t.Context(), "install_app", map[string]interface{}{
-			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": validHostPathValues(),
+			"app_name": "media", "catalog_app": "jellyfin", "train": "community", "values": validHostPathValues(),
 		})
 		if err == nil {
 			t.Fatal("install_app accepted a values set when dataset lookup failed")
@@ -690,7 +691,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 	t.Run("unknown install version is an error", func(t *testing.T) {
 		r, fake := hostPathReviewFake(t, nil, nil)
 		_, err := r.CallTool(t.Context(), "install_app", map[string]interface{}{
-			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community",
+			"app_name": "media", "catalog_app": "jellyfin", "train": "community",
 			"version": "9.9.9", "values": validHostPathValues(),
 		})
 		if err == nil {
@@ -713,7 +714,7 @@ func TestAppHostPathCatalogFollowups(t *testing.T) {
 		t.Helper()
 		r, fake := hostPathReviewFake(t, schema, nil)
 		args := map[string]interface{}{
-			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": values,
+			"app_name": "media", "catalog_app": "jellyfin", "train": "community", "values": values,
 		}
 		if dry {
 			args["dry_run"] = true
@@ -888,7 +889,7 @@ func TestAppHostPathClassifyAndSchemaNits(t *testing.T) {
 			addHostPathDatasets(fake, extraDS...)
 		}
 		out, err := r.CallTool(t.Context(), "install_app", map[string]interface{}{
-			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": values,
+			"app_name": "media", "catalog_app": "jellyfin", "train": "community", "values": values,
 		})
 		return out, err, fake
 	}
@@ -957,18 +958,18 @@ func TestAppHostPathClassifyAndSchemaNits(t *testing.T) {
 
 		r, fake := hostPathReviewFake(t, hostPathFieldSchema(), nil)
 		out, err = r.CallTool(t.Context(), "install_app", map[string]interface{}{
-			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community",
+			"app_name": "media", "catalog_app": "jellyfin", "train": "community",
 			"values": values, "dry_run": true,
 		})
-		if err != nil {
-			t.Fatalf("dry-run returned an error: %v (out=%s)", err, out)
+		if err == nil {
+			t.Fatalf("dry-run accepted a missing pool-root dataset: %s", out)
 		}
-		low := strings.ToLower(out)
-		if !strings.Contains(low, "critical") || !strings.Contains(low, "create_dataset") || !strings.Contains(low, "tank/webdav") {
-			t.Errorf("dry-run output %q, want a CRITICAL missing-dataset warning for tank/webdav", out)
+		low := strings.ToLower(err.Error() + "\n" + out)
+		if !strings.Contains(low, "create_dataset") || !strings.Contains(low, "tank/webdav") {
+			t.Errorf("dry-run error %q, want the missing-dataset error with a create_dataset hint for tank/webdav", err)
 		}
 		if strings.Contains(low, "not a file under a dataset") {
-			t.Errorf("dry-run used the hard classification error: %s", out)
+			t.Errorf("dry-run used the hard classification error: %v", err)
 		}
 		if n := len(fake.called("app.create")); n != 0 {
 			t.Errorf("dry-run app.create called %d times, want 0", n)

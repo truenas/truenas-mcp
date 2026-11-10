@@ -15,110 +15,93 @@ import (
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
-// handleCreateDataset creates a new ZFS dataset (filesystem or volume)
-func handleCreateDataset(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	// Extract required parameters
+// Middleware method names used as writePlan.Method must be declared in
+// this file (same-file contract for TestMiddlewareMethodContract).
+const poolDatasetCreateMethod = "pool.dataset.create"
+
+// buildCreateDatasetPayload constructs the pool.dataset.create body.
+// The map is unchanged from main: create_ancestors defaults to true, and
+// encryption_options are only sent together with encryption=true and
+// inherit_encryption=false.
+func buildCreateDatasetPayload(args map[string]interface{}) (map[string]interface{}, map[string]interface{}, error) {
 	name, ok := args["name"].(string)
 	if !ok || name == "" {
-		return "", fmt.Errorf("name is required")
+		return nil, nil, fmt.Errorf("name is required")
 	}
 
 	dsType, ok := args["type"].(string)
 	if !ok || dsType == "" {
-		dsType = "FILESYSTEM" // Default to filesystem
+		dsType = "FILESYSTEM"
 	}
 
-	// Validate dataset name
 	if err := validateDatasetName(name); err != nil {
-		return "", err
+		return nil, nil, err
 	}
-
-	// Validate type
 	if dsType != "FILESYSTEM" && dsType != "VOLUME" {
-		return "", fmt.Errorf("type must be FILESYSTEM or VOLUME, got: %s", dsType)
+		return nil, nil, fmt.Errorf("type must be FILESYSTEM or VOLUME, got: %s", dsType)
 	}
-
 	if err := validateVolblocksize(args, dsType); err != nil {
-		return "", err
+		return nil, nil, err
 	}
 	if err := validateUserProperties(args); err != nil {
-		return "", err
+		return nil, nil, err
 	}
 
-	// Build the payload
 	payload := map[string]interface{}{
 		"name": name,
 		"type": dsType,
 	}
 
-	// Handle VOLUME-specific required parameter
 	if dsType == "VOLUME" {
 		volsize, ok := args["volsize"].(float64)
 		if !ok || volsize <= 0 {
-			return "", fmt.Errorf("volsize (in bytes) is required for VOLUME type")
+			return nil, nil, fmt.Errorf("volsize (in bytes) is required for VOLUME type")
 		}
 		payload["volsize"] = int64(volsize)
-
 		if volblocksize, ok := args["volblocksize"].(string); ok {
 			payload["volblocksize"] = volblocksize
 		}
 	}
 
-	// Optional parameters with defaults
 	if shareType, ok := args["share_type"].(string); ok && shareType != "" {
 		payload["share_type"] = shareType
 	}
-
 	if compression, ok := args["compression"].(string); ok && compression != "" {
 		payload["compression"] = compression
 	}
-
 	if acltype, ok := args["acltype"].(string); ok && acltype != "" {
 		payload["acltype"] = acltype
 	}
-
-	// Quota parameters
 	if quota, ok := args["quota"].(float64); ok && quota > 0 {
 		payload["quota"] = int64(quota)
 	}
-
 	if refquota, ok := args["refquota"].(float64); ok && refquota > 0 {
 		payload["refquota"] = int64(refquota)
 	}
-
-	// Boolean parameters - create_ancestors defaults to true
 	if createAncestors, ok := args["create_ancestors"].(bool); ok {
 		payload["create_ancestors"] = createAncestors
 	} else {
-		// Default to true to auto-create parent datasets
 		payload["create_ancestors"] = true
 	}
-
 	if readonly, ok := args["readonly"].(bool); ok {
 		payload["readonly"] = readonly
 	}
-
 	if dedup, ok := args["deduplication"].(string); ok && dedup != "" {
 		payload["deduplication"] = dedup
 	}
-
 	if checksum, ok := args["checksum"].(string); ok && checksum != "" {
 		payload["checksum"] = checksum
 	}
-
 	if snapdir, ok := args["snapdir"].(string); ok && snapdir != "" {
 		payload["snapdir"] = snapdir
 	}
-
 	if atime, ok := args["atime"].(string); ok && atime != "" {
 		payload["atime"] = atime
 	}
 
-	// Encryption. The middleware only honours encryption_options together
-	// with encryption=true, and requires inherit_encryption=false then.
 	encrypted, encOpts, err := parseDatasetEncryption(args)
 	if err != nil {
-		return "", err
+		return nil, nil, err
 	}
 	if encrypted {
 		payload["encryption"] = true
@@ -128,55 +111,97 @@ func handleCreateDataset(ctx context.Context, client *truenas.Client, args map[s
 		payload["inherit_encryption"] = inheritEnc
 	}
 
-	// User properties
 	if userProps, ok := args["user_properties"].([]interface{}); ok && len(userProps) > 0 {
 		payload["user_properties"] = userProps
 	}
+	return payload, encOpts, nil
+}
 
-	// Check if this is a dry run
-	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		// Return preview of what would be created
-		preview := map[string]interface{}{
-			"dry_run":        true,
-			"operation":      "pool.dataset.create",
-			"payload":        maskDatasetPayload(payload),
-			"note":           "This is a preview. No dataset has been created.",
-			"next_step":      "Remove dry_run parameter or set to false to execute",
-			"estimated_path": fmt.Sprintf("/mnt/%s", name),
-		}
-
-		if err := checkCreateDatasetPreflight(ctx, client, name); err != nil {
-			return "", err
-		}
-
-		// create_ancestors defaults to true: list missing parents that
-		// would be created, in order from parent to child, so the client
-		// can report them before confirming.
-		if createAncestors, _ := payload["create_ancestors"].(bool); createAncestors {
-			missing, err := missingAncestorDatasets(ctx, client, name)
-			if err != nil {
-				return "", err
-			}
-			preview["ancestors_to_create"] = missing
-			if len(missing) > 0 {
-				preview["ancestors_note"] = ancestorsInheritNote
-			}
-		} else {
-			preview["ancestors_to_create"] = []string{}
-		}
-
-		formatted, err := json.MarshalIndent(preview, "", "  ")
-		if err != nil {
-			return "", err
-		}
-		return string(formatted), nil
+// planCreateDataset builds the create_dataset plan used by both the dry-run
+// preview and the real call. Preflight (pool exists, dataset name is free)
+// runs on both paths so a dry run cannot succeed when the create would
+// be refused.
+func planCreateDataset(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
+	payload, encOpts, err := buildCreateDatasetPayload(args)
+	if err != nil {
+		return nil, err
+	}
+	name, _ := payload["name"].(string)
+	if err := checkCreateDatasetPreflight(ctx, client, name); err != nil {
+		return nil, err
 	}
 
-	// Call the API (error will include payload automatically)
-	result, err := client.Call(ctx, "pool.dataset.create", payload)
+	var missing []string
+	var ancestorsNote string
+	if createAncestors, _ := payload["create_ancestors"].(bool); createAncestors {
+		var err error
+		missing, err = missingAncestorDatasets(ctx, client, name)
+		if err != nil {
+			return nil, err
+		}
+		if len(missing) > 0 {
+			ancestorsNote = ancestorsInheritNote
+		}
+	} else {
+		missing = []string{}
+	}
+
+	current := map[string]interface{}{
+		"payload":             maskDatasetPayload(payload),
+		"ancestors_to_create": missing,
+		"estimated_path":      fmt.Sprintf("/mnt/%s", name),
+	}
+	if ancestorsNote != "" {
+		current["ancestors_note"] = ancestorsNote
+	}
+
+	return &writePlan{
+		Tool:         "create_dataset",
+		Method:       poolDatasetCreateMethod,
+		CallParams:   []interface{}{payload},
+		ParamNames:   []string{"data"},
+		TargetName:   name,
+		CurrentState: current,
+		Actions: []PlannedAction{{
+			Step:        1,
+			Description: fmt.Sprintf("Create dataset %s", name),
+			Operation:   "create",
+			Target:      poolDatasetCreateMethod,
+			Details: map[string]interface{}{
+				"payload":             payload,
+				"ancestors_to_create": missing,
+				"estimated_path":      fmt.Sprintf("/mnt/%s", name),
+			},
+		}},
+		Result: map[string]interface{}{
+			"enc_opts": encOpts,
+			"name":     name,
+		},
+	}, nil
+}
+
+// handleCreateDataset creates a new ZFS dataset (filesystem or volume)
+func handleCreateDataset(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planCreateDataset(ctx, client, args)
 	if err != nil {
-		// The middleware error can quote request values; scrub the literal
-		// passphrase/key (the redactor only recognises labelled secrets).
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return executeCreateDataset(ctx, client, args, plan)
+}
+
+func executeCreateDataset(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	encOpts, _ := plan.Result["enc_opts"].(map[string]interface{})
+	result, err := callPlan(ctx, client, plan)
+	if err != nil {
 		return "", fmt.Errorf("failed to create dataset: %s", scrubDatasetCreateError(err, encOpts))
 	}
 
@@ -185,7 +210,6 @@ func handleCreateDataset(ctx context.Context, client *truenas.Client, args map[s
 		return "", fmt.Errorf("failed to parse dataset response: %w", err)
 	}
 
-	// Format response with key information
 	response := map[string]interface{}{
 		"success":    true,
 		"dataset_id": dataset["id"],
@@ -193,15 +217,12 @@ func handleCreateDataset(ctx context.Context, client *truenas.Client, args map[s
 		"type":       dataset["type"],
 		"pool":       dataset["pool"],
 	}
-
 	if mountpoint, ok := dataset["mountpoint"].(string); ok {
 		response["mountpoint"] = mountpoint
 	}
-
 	if encrypted, ok := dataset["encrypted"].(bool); ok {
 		response["encrypted"] = encrypted
 	}
-
 	if keyLoaded, ok := dataset["key_loaded"].(bool); ok && keyLoaded {
 		response["key_loaded"] = keyLoaded
 	}
@@ -210,12 +231,10 @@ func handleCreateDataset(ctx context.Context, client *truenas.Client, args map[s
 	} else if encrypted, ok := dataset["encrypted"].(bool); ok && encrypted {
 		response["encryption_warning"] = keyBackupGuidance("")
 	}
-
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
 }
 

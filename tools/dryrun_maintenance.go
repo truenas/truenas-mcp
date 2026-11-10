@@ -256,7 +256,7 @@ func executeAlertAction(ctx context.Context, client *truenas.Client, plan *write
 	return fmt.Sprintf("Alert %s %s successfully: %s", plan.TargetName, verb, string(result)), nil
 }
 
-func handleRefreshDirectoryCacheWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleRefreshDirectoryCacheWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	plan, err := planRefreshDirectoryCache(ctx, client, args)
 	if err != nil {
 		return "", err
@@ -267,5 +267,5 @@ func handleRefreshDirectoryCacheWithDryRun(ctx context.Context, client *truenas.
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
 		return plan.marshalDryRun()
 	}
-	return executeRefreshDirectoryCache(ctx, client, args, plan)
+	return r.executeRefreshDirectoryCache(ctx, client, args, plan)
 }

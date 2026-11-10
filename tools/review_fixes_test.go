@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -29,7 +30,15 @@ func TestCreateDatasetVolblocksize(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
 			t.Fatal(err)
 		}
-		return got["payload"].(map[string]interface{}), nil
+		if payload, ok := got["payload"].(map[string]interface{}); ok {
+			return payload, nil
+		}
+		if cs, ok := got["current_state"].(map[string]interface{}); ok {
+			if payload, ok := cs["payload"].(map[string]interface{}); ok {
+				return payload, nil
+			}
+		}
+		return nil, fmt.Errorf("preview has no payload: %s", out)
 	}
 
 	for _, v := range []string{"512", "512B", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K"} {
@@ -221,7 +230,10 @@ func TestCreateDatasetEncryptionWarningRequiresEncrypted(t *testing.T) {
 			for k, v := range tt.dataset {
 				ds[k] = v
 			}
-			client, _ := newFakeClientWith(t, map[string]interface{}{"pool.dataset.create": ds}, nil)
+			client, _ := newFakeClientWith(t, map[string]interface{}{
+				"pool.query":          []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+				"pool.dataset.create": ds,
+			}, nil)
 			out, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/x"})
 			if err != nil {
 				t.Fatal(err)

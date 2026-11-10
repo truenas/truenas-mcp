@@ -238,6 +238,7 @@ func planRefreshDirectoryCache(ctx context.Context, client *truenas.Client, args
 	return &writePlan{
 		Tool:         "refresh_directory_cache",
 		Method:       directoryServicesCacheRefreshMethod,
+		JobMethod:    directoryServicesCacheRefreshMethod,
 		CallParams:   []interface{}{},
 		TargetName:   status.Type,
 		CurrentState: status,
@@ -250,20 +251,42 @@ func planRefreshDirectoryCache(ctx context.Context, client *truenas.Client, args
 	}, nil
 }
 
-func executeRefreshDirectoryCache(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+func (r *Registry) executeRefreshDirectoryCache(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
 	if err := plan.blockedReply(); err != nil {
 		return "", err
 	}
-	_, err := callPlan(ctx, client, plan)
+	result, err := callPlan(ctx, client, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to refresh cache: %w", err)
 	}
 	dirType := plan.TargetName
+	jobID := parseJobID(result)
 	response := map[string]interface{}{
-		"success":         true,
-		"directory_type":  dirType,
-		"cache_refreshed": true,
-		"message":         fmt.Sprintf("%s cache has been refreshed", dirType),
+		"status":         "submitted",
+		"directory_type": dirType,
+		"message":        fmt.Sprintf("%s cache refresh was submitted to TrueNAS; track the task for the result.", dirType),
+	}
+	if jobID > 0 {
+		opts := []tasks.TaskOption{}
+		if plan.JobMethod != "" {
+			opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+		}
+		task, err := r.taskManager.CreateJobTask(ctx,
+			"refresh_directory_cache",
+			args,
+			jobID,
+			dsJobTTL,
+			opts...,
+		)
+		if err != nil {
+			return "", fmt.Errorf("directoryservices.cache_refresh was submitted as job %d but task creation failed: %w", jobID, err)
+		}
+		response["task_id"] = task.TaskID
+		response["job_id"] = jobID
+		response["task_status"] = task.Status
+		response["poll_interval"] = task.PollInterval
+	} else {
+		response["warning"] = "TrueNAS did not return a job ID, so progress cannot be tracked; check get_directory_service_status."
 	}
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {

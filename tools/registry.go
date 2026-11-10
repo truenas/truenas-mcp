@@ -478,7 +478,7 @@ func (r *Registry) registerTools() {
 				},
 			},
 		},
-		Handler: handleRefreshDirectoryCacheWithDryRun,
+		Handler: r.handleRefreshDirectoryCacheWithDryRun,
 		Plan:    planRefreshDirectoryCache,
 	}
 
@@ -940,6 +940,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: handleCreateDataset,
+		Plan:    planCreateDataset,
 	}
 
 	// SMB share creation (write operation)
@@ -1040,6 +1041,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: handleCreateSMBShare,
+		Plan:    planCreateSMBShare,
 	}
 
 	// NFS share creation (write operation)
@@ -1116,6 +1118,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: handleCreateNFSShare,
+		Plan:    planCreateNFSShare,
 	}
 
 	// Alert list with filtering
@@ -1819,6 +1822,7 @@ Returns task_id for tracking progress with tasks_get.
 			},
 		},
 		Handler: r.handleInstallAppWithDryRun,
+		Plan:    planInstallApp,
 	}
 
 	// Delete app

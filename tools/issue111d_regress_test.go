@@ -496,6 +496,12 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 				return schedules, nil, true
 			}
 			return []interface{}{}, nil, true
+		case "pool.dataset.query":
+			rows := []interface{}{
+				map[string]interface{}{"id": "tank/apps/jellyfin/config", "name": "tank/apps/jellyfin/config", "type": "FILESYSTEM"},
+				map[string]interface{}{"id": "tank/apps/jellyfin/data", "name": "tank/apps/jellyfin/data", "type": "FILESYSTEM"},
+			}
+			return datasetQueryLikeMiddleware(t, params, rows), nil, true
 		default:
 			return nil, nil, false
 		}
@@ -514,6 +520,12 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 		args := toolArgsForSafetyFlagTest(name)
 		if name == "create_scrub_schedule" {
 			args["pool"] = "spare"
+		}
+		if name == "install_app" {
+			args["app_name"] = "media"
+			args["catalog_app"] = "jellyfin"
+			args["train"] = "community"
+			args["values"] = validHostPathValues()
 		}
 		plan, err := tool.Plan(t.Context(), client, args)
 		if err != nil {

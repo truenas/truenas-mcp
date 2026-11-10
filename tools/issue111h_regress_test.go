@@ -23,6 +23,10 @@ var issue111hPlanBackedWriteTools = []string{
 	"refresh_directory_cache",
 	"create_scrub_schedule",
 	"run_scrub",
+	"install_app",
+	"create_dataset",
+	"create_smb_share",
+	"create_nfs_share",
 }
 
 func TestPlanBackedWriteToolsRegisterAPlan(t *testing.T) {
@@ -369,9 +373,12 @@ func TestDismissAndRestoreAlertUnlistedUUIDStillCallsMiddleware(t *testing.T) {
 func TestRefreshDirectoryCacheSharesPlanPayload(t *testing.T) {
 	client, fake := newFakeClientWith(t, map[string]interface{}{
 		"directoryservices.status":        map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
-		"directoryservices.cache_refresh": nil,
+		"directoryservices.cache_refresh": 7,
+		"core.get_jobs":                   []interface{}{},
 	}, nil)
-	r := NewRegistry(client, nil)
+	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second})
+	t.Cleanup(mgr.Shutdown)
+	r := NewRegistry(client, mgr)
 	if r.tools["refresh_directory_cache"].Plan == nil {
 		t.Fatal("refresh_directory_cache has no Plan")
 	}
@@ -400,8 +407,14 @@ func TestRefreshDirectoryCacheSharesPlanPayload(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp["cache_refreshed"] != true || resp["directory_type"] != "ACTIVEDIRECTORY" {
+	if resp["cache_refreshed"] == true {
+		t.Errorf("cache_refreshed should not be true until the job finishes: %v", resp)
+	}
+	if resp["status"] != "submitted" || resp["directory_type"] != "ACTIVEDIRECTORY" || resp["job_id"] != float64(7) {
 		t.Errorf("response = %v", resp)
+	}
+	if _, err := mgr.Get(resp["task_id"].(string)); err != nil {
+		t.Fatal(err)
 	}
 }
 

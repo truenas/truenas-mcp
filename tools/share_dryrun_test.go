@@ -38,8 +38,26 @@ func callShareDryRun(t *testing.T, r *Registry, tool string, args map[string]int
 	return resp
 }
 
+func sharePreviewField(resp map[string]interface{}, key string) interface{} {
+	if raw, ok := resp[key]; ok {
+		return raw
+	}
+	if cs, ok := resp["current_state"].(map[string]interface{}); ok {
+		return cs[key]
+	}
+	return nil
+}
+
+func sharePreviewPayload(resp map[string]interface{}) map[string]interface{} {
+	m, _ := sharePreviewField(resp, "payload").(map[string]interface{})
+	return m
+}
+
 func warningStrings(resp map[string]interface{}) []string {
-	raw, _ := resp["security_warnings"].([]interface{})
+	raw, ok := resp["security_warnings"].([]interface{})
+	if !ok {
+		raw, _ = resp["warnings"].([]interface{})
+	}
 	out := make([]string, 0, len(raw))
 	for _, w := range raw {
 		if s, ok := w.(string); ok {
@@ -82,8 +100,8 @@ func TestShareDryRunWarnings(t *testing.T) {
 	t.Run("SMB omitted browsable and no hostsallow warns", func(t *testing.T) {
 		r := shareDryRunRegistry(t, nil)
 		resp := callShareDryRun(t, r, "create_smb_share", mergeShareArgs(smbBase, nil))
-		if _, ok := resp["payload"].(map[string]interface{})["browsable"]; ok {
-			t.Errorf("payload should omit browsable when the caller did: %v", resp["payload"])
+		if _, ok := sharePreviewPayload(resp)["browsable"]; ok {
+			t.Errorf("payload should omit browsable when the caller did: %v", sharePreviewPayload(resp))
 		}
 		if !hasWarning(warningStrings(resp), "any network host") {
 			t.Errorf("missing any-host warning: %v", resp["security_warnings"])
@@ -225,7 +243,7 @@ func TestShareDryRunWarnings(t *testing.T) {
 	t.Run("network_path and mount_example use the NAS hostname", func(t *testing.T) {
 		r := shareDryRunRegistry(t, nil)
 		smb := callShareDryRun(t, r, "create_smb_share", mergeShareArgs(smbBase, nil))
-		path, _ := smb["network_path"].(string)
+		path, _ := sharePreviewField(smb, "network_path").(string)
 		if path != `\\nas.example.invalid\media` {
 			t.Errorf("network_path = %q, want \\\\nas.example.invalid\\media", path)
 		}
@@ -233,7 +251,7 @@ func TestShareDryRunWarnings(t *testing.T) {
 			t.Errorf("network_path used the hard-coded host: %q", path)
 		}
 		nfs := callShareDryRun(t, r, "create_nfs_share", mergeShareArgs(nfsBase, nil))
-		ex, _ := nfs["mount_example"].(string)
+		ex, _ := sharePreviewField(nfs, "mount_example").(string)
 		if !strings.Contains(ex, "nas.example.invalid:/mnt/tank/media") {
 			t.Errorf("mount_example = %q, want the fake hostname", ex)
 		}
@@ -272,7 +290,7 @@ func TestShareHostnameUnavailable(t *testing.T) {
 		if strings.Contains(value, "truenas") && !strings.Contains(value, "NAS_HOSTNAME") {
 			t.Errorf("%s %s used a silent truenas fallback: %q", tool, field, value)
 		}
-		note, _ := resp["hostname_note"].(string)
+		note, _ := sharePreviewField(resp, "hostname_note").(string)
 		if note == "" || !strings.Contains(strings.ToLower(note), "unavailable") {
 			t.Errorf("%s missing hostname_note marking the placeholder: %v", tool, resp["hostname_note"])
 		}
@@ -280,10 +298,10 @@ func TestShareHostnameUnavailable(t *testing.T) {
 
 	t.Run("dry-run preview", func(t *testing.T) {
 		smb := callShareDryRun(t, r, "create_smb_share", mergeShareArgs(smbBase, nil))
-		path, _ := smb["network_path"].(string)
+		path, _ := sharePreviewField(smb, "network_path").(string)
 		assertPlaceholder(t, "create_smb_share", "network_path", path, smb)
 		nfs := callShareDryRun(t, r, "create_nfs_share", mergeShareArgs(nfsBase, nil))
-		ex, _ := nfs["mount_example"].(string)
+		ex, _ := sharePreviewField(nfs, "mount_example").(string)
 		assertPlaceholder(t, "create_nfs_share", "mount_example", ex, nfs)
 	})
 
