@@ -600,6 +600,8 @@ idmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed t
 			},
 		},
 		Handler: r.handleConfigureDirectoryServiceWithDryRun,
+		Plan:    planConfigureDirectoryService,
+		Execute: r.executeConfigureDirectoryService,
 	}
 
 	r.tools["leave_directory_service"] = Tool{
@@ -648,6 +650,8 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: r.handleLeaveDirectoryServiceWithDryRun,
+		Plan:    planLeaveDirectoryService,
+		Execute: r.executeLeaveDirectoryService,
 	}
 
 	// Storage pools query
@@ -6345,6 +6349,23 @@ func withoutKeys(args map[string]interface{}, keys ...string) map[string]interfa
 	return out
 }
 
+// applyUpdateBoundVersion returns the trimmed update.status new_version.version
+// the confirmation token should bind, or "" when there is no version to apply.
+func applyUpdateBoundVersion(status map[string]interface{}) string {
+	nv, _ := status["new_version"].(map[string]interface{})
+	v, _ := nv["version"].(string)
+	return strings.TrimSpace(v)
+}
+
+// applyUpdateBind returns the extra plan identity for apply_update, or nil
+// when there is no version so hashes stay {method, params}.
+func applyUpdateBind(status map[string]interface{}) interface{} {
+	if v := applyUpdateBoundVersion(status); v != "" {
+		return map[string]interface{}{"new_version": v}
+	}
+	return nil
+}
+
 // planApplyUpdate builds the apply_update plan used by both the dry-run
 // preview and the real call. The middleware write is a single update.run;
 // the preview still describes the stop/update/verify (and optional reboot)
@@ -6426,6 +6447,11 @@ func planApplyUpdate(ctx context.Context, client *truenas.Client, args map[strin
 		)
 	}
 
+	var blocked []string
+	if applyUpdateBoundVersion(status) == "" {
+		blocked = append(blocked, "No update is available to apply (update.status has no new_version)")
+	}
+
 	return &writePlan{
 		Tool:       "apply_update",
 		Method:     updateRunMethod,
@@ -6438,6 +6464,8 @@ func planApplyUpdate(ctx context.Context, client *truenas.Client, args map[strin
 		},
 		Actions:  actions,
 		Warnings: warnings,
+		Blocked:  blocked,
+		Bind:     applyUpdateBind(status),
 		EstimatedTime: &EstimatedTime{
 			MinSeconds: 180,
 			MaxSeconds: 900,

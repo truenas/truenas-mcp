@@ -878,9 +878,12 @@ func TestLeaveDirectoryServiceDryRunPastPreChecks(t *testing.T) {
 			if err := json.Unmarshal([]byte(out), &got); err != nil {
 				t.Fatalf("not JSON: %v\n%s", err, out)
 			}
+			dry, executed := true, false
 			want := DryRunResult{
 				Tool:         "leave_directory_service",
 				CurrentState: obj{"directory_type": dsType, "enabled": true, "healthy": true},
+				DryRun:       &dry,
+				Executed:     &executed,
 				PlannedActions: []PlannedAction{
 					{
 						Step: 1, Description: "Call directoryservices.leave to leave the " + dsType + " domain", Operation: "leave", Target: dsType,

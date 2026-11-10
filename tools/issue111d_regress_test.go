@@ -29,6 +29,8 @@ func TestPlanBackedDestructiveToolsRegisterAPlan(t *testing.T) {
 		"update_app",
 		"system_reboot",
 		"apply_update",
+		"configure_directory_service",
+		"leave_directory_service",
 	} {
 		if safetyOf(name).Access != Destructive {
 			t.Errorf("%s is listed as plan-backed but is not classified destructive", name)
@@ -455,15 +457,16 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 		},
 	}
 	client, _ := newFakeClientWith(t, map[string]interface{}{
-		"app.query":               []interface{}{appEntry("plex", "STOPPED")},
-		"app.upgrade_summary":     upgradeSummaryFixture("x"),
-		"catalog.get_app_details": hostPathCatalogDetails(),
-		"app.available":           []interface{}{map[string]interface{}{"name": "plex", "train": "community"}},
-		"app.config":              map[string]interface{}{},
-		"pool.query":              []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
-		"boot.environment.query":  bootEnvs,
-		"pool.scrub.query":        schedules,
-		"update.status":           map[string]interface{}{"status": "AVAILABLE"},
+		"app.query":                []interface{}{appEntry("plex", "STOPPED")},
+		"app.upgrade_summary":      upgradeSummaryFixture("x"),
+		"catalog.get_app_details":  hostPathCatalogDetails(),
+		"app.available":            []interface{}{map[string]interface{}{"name": "plex", "train": "community"}},
+		"app.config":               map[string]interface{}{},
+		"pool.query":               []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+		"boot.environment.query":   bootEnvs,
+		"pool.scrub.query":         schedules,
+		"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
+		"update.status":            map[string]interface{}{"status": "AVAILABLE", "new_version": map[string]interface{}{"version": "25.10.1"}},
 	}, nil)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)

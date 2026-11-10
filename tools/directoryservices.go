@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
@@ -267,6 +268,13 @@ func handleRefreshDirectoryCache(ctx context.Context, client *truenas.Client, ar
 // domain controllers and can take several minutes.
 const dsJobTTL = 15 * time.Minute
 
+// Middleware method names used as writePlan.Method must be declared in
+// this file (same-file contract for TestMiddlewareMethodContract).
+const (
+	directoryServicesUpdateMethod = "directoryservices.update"
+	directoryServicesLeaveMethod  = "directoryservices.leave"
+)
+
 // parseJobID returns the job id from the result of a job method: a bare
 // integer, or a list whose first element is the id. It returns 0 if there is
 // none.
@@ -282,125 +290,7 @@ func parseJobID(result json.RawMessage) int {
 	return 0
 }
 
-func (r *Registry) handleConfigureDirectoryService(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	payload, err := buildDirectoryServiceUpdatePayload(args)
-	if err != nil {
-		return "", err
-	}
-	serviceType, _ := payload["service_type"].(string)
-	enabled, _ := payload["enable"].(bool)
-	label := serviceType
-	if label == "" {
-		label = "the configured directory service"
-	}
-
-	// directoryservices.update is a job: the call returns its job ID.
-	result, err := client.Call(ctx, "directoryservices.update", payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to configure %s: %w", label, err)
-	}
-
-	jobID := parseJobID(result)
-
-	response := map[string]interface{}{
-		"status":  "submitted",
-		"enabled": enabled,
-	}
-	if serviceType != "" {
-		response["directory_type"] = serviceType
-	}
-	if enabled {
-		response["message"] = fmt.Sprintf("%s configuration was submitted to TrueNAS. Enabling it for the first time joins the domain, which may take a few minutes.", serviceType)
-	} else {
-		response["message"] = fmt.Sprintf("Disabling %s was submitted to TrueNAS; its settings are kept. Domain authentication stops until it is enabled again.", label)
-	}
-
-	if jobID > 0 {
-		// Never keep the credential values in the stored task arguments.
-		task, err := r.taskManager.CreateJobTask(ctx,
-			"configure_directory_service",
-			maskDirectoryServicePayload(args),
-			jobID,
-			dsJobTTL,
-		)
-		if err != nil {
-			return "", fmt.Errorf("directoryservices.update was submitted as job %d but task creation failed: %w", jobID, err)
-		}
-		response["task_id"] = task.TaskID
-		response["job_id"] = jobID
-	} else {
-		response["warning"] = "TrueNAS did not return a job ID, so progress cannot be tracked; check get_directory_service_status."
-	}
-
-	formatted, err := json.MarshalIndent(response, "", "  ")
-	if err != nil {
-		return "", err
-	}
-
-	return string(formatted), nil
-}
-
-func (r *Registry) handleLeaveDirectoryService(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-
-	payload, err := buildDirectoryServiceLeavePayload(args)
-	if err != nil {
-		return "", err
-	}
-
-	// Check current status
-	status, err := getDirectoryServiceStatus(ctx, client)
-	if err != nil {
-		return "", err
-	}
-	if err := checkDirectoryServiceCanLeave(status); err != nil {
-		return "", err
-	}
-
-	// directoryservices.leave is a job: the call returns its job ID.
-	result, err := client.Call(ctx, "directoryservices.leave", payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to leave %s: %w", status.Type, err)
-	}
-
-	jobID := parseJobID(result)
-
-	response := map[string]interface{}{
-		"status":         "submitted",
-		"directory_type": status.Type,
-		"message":        fmt.Sprintf("Leaving %s was submitted to TrueNAS; track the task for the result.", status.Type),
-	}
-
-	if jobID > 0 {
-		// Never keep the credential values in the stored task arguments.
-		task, err := r.taskManager.CreateJobTask(ctx,
-			"leave_directory_service",
-			maskDirectoryServicePayload(args),
-			jobID,
-			dsJobTTL,
-		)
-		if err != nil {
-			return "", fmt.Errorf("directoryservices.leave was submitted as job %d but task creation failed: %w", jobID, err)
-		}
-		response["task_id"] = task.TaskID
-		response["job_id"] = jobID
-	} else {
-		response["warning"] = "TrueNAS did not return a job ID, so progress cannot be tracked; check get_directory_service_status."
-	}
-
-	formatted, err := json.MarshalIndent(response, "", "  ")
-	if err != nil {
-		return "", err
-	}
-
-	return string(formatted), nil
-}
-
-// DryRunnable implementations
-
-type configureDirectoryServiceDryRun struct{}
-
-func (d *configureDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-
+func planConfigureDirectoryService(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	payload, err := buildDirectoryServiceUpdatePayload(args)
 	if err != nil {
 		return nil, err
@@ -412,7 +302,6 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, cli
 		credType, _ = cred["credential_type"].(string)
 	}
 
-	// Get current status
 	status, err := getDirectoryServiceStatus(ctx, client)
 	if err != nil {
 		return nil, err
@@ -426,6 +315,10 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, cli
 	}
 	if nothingToDisable {
 		target = "the configured directory service"
+	}
+	label := serviceType
+	if label == "" {
+		label = "the configured directory service"
 	}
 
 	warnings := []string{}
@@ -475,7 +368,7 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, cli
 			Operation:   operation,
 			Target:      target,
 			Details: map[string]interface{}{
-				"method":  "directoryservices.update",
+				"method":  directoryServicesUpdateMethod,
 				"enabled": enabled,
 				// Exactly what will be sent to TrueNAS, with secret values masked.
 				"payload": maskDirectoryServicePayload(payload),
@@ -504,32 +397,98 @@ func (d *configureDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, cli
 		conditions = []string{"A directory service is configured on TrueNAS"}
 	}
 
-	requirements := &Requirements{
-		Conditions: conditions,
-	}
-
-	return &DryRunResult{
-		Tool: "configure_directory_service",
+	return &writePlan{
+		Tool:       "configure_directory_service",
+		Method:     directoryServicesUpdateMethod,
+		CallParams: []interface{}{payload},
+		JobMethod:  directoryServicesUpdateMethod,
+		ParamNames: []string{"payload"},
 		CurrentState: map[string]interface{}{
 			"current_service": status.Type,
 			"current_enabled": status.Enabled,
 			"current_healthy": status.Healthy,
 		},
-		PlannedActions: actions,
-		Warnings:       warnings,
-		Requirements:   requirements,
+		Actions:  actions,
+		Warnings: warnings,
+		Requirements: &Requirements{
+			Conditions: conditions,
+		},
 		EstimatedTime: &EstimatedTime{
 			MinSeconds: 10,
 			MaxSeconds: 120,
 			Note:       "Time varies based on network and domain controller response",
 		},
+		Result: map[string]interface{}{
+			"service_type": serviceType,
+			"enabled":      enabled,
+			"label":        label,
+		},
 	}, nil
 }
 
-type leaveDirectoryServiceDryRun struct{}
+func (r *Registry) executeConfigureDirectoryService(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
 
-func (d *leaveDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+	serviceType, _ := plan.Result["service_type"].(string)
+	enabled, _ := plan.Result["enabled"].(bool)
+	label, _ := plan.Result["label"].(string)
+	if label == "" {
+		label = "the configured directory service"
+	}
 
+	result, err := callPlan(ctx, client, plan)
+	if err != nil {
+		return "", fmt.Errorf("failed to configure %s: %w", label, err)
+	}
+
+	jobID := parseJobID(result)
+
+	response := map[string]interface{}{
+		"status":  "submitted",
+		"enabled": enabled,
+	}
+	if serviceType != "" {
+		response["directory_type"] = serviceType
+	}
+	if enabled {
+		response["message"] = fmt.Sprintf("%s configuration was submitted to TrueNAS. Enabling it for the first time joins the domain, which may take a few minutes.", serviceType)
+	} else {
+		response["message"] = fmt.Sprintf("Disabling %s was submitted to TrueNAS; its settings are kept. Domain authentication stops until it is enabled again.", label)
+	}
+
+	if jobID > 0 {
+		// Never keep the credential values in the stored task arguments.
+		opts := []tasks.TaskOption{}
+		if plan.JobMethod != "" {
+			opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+		}
+		task, err := r.taskManager.CreateJobTask(ctx,
+			"configure_directory_service",
+			maskDirectoryServicePayload(args),
+			jobID,
+			dsJobTTL,
+			opts...,
+		)
+		if err != nil {
+			return "", fmt.Errorf("directoryservices.update was submitted as job %d but task creation failed: %w", jobID, err)
+		}
+		response["task_id"] = task.TaskID
+		response["job_id"] = jobID
+	} else {
+		response["warning"] = "TrueNAS did not return a job ID, so progress cannot be tracked; check get_directory_service_status."
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
+}
+
+func planLeaveDirectoryService(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	payload, err := buildDirectoryServiceLeavePayload(args)
 	if err != nil {
 		return nil, err
@@ -537,7 +496,6 @@ func (d *leaveDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, client 
 	cred, _ := payload["credential"].(map[string]interface{})
 	username, _ := cred["username"].(string)
 
-	// Get current status
 	status, err := getDirectoryServiceStatus(ctx, client)
 	if err != nil {
 		return nil, err
@@ -561,7 +519,7 @@ func (d *leaveDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, client 
 			Operation:   "leave",
 			Target:      status.Type,
 			Details: map[string]interface{}{
-				"method": "directoryservices.leave",
+				"method": directoryServicesLeaveMethod,
 				// Exactly what will be sent to TrueNAS, with the password masked.
 				"payload": maskDirectoryServicePayload(payload),
 			},
@@ -574,38 +532,109 @@ func (d *leaveDirectoryServiceDryRun) ExecuteDryRun(ctx context.Context, client 
 		},
 	}
 
-	requirements := &Requirements{
-		Conditions: []string{
-			fmt.Sprintf("Connectivity to %s servers", status.Type),
-			"Proper DNS configuration",
-			"A KERBEROS_USER credential with the administrative privileges needed to remove the computer account",
-		},
-	}
-
-	return &DryRunResult{
-		Tool: "leave_directory_service",
+	return &writePlan{
+		Tool:       "leave_directory_service",
+		Method:     directoryServicesLeaveMethod,
+		CallParams: []interface{}{payload},
+		JobMethod:  directoryServicesLeaveMethod,
+		ParamNames: []string{"payload"},
 		CurrentState: map[string]interface{}{
 			"directory_type": status.Type,
 			"enabled":        status.Enabled,
 			"healthy":        status.Healthy,
 		},
-		PlannedActions: actions,
-		Warnings:       warnings,
-		Requirements:   requirements,
+		Actions:  actions,
+		Warnings: warnings,
+		Requirements: &Requirements{
+			Conditions: []string{
+				fmt.Sprintf("Connectivity to %s servers", status.Type),
+				"Proper DNS configuration",
+				"A KERBEROS_USER credential with the administrative privileges needed to remove the computer account",
+			},
+		},
 		EstimatedTime: &EstimatedTime{
 			MinSeconds: 5,
 			MaxSeconds: 60,
 			Note:       "Time varies based on network and domain controller response",
 		},
+		Result: map[string]interface{}{"directory_type": status.Type},
 	}, nil
 }
 
-// WithDryRun wrappers
+func (r *Registry) executeLeaveDirectoryService(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+
+	dsType, _ := plan.Result["directory_type"].(string)
+
+	result, err := callPlan(ctx, client, plan)
+	if err != nil {
+		return "", fmt.Errorf("failed to leave %s: %w", dsType, err)
+	}
+
+	jobID := parseJobID(result)
+
+	response := map[string]interface{}{
+		"status":         "submitted",
+		"directory_type": dsType,
+		"message":        fmt.Sprintf("Leaving %s was submitted to TrueNAS; track the task for the result.", dsType),
+	}
+
+	if jobID > 0 {
+		// Never keep the credential values in the stored task arguments.
+		opts := []tasks.TaskOption{}
+		if plan.JobMethod != "" {
+			opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+		}
+		task, err := r.taskManager.CreateJobTask(ctx,
+			"leave_directory_service",
+			maskDirectoryServicePayload(args),
+			jobID,
+			dsJobTTL,
+			opts...,
+		)
+		if err != nil {
+			return "", fmt.Errorf("directoryservices.leave was submitted as job %d but task creation failed: %w", jobID, err)
+		}
+		response["task_id"] = task.TaskID
+		response["job_id"] = jobID
+	} else {
+		response["warning"] = "TrueNAS did not return a job ID, so progress cannot be tracked; check get_directory_service_status."
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
+}
 
 func (r *Registry) handleConfigureDirectoryServiceWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &configureDirectoryServiceDryRun{}, r.handleConfigureDirectoryService)
+	plan, err := planConfigureDirectoryService(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return r.executeConfigureDirectoryService(ctx, client, args, plan)
 }
 
 func (r *Registry) handleLeaveDirectoryServiceWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &leaveDirectoryServiceDryRun{}, r.handleLeaveDirectoryService)
+	plan, err := planLeaveDirectoryService(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return r.executeLeaveDirectoryService(ctx, client, args, plan)
 }
