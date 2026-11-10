@@ -96,6 +96,25 @@ func TestValidateDatasetName(t *testing.T) {
 			wantErr: true,
 			errMsg:  "dataset name contains invalid characters (only alphanumeric, /, _, ., - allowed)",
 		},
+
+		{
+			name:    "dot component",
+			input:   "tank/../x/y",
+			wantErr: true,
+			errMsg:  "dataset name cannot contain '.' or '..' path components",
+		},
+		{
+			name:    "bare dot component",
+			input:   "tank/./child",
+			wantErr: true,
+			errMsg:  "dataset name cannot contain '.' or '..' path components",
+		},
+		{
+			name:    "too long",
+			input:   "tank/" + strings.Repeat("a", 251),
+			wantErr: true,
+			errMsg:  "dataset name is too long (maximum 255 characters)",
+		},
 	}
 
 	for _, tt := range tests {

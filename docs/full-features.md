@@ -86,6 +86,9 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 ### Applications
 - **query_apps** - List installed applications with status, `human_version`, and `upgrade_available` (whether an upgrade exists) and `latest_version` (newest catalog version, always set, in catalog form rather than `human_version` form)
 - **search_app_catalog** - Search TrueNAS app catalog by name, category, or keyword
+  - The query is a case-insensitive literal substring match (not a regular expression), so `cloud` finds nextcloud
+  - `category` is an exact match against the app's categories list
+  - `limit` must be at least 1 (default 20)
   - Search across all catalog trains (stable, enterprise, community)
   - Filter by category (media, productivity, database, etc.)
   - Returns app information with versions and installation status
@@ -131,7 +134,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Encryption with auto-generated keys or passphrases
   - Compression (LZ4, ZSTD, GZIP), quotas, and ACL configuration
   - Dry-run mode to preview before creating
-  - `create_ancestors` defaults to true; the dry-run preview lists any missing parent datasets that would be created, in order from parent to child (`ancestors_to_create`)
+  - `create_ancestors` defaults to true; the dry-run preview lists any missing parent datasets that would be created, in order from parent to child (`ancestors_to_create`). Those ancestors are created with no properties of their own; they inherit compression, ACL type and encryption from their parent and have no quota of their own (they do not receive the leaf's share_type, compression or encryption). Under an unencrypted parent, ancestors of an encrypted dataset are unencrypted. The preview fails if the pool does not exist, the dataset already exists, or the name is invalid (including `.` / `..` components and names longer than 255 characters)
   - Wizard-style guidance for SMB/NFS/iSCSI setup
 
 ### Share Management
@@ -158,6 +161,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 
 ### Application Management
 - **install_app** - Install applications from the catalog with guided storage setup
+  - When `train` is omitted, the catalog train that has the app is looked up (stable is preferred if several do), as with get_app_catalog_details. If the lookup itself fails, the stable train is assumed and the response includes a `train_note` saying so
   - Multi-step wizard guides through app installation process
   - ALWAYS uses host-path volumes (NEVER ix-volumes)
   - Fetches the app schema and requires every storage entry to be present as `type: host_path` with a cleaned path under `/mnt/<pool>/` (at least one component below an existing pool). `host_path_config.acl_enable` must be a JSON boolean; when it is true, the mounted `acl.path` is the path that is validated and checked for an existing dataset. Fields whose schema type is `hostpath`, `hostpathdirectory`, or `hostpathfile` are also checked. `hostpathfile` is checked as a file against its parent dataset; `hostpathdirectory` is checked as a directory. Catalog type `hostpath` is used for both directories (webdav and rsyncd shares) and files (for example Nextcloud `custom_confs`): the path is treated as a directory if it exists as a dataset, and as a file if it does not and its parent is a dataset below the pool. A hostpath that is not an existing dataset and sits directly under the pool is reported as a missing dataset (a create_dataset hint on the real call, or a CRITICAL warning on dry-run), not as a classification error. An app schema with no questions list, an empty list, items that cannot be parsed, a question with no schema map, or an attrs entry that is not a map is refused, including on dry runs. Off-schema storage-like types must be the exact string `host_path`; an unrecognized type is also refused when the object carries a volume config key. Paths under `/mnt/<pool>/.system` or `/mnt/<pool>/ix-applications` are refused.
@@ -253,7 +257,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
     - Network and DNS requirements
     - Security warnings and recommendations
     - Estimated time (1-10 minutes typical)
-  - Returns task_id for tracking long-running domain join operation
+  - Returns `status: "submitted"` with task_id for tracking the long-running domain join operation (the job has been accepted, not completed)
   - Automatic domain join when enable=true
   - Use enable=false to disable without leaving domain
 
@@ -271,7 +275,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
     - Critical impact warnings
     - Alternative suggestion (use enable=false for temporary disable)
     - Estimated time (30 seconds to 5 minutes typical)
-  - Returns task_id for tracking leave operation
+  - Returns `status: "submitted"` with task_id for tracking the leave operation (the job has been accepted, not completed)
   - Consider using configure_directory_service with enable=false instead for temporary disable
 
 ### Integration with Other Tools
@@ -428,6 +432,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Human-readable cron schedule descriptions
 
 - **get_scrub_status** - Comprehensive scrub status
+  - An empty `pool` is treated as unset and returns every pool
   - Shows current scrub progress if running
   - Displays last scrub date and results
   - Lists next scheduled scrub times

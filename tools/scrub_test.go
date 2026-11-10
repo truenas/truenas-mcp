@@ -1225,3 +1225,42 @@ func TestPoolIsOffline(t *testing.T) {
 		t.Errorf("ONLINE refused: %v", err)
 	}
 }
+
+// TestGetScrubStatusEmptyPoolIsUnset is the regression for get_scrub_status
+// with pool: "": an empty string must be treated as unset and return every
+// pool, not an empty list.
+func TestGetScrubStatusEmptyPoolIsUnset(t *testing.T) {
+	results := poolsWithOfflineNeighbor()
+	client, _ := newFakeClientFilteringPools(t, results)
+	r := NewRegistry(client, nil)
+
+	all, err := r.CallTool(t.Context(), "get_scrub_status", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("no filter: %v", err)
+	}
+	empty, err := r.CallTool(t.Context(), "get_scrub_status", map[string]interface{}{"pool": ""})
+	if err != nil {
+		t.Fatalf("empty pool: %v", err)
+	}
+	var allResp, emptyResp map[string]interface{}
+	if err := json.Unmarshal([]byte(all), &allResp); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(empty), &emptyResp); err != nil {
+		t.Fatal(err)
+	}
+	allPools, _ := allResp["pools"].([]interface{})
+	emptyPools, _ := emptyResp["pools"].([]interface{})
+	if len(allPools) < 2 {
+		t.Fatalf("unfiltered pools = %s, want at least 2", all)
+	}
+	if len(emptyPools) != len(allPools) {
+		t.Errorf("pool \"\" returned %d pools, want %d (same as unset): %s", len(emptyPools), len(allPools), empty)
+	}
+	summary, _ := emptyResp["summary"].(map[string]interface{})
+	if summary["total_pools"] != float64(len(allPools)) {
+		t.Errorf("total_pools = %v, want %d", summary["total_pools"], len(allPools))
+	}
+	findPoolByName(t, emptyResp, "tank")
+	findPoolByName(t, emptyResp, "backup")
+}

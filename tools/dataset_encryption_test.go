@@ -14,6 +14,7 @@ const (
 
 func encFakeResults() map[string]interface{} {
 	return map[string]interface{}{
+		"pool.query": []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
 		"pool.dataset.create": map[string]interface{}{
 			"id": "tank/secure", "name": "tank/secure", "type": "FILESYSTEM", "pool": "tank",
 			"encrypted": true, "key_loaded": true,
