@@ -24,7 +24,7 @@ func shareDryRunRegistry(t *testing.T, results map[string]interface{}) *Registry
 func callShareDryRun(t *testing.T, r *Registry, tool string, args map[string]interface{}) map[string]interface{} {
 	t.Helper()
 	args["dry_run"] = true
-	out, err := r.CallTool(tool, args)
+	out, err := r.CallTool(t.Context(), tool, args)
 	if err != nil {
 		t.Fatalf("%s: %v", tool, err)
 	}
@@ -287,7 +287,7 @@ func TestShareHostnameUnavailable(t *testing.T) {
 	})
 
 	t.Run("create result", func(t *testing.T) {
-		out, err := r.CallTool("create_smb_share", mergeShareArgs(smbBase, nil))
+		out, err := r.CallTool(t.Context(), "create_smb_share", mergeShareArgs(smbBase, nil))
 		if err != nil {
 			t.Fatalf("create_smb_share: %v", err)
 		}
@@ -298,7 +298,7 @@ func TestShareHostnameUnavailable(t *testing.T) {
 		path, _ := smb["network_path"].(string)
 		assertPlaceholder(t, "create_smb_share", "network_path", path, smb)
 
-		out, err = r.CallTool("create_nfs_share", mergeShareArgs(nfsBase, nil))
+		out, err = r.CallTool(t.Context(), "create_nfs_share", mergeShareArgs(nfsBase, nil))
 		if err != nil {
 			t.Fatalf("create_nfs_share: %v", err)
 		}
