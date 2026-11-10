@@ -106,10 +106,14 @@ type PollerConfig struct {
 	// Retention is how long a finished task stays readable (0 means
 	// DefaultRetention).
 	Retention time.Duration
+	// MaxFinished is how many finished tasks are kept at most; the ones
+	// that finished first are evicted beyond it (0 means DefaultMaxFinished).
+	MaxFinished int
 }
 
 const (
 	DefaultMissingJobPolls = 3
 	DefaultPollErrorPolls  = 3
 	DefaultRetention       = 24 * time.Hour
+	DefaultMaxFinished     = 500
 )

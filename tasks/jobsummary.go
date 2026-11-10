@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/truenas/truenas-mcp/internal/mwtime"
+	"github.com/truenas/truenas-mcp/redact"
 )
 
 const (
@@ -36,6 +37,13 @@ func TruncateText(s string, max int) (string, bool) {
 		cut--
 	}
 	return s[:cut], true
+}
+
+// BoundText redacts s and then cuts it to at most max bytes. Redacting first
+// matters: a cut inside a secret value would leave an unclosed fragment that
+// redaction of the cut text could miss.
+func BoundText(s string, max int) (string, bool) {
+	return TruncateText(redact.Text(s), max)
 }
 
 // readableTime renders a middleware datetime ({"$date": <ms since epoch>}),
@@ -110,6 +118,8 @@ func boundText(v interface{}, max int) interface{} {
 }
 
 // BoundResult returns a job result small enough to hand back to a caller.
+// The result is redacted first, before anything is cut, so a secret that
+// straddles the cut cannot survive as a fragment of the preview.
 // A result that serialises to at most MaxJobResultBytes is returned as is.
 // A larger app entry is reduced to SummarizeApp, and anything else to a text
 // preview. truncated reports that the returned value is not the full result;
@@ -118,20 +128,25 @@ func BoundResult(v interface{}) (out interface{}, truncated bool, size int) {
 	if v == nil {
 		return nil, false, 0
 	}
-	b, err := json.Marshal(v)
+	orig, err := json.Marshal(v)
 	if err != nil {
 		s := fmt.Sprint(v)
-		p, _ := TruncateText(s, MaxJobResultBytes)
+		p, _ := BoundText(s, MaxJobResultBytes)
 		return p, true, len(s)
 	}
+	v = redact.Value(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, true, len(orig)
+	}
 	if len(b) <= MaxJobResultBytes {
-		return v, false, len(b)
+		return v, false, len(orig)
 	}
 	if app, ok := isAppEntry(v); ok {
-		return SummarizeApp(app), true, len(b)
+		return SummarizeApp(app), true, len(orig)
 	}
 	p, _ := TruncateText(string(b), MaxJobResultBytes)
-	return p, true, len(b)
+	return p, true, len(orig)
 }
 
 // SummarizeJob builds a bounded, readable view of a core.get_jobs entry:
@@ -152,7 +167,7 @@ func SummarizeJob(job map[string]interface{}) map[string]interface{} {
 			prog["percent"] = v
 		}
 		if s, ok := p["description"].(string); ok && s != "" {
-			prog["description"], _ = TruncateText(s, MaxJobTextBytes)
+			prog["description"], _ = BoundText(s, MaxJobTextBytes)
 		}
 		if len(prog) > 0 {
 			out["progress"] = prog
@@ -165,14 +180,14 @@ func SummarizeJob(job map[string]interface{}) map[string]interface{} {
 	}
 	if s, ok := job["error"].(string); ok && s != "" {
 		var cut bool
-		out["error"], cut = TruncateText(s, MaxJobTextBytes)
+		out["error"], cut = BoundText(s, MaxJobTextBytes)
 		if cut {
 			out["error_truncated"] = true
 		}
 	}
 	if s, ok := job["exception"].(string); ok && s != "" {
 		var cut bool
-		out["exception"], cut = TruncateText(s, MaxJobTextBytes)
+		out["exception"], cut = BoundText(s, MaxJobTextBytes)
 		if cut {
 			out["exception_truncated"] = true
 		}

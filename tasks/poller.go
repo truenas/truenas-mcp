@@ -161,6 +161,13 @@ func (p *Poller) recordIdentity(task *Task) {
 	if job != nil {
 		task.jobMethod, task.jobStarted = jobIdentity(job)
 		task.identityKnown = true
+		if !methodMatches(task.ToolName, task.jobMethod) {
+			// TrueNAS restarted between the start call and this read, and
+			// the id now belongs to another job.
+			task.Status = TaskStatusFailed
+			task.StatusMessage = restartMessage(task, true)
+			log.Printf("task %s (%s): %s", task.TaskID, task.ToolName, task.StatusMessage)
+		}
 	}
 }
 
@@ -187,6 +194,8 @@ func (p *Poller) pollJobTask(task *Task) {
 		return
 	}
 
+	// The job was read, so a "could not read" message is no longer true.
+	staleErrMsg := task.pollErrors >= p.pollErrorPolls()
 	dirty := task.pollErrors != 0
 	task.pollErrors = 0
 
@@ -196,7 +205,7 @@ func (p *Poller) pollJobTask(task *Task) {
 			p.failTask(task, restartMessage(task, false))
 			return
 		}
-		if task.StatusMessage != "" && dirty {
+		if staleErrMsg {
 			task.StatusMessage = ""
 			p.store.Update(task)
 			return
@@ -218,17 +227,26 @@ func (p *Poller) pollJobTask(task *Task) {
 		}
 	case task.genKnown && gen == task.sessionGen:
 		// The creation read failed, but this is still the session the job
-		// was started in, so the row is that job.
+		// was started in, so the row is that job if it runs the method the
+		// tool starts.
+		if !methodMatches(task.ToolName, method) {
+			p.failTask(task, restartMessage(task, true))
+			return
+		}
 		task.jobMethod, task.jobStarted, task.identityKnown = method, started, true
 		dirty = true
 	default:
 		// The session changed before the job's identity was recorded: the
 		// row may belong to a job started after a restart.
-		p.failTask(task, restartMessage(task, true))
+		p.failTask(task, unconfirmedMessage(task))
 		return
 	}
 
-	if dirty {
+	switch {
+	case staleErrMsg:
+		task.StatusMessage = ""
+		p.store.Update(task)
+	case dirty:
 		p.store.Save(task)
 	}
 	p.updateTaskFromJob(task, job)
@@ -298,7 +316,7 @@ func (p *Poller) updateTaskFromJob(task *Task, job map[string]interface{}) {
 	case "FAILED":
 		newStatus = TaskStatusFailed
 		if errMsg, ok := job["error"].(string); ok {
-			statusMessage, _ = TruncateText(errMsg, MaxJobTextBytes)
+			statusMessage, _ = BoundText(errMsg, MaxJobTextBytes)
 		} else {
 			statusMessage = "Job failed"
 		}

@@ -22,6 +22,30 @@ var checkTools = map[string]string{
 	"leave_directory_service":     "get_directory_service_status",
 }
 
+// expectedMethods is the job method each tool's start call creates. A job
+// row with another method under the returned id is not the job the tool
+// started (TrueNAS restarted in between and the id was reused).
+var expectedMethods = map[string]string{
+	"install_app":                 "app.create",
+	"update_app":                  "app.update",
+	"upgrade_app":                 "app.upgrade",
+	"start_app":                   "app.start",
+	"stop_app":                    "app.stop",
+	"delete_app":                  "app.delete",
+	"run_scrub":                   "pool.scrub.scrub",
+	"download_update":             "update.download",
+	"apply_update":                "update.run",
+	"configure_directory_service": "directoryservices.update",
+	"leave_directory_service":     "directoryservices.leave",
+}
+
+// methodMatches reports whether a job with this method can be the one
+// toolName started. Tools without an entry accept any method.
+func methodMatches(toolName, method string) bool {
+	want, ok := expectedMethods[toolName]
+	return !ok || method == want
+}
+
 func checkTool(toolName string) string {
 	if c, ok := checkTools[toolName]; ok {
 		return c
@@ -49,6 +73,14 @@ func restartMessage(task *Task, reused bool) string {
 	}
 	return fmt.Sprintf("%s (the system or its middleware restarted), so the outcome of this operation is unknown; check the state with %s",
 		what, checkTool(task.ToolName))
+}
+
+// unconfirmedMessage is the terminal message for a task whose job could not
+// be read while the session it was started in lasted, so it cannot be told
+// apart from a job started after a restart.
+func unconfirmedMessage(task *Task) string {
+	return fmt.Sprintf("the connection to TrueNAS was re-established before %s could be read, so it could not be confirmed that it is still the job this task started (TrueNAS or its middleware may have restarted); "+
+		"the outcome of this operation is unknown; check the state with %s", jobIDText(task), checkTool(task.ToolName))
 }
 
 // timedOutMessage is the terminal message for a task still working when its

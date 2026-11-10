@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -96,5 +97,39 @@ func TestFinishedTaskIsNotRevived(t *testing.T) {
 	}
 	if got, _ := s.Get("t1"); got.Status != TaskStatusFailed || got.StatusMessage != "tracking timed out" {
 		t.Errorf("finished task changed: %s / %q", got.Status, got.StatusMessage)
+	}
+}
+
+// Finished tasks are capped: past DefaultMaxFinished (500) the oldest
+// finished ones are evicted first. Working tasks are never evicted.
+func TestFinishedTasksAreCapped(t *testing.T) {
+	s := NewTaskStore()
+	if err := s.Add(&Task{TaskID: "working", Status: TaskStatusWorking, TTL: 3600}); err != nil {
+		t.Fatal(err)
+	}
+	const n = 502
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("t%03d", i)
+		if err := s.Add(&Task{TaskID: id, Status: TaskStatusWorking, TTL: 3600}); err != nil {
+			t.Fatal(err)
+		}
+		task, _ := s.Get(id)
+		task.Status = TaskStatusCompleted
+		if err := s.Update(task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"t000", "t001"} {
+		if _, err := s.Get(id); err == nil {
+			t.Errorf("oldest finished task %s kept past the cap", id)
+		}
+	}
+	for _, id := range []string{"t002", "t501", "working"} {
+		if _, err := s.Get(id); err != nil {
+			t.Errorf("task %s evicted: %v", id, err)
+		}
+	}
+	if l, _, _ := s.List("", 1000); len(l) != 501 {
+		t.Errorf("tasks_list shows %d tasks, want 500 finished + 1 working", len(l))
 	}
 }

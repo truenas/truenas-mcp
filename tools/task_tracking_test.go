@@ -291,3 +291,73 @@ func TestTasksExposeToolJobIDAndResult(t *testing.T) {
 		t.Errorf("tasks_list exposes arguments: %s", out)
 	}
 }
+
+// If the job could not be read at creation and the session changed before
+// the first poll, the message says the job's identity could not be
+// confirmed, not that the id now belongs to a different job.
+func TestTaskIdentityUnconfirmedMessage(t *testing.T) {
+	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
+	f.set(func(f *jobFake) { f.rpcErr = map[string]interface{}{"code": -32000, "message": "busy"} })
+	task, err := mgr.CreateJobTask("start_app", nil, 6, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set(func(f *jobFake) { f.drop = true })
+	mgr.PollNow() // error reply, then the connection drops
+	f.set(func(f *jobFake) {
+		f.rpcErr = nil
+		f.jobs = []interface{}{jobRow(6, "app.start", "RUNNING", 1_700_000_000_000)}
+	})
+	st := pollUntil(t, r, mgr, task.TaskID, 5)
+	msg, _ := st["statusMessage"].(string)
+	if st["status"] != "failed" || !strings.Contains(msg, "could not be confirmed") || strings.Contains(msg, "different job") {
+		t.Errorf("task = %v / %q, want failed: identity could not be confirmed", st["status"], msg)
+	}
+}
+
+// A restart between the start call and the identity read would record some
+// other job under the returned id. The job must run the method the tool
+// starts (app.start for start_app), so that job is never adopted.
+func TestTaskRequiresExpectedJobMethod(t *testing.T) {
+	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
+	f.set(func(f *jobFake) {
+		f.jobs = []interface{}{jobRow(1, "pool.dataset.query", "SUCCESS", 1_700_000_000_000)}
+	})
+	task, err := mgr.CreateJobTask("start_app", nil, 1, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.PollNow()
+	st := taskState(t, r, task.TaskID)
+	msg, _ := st["statusMessage"].(string)
+	if st["status"] != "failed" || !strings.Contains(msg, "restarted") || !strings.Contains(msg, "query_apps") {
+		t.Errorf("task = %v / %q, want failed: job 1 is not an app.start job", st["status"], msg)
+	}
+}
+
+// A job state the poller does not know still clears a stale poll-error
+// message: the job was read, so "could not read" is no longer true.
+func TestTaskUnknownStateClearsPollErrorMessage(t *testing.T) {
+	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
+	f.set(func(f *jobFake) { f.jobs = []interface{}{jobRow(8, "app.stop", "RUNNING", 1_700_000_000_000)} })
+	task, err := mgr.CreateJobTask("stop_app", nil, 8, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.set(func(f *jobFake) { f.rpcErr = map[string]interface{}{"code": -32000, "message": "middleware busy"} })
+	for i := 0; i < 3; i++ {
+		mgr.PollNow()
+	}
+	if msg, _ := taskState(t, r, task.TaskID)["statusMessage"].(string); !strings.Contains(msg, "consecutive polls") {
+		t.Fatalf("poll errors not reported: %q", msg)
+	}
+	f.set(func(f *jobFake) {
+		f.rpcErr = nil
+		f.jobs = []interface{}{jobRow(8, "app.stop", "SOMETHING_NEW", 1_700_000_000_000)}
+	})
+	mgr.PollNow()
+	st := taskState(t, r, task.TaskID)
+	if msg, _ := st["statusMessage"].(string); strings.Contains(msg, "consecutive") || st["status"] != "working" {
+		t.Errorf("task = %v / %q, want working with the poll-error message cleared", st["status"], msg)
+	}
+}

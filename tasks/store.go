@@ -14,7 +14,8 @@ import (
 // A working task is tracked until creation + TTL. If it is still working then,
 // it is marked failed ("tracking timed out") rather than dropped. A finished
 // task stays readable for the retention period after it finished, and is then
-// removed.
+// removed. At most maxFinished finished tasks are kept: past that, the ones
+// that finished first are removed early. Working tasks are never evicted.
 //
 // The store owns the tasks it holds: Add, Update and Save keep a private copy
 // and Get, List and GetActive hand out copies. Callers (the poller, tools
@@ -23,10 +24,13 @@ import (
 // pointer fields of a Task (Job, Result, Arguments, JobID) are shared between
 // copies and must be replaced, not modified in place.
 type TaskStore struct {
-	mu        sync.Mutex
-	tasks     map[string]*Task
-	expiry    map[string]time.Time // working: end of tracking; finished: end of retention
-	retention time.Duration
+	mu          sync.Mutex
+	tasks       map[string]*Task
+	expiry      map[string]time.Time // working: end of tracking; finished: end of retention
+	retention   time.Duration
+	maxFinished int               // finished tasks kept at most; the oldest finished are evicted
+	finishSeq   map[string]uint64 // order in which tasks finished
+	seq         uint64
 }
 
 // ErrTaskFinished is returned by Update and Save for a task that has already
@@ -37,10 +41,58 @@ var ErrTaskFinished = errors.New("task already finished")
 // NewTaskStore creates a new task store with DefaultRetention.
 func NewTaskStore() *TaskStore {
 	return &TaskStore{
-		tasks:     make(map[string]*Task),
-		expiry:    make(map[string]time.Time),
-		retention: DefaultRetention,
+		tasks:       make(map[string]*Task),
+		expiry:      make(map[string]time.Time),
+		retention:   DefaultRetention,
+		maxFinished: DefaultMaxFinished,
+		finishSeq:   make(map[string]uint64),
 	}
+}
+
+// SetMaxFinished sets how many finished tasks are kept at most; n <= 0
+// restores DefaultMaxFinished.
+func (s *TaskStore) SetMaxFinished(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n <= 0 {
+		n = DefaultMaxFinished
+	}
+	s.maxFinished = n
+	s.evictFinishedLocked()
+}
+
+// finishedLocked records that taskID has just finished: its retention
+// period starts, and the oldest finished tasks beyond maxFinished are
+// removed. s.mu must be held.
+func (s *TaskStore) finishedLocked(taskID string, now time.Time) {
+	s.expiry[taskID] = now.Add(s.retention)
+	s.seq++
+	s.finishSeq[taskID] = s.seq
+	s.evictFinishedLocked()
+}
+
+// evictFinishedLocked removes the tasks that finished first until at most
+// maxFinished finished tasks remain. s.mu must be held.
+func (s *TaskStore) evictFinishedLocked() {
+	excess := len(s.finishSeq) - s.maxFinished
+	if excess <= 0 {
+		return
+	}
+	ids := make([]string, 0, len(s.finishSeq))
+	for id := range s.finishSeq {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return s.finishSeq[ids[i]] < s.finishSeq[ids[j]] })
+	for _, id := range ids[:excess] {
+		s.deleteLocked(id)
+	}
+}
+
+// deleteLocked removes a task. s.mu must be held.
+func (s *TaskStore) deleteLocked(taskID string) {
+	delete(s.tasks, taskID)
+	delete(s.expiry, taskID)
+	delete(s.finishSeq, taskID)
 }
 
 // SetRetention sets how long finished tasks stay readable; d <= 0 restores
@@ -66,7 +118,7 @@ func (s *TaskStore) Add(task *Task) error {
 	now := time.Now()
 	s.tasks[task.TaskID] = task.clone()
 	if task.Status.Terminal() {
-		s.expiry[task.TaskID] = now.Add(s.retention)
+		s.finishedLocked(task.TaskID, now)
 	} else {
 		s.expiry[task.TaskID] = now.Add(time.Duration(task.TTL) * time.Second)
 	}
@@ -89,7 +141,7 @@ func (s *TaskStore) timeOutLocked(taskID string, now time.Time) {
 	t.StatusMessage = timedOutMessage(t)
 	t.LastUpdatedAt = now
 	s.tasks[taskID] = t
-	s.expiry[taskID] = now.Add(s.retention)
+	s.finishedLocked(taskID, now)
 	log.Printf("task %s (%s): %s", taskID, t.ToolName, t.StatusMessage)
 }
 
@@ -140,7 +192,7 @@ func (s *TaskStore) Update(task *Task) error {
 	task.LastUpdatedAt = now
 	s.tasks[task.TaskID] = task.clone()
 	if task.Status.Terminal() {
-		s.expiry[task.TaskID] = now.Add(s.retention)
+		s.finishedLocked(task.TaskID, now)
 	}
 
 	return nil
@@ -248,8 +300,7 @@ func (s *TaskStore) CleanExpired() {
 	s.timeOutAllLocked(now)
 	for taskID, expiry := range s.expiry {
 		if now.After(expiry) {
-			delete(s.tasks, taskID)
-			delete(s.expiry, taskID)
+			s.deleteLocked(taskID)
 		}
 	}
 }

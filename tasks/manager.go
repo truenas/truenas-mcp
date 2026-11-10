@@ -32,6 +32,7 @@ func NewManager(client *truenas.Client, config PollerConfig) *Manager {
 
 	store := NewTaskStore()
 	store.SetRetention(config.Retention)
+	store.SetMaxFinished(config.MaxFinished)
 	poller := NewPoller(client, store, config)
 
 	return &Manager{

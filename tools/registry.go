@@ -1883,7 +1883,7 @@ Returns task_id for tracking progress with tasks_get.
 	r.tools["tasks_list"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "tasks_list",
-			Description: "List tasks started by this server (newest first): running tasks, and finished ones for 24 hours after they finish. Each task names the tool that started it (tool), the TrueNAS job it tracks (job_id), its status and statusMessage, and, once the job succeeded, its result (bounded; result_truncated is set when cut). Tasks are held in this server's memory only and are lost when it restarts.",
+			Description: "List tasks started by this server (newest first): running tasks, and finished ones for 24 hours after they finish (at most 500; the oldest finished are dropped first). Each task names the tool that started it (tool), the TrueNAS job it tracks (job_id), its status and statusMessage, and, once the job succeeded, its result (bounded; result_truncated is set when cut). Tasks are held in this server's memory only and are lost when it restarts.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -4913,7 +4913,7 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 		}
 		if errorMsg, ok := job["error"]; ok && errorMsg != nil {
 			if text, isText := errorMsg.(string); isText {
-				cut, truncated := tasks.TruncateText(text, tasks.MaxJobTextBytes)
+				cut, truncated := tasks.BoundText(text, tasks.MaxJobTextBytes)
 				jobInfo["error"] = cut
 				if truncated {
 					jobInfo["error_truncated"] = true
@@ -4924,7 +4924,7 @@ func handleQueryJobs(client *truenas.Client, args map[string]interface{}) (strin
 		}
 		if exception, ok := job["exception"]; ok && exception != nil {
 			if text, isText := exception.(string); isText {
-				cut, truncated := tasks.TruncateText(text, tasks.MaxJobTextBytes)
+				cut, truncated := tasks.BoundText(text, tasks.MaxJobTextBytes)
 				jobInfo["exception"] = cut
 				if truncated {
 					jobInfo["exception_truncated"] = true
