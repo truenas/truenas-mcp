@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/truenas/truenas-mcp/truenas"
@@ -8,7 +9,7 @@ import (
 
 // DryRunnable is implemented by tools that support dry-run mode
 type DryRunnable interface {
-	ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error)
+	ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error)
 }
 
 // DryRunResult represents the preview of changes that would be made
@@ -52,20 +53,21 @@ type EstimatedTime struct {
 // ExecuteWithDryRun wraps a handler to support dry-run mode
 // If dry_run is true, calls ExecuteDryRun; otherwise calls normalHandler
 func ExecuteWithDryRun(
+	ctx context.Context,
 	client *truenas.Client,
 	args map[string]interface{},
 	dryRunnable DryRunnable,
-	normalHandler func(*truenas.Client, map[string]interface{}) (string, error),
+	normalHandler func(context.Context, *truenas.Client, map[string]interface{}) (string, error),
 ) (string, error) {
 	// Check if dry_run is requested
 	dryRun, ok := args["dry_run"].(bool)
 	if !ok || !dryRun {
 		// Normal execution
-		return normalHandler(client, args)
+		return normalHandler(ctx, client, args)
 	}
 
 	// Dry-run execution
-	result, err := dryRunnable.ExecuteDryRun(client, args)
+	result, err := dryRunnable.ExecuteDryRun(ctx, client, args)
 	if err != nil {
 		return "", err
 	}

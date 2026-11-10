@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -66,10 +67,10 @@ func TestRequireSupportedVersionRejects2504(t *testing.T) {
 		f.infoVersion = "25.04.2"
 	})
 	c := insecureClient(t, f, Options{})
-	if err := c.Authenticate(); err != nil {
+	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	err := c.RequireSupportedVersion()
+	err := c.RequireSupportedVersion(context.Background())
 	var u *UnsupportedVersionError
 	if err == nil || !errors.As(err, &u) {
 		t.Fatalf("got %v, want UnsupportedVersionError", err)
@@ -84,10 +85,10 @@ func TestRequireSupportedVersionAccepts2510(t *testing.T) {
 		f.infoVersion = "25.10.1"
 	})
 	c := insecureClient(t, f, Options{})
-	if err := c.Authenticate(); err != nil {
+	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if err := c.RequireSupportedVersion(); err != nil {
+	if err := c.RequireSupportedVersion(context.Background()); err != nil {
 		t.Fatalf("25.10.1 should be accepted: %v", err)
 	}
 }
@@ -97,7 +98,7 @@ func TestServerVersionRereadsAfterReconnect(t *testing.T) {
 		f.infoVersion = "25.10.0"
 	})
 	c := insecureClient(t, f, Options{})
-	if err := c.RequireSupportedVersion(); err != nil {
+	if err := c.RequireSupportedVersion(context.Background()); err != nil {
 		t.Fatalf("first read: %v", err)
 	}
 	f.mu.Lock()
@@ -106,7 +107,7 @@ func TestServerVersionRereadsAfterReconnect(t *testing.T) {
 	f.closeSocket(1)
 	waitDisconnected(t, c)
 
-	err := c.RequireSupportedVersion()
+	err := c.RequireSupportedVersion(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "25.04.2") {
 		t.Fatalf("after reconnect got %v, want a 25.04.2 refusal", err)
 	}

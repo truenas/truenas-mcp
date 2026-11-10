@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"context"
 	"crypto/tls"
 	"net/http"
 	"strings"
@@ -11,7 +12,7 @@ import (
 
 func TestConnectRecoversFromDialPanic(t *testing.T) {
 	orig := wsDial
-	wsDial = func(*websocket.Dialer, string) (*websocket.Conn, *http.Response, error) {
+	wsDial = func(context.Context, *websocket.Dialer, string) (*websocket.Conn, *http.Response, error) {
 		panic("injected dial panic")
 	}
 	t.Cleanup(func() { wsDial = orig })
@@ -30,7 +31,7 @@ func TestConnectRecoversFromDialPanic(t *testing.T) {
 			}
 
 			c.connMu.Lock()
-			err = c.connect()
+			err = c.connect(context.Background())
 			conn := c.conn
 			c.connMu.Unlock()
 

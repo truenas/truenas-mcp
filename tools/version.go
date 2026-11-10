@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -128,11 +129,11 @@ func restoreToolVersionForTest(name string, prev VersionRange, ok bool) {
 // than 25.10, or when the tool is outside its version range. A nil client
 // (unit tests without a NAS) skips the gate. The version is loaded on the
 // first call and re-read after a reconnect.
-func (r *Registry) checkVersion(name string) error {
+func (r *Registry) checkVersion(ctx context.Context, name string) error {
 	if r.client == nil {
 		return nil
 	}
-	v, err, ok := r.client.SessionVersion()
+	v, err, ok := r.client.SessionVersion(ctx)
 	if !ok {
 		// Production loads the version at startup. Tests that never
 		// call RequireSupportedVersion skip the gate.

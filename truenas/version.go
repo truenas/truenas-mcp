@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -122,8 +123,8 @@ func parseSystemInfoVersion(raw json.RawMessage) (Version, error) {
 // ServerVersion returns the TrueNAS version for the current session,
 // reading system.info when it has not been read since the last login
 // (including after a reconnect).
-func (c *Client) ServerVersion() (Version, error) {
-	gen, err := c.SessionGeneration()
+func (c *Client) ServerVersion(ctx context.Context) (Version, error) {
+	gen, err := c.SessionGeneration(ctx)
 	if err != nil {
 		return Version{}, err
 	}
@@ -135,7 +136,7 @@ func (c *Client) ServerVersion() (Version, error) {
 	if v, err, ok := c.cachedVersion(gen); ok {
 		return v, err
 	}
-	raw, err := c.Call("system.info")
+	raw, err := c.Call(ctx, "system.info")
 	if err != nil {
 		return Version{}, fmt.Errorf("failed to read TrueNAS version from system.info: %w", err)
 	}
@@ -150,14 +151,14 @@ func (c *Client) ServerVersion() (Version, error) {
 // SessionVersion returns the cached TrueNAS version, refreshing it if the
 // session has changed. ok is false when no version has ever been loaded,
 // so callers that only gate after startup do not contact TrueNAS.
-func (c *Client) SessionVersion() (v Version, err error, ok bool) {
+func (c *Client) SessionVersion(ctx context.Context) (v Version, err error, ok bool) {
 	c.versionMu.Lock()
 	loaded := c.versionLoaded
 	c.versionMu.Unlock()
 	if !loaded {
 		return Version{}, nil, false
 	}
-	v, err = c.ServerVersion()
+	v, err = c.ServerVersion(ctx)
 	return v, err, true
 }
 
@@ -197,8 +198,8 @@ func (c *Client) storeVersion(gen uint64, v Version, err error) {
 
 // RequireSupportedVersion reads the connected TrueNAS version and returns
 // an error if it is older than MinSupported or cannot be determined.
-func (c *Client) RequireSupportedVersion() error {
-	v, err := c.ServerVersion()
+func (c *Client) RequireSupportedVersion(ctx context.Context) error {
+	v, err := c.ServerVersion(ctx)
 	if err != nil {
 		return err
 	}

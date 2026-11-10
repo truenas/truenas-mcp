@@ -21,8 +21,9 @@ import (
 
 const (
 	// maxConcurrentToolCalls bounds the tool calls running at once; further
-	// calls wait for a slot. A call abandoned after cancellation or its
-	// deadline keeps its slot until its handler returns.
+	// calls wait for a slot. A cancelled call stops waiting for TrueNAS and
+	// then releases its slot; a handler that ignores ctx still holds the
+	// slot until it returns.
 	maxConcurrentToolCalls = 8
 	// toolCallTimeout is the overall deadline of one tool call, including
 	// the wait for a slot. It is above what the slowest tools need: a few
@@ -144,7 +145,9 @@ func (h *StdioHandler) callTool(ctx context.Context, p *sdk.CallToolParamsRaw) (
 
 // runTool runs a tool under the concurrency limit and the call deadline.
 // It returns as soon as ctx is cancelled (notifications/cancelled, or the
-// session ending), even if the handler is still running.
+// session ending). Handlers observe ctx and release their middleware
+// request and concurrency slot promptly; a handler that ignores ctx can
+// still finish in the background, and its result is dropped.
 func (h *StdioHandler) runTool(ctx context.Context, name string, args map[string]interface{}) (*sdk.CallToolResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, h.callTimeout)
 	defer cancel()
@@ -167,6 +170,12 @@ func (h *StdioHandler) runTool(ctx context.Context, name string, args map[string
 
 	select {
 	case o := <-done:
+		// If the client cancelled while the handler was returning, do
+		// not send a tool result (including a context.Canceled error):
+		// a cancelled request gets no reply.
+		if ctx.Err() != nil {
+			return h.interrupted(ctx, name, true)
+		}
 		return h.callResult(o.result, o.err), nil
 	case <-ctx.Done():
 		return h.interrupted(ctx, name, true)

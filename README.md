@@ -418,10 +418,10 @@ newline-delimited JSON-RPC 2.0 on stdin and stdout, with logs on stderr only.
   calls run at once; further calls wait for a slot.
 - **Cancellation and deadlines:** a `notifications/cancelled` for a running
   call, or the client closing stdin, cancels the call and the server stops
-  waiting for it; a cancelled call, and a call still in flight when stdin
-  closes, gets no reply. A cancelled or timed-out call keeps its
-  concurrency slot until its handler finishes, which can take a few
-  middleware calls of up to 120 seconds each. A tool call that has not
+  waiting for it, including any in-flight TrueNAS request; a cancelled call,
+  and a call still in flight when stdin closes, gets no reply. The
+  concurrency slot is released once the handler returns, which happens
+  promptly when it observes the cancellation. A tool call that has not
   finished after 10 minutes gets a tool error. The TrueNAS request a
   cancelled or timed-out tool already sent is not withdrawn, so the
   operation may still complete on the NAS: check the system state before
@@ -443,9 +443,9 @@ newline-delimited JSON-RPC 2.0 on stdin and stdout, with logs on stderr only.
 > `tools/list` and `tools/call` before `initialize`, and still answered
 > calls that were in flight when stdin closed. Array params now get
 > `-32602` with the request id; a batch gets `-32600`; calls still in
-> flight when stdin closes get no reply. A cancelled or timed-out call
-> keeps its concurrency slot until its handler finishes, which can take a
-> few middleware calls of up to 120 seconds each. Clients that follow the
+> flight when stdin closes get no reply. A cancelled call stops waiting
+> for TrueNAS and releases its concurrency slot once the handler returns.
+> Clients that follow the
 > MCP specification are not affected; tool names, schemas and output are
 > unchanged.
 

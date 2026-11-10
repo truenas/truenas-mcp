@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -335,9 +336,9 @@ func hasParam(tool Tool, name string) bool {
 // preview and returns it with a fresh token, or with an error when the
 // preview says the operation cannot proceed. legacyConfirm reports that the
 // caller sent the old confirm=true.
-func (r *Registry) callDestructive(name string, tool Tool, args map[string]interface{}, legacyConfirm bool) (string, error) {
+func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, args map[string]interface{}, legacyConfirm bool) (string, error) {
 	if dryRun, _ := args["dry_run"].(bool); dryRun && hasParam(tool, "dry_run") {
-		return tool.Handler(r.client, withoutKeys(args, "confirmation_token"))
+		return tool.Handler(ctx, r.client, withoutKeys(args, "confirmation_token"))
 	}
 	argsHash, err := confirmationArgsHash(args)
 	if err != nil {
@@ -347,10 +348,10 @@ func (r *Registry) callDestructive(name string, tool Tool, args map[string]inter
 	if v, sent := args["confirmation_token"]; sent {
 		tok, _ := v.(string)
 		if rejected = r.confirmTokens.redeem(tok, name, argsHash); rejected == nil {
-			return tool.Handler(r.client, withoutKeys(args, "confirmation_token", "dry_run"))
+			return tool.Handler(ctx, r.client, withoutKeys(args, "confirmation_token", "dry_run"))
 		}
 	}
-	return r.confirmationRequired(name, tool, withoutKeys(args, "confirmation_token", "dry_run"), argsHash, rejected, legacyConfirm)
+	return r.confirmationRequired(ctx, name, tool, withoutKeys(args, "confirmation_token", "dry_run"), argsHash, rejected, legacyConfirm)
 }
 
 // confirmationRequired runs the tool's dry-run preview and returns it with a
@@ -358,7 +359,7 @@ func (r *Registry) callDestructive(name string, tool Tool, args map[string]inter
 // reports the operation cannot proceed, is an error and issues no token. When
 // a presented token was rejected, the reply (with the fresh preview and
 // token) is an error that gives the reason.
-func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]interface{}, argsHash [32]byte, rejected error, legacyConfirm bool) (string, error) {
+func (r *Registry) confirmationRequired(ctx context.Context, name string, tool Tool, args map[string]interface{}, argsHash [32]byte, rejected error, legacyConfirm bool) (string, error) {
 	reply := map[string]interface{}{
 		"status":   "confirmation_required",
 		"tool":     name,
@@ -374,7 +375,7 @@ func (r *Registry) confirmationRequired(name string, tool Tool, args map[string]
 			preview[k] = v
 		}
 		preview["dry_run"] = true
-		out, err := tool.Handler(r.client, preview)
+		out, err := tool.Handler(ctx, r.client, preview)
 		if err != nil {
 			return "", fmt.Errorf("%s%s was NOT executed. Preview failed: %w. Resolve this before confirming; "+
 				"the user must see a successful preview and explicitly approve it first", rejectedNote, name, err)

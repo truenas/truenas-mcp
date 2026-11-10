@@ -101,9 +101,9 @@ func TestMiddlewareMethodContract(t *testing.T) {
 
 func TestMiddlewareMethodContractFailsWhenACallIsMissing(t *testing.T) {
 	src := `package p
-func f(client interface{ Call(string, ...interface{}) }) {
-	client.Call("pool.query")
-	client.Call("no.such.method")
+func f(ctx context.Context, client interface{ Call(context.Context, string, ...interface{}) }) {
+	client.Call(ctx, "pool.query")
+	client.Call(ctx, "no.such.method")
 }
 `
 	found, problems := callsInSource("fake.go", src)
@@ -230,14 +230,15 @@ func methodArg(fn string, args []ast.Expr) (method string, literal, ok bool) {
 	if len(args) == 0 {
 		return "", false, false
 	}
-	idx := 0
+	// All dispatchers now take context.Context first:
+	// Call(ctx, method, ...), CallWithTimeout(ctx, timeout, method, ...),
+	// roundTrip(ctx, conn, method, ...), queryCount(ctx, client, method, ...).
+	idx := 1
 	if fn == "CallWithTimeout" || fn == "roundTrip" || fn == "queryCount" {
-		// CallWithTimeout(timeout, method, ...), roundTrip(conn, method, ...),
-		// queryCount(client, method, ...)
-		if len(args) < 2 {
-			return "", false, false
-		}
-		idx = 1
+		idx = 2
+	}
+	if len(args) <= idx {
+		return "", false, false
 	}
 	switch a := args[idx].(type) {
 	case *ast.BasicLit:

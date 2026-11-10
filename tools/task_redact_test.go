@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestTaskResultSecretStraddlingCutIsRedacted(t *testing.T) {
 
 	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
 	f.set(func(f *jobFake) { f.jobs = []interface{}{row} })
-	task, err := mgr.CreateJobTask("configure_directory_service", nil, 21, time.Hour)
+	task, err := mgr.CreateJobTask(context.Background(), "configure_directory_service", nil, 21, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +69,7 @@ func TestTaskErrorSecretStraddlingCutIsRedacted(t *testing.T) {
 
 	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
 	f.set(func(f *jobFake) { f.jobs = []interface{}{row} })
-	task, err := mgr.CreateJobTask("configure_directory_service", nil, 22, time.Hour)
+	task, err := mgr.CreateJobTask(context.Background(), "configure_directory_service", nil, 22, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,7 +116,7 @@ func TestConfirmTokenRejectionCarriesFreshToken(t *testing.T) {
 func TestConfirmTokenBlockedReplyHasNoToken(t *testing.T) {
 	r, seen, _ := clockedRegistry(t)
 	tool := r.tools["delete_boot_environment"]
-	tool.Handler = func(_ *truenas.Client, args map[string]interface{}) (string, error) {
+	tool.Handler = func(_ context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
 		seen["delete_boot_environment"] = append(seen["delete_boot_environment"], args)
 		return `{"tool":"delete_boot_environment","warnings":["BLOCKED: Cannot delete active boot environment 'x' (currently running)"]}`, nil
 	}
@@ -141,7 +142,7 @@ func TestConfirmTokenBlockedReplyHasNoToken(t *testing.T) {
 func TestConfirmTokenPreviewFailureIssuesNoToken(t *testing.T) {
 	r, _, _ := clockedRegistry(t)
 	tool := r.tools["delete_app"]
-	tool.Handler = func(*truenas.Client, map[string]interface{}) (string, error) {
+	tool.Handler = func(context.Context, *truenas.Client, map[string]interface{}) (string, error) {
 		return "", errors.New("app not found: plex")
 	}
 	r.tools["delete_app"] = tool
@@ -218,7 +219,7 @@ func TestConfirmTokenSingleUseUnderConcurrency(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	var ran atomic.Int32
 	tool := r.tools["stop_app"]
-	tool.Handler = func(_ *truenas.Client, args map[string]interface{}) (string, error) {
+	tool.Handler = func(_ context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
 		if args["dry_run"] != true {
 			ran.Add(1)
 		}

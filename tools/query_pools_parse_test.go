@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -15,7 +16,7 @@ func TestQueryPoolsParseErrorOmitsRawResponse(t *testing.T) {
 		return nil, nil, false
 	}}
 	client, _ := newFakeClientFrom(t, fake)
-	_, err := handleQueryPools(client, map[string]interface{}{})
+	_, err := handleQueryPools(context.Background(), client, map[string]interface{}{})
 	if err == nil {
 		t.Fatal("expected a parse error")
 	}

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,8 +209,8 @@ func noUpgradeAvailableError(appName, version string, app map[string]interface{}
 
 // queryAppQuietly returns the app.query entry for appName, or nil if the
 // query fails or finds nothing. It is only used to add detail to a message.
-func queryAppQuietly(client *truenas.Client, appName string) map[string]interface{} {
-	result, err := client.Call("app.query", []interface{}{
+func queryAppQuietly(ctx context.Context, client *truenas.Client, appName string) map[string]interface{} {
+	result, err := client.Call(ctx, "app.query", []interface{}{
 		[]interface{}{"name", "=", appName},
 	})
 	if err != nil {

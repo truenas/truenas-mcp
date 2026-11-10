@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"log"
 	"os"
 	"testing"
@@ -15,7 +16,7 @@ func TestDiscoverArcGraphsSurvivesPanics(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
 
-	_, complete := discoverArcGraphs(nil)
+	_, complete := discoverArcGraphs(context.Background(), nil)
 	if complete {
 		t.Error("discovery reported complete although both lookups panicked")
 	}

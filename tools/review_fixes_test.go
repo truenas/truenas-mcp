@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ func TestCreateDatasetVolblocksize(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	preview := func(args map[string]interface{}) (map[string]interface{}, error) {
 		args["dry_run"] = true
-		out, err := handleCreateDataset(tankDryRunClient(t), args)
+		out, err := handleCreateDataset(context.Background(), tankDryRunClient(t), args)
 		if err != nil {
 			return nil, err
 		}
@@ -74,7 +75,7 @@ func TestCreateDatasetVolblocksize(t *testing.T) {
 func TestCreateDatasetUserProperties(t *testing.T) {
 	prop := func(k, v interface{}) interface{} { return map[string]interface{}{"key": k, "value": v} }
 	call := func(up interface{}) error {
-		_, err := handleCreateDataset(tankDryRunClient(t), map[string]interface{}{"name": "tank/x", "dry_run": true, "user_properties": up})
+		_, err := handleCreateDataset(context.Background(), tankDryRunClient(t), map[string]interface{}{"name": "tank/x", "dry_run": true, "user_properties": up})
 		return err
 	}
 
@@ -178,7 +179,7 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 		client, _ := newFakeClientWith(t, map[string]interface{}{
 			"update.status": map[string]interface{}{"update_download_progress": map[string]interface{}{"percent": float64(100), "version": "25.10.1"}},
 		}, nil)
-		out, err := NewRegistry(client, nil).handleDownloadUpdate(client, ignoredArgs())
+		out, err := NewRegistry(client, nil).handleDownloadUpdate(context.Background(), client, ignoredArgs())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -201,7 +202,7 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 	t.Run("started download", func(t *testing.T) {
 		client, fake := newFakeClientWith(t, map[string]interface{}{"update.status": map[string]interface{}{}, "update.download": 7}, nil)
 		mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second})
-		out, err := NewRegistry(client, mgr).handleDownloadUpdate(client, ignoredArgs())
+		out, err := NewRegistry(client, mgr).handleDownloadUpdate(context.Background(), client, ignoredArgs())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -240,7 +241,7 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 		client, _ := newFakeClientWith(t, map[string]interface{}{
 			"update.status": map[string]interface{}{"update_download_progress": map[string]interface{}{"percent": float64(100), "version": "25.10.1"}},
 		}, nil)
-		out, err := NewRegistry(client, nil).handleDownloadUpdate(client, map[string]interface{}{})
+		out, err := NewRegistry(client, nil).handleDownloadUpdate(context.Background(), client, map[string]interface{}{})
 		if err != nil || strings.Contains(out, "warning") {
 			t.Errorf("out = %s, err = %v", out, err)
 		}
@@ -248,7 +249,7 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 
 	t.Run("dry run", func(t *testing.T) {
 		client, _ := newFakeClient(t)
-		res, err := (&downloadUpdateDryRun{}).ExecuteDryRun(client, ignoredArgs())
+		res, err := (&downloadUpdateDryRun{}).ExecuteDryRun(context.Background(), client, ignoredArgs())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -257,7 +258,7 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 		if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], wantNote) {
 			t.Errorf("warnings = %v", res.Warnings)
 		}
-		res, err = (&downloadUpdateDryRun{}).ExecuteDryRun(client, map[string]interface{}{})
+		res, err = (&downloadUpdateDryRun{}).ExecuteDryRun(context.Background(), client, map[string]interface{}{})
 		if err != nil || len(res.Warnings) != 0 {
 			t.Errorf("no-arg dry run: %v, %v", res, err)
 		}
@@ -282,7 +283,7 @@ func TestCreateDatasetEncryptionWarningRequiresEncrypted(t *testing.T) {
 				ds[k] = v
 			}
 			client, _ := newFakeClientWith(t, map[string]interface{}{"pool.dataset.create": ds}, nil)
-			out, err := handleCreateDataset(client, map[string]interface{}{"name": "tank/x"})
+			out, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/x"})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -99,7 +100,7 @@ func TestGetArcMetricsAllFailedIsError(t *testing.T) {
 	})
 	client, _ := newFakeClientFrom(t, fake)
 
-	out, err := handleGetArcMetrics(client, map[string]interface{}{})
+	out, err := handleGetArcMetrics(context.Background(), client, map[string]interface{}{})
 	if err == nil {
 		t.Fatalf("expected an error when every graph fails, got output %s", out)
 	}
@@ -122,7 +123,7 @@ func TestGetArcMetricsAllFailedIsError(t *testing.T) {
 
 func TestGetArcMetricsUnknownGraphRejected(t *testing.T) {
 	client, fake := newFakeClient(t)
-	_, err := handleGetArcMetrics(client, map[string]interface{}{"graphs": []interface{}{"arcsize", "arcrate"}})
+	_, err := handleGetArcMetrics(context.Background(), client, map[string]interface{}{"graphs": []interface{}{"arcsize", "arcrate"}})
 	if err == nil || !strings.Contains(err.Error(), `"arcrate"`) || !strings.Contains(err.Error(), "supported graphs on this server: arcsize") {
 		t.Fatalf("expected unknown graph error naming arcrate and listing arcsize, got %v", err)
 	}
@@ -145,7 +146,7 @@ func TestGetArcMetricsPartialFailure(t *testing.T) {
 	})
 	client, _ := newFakeClientFrom(t, fake)
 
-	out, err := handleGetArcMetrics(client, map[string]interface{}{"graphs": []interface{}{"arcsize", "arcfreememory"}})
+	out, err := handleGetArcMetrics(context.Background(), client, map[string]interface{}{"graphs": []interface{}{"arcsize", "arcfreememory"}})
 	if err != nil {
 		t.Fatalf("partial success should not be an error: %v", err)
 	}
@@ -244,7 +245,7 @@ func TestGetArcMetricsDefault27OnlySupportedGraphs(t *testing.T) {
 	client, fake := newFakeClientFrom(t, fake)
 
 	for i := 0; i < 2; i++ {
-		out, err := handleGetArcMetrics(client, map[string]interface{}{})
+		out, err := handleGetArcMetrics(context.Background(), client, map[string]interface{}{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -264,7 +265,7 @@ func TestGetArcMetricsDefault27OnlySupportedGraphs(t *testing.T) {
 	}
 
 	// A graph the 27.0 schema rejects gets a clean error, not a call.
-	_, err := handleGetArcMetrics(client, map[string]interface{}{"graphs": []interface{}{"arcfreememory"}})
+	_, err := handleGetArcMetrics(context.Background(), client, map[string]interface{}{"graphs": []interface{}{"arcfreememory"}})
 	if err == nil || !strings.Contains(err.Error(), "supported graphs on this server: arcsize") {
 		t.Errorf("expected unsupported graph error listing arcsize, got %v", err)
 	}
@@ -278,7 +279,7 @@ func TestSupportedArcGraphsIntersectsSchemaAndPlugins(t *testing.T) {
 		"reporting.graphs": reportingGraphsResult("cpu", "memory", "arcsize", "arcrate", "arcresult", "arcactualrate", "arcfreememory"),
 	}
 	client, _ := newFakeClientWith(t, results, nil)
-	got := supportedArcGraphs(client)
+	got := supportedArcGraphs(context.Background(), client)
 	want := []string{"arcactualrate", "arcrate", "arcresult", "arcsize"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("supportedArcGraphs = %v, want %v", got, want)
@@ -294,13 +295,13 @@ func TestSupportedArcGraphsFallback(t *testing.T) {
 		return nil, nil, false
 	}}
 	client, _ := newFakeClientFrom(t, fake)
-	if got := supportedArcGraphs(client); strings.Join(got, ",") != "arcsize" {
+	if got := supportedArcGraphs(context.Background(), client); strings.Join(got, ",") != "arcsize" {
 		t.Errorf("fallback = %v, want [arcsize]", got)
 	}
 
 	// No discovery data at all (null results) also falls back.
 	client2, _ := newFakeClient(t)
-	if got := supportedArcGraphs(client2); strings.Join(got, ",") != "arcsize" {
+	if got := supportedArcGraphs(context.Background(), client2); strings.Join(got, ",") != "arcsize" {
 		t.Errorf("fallback with null results = %v, want [arcsize]", got)
 	}
 }
@@ -311,7 +312,7 @@ func TestSupportedArcGraphsPartialDiscoveryNotCached(t *testing.T) {
 	results := map[string]interface{}{"reporting.graphs": reportingGraphsResult(pluginNames27...)}
 	client, fake := newFakeClientFrom(t, reportingFake(t, nil, results, nil))
 	for i := 0; i < 2; i++ {
-		if got := supportedArcGraphs(client); strings.Join(got, ",") != "arcsize" {
+		if got := supportedArcGraphs(context.Background(), client); strings.Join(got, ",") != "arcsize" {
 			t.Errorf("reporting.graphs only = %v, want [arcsize]", got)
 		}
 	}
@@ -346,19 +347,19 @@ func TestSupportedArcGraphsRecoversAndRediscoversAfterReconnect(t *testing.T) {
 	}
 	client, fake := newFakeClientFrom(t, fake)
 
-	if got := supportedArcGraphs(client); strings.Join(got, ",") != "arcsize" {
+	if got := supportedArcGraphs(context.Background(), client); strings.Join(got, ",") != "arcsize" {
 		t.Fatalf("failed discovery = %v, want fallback [arcsize]", got)
 	}
 
 	phase.Store(1)
-	if got := supportedArcGraphs(client); strings.Join(got, ",") != strings.Join(sets[1], ",") {
+	if got := supportedArcGraphs(context.Background(), client); strings.Join(got, ",") != strings.Join(sets[1], ",") {
 		t.Fatalf("after recovery = %v, want %v (fallback must not be cached)", got, sets[1])
 	}
-	if _, err := handleGetArcMetrics(client, map[string]interface{}{"graphs": []interface{}{"arcfreememory"}}); err != nil {
+	if _, err := handleGetArcMetrics(context.Background(), client, map[string]interface{}{"graphs": []interface{}{"arcfreememory"}}); err != nil {
 		t.Errorf("arcfreememory should be accepted after recovery: %v", err)
 	}
 	before := len(fake.called("core.get_methods"))
-	supportedArcGraphs(client)
+	supportedArcGraphs(context.Background(), client)
 	if n := len(fake.called("core.get_methods")); n != before {
 		t.Errorf("successful discovery should be cached within a session (%d -> %d calls)", before, n)
 	}
@@ -367,7 +368,7 @@ func TestSupportedArcGraphsRecoversAndRediscoversAfterReconnect(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if got := supportedArcGraphs(client); strings.Join(got, ",") != strings.Join(sets[2], ",") {
+	if got := supportedArcGraphs(context.Background(), client); strings.Join(got, ",") != strings.Join(sets[2], ",") {
 		t.Errorf("after reconnect = %v, want %v (re-discovered)", got, sets[2])
 	}
 	if n := len(fake.called("auth.login_ex")); n != 2 {
@@ -392,7 +393,7 @@ func TestSupportedArcGraphsDiscoveryTimeout(t *testing.T) {
 	}}
 	client, _ := newFakeClientFrom(t, fake)
 	start := time.Now()
-	if got := supportedArcGraphs(client); strings.Join(got, ",") != "arcsize" {
+	if got := supportedArcGraphs(context.Background(), client); strings.Join(got, ",") != "arcsize" {
 		t.Errorf("timed-out discovery = %v, want fallback [arcsize]", got)
 	}
 	// Both calls run concurrently, each bounded by discoveryTimeout.
@@ -408,7 +409,7 @@ func TestGetDataAcceptedGraphsAnchoredToGraphsArg(t *testing.T) {
 	accepts := res["reporting.get_data"].(map[string]interface{})["accepts"].([]interface{})
 	accepts[1].(map[string]interface{})["properties"].(map[string]interface{})["name"] = map[string]interface{}{"enum": []interface{}{"arcbogus"}}
 	client, _ := newFakeClientWith(t, map[string]interface{}{"core.get_methods": res}, nil)
-	if got := getDataAcceptedGraphs(client); strings.Join(got, ",") != "memory,arcsize" {
+	if got := getDataAcceptedGraphs(context.Background(), client); strings.Join(got, ",") != "memory,arcsize" {
 		t.Errorf("getDataAcceptedGraphs = %v, want [memory arcsize]", got)
 	}
 }
@@ -430,7 +431,7 @@ func TestAnalyzeMemoryCapacityUsesAvailable(t *testing.T) {
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
 
-	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	analysis, err := analyzeMemoryCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +468,7 @@ func TestAnalyzeMemoryCapacityExcludesArc(t *testing.T) {
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
 
-	analysis, err := analyzeMemoryCapacity(client, "WEEK")
+	analysis, err := analyzeMemoryCapacity(context.Background(), client, "WEEK")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +512,7 @@ func TestAnalyzeMemoryCapacityNoProjectionFromArcWarmup(t *testing.T) {
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
 
-	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	analysis, err := analyzeMemoryCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +541,7 @@ func TestAnalyzeMemoryCapacityProjectsWithoutArc(t *testing.T) {
 		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 100 * gib},
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
-	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	analysis, err := analyzeMemoryCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,7 +560,7 @@ func TestAnalyzeMemoryCapacityArcClampNote(t *testing.T) {
 		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 16 * gib},
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
-	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	analysis, err := analyzeMemoryCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,7 +582,7 @@ func TestAnalyzeMemoryCapacityStaleArcIgnored(t *testing.T) {
 		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 100 * gib},
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
-	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	analysis, err := analyzeMemoryCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +606,7 @@ func arcSkewAnalysis(t *testing.T, nasNow, arcEnd time.Time) map[string]interfac
 		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 100 * gib},
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
-	analysis, err := analyzeMemoryCapacity(client, "HOUR")
+	analysis, err := analyzeMemoryCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -703,7 +704,7 @@ func TestCurrentArcBytesReference(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			graphs := map[string]map[string]interface{}{"arcsize": c.graph()}
 			client, _ := newFakeClientFrom(t, reportingFake(t, graphs, nil, nil))
-			got, known, err := currentArcBytes(client, c.memRef)
+			got, known, err := currentArcBytes(context.Background(), client, c.memRef)
 			if c.wantErr != nil {
 				if !errors.Is(err, c.wantErr) {
 					t.Fatalf("err = %v, want %v", err, c.wantErr)
@@ -730,7 +731,7 @@ func TestAnalyzeMemoryCapacityArcFreshnessUnknownNote(t *testing.T) {
 		"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 100 * gib},
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
-	a, err := analyzeMemoryCapacity(client, "HOUR")
+	a, err := analyzeMemoryCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -760,7 +761,7 @@ func TestAnalyzeMemoryCapacitySkipsNullSamples(t *testing.T) {
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
 
-	analysis, err := analyzeMemoryCapacity(client, "MONTH")
+	analysis, err := analyzeMemoryCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +829,7 @@ func TestSystemHealthExcludesDismissedAlerts(t *testing.T) {
 	}
 	client, _ := newFakeClientFrom(t, systemHealthFake(t, alerts, 12*gib))
 
-	out, err := handleSystemHealth(client, map[string]interface{}{})
+	out, err := handleSystemHealth(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -864,7 +865,7 @@ func TestSystemHealthOnlyDismissedAlertsIsOK(t *testing.T) {
 	alerts := []interface{}{fakeAlert("00000000-0000-0000-0000-000000000001", "CRITICAL", true)}
 	client, _ := newFakeClientFrom(t, systemHealthFake(t, alerts, 12*gib))
 
-	out, err := handleSystemHealth(client, map[string]interface{}{})
+	out, err := handleSystemHealth(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +882,7 @@ func TestSystemHealthMemoryWarningUsesAvailable(t *testing.T) {
 	// 12 GiB of 16 GiB available is 25% used: no warning (the old maths
 	// reported 75% "used"). 1 GiB available is 93.75% used: critical.
 	client, _ := newFakeClientFrom(t, systemHealthFake(t, nil, 12*gib))
-	out, err := handleSystemHealth(client, map[string]interface{}{})
+	out, err := handleSystemHealth(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -890,7 +891,7 @@ func TestSystemHealthMemoryWarningUsesAvailable(t *testing.T) {
 	}
 
 	client, _ = newFakeClientFrom(t, systemHealthFake(t, nil, 1*gib))
-	out, err = handleSystemHealth(client, map[string]interface{}{})
+	out, err = handleSystemHealth(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -912,7 +913,7 @@ func TestSystemHealthMemoryWarningExcludesArc(t *testing.T) {
 		return inner(method, params)
 	}
 	client, _ := newFakeClientFrom(t, fake)
-	out, err := handleSystemHealth(client, map[string]interface{}{})
+	out, err := handleSystemHealth(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -983,7 +984,7 @@ func TestQueryBootEnvironmentsDateObject(t *testing.T) {
 	}
 	client, _ := newFakeClientWith(t, map[string]interface{}{"boot.environment.query": envs}, nil)
 
-	out, err := handleQueryBootEnvironments(client, map[string]interface{}{})
+	out, err := handleQueryBootEnvironments(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}

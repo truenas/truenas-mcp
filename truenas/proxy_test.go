@@ -3,6 +3,7 @@ package truenas
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -305,7 +306,7 @@ func TestHTTPConnectProxy(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", p.url("http", true))
 	c, logs := proxiedClient(t, f, "example.com", Options{})
 
-	_, err := c.Call("system.info")
+	_, err := c.Call(context.Background(), "system.info")
 	if err != nil {
 		t.Fatalf("Call through the HTTP proxy: %v", err)
 	}
@@ -326,7 +327,7 @@ func TestSOCKS5hProxyFromAllProxy(t *testing.T) {
 	t.Setenv("ALL_PROXY", p.url("socks5h", true))
 	c, logs := proxiedClient(t, f, "example.com", Options{})
 
-	_, err := c.Call("system.info")
+	_, err := c.Call(context.Background(), "system.info")
 	if err != nil {
 		t.Fatalf("Call through the SOCKS5 proxy: %v", err)
 	}
@@ -347,7 +348,7 @@ func TestProxyOptionOverridesEnvironment(t *testing.T) {
 	t.Setenv("ALL_PROXY", "http://127.0.0.1:1")
 	c, logs := proxiedClient(t, f, "example.com", Options{Proxy: p.url("socks5", true)})
 
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("Call through --proxy: %v", err)
 	}
 	if len(p.seen()) != 1 {
@@ -374,7 +375,7 @@ func TestNoProxyBypassesProxy(t *testing.T) {
 	logs := &syncBuffer{}
 	log.SetOutput(logs)
 	defer log.SetOutput(os.Stderr)
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("direct Call for a NO_PROXY host: %v", err)
 	}
 	if got := p.seen(); len(got) != 0 {
@@ -386,7 +387,7 @@ func TestNoProxyBypassesProxy(t *testing.T) {
 
 	// Loopback addresses are always direct, as with net/http.
 	c2 := insecureClient(t, f, Options{Proxy: p.url("http", true)})
-	if _, err := c2.Call("system.info"); err != nil {
+	if _, err := c2.Call(context.Background(), "system.info"); err != nil {
 		t.Fatal(err)
 	}
 	if got := p.seen(); len(got) != 0 {
@@ -414,7 +415,7 @@ func TestProxyCredentialsNotLeaked(t *testing.T) {
 		{httpProxy, "ftp://proxyuser:proxysecret7@proxy.example:21"},
 	} {
 		c, logs := proxiedClient(t, f, "example.com", Options{Proxy: tc.proxy})
-		err := c.Authenticate()
+		err := c.Authenticate(context.Background())
 		if err == nil {
 			t.Errorf("connected with bad proxy settings %d", len(tc.proxy))
 			continue
@@ -575,7 +576,7 @@ func TestUnreachableProxyIsNamed(t *testing.T) {
 		clearProxyEnv(t)
 		t.Setenv(tc.env, tc.scheme+"://proxyuser:proxysecret7@"+dead)
 		c, logs := proxiedClient(t, f, "example.com", Options{})
-		err := c.Authenticate()
+		err := c.Authenticate(context.Background())
 		want := "connecting via proxy " + tc.scheme + "://redacted@" + dead + " from " + tc.env + ": proxy unreachable: "
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: got %v, want it to contain %q", tc.env, err, want)
@@ -611,7 +612,7 @@ func TestSOCKS5ReplyFailureExplained(t *testing.T) {
 		p := startProxy(t, f, socksReplying(tc.rep))
 		t.Setenv("ALL_PROXY", p.url("socks5h", true))
 		c, logs := proxiedClient(t, f, "truenas.example.com", Options{})
-		err := c.Authenticate()
+		err := c.Authenticate(context.Background())
 		var ce *ConnectError
 		if !errors.As(err, &ce) || ce.LoginAttempted {
 			t.Fatalf("reply %d: got %#v, want a *ConnectError with no login attempted", tc.rep, err)
@@ -663,7 +664,7 @@ func TestHTTPProxyUserWithoutPassword(t *testing.T) {
 	f := newFakeTrueNAS(t, nil)
 	p := startProxyAuth(t, f, serveHTTPConnect, "proxytoken9", "")
 	c, logs := proxiedClient(t, f, "example.com", Options{Proxy: "http://proxytoken9@" + p.Addr().String()})
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("Call with a user-only proxy credential: %v", err)
 	}
 	assertNoLeak(t, &testProxy{user: "proxytoken9"}, nil, logs)
@@ -694,7 +695,7 @@ func TestTLSVerifiedThroughProxy(t *testing.T) {
 		} {
 			c, logs := proxiedClientTLS(t, f, tc.host, Options{Proxy: p.url(px.scheme, true)}, tc.cfg)
 			before := len(p.seen())
-			err := c.Authenticate()
+			err := c.Authenticate(context.Background())
 			if err == nil {
 				t.Errorf("%s through %s proxy: connected", tc.name, px.scheme)
 				continue

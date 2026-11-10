@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 )
 
 // handleCreateDataset creates a new ZFS dataset (filesystem or volume)
-func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleCreateDataset(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Extract required parameters
 	name, ok := args["name"].(string)
 	if !ok || name == "" {
@@ -144,7 +145,7 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 			"estimated_path": fmt.Sprintf("/mnt/%s", name),
 		}
 
-		if err := checkCreateDatasetPreflight(client, name); err != nil {
+		if err := checkCreateDatasetPreflight(ctx, client, name); err != nil {
 			return "", err
 		}
 
@@ -152,7 +153,7 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 		// would be created, in order from parent to child, so the client
 		// can report them before confirming.
 		if createAncestors, _ := payload["create_ancestors"].(bool); createAncestors {
-			missing, err := missingAncestorDatasets(client, name)
+			missing, err := missingAncestorDatasets(ctx, client, name)
 			if err != nil {
 				return "", err
 			}
@@ -172,7 +173,7 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 	}
 
 	// Call the API (error will include payload automatically)
-	result, err := client.Call("pool.dataset.create", payload)
+	result, err := client.Call(ctx, "pool.dataset.create", payload)
 	if err != nil {
 		// The middleware error can quote request values; scrub the literal
 		// passphrase/key (the redactor only recognises labelled secrets).
@@ -240,8 +241,8 @@ const ancestorsInheritNote = "Missing ancestors are created with no properties o
 // maxDatasetNameLen is OpenZFS's ZFS_MAX_DATASET_NAME_LEN minus the NUL.
 const maxDatasetNameLen = 255
 
-func datasetNameExists(client *truenas.Client, name string) (bool, error) {
-	result, err := client.Call("pool.dataset.query",
+func datasetNameExists(ctx context.Context, client *truenas.Client, name string) (bool, error) {
+	result, err := client.Call(ctx, "pool.dataset.query",
 		[]interface{}{[]interface{}{"name", "=", name}},
 		map[string]interface{}{},
 	)
@@ -257,16 +258,16 @@ func datasetNameExists(client *truenas.Client, name string) (bool, error) {
 
 // checkCreateDatasetPreflight rejects a dry-run preview that would read as
 // if the create would succeed when the middleware would refuse it.
-func checkCreateDatasetPreflight(client *truenas.Client, name string) error {
+func checkCreateDatasetPreflight(ctx context.Context, client *truenas.Client, name string) error {
 	pool := strings.SplitN(name, "/", 2)[0]
-	pools, err := listPoolNames(client)
+	pools, err := listPoolNames(ctx, client)
 	if err != nil {
 		return err
 	}
 	if !pools[pool] {
 		return fmt.Errorf("pool %q does not exist", pool)
 	}
-	exists, err := datasetNameExists(client, name)
+	exists, err := datasetNameExists(ctx, client, name)
 	if err != nil {
 		return err
 	}
@@ -278,14 +279,14 @@ func checkCreateDatasetPreflight(client *truenas.Client, name string) error {
 
 // missingAncestorDatasets returns ancestors of name that do not yet exist,
 // in parent-to-child order.
-func missingAncestorDatasets(client *truenas.Client, name string) ([]string, error) {
+func missingAncestorDatasets(ctx context.Context, client *truenas.Client, name string) ([]string, error) {
 	ancestors := datasetAncestorNames(name)
 	if len(ancestors) == 0 {
 		return []string{}, nil
 	}
 	missing := make([]string, 0, len(ancestors))
 	for _, ancestor := range ancestors {
-		exists, err := datasetNameExists(client, ancestor)
+		exists, err := datasetNameExists(ctx, client, ancestor)
 		if err != nil {
 			return nil, err
 		}
