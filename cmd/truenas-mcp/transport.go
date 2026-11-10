@@ -113,14 +113,14 @@ func (c *lineConn) decode(line []byte) (jsonrpc.Message, error) {
 		var v interface{}
 		err := json.Unmarshal(line, &v)
 		if c.debug {
-			log.Printf("Parse error: %v", err)
+			log.Printf("Parse error: %s", redact.Text(err.Error()))
 		}
 		return nil, c.writeError(nil, jsonrpc.CodeParseError, fmt.Sprintf("Parse error: %v", err))
 	}
 	msg, err := jsonrpc.DecodeMessage(line)
 	if err != nil {
 		if c.debug {
-			log.Printf("Invalid request: %v", err)
+			log.Printf("Invalid request: %s", redact.Text(err.Error()))
 		}
 		return nil, c.writeError(requestID(line), jsonrpc.CodeInvalidRequest, fmt.Sprintf("Invalid Request: %v", err))
 	}
@@ -135,7 +135,7 @@ func (c *lineConn) decode(line []byte) (jsonrpc.Message, error) {
 			return nil, nil
 		}
 		if c.debug {
-			log.Printf("Handling method: %s (id: %v)", redact.Text(req.Method), req.ID.Raw())
+			log.Printf("Handling method: %s (id: %s)", redact.Text(req.Method), redact.Text(fmt.Sprint(req.ID.Raw())))
 		}
 		c.track(req)
 	}
@@ -221,7 +221,7 @@ func (c *lineConn) Read(ctx context.Context) (jsonrpc.Message, error) {
 func (c *lineConn) Write(_ context.Context, msg jsonrpc.Message) error {
 	if resp, ok := msg.(*jsonrpc.Response); ok && c.answered(resp.ID) {
 		if c.debug {
-			log.Printf("Dropping the reply to cancelled request %v", resp.ID.Raw())
+			log.Printf("Dropping the reply to cancelled request %s", redact.Text(fmt.Sprint(resp.ID.Raw())))
 		}
 		return nil
 	}
