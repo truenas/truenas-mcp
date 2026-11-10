@@ -98,7 +98,7 @@ func (r *Registry) registerTools() {
 	r.tools["check_updates"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "check_updates",
-			Description: "Check for available TrueNAS system updates",
+			Description: "Check for available TrueNAS system updates. Returns allow-listed fields for each available version (train, version, release notes and URL).",
 			InputSchema: map[string]interface{}{
 				"type":       "object",
 				"properties": map[string]interface{}{},
@@ -666,7 +666,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["query_pools"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_pools",
-			Description: "Query storage pools with their status, capacity, and health information",
+			Description: "Query storage pools with their status, capacity, and health information. Returns allow-listed pool fields, RAIDZ expansion progress, a compact topology (type, path, name, guid, status, disk, device, and trimmed read/write/checksum error stats), and a trimmed scrub/resilver scan; it does not pass through the raw middleware record.",
 			InputSchema: map[string]interface{}{
 				"type":       "object",
 				"properties": map[string]interface{}{},
@@ -751,7 +751,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["query_shares"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_shares",
-			Description: "Query SMB and NFS shares configuration",
+			Description: "Query SMB and NFS shares configuration. Returns allow-listed share fields (including hostsallow/hostsdeny and NFS maps); extra middleware keys such as auxsmbconf are omitted.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1129,7 +1129,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["list_alerts"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "list_alerts",
-			Description: "List system alerts. By default only active alerts are listed: dismissed alerts are excluded. Set include_dismissed=true to list all alerts, or dismissed=true to list only dismissed ones.",
+			Description: "List system alerts. By default only active alerts are listed: dismissed alerts are excluded. Set include_dismissed=true to list all alerts, or dismissed=true to list only dismissed ones. Returns allow-listed alert fields (uuid, level, text, and so on). The middleware dedup key is omitted because it would be masked by output redaction; use uuid with dismiss_alert or restore_alert.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -2416,7 +2416,10 @@ func queryCount(ctx context.Context, client *truenas.Client, method string, filt
 }
 
 func handleQueryPools(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	result, err := client.Call(ctx, "pool.query")
+	result, err := client.Call(ctx, "pool.query", []interface{}{}, map[string]interface{}{
+		"select": poolQuerySelect,
+		"extra":  map[string]interface{}{"is_upgraded": true},
+	})
 	if err != nil {
 		return "", err
 	}
@@ -2426,7 +2429,12 @@ func handleQueryPools(ctx context.Context, client *truenas.Client, args map[stri
 		return "", fmt.Errorf("failed to parse pools: %w", err)
 	}
 
-	formatted, err := json.MarshalIndent(pools, "", "  ")
+	simplified := make([]map[string]interface{}, 0, len(pools))
+	for _, pool := range pools {
+		simplified = append(simplified, simplifyPool(pool))
+	}
+
+	formatted, err := json.MarshalIndent(simplified, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -2674,7 +2682,7 @@ func handleQueryShares(ctx context.Context, client *truenas.Client, args map[str
 	response := make(map[string]interface{})
 
 	if shareType == "smb" || shareType == "all" {
-		result, err := client.Call(ctx, "sharing.smb.query")
+		result, err := client.Call(ctx, "sharing.smb.query", []interface{}{}, map[string]interface{}{"select": smbShareQuerySelect})
 		if err != nil {
 			return "", fmt.Errorf("failed to query SMB shares: %w", err)
 		}
@@ -2683,11 +2691,15 @@ func handleQueryShares(ctx context.Context, client *truenas.Client, args map[str
 		if err := json.Unmarshal(result, &smbShares); err != nil {
 			return "", fmt.Errorf("failed to parse SMB shares: %w", err)
 		}
-		response["smb_shares"] = smbShares
+		simplified := make([]map[string]interface{}, 0, len(smbShares))
+		for _, share := range smbShares {
+			simplified = append(simplified, simplifySMBShare(share))
+		}
+		response["smb_shares"] = simplified
 	}
 
 	if shareType == "nfs" || shareType == "all" {
-		result, err := client.Call(ctx, "sharing.nfs.query")
+		result, err := client.Call(ctx, "sharing.nfs.query", []interface{}{}, map[string]interface{}{"select": nfsShareQuerySelect})
 		if err != nil {
 			return "", fmt.Errorf("failed to query NFS shares: %w", err)
 		}
@@ -2696,7 +2708,11 @@ func handleQueryShares(ctx context.Context, client *truenas.Client, args map[str
 		if err := json.Unmarshal(result, &nfsShares); err != nil {
 			return "", fmt.Errorf("failed to parse NFS shares: %w", err)
 		}
-		response["nfs_shares"] = nfsShares
+		simplified := make([]map[string]interface{}, 0, len(nfsShares))
+		for _, share := range nfsShares {
+			simplified = append(simplified, simplifyNFSShare(share))
+		}
+		response["nfs_shares"] = simplified
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -3358,7 +3374,7 @@ func handleListAlerts(ctx context.Context, client *truenas.Client, args map[stri
 		alerts = filtered
 	}
 	for i, alert := range alerts {
-		alerts[i] = readableDatesMap(alert)
+		alerts[i] = simplifyAlert(alert)
 	}
 
 	formatted, err := json.MarshalIndent(alerts, "", "  ")
@@ -6111,12 +6127,16 @@ func handleCheckUpdates(ctx context.Context, client *truenas.Client, args map[st
 		return "", fmt.Errorf("failed to check for updates: %w", err)
 	}
 
-	var updates interface{}
+	var updates []map[string]interface{}
 	if err := json.Unmarshal(result, &updates); err != nil {
 		return "", fmt.Errorf("failed to parse update information: %w", err)
 	}
+	simplified := make([]map[string]interface{}, 0, len(updates))
+	for _, item := range updates {
+		simplified = append(simplified, simplifyAvailableVersion(item))
+	}
 
-	formatted, err := json.MarshalIndent(updates, "", "  ")
+	formatted, err := json.MarshalIndent(simplified, "", "  ")
 	if err != nil {
 		return "", err
 	}
