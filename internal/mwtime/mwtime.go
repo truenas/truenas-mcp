@@ -21,7 +21,7 @@ const maxAhead = 10 * 365 * 24 * time.Hour
 
 // Normalize converts a middleware time (a boot environment "created" value,
 // a job time_started or time_finished, ...) and returns it as an ISO-8601 UTC
-// string plus Unix seconds. TrueNAS 25.04+ sends a datetime as {"$date": <ms since epoch>}; plain strings and numbers
+// string plus Unix seconds. TrueNAS 25.10+ sends a datetime as {"$date": <ms since epoch>}; plain strings and numbers
 // are accepted too. Numbers below 1e12 are seconds, larger ones
 // milliseconds. Only times from 2000-01-01 to 10 years after now are
 // accepted. Anything else (unparseable, out of range or overflowing) is

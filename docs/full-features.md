@@ -6,6 +6,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 
 Every tool result and error sent to the MCP client is at most 100 KiB. Larger output is redacted first, then cut, with a notice telling the model to narrow the query with `limit`, `select`, or filters. Middleware error traces are not sent to the client; `--debug` logs them to stderr (see [Security](../README.md#security) and [Debug Logging](../README.md#debug-logging)).
 
+The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a connected release cannot run (see [TrueNAS version compatibility](../README.md#truenas-version-compatibility)) are hidden from `tools/list` and refused if called.
+
 ## Read-Only Monitoring Tools
 
 ### System Information
@@ -442,7 +444,7 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
 
 - **run_scrub** - Manually start a scrub
   - Returns task ID for progress tracking; `poll_interval` is the task manager's poll interval
-  - Starts with `pool.scrub.scrub` on every version (present on TrueNAS 25.04–27; deprecated on 26+ but still working) and tracks the job id that call returns. `zpool.scrub.run` is not used to start, because it can finish successfully without starting a scrub (HA standby, a race with a scheduled run, or the concurrent-scrub limit)
+  - Starts with `pool.scrub.scrub` on every version (present on TrueNAS 25.10–27; deprecated on 26+ but still working) and tracks the job id that call returns. `zpool.scrub.run` is not used to start, because it can finish successfully without starting a scrub (HA standby, a race with a scheduled run, or the concurrent-scrub limit)
   - Job lookups still match both `pool.scrub.scrub` (string argument) and `zpool.scrub.run` (`pool_name` argument), including scheduled scrubs
   - If a start returns no job id, reports an error instead of `scrub_started: true` with `job_id` 0
   - If the last scrub is newer than the threshold (default 7 days), returns `scrub_started: false` and does not start a scrub. The threshold matches middleware: a start is due once `(threshold-1)*24h` have passed since the last finished scrub

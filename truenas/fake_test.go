@@ -19,21 +19,22 @@ import (
 type fakeTrueNAS struct {
 	*httptest.Server
 
-	loginType  string                            // auth.login_ex response_type; default SUCCESS
-	echoKey    bool                              // auth.login_ex fails with an error echoing the key
-	notify     bool                              // send an id-less notification before every reply
-	stringIDs  bool                              // echo ids back as JSON strings
-	closeAfter int                               // close the socket after N non-auth replies (0 = never)
-	errors     map[string]map[string]interface{} // method -> JSON-RPC error object
-	dropLogins int                               // close the socket instead of answering the first N logins
-	dropOn     string                            // close the socket instead of answering this method (once)
-	expireOnce bool                              // forget the login after the first non-auth reply (once)
-	nullIDFor  string                            // answer this method with a null-id error
-	holdConn   int                               // with holdMethod: connection (1-based) whose replies wait for release; 0 = all
-	holdMethod string                            // hold replies to this method ("*" = every method) until release is closed
-	release    chan struct{}
-	noPong     bool // ignore websocket pings, like a half-open connection
-	maxMessage int  // close with 1009 on a frame larger than this, as TrueNAS does (0 = no limit)
+	loginType   string                            // auth.login_ex response_type; default SUCCESS
+	echoKey     bool                              // auth.login_ex fails with an error echoing the key
+	notify      bool                              // send an id-less notification before every reply
+	stringIDs   bool                              // echo ids back as JSON strings
+	closeAfter  int                               // close the socket after N non-auth replies (0 = never)
+	errors      map[string]map[string]interface{} // method -> JSON-RPC error object
+	dropLogins  int                               // close the socket instead of answering the first N logins
+	dropOn      string                            // close the socket instead of answering this method (once)
+	expireOnce  bool                              // forget the login after the first non-auth reply (once)
+	nullIDFor   string                            // answer this method with a null-id error
+	holdConn    int                               // with holdMethod: connection (1-based) whose replies wait for release; 0 = all
+	holdMethod  string                            // hold replies to this method ("*" = every method) until release is closed
+	release     chan struct{}
+	noPong      bool   // ignore websocket pings, like a half-open connection
+	maxMessage  int    // close with 1009 on a frame larger than this, as TrueNAS does (0 = no limit)
+	infoVersion string // system.info version field; default 25.10.0
 
 	mu         sync.Mutex
 	frames     []string
@@ -48,7 +49,7 @@ type fakeTrueNAS struct {
 
 func newFakeTrueNAS(t *testing.T, configure func(*fakeTrueNAS)) *fakeTrueNAS {
 	t.Helper()
-	f := &fakeTrueNAS{loginType: "SUCCESS", errors: map[string]map[string]interface{}{}, release: make(chan struct{})}
+	f := &fakeTrueNAS{loginType: "SUCCESS", errors: map[string]map[string]interface{}{}, release: make(chan struct{}), infoVersion: "25.10.0"}
 	if configure != nil {
 		configure(f)
 	}
@@ -165,6 +166,19 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 			reply["error"] = map[string]interface{}{"code": -32600, "message": "Invalid Request"}
 		case f.errors[req.Method] != nil:
 			reply["error"] = f.errors[req.Method]
+		case req.Method == "system.info":
+			calls++
+			f.mu.Lock()
+			ver := f.infoVersion
+			f.mu.Unlock()
+			// Include the usual secret-bearing fields so existing redaction
+			// tests still see them, plus the version this server reports.
+			reply["result"] = map[string]interface{}{
+				"hostname": "nas",
+				"version":  ver,
+				"bindpw":   "responsesecret9",
+				"domain":   "example.com",
+			}
 		default:
 			calls++
 			// Secret-bearing result, like core.get_jobs job arguments
