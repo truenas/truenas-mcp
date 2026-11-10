@@ -200,6 +200,9 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Supports dry-run mode
 
 - **start_app** - Start a stopped application
+  - Dry-run and the real call share one plan: the preview lists only the `app.start` call that will be made, with the same parameters the real call sends
+  - A STOPPED app is started with no "must be STOPPED" warning
+  - An already RUNNING app is refused on both dry-run and the real call (an error; nothing is started)
   - Supports dry-run mode; returns a task ID for tracking
 
 - **stop_app** - Stop a running application (**destructive**: the service goes offline)
