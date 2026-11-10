@@ -717,6 +717,12 @@ without the token instead (nothing is executed).
 > **Earlier breaking change:** clients or scripts that called the
 > destructive tools without `confirm` get a preview instead of the
 > operation.
+>
+> **Breaking change (directory services):** `configure_directory_service`
+> and `leave_directory_service` now return `status: "submitted"` and a
+> `task_id` for the accepted job, not `success: true`. The job has been
+> submitted, not completed; track it with `tasks_get`. Clients that keyed
+> on `success` need to use `status` and the task id instead.
 
 **Argument validation.** Before anything runs (including a dry run, the
 confirmation preview or the check of a confirmation token), every `tools/call` is checked against the tool's own

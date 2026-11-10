@@ -55,15 +55,18 @@ func handleSearchAppCatalog(client *truenas.Client, args map[string]interface{})
 	// Build filters
 	filters := []interface{}{}
 
-	// Escape the query so the middleware's regex operator does a literal
-	// substring match. Characters like + and ( would otherwise be special.
+	// Crin is a case-insensitive literal substring match (operator.contains
+	// after casefold). The 25.10 "~" operator is Python re.match, which
+	// anchors at the start, so an escaped "cloud" would miss "nextcloud".
 	if query != "" {
-		filters = append(filters, []interface{}{"name", "~", regexp.QuoteMeta(query)})
+		filters = append(filters, []interface{}{"name", "Crin", query})
 	}
 
-	// Add category filter if provided
+	// categories is a list of strings; rin is membership (the list contains
+	// this exact category). "=" would compare the whole list to the string
+	// and never match.
 	if category != "" {
-		filters = append(filters, []interface{}{"categories", "~", category})
+		filters = append(filters, []interface{}{"categories", "rin", category})
 	}
 
 	// Filter by train in the middleware too, so limit counts only apps in
@@ -550,7 +553,7 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 		return "", fmt.Errorf("catalog_app is required")
 	}
 
-	train, err := catalogTrainForInstall(client, catalogApp, args)
+	train, trainNote, err := catalogTrainForInstall(client, catalogApp, args)
 	if err != nil {
 		return "", err
 	}
@@ -634,6 +637,9 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 		"job_id":        jobID,
 		"message":       fmt.Sprintf("Installation started. Track progress with tasks_get using task_id: %s", task.TaskID),
 	}
+	if trainNote != "" {
+		response["train_note"] = trainNote
+	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
@@ -655,7 +661,7 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	if !ok || catalogApp == "" {
 		return nil, fmt.Errorf("catalog_app is required")
 	}
-	train, err := catalogTrainForInstall(client, catalogApp, args)
+	train, trainNote, err := catalogTrainForInstall(client, catalogApp, args)
 	if err != nil {
 		return nil, err
 	}
@@ -783,6 +789,14 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 			MaxSeconds: 300,
 			Note:       "Time varies based on container image size and network speed",
 		},
+	}
+	if trainNote != "" {
+		result.CurrentState.(map[string]interface{})["train_note"] = trainNote
+		if len(actions) > 0 && actions[len(actions)-1].Details != nil {
+			if details, ok := actions[len(actions)-1].Details.(map[string]interface{}); ok {
+				details["train_note"] = trainNote
+			}
+		}
 	}
 
 	return result, nil
@@ -979,13 +993,20 @@ func (r *Registry) handleDeleteAppWithDryRun(client *truenas.Client, args map[st
 
 // catalogTrainForInstall returns the catalog train for an install: the
 // caller's train when given, otherwise the preferred train that has the
-// catalog app (same lookup as get_app_catalog_details).
-func catalogTrainForInstall(client *truenas.Client, catalogApp string, args map[string]interface{}) (string, error) {
+// catalog app (same lookup as get_app_catalog_details). If the lookup
+// itself fails, it falls back to stable and returns a note saying so.
+func catalogTrainForInstall(client *truenas.Client, catalogApp string, args map[string]interface{}) (string, string, error) {
 	if t, ok := args["train"].(string); ok && t != "" {
-		return t, nil
+		return t, "", nil
 	}
-	train, _, err := resolveCatalogTrain(client, catalogApp)
-	return train, err
+	train, trains, err := resolveCatalogTrain(client, catalogApp)
+	if err != nil {
+		return "", "", err
+	}
+	if trains == nil && train == "stable" {
+		return train, "Catalog train lookup failed; assuming the stable train.", nil
+	}
+	return train, "", nil
 }
 
 // appNamePattern is the TrueNAS app instance name rule.

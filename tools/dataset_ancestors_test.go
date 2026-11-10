@@ -190,10 +190,13 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 		requireAncestors(t, preview, []string{"tank/apps", "tank/apps/jellyfin"})
 		note, _ := preview["ancestors_note"].(string)
 		low := strings.ToLower(note)
-		for _, want := range []string{"inherit", "encryption", "unencrypted"} {
+		for _, want := range []string{"inherit", "encryption", "unencrypted", "no quota of their own"} {
 			if !strings.Contains(low, want) {
 				t.Errorf("ancestors_note = %q, want it to mention %q", note, want)
 			}
+		}
+		if strings.Contains(low, "inherit") && strings.Contains(low, "quota") && !strings.Contains(low, "no quota") {
+			t.Errorf("ancestors_note = %q still says quota is inherited", note)
 		}
 	})
 }

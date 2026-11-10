@@ -235,7 +235,7 @@ func datasetAncestorNames(name string) []string {
 
 // ancestorsInheritNote explains that missing parents are created as plain
 // filesystems that inherit from their parent, not with the leaf's properties.
-const ancestorsInheritNote = "Missing ancestors are created with no properties of their own; they inherit compression, ACL type, quota and encryption from their parent. They do not receive this dataset's share_type, compression, quota or encryption. Under an unencrypted parent, ancestors of an encrypted dataset are unencrypted."
+const ancestorsInheritNote = "Missing ancestors are created with no properties of their own; they inherit compression, ACL type and encryption from their parent and have no quota of their own. They do not receive this dataset's share_type, compression or encryption. Under an unencrypted parent, ancestors of an encrypted dataset are unencrypted."
 
 // maxDatasetNameLen is OpenZFS's ZFS_MAX_DATASET_NAME_LEN minus the NUL.
 const maxDatasetNameLen = 255

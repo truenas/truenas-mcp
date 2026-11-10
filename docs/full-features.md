@@ -86,7 +86,8 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 ### Applications
 - **query_apps** - List installed applications with status, `human_version`, and `upgrade_available` (whether an upgrade exists) and `latest_version` (newest catalog version, always set, in catalog form rather than `human_version` form)
 - **search_app_catalog** - Search TrueNAS app catalog by name, category, or keyword
-  - The query is a literal substring match (special characters are escaped, not treated as a regular expression)
+  - The query is a case-insensitive literal substring match (not a regular expression), so `cloud` finds nextcloud
+  - `category` is an exact match against the app's categories list
   - `limit` must be at least 1 (default 20)
   - Search across all catalog trains (stable, enterprise, community)
   - Filter by category (media, productivity, database, etc.)
@@ -133,7 +134,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Encryption with auto-generated keys or passphrases
   - Compression (LZ4, ZSTD, GZIP), quotas, and ACL configuration
   - Dry-run mode to preview before creating
-  - `create_ancestors` defaults to true; the dry-run preview lists any missing parent datasets that would be created, in order from parent to child (`ancestors_to_create`). Those ancestors are created with no properties of their own and inherit from their parent (they do not receive the leaf's share_type, compression, quota or encryption). Under an unencrypted parent, ancestors of an encrypted dataset are unencrypted. The preview fails if the pool does not exist, the dataset already exists, or the name is invalid (including `.` / `..` components and names longer than 255 characters)
+  - `create_ancestors` defaults to true; the dry-run preview lists any missing parent datasets that would be created, in order from parent to child (`ancestors_to_create`). Those ancestors are created with no properties of their own; they inherit compression, ACL type and encryption from their parent and have no quota of their own (they do not receive the leaf's share_type, compression or encryption). Under an unencrypted parent, ancestors of an encrypted dataset are unencrypted. The preview fails if the pool does not exist, the dataset already exists, or the name is invalid (including `.` / `..` components and names longer than 255 characters)
   - Wizard-style guidance for SMB/NFS/iSCSI setup
 
 ### Share Management
@@ -160,7 +161,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 
 ### Application Management
 - **install_app** - Install applications from the catalog with guided storage setup
-  - When `train` is omitted, the catalog train that has the app is looked up (stable is preferred if several do), as with get_app_catalog_details
+  - When `train` is omitted, the catalog train that has the app is looked up (stable is preferred if several do), as with get_app_catalog_details. If the lookup itself fails, the stable train is assumed and the response includes a `train_note` saying so
   - Multi-step wizard guides through app installation process
   - ALWAYS uses host-path volumes (NEVER ix-volumes)
   - Fetches the app schema and requires every storage entry to be present as `type: host_path` with a cleaned path under `/mnt/<pool>/` (at least one component below an existing pool). `host_path_config.acl_enable` must be a JSON boolean; when it is true, the mounted `acl.path` is the path that is validated and checked for an existing dataset. Fields whose schema type is `hostpath`, `hostpathdirectory`, or `hostpathfile` are also checked; a `hostpath` value whose last component has a file extension (for example Nextcloud `custom_confs`) is checked as a file against its parent dataset, matching how the catalog template mounts it. An app schema with no questions list, an empty list, or items that cannot be parsed is refused, including on dry runs. Off-schema storage-like types must be `host_path`. Paths under `/mnt/<pool>/.system` or `/mnt/<pool>/ix-applications` are refused.
