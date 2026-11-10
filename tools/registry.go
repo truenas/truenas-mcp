@@ -2246,14 +2246,35 @@ func handleSystemHealth(client *truenas.Client, args map[string]interface{}) (st
 // nested children tree for each row.
 var datasetQueryProperties = []interface{}{
 	"used", "available", "usedbysnapshots", "usedbydataset", "usedbychildren",
-	"compression", "compressratio", "deduplication", "quota", "refquota",
+	"compression", "compressratio", "dedup", "quota", "refquota",
+	"encryption", "keystatus",
 }
 
-var poolQuerySelect = []interface{}{"id", "name", "status", "size", "healthy", "path", "scan"}
+// datasetTypeFilter is always sent with retrieve_children=false so
+// middleware still walks child datasets. On 25.10 and 27.0, an empty
+// filter list plus retrieve_children=false returns only pool roots.
+var datasetTypeFilter = []interface{}{"type", "in", []interface{}{"FILESYSTEM", "VOLUME"}}
 
-var smbShareQuerySelect = []interface{}{"id", "name", "path", "enabled", "comment", "purpose", "readonly", "browsable"}
+const (
+	defaultQueryLimit = 50
+	maxQueryLimit     = 1000
+)
 
-var nfsShareQuerySelect = []interface{}{"id", "path", "enabled", "comment", "ro", "networks", "hosts", "maproot_user", "maproot_group", "mapall_user", "mapall_group"}
+var poolQuerySelect = []interface{}{
+	"id", "name", "status", "size", "allocated", "free", "healthy",
+	"warning", "status_code", "status_detail", "path", "scan",
+}
+
+var smbShareQuerySelect = []interface{}{
+	"id", "name", "path", "enabled", "comment", "purpose", "readonly", "browsable",
+	"options", "access_based_share_enumeration", "audit", "locked",
+}
+
+var nfsShareQuerySelect = []interface{}{
+	"id", "path", "enabled", "comment", "ro", "networks", "hosts",
+	"maproot_user", "maproot_group", "mapall_user", "mapall_group",
+	"security", "expose_snapshots", "locked",
+}
 
 var vmQuerySelect = []interface{}{
 	"id", "name", "uuid", "description", "vcpus", "cores", "threads", "cpu_mode",
@@ -2275,6 +2296,17 @@ func datasetChildrenCount(name string, names []string) int {
 
 // queryCount runs method(filters, {count: true}) and returns the integer
 // total when the middleware answers with a JSON number.
+func queryLimit(args map[string]interface{}) int {
+	l, ok := args["limit"].(float64)
+	if !ok || l < 1 {
+		return defaultQueryLimit
+	}
+	if l > float64(maxQueryLimit) {
+		return maxQueryLimit
+	}
+	return int(l)
+}
+
 func queryCount(client *truenas.Client, method string, filters []interface{}) (int, bool) {
 	raw, err := client.Call(method, filters, map[string]interface{}{"count": true})
 	if err != nil {
@@ -2304,27 +2336,17 @@ func simplifyPool(pool map[string]interface{}) map[string]interface{} {
 		"name":   pool["name"],
 		"status": pool["status"],
 	}
-	if v, ok := pool["healthy"]; ok {
-		out["healthy"] = v
-	}
-	if path, ok := pool["path"].(string); ok && path != "" {
-		out["path"] = path
+	for _, key := range []string{"healthy", "warning", "status_code", "status_detail", "path", "allocated", "free"} {
+		if v, ok := pool[key]; ok {
+			out[key] = v
+		}
 	}
 	if size, ok := pool["size"].(float64); ok {
 		out["size_bytes"] = size
 		out["size"] = formatBytes(int64(size))
 	}
 	if scan, ok := pool["scan"].(map[string]interface{}); ok {
-		scanOut := map[string]interface{}{}
-		if fn, ok := scan["function"].(string); ok {
-			scanOut["function"] = fn
-		}
-		if st, ok := scan["state"].(string); ok {
-			scanOut["state"] = st
-		}
-		if len(scanOut) > 0 {
-			out["scan"] = scanOut
-		}
+		out["scan"] = scan
 	}
 	return out
 }
@@ -2357,7 +2379,9 @@ func handleQueryPools(client *truenas.Client, args map[string]interface{}) (stri
 }
 
 func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (string, error) {
-	filters := []interface{}{}
+	// Always include a structured filter. With retrieve_children=false and
+	// no filters, 25.10 and 27.0 middleware do not recurse below pool roots.
+	filters := []interface{}{datasetTypeFilter}
 	if pool, ok := args["pool"].(string); ok && pool != "" {
 		// Equality on the pool field: a name prefix of "tank" would also
 		// match tank2/... datasets.
@@ -2415,10 +2439,7 @@ func handleQueryDatasets(client *truenas.Client, args map[string]interface{}) (s
 	}
 	sortDatasets(simplified, orderBy)
 
-	limit := 50
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
+	limit := queryLimit(args)
 	total := len(simplified)
 	if len(simplified) > limit {
 		simplified = simplified[:limit]
@@ -2662,10 +2683,7 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 	if order, ok := args["order_by"].(string); ok && order != "" {
 		orderBy = order
 	}
-	limit := 50
-	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
+	limit := queryLimit(args)
 
 	// Unfiltered calls can return every snapshot on the NAS. Push limit
 	// and order_by when the sort key is a middleware field. holds_only
@@ -2718,11 +2736,14 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 	sortSnapshots(simplified, orderBy)
 
 	totalSnapshots := len(simplified)
+	totalKnown := true
 	// A count query is only needed when the page was full; otherwise the
 	// returned rows are the complete result.
 	if pushLimit && len(snapshots) >= limit {
 		if n, ok := queryCount(client, "pool.snapshot.query", filters); ok {
 			totalSnapshots = n
+		} else {
+			totalKnown = false
 		}
 	}
 	if len(simplified) > limit {
@@ -2731,10 +2752,14 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 
 	// Add metadata wrapper
 	response := map[string]interface{}{
-		"snapshots":       simplified,
-		"snapshot_count":  len(simplified),
-		"total_snapshots": totalSnapshots,
-		"holds_included":  wantHolds,
+		"snapshots":      simplified,
+		"snapshot_count": len(simplified),
+		"holds_included": wantHolds,
+	}
+	if totalKnown {
+		response["total_snapshots"] = totalSnapshots
+	} else {
+		response["note"] = "Snapshot total is unknown; the count query failed"
 	}
 	if dataset, ok := args["dataset"].(string); ok && dataset != "" {
 		response["dataset_filter"] = dataset
@@ -2745,7 +2770,7 @@ func handleQuerySnapshots(client *truenas.Client, args map[string]interface{}) (
 	if holdsOnly {
 		response["holds_filter"] = "only snapshots with holds"
 	}
-	if len(simplified) < totalSnapshots {
+	if totalKnown && len(simplified) < totalSnapshots {
 		response["note"] = fmt.Sprintf("Showing %d of %d snapshots (limited)", len(simplified), totalSnapshots)
 	}
 
