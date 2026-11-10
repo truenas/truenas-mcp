@@ -260,13 +260,13 @@ func (r *Registry) executeRefreshDirectoryCache(ctx context.Context, client *tru
 		return "", fmt.Errorf("failed to refresh cache: %w", err)
 	}
 	dirType := plan.TargetName
-	jobID := parseJobID(result)
+	jobID, jobErr := parseJobID(result)
 	response := map[string]interface{}{
 		"status":         "submitted",
 		"directory_type": dirType,
 		"message":        fmt.Sprintf("%s cache refresh was submitted to TrueNAS; track the task for the result.", dirType),
 	}
-	if jobID > 0 {
+	if jobErr == nil {
 		opts := []tasks.TaskOption{}
 		if plan.JobMethod != "" {
 			opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
@@ -309,21 +309,6 @@ const (
 	directoryServicesLeaveMethod        = "directoryservices.leave"
 	directoryServicesCacheRefreshMethod = "directoryservices.cache_refresh"
 )
-
-// parseJobID returns the job id from the result of a job method: a bare
-// integer, or a list whose first element is the id. It returns 0 if there is
-// none.
-func parseJobID(result json.RawMessage) int {
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err == nil {
-		return jobID
-	}
-	var jobIDs []int
-	if err := json.Unmarshal(result, &jobIDs); err == nil && len(jobIDs) > 0 {
-		return jobIDs[0]
-	}
-	return 0
-}
 
 func planConfigureDirectoryService(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	payload, err := buildDirectoryServiceUpdatePayload(args)
@@ -478,7 +463,7 @@ func (r *Registry) executeConfigureDirectoryService(ctx context.Context, client 
 		return "", fmt.Errorf("failed to configure %s: %w", label, err)
 	}
 
-	jobID := parseJobID(result)
+	jobID, jobErr := parseJobID(result)
 
 	response := map[string]interface{}{
 		"status":  "submitted",
@@ -493,7 +478,7 @@ func (r *Registry) executeConfigureDirectoryService(ctx context.Context, client 
 		response["message"] = fmt.Sprintf("Disabling %s was submitted to TrueNAS; its settings are kept. Domain authentication stops until it is enabled again.", label)
 	}
 
-	if jobID > 0 {
+	if jobErr == nil {
 		// Never keep the credential values in the stored task arguments.
 		opts := []tasks.TaskOption{}
 		if plan.JobMethod != "" {
@@ -608,7 +593,7 @@ func (r *Registry) executeLeaveDirectoryService(ctx context.Context, client *tru
 		return "", fmt.Errorf("failed to leave %s: %w", dsType, err)
 	}
 
-	jobID := parseJobID(result)
+	jobID, jobErr := parseJobID(result)
 
 	response := map[string]interface{}{
 		"status":         "submitted",
@@ -616,7 +601,7 @@ func (r *Registry) executeLeaveDirectoryService(ctx context.Context, client *tru
 		"message":        fmt.Sprintf("Leaving %s was submitted to TrueNAS; track the task for the result.", dsType),
 	}
 
-	if jobID > 0 {
+	if jobErr == nil {
 		// Never keep the credential values in the stored task arguments.
 		opts := []tasks.TaskOption{}
 		if plan.JobMethod != "" {

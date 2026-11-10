@@ -1295,32 +1295,11 @@ func lastScrubWithinThresholdAt(end *time.Time, threshold int, now time.Time) bo
 }
 
 func parseScrubJobID(result json.RawMessage) (int, error) {
-	errNoID := fmt.Errorf("scrub start returned no job id; nothing was confirmed started")
-	if len(result) == 0 || string(result) == "null" {
-		return 0, errNoID
+	id, err := parseJobID(result)
+	if err != nil {
+		return 0, fmt.Errorf("scrub start returned no job id; nothing was confirmed started")
 	}
-	var id int
-	if err := json.Unmarshal(result, &id); err == nil {
-		if id == 0 {
-			return 0, errNoID
-		}
-		return id, nil
-	}
-	var f float64
-	if err := json.Unmarshal(result, &f); err == nil {
-		if f == 0 {
-			return 0, errNoID
-		}
-		return int(f), nil
-	}
-	var arr []int
-	if err := json.Unmarshal(result, &arr); err == nil && len(arr) > 0 {
-		if arr[0] == 0 {
-			return 0, errNoID
-		}
-		return arr[0], nil
-	}
-	return 0, errNoID
+	return id, nil
 }
 
 func estimateScrubDuration(poolSizeBytes int64) int {

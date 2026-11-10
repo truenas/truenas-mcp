@@ -796,8 +796,8 @@ func (r *Registry) executeInstallApp(ctx context.Context, client *truenas.Client
 		return "", fmt.Errorf("failed to install app: %v", err)
 	}
 
-	jobID := parseJobID(result)
-	if jobID == 0 {
+	jobID, err := parseJobID(result)
+	if err != nil {
 		return "", fmt.Errorf("failed to parse job ID as int or array: app.create returned %s", result)
 	}
 
@@ -941,16 +941,9 @@ func (r *Registry) executeDeleteApp(ctx context.Context, client *truenas.Client,
 		return "", fmt.Errorf("failed to delete app: %w", err)
 	}
 
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		var jobIDArray []int
-		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
-			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
-		}
-		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("%s returned empty job ID array", plan.Method)
-		}
-		jobID = jobIDArray[0]
+	jobID, err := parseJobID(result)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
 	opts := []tasks.TaskOption{}

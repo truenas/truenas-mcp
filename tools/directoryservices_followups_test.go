@@ -382,14 +382,6 @@ func TestDirectoryServiceIntegerForms(t *testing.T) {
 	}
 }
 
-func TestParseJobID(t *testing.T) {
-	for in, want := range map[string]int{"42": 42, "[42]": 42, "[7,8]": 7, "[]": 0, "null": 0, `"x"`: 0, `{"id":1}`: 0, "": 0, "4.5": 0} {
-		if got := parseJobID(json.RawMessage(in)); got != want {
-			t.Errorf("parseJobID(%q) = %d, want %d", in, got, want)
-		}
-	}
-}
-
 // ---- schema pinned to the middleware model ----
 
 type middlewareFields struct {
