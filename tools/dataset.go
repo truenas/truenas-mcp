@@ -144,6 +144,19 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 			"estimated_path": fmt.Sprintf("/mnt/%s", name),
 		}
 
+		// create_ancestors defaults to true: list missing parents that
+		// would be created, in order from parent to child, so the client
+		// can report them before confirming.
+		if createAncestors, _ := payload["create_ancestors"].(bool); createAncestors {
+			missing, err := missingAncestorDatasets(client, name)
+			if err != nil {
+				return "", err
+			}
+			preview["ancestors_to_create"] = missing
+		} else {
+			preview["ancestors_to_create"] = []string{}
+		}
+
 		formatted, err := json.MarshalIndent(preview, "", "  ")
 		if err != nil {
 			return "", err
@@ -196,6 +209,48 @@ func handleCreateDataset(client *truenas.Client, args map[string]interface{}) (s
 	}
 
 	return string(formatted), nil
+}
+
+// datasetAncestorNames returns intermediate parent datasets of name, from
+// the pool's first child down to the parent of the leaf (not the pool or
+// the dataset being created).
+func datasetAncestorNames(name string) []string {
+	parts := strings.Split(name, "/")
+	if len(parts) < 3 {
+		return nil
+	}
+	ancestors := make([]string, 0, len(parts)-2)
+	for i := 1; i < len(parts)-1; i++ {
+		ancestors = append(ancestors, strings.Join(parts[:i+1], "/"))
+	}
+	return ancestors
+}
+
+// missingAncestorDatasets returns ancestors of name that do not yet exist,
+// in parent-to-child order.
+func missingAncestorDatasets(client *truenas.Client, name string) ([]string, error) {
+	ancestors := datasetAncestorNames(name)
+	if len(ancestors) == 0 {
+		return []string{}, nil
+	}
+	missing := make([]string, 0, len(ancestors))
+	for _, ancestor := range ancestors {
+		result, err := client.Call("pool.dataset.query",
+			[]interface{}{[]interface{}{"name", "=", ancestor}},
+			map[string]interface{}{},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check ancestor dataset %s: %w", ancestor, err)
+		}
+		var rows []interface{}
+		if err := json.Unmarshal(result, &rows); err != nil {
+			return nil, fmt.Errorf("failed to parse ancestor query for %s: %w", ancestor, err)
+		}
+		if len(rows) == 0 {
+			missing = append(missing, ancestor)
+		}
+	}
+	return missing, nil
 }
 
 // validateDatasetName validates the dataset name format
