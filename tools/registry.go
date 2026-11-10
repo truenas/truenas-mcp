@@ -4454,18 +4454,9 @@ func (r *Registry) executeUpgradeApp(ctx context.Context, client *truenas.Client
 	}
 
 	// Parse the job ID (app.upgrade may return an array [job_id] or just job_id)
-	var jobID int
-	// First try to parse as an integer
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		// If that fails, try parsing as an array and extract the first element
-		var jobIDArray []int
-		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
-			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
-		}
-		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("app.upgrade returned empty job ID array")
-		}
-		jobID = jobIDArray[0]
+	jobID, err := parseJobID(result)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
 	healthTimeout, _ := plan.Result["health_timeout"].(time.Duration)
@@ -4617,16 +4608,9 @@ func (r *Registry) executeStartApp(ctx context.Context, client *truenas.Client, 
 		return "", fmt.Errorf("failed to start app: %w", err)
 	}
 
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		var jobIDArray []int
-		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
-			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
-		}
-		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("%s returned empty job ID array", plan.Method)
-		}
-		jobID = jobIDArray[0]
+	jobID, err := parseJobID(result)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
 	opts := []tasks.TaskOption{}
@@ -4713,16 +4697,9 @@ func (r *Registry) executeStopApp(ctx context.Context, client *truenas.Client, a
 		return "", fmt.Errorf("failed to stop app: %w", err)
 	}
 
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		var jobIDArray []int
-		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
-			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
-		}
-		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("%s returned empty job ID array", plan.Method)
-		}
-		jobID = jobIDArray[0]
+	jobID, err := parseJobID(result)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
 	opts := []tasks.TaskOption{}
@@ -4876,16 +4853,9 @@ func (r *Registry) executeUpdateApp(ctx context.Context, client *truenas.Client,
 		return "", fmt.Errorf("failed to update app: %w", err)
 	}
 
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		var jobIDArray []int
-		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
-			return "", fmt.Errorf("failed to parse job ID: int error: %v, array error: %v", err, err2)
-		}
-		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("app.update returned empty job ID array")
-		}
-		jobID = jobIDArray[0]
+	jobID, err := parseJobID(result)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
 	opts := []tasks.TaskOption{}
@@ -6383,8 +6353,8 @@ func (r *Registry) executeDownloadUpdate(ctx context.Context, client *truenas.Cl
 		return "", fmt.Errorf("failed to start update download: %w", err)
 	}
 
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
+	jobID, err := parseJobID(result)
+	if err != nil {
 		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
@@ -6613,8 +6583,8 @@ func (r *Registry) executeApplyUpdate(ctx context.Context, client *truenas.Clien
 		return "", fmt.Errorf("failed to start update: %w", err)
 	}
 
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
+	jobID, err := parseJobID(result)
+	if err != nil {
 		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
