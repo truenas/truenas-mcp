@@ -1944,6 +1944,9 @@ func (r *Registry) ListTools() []mcp.Tool {
 		if r.checkPolicy(name) != nil {
 			continue
 		}
+		if r.toolHiddenByVersion(name) {
+			continue
+		}
 		if r.readOnly && readOnlyDryRunTools[name] {
 			tools = append(tools, readOnlyDryRunDefinition(tool.Definition))
 		} else {
@@ -2023,6 +2026,11 @@ func (r *Registry) CallTool(ctx context.Context, name string, args map[string]in
 	}
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("tool %s was not run: %w", name, err)
+	}
+	// Hide-and-refuse tools the connected TrueNAS release cannot run,
+	// and refuse every tool if the NAS is below the 25.10 minimum.
+	if err := r.checkVersion(name); err != nil {
+		return "", err
 	}
 	if destructive {
 		return r.callDestructive(name, tool, args, legacyConfirm)
@@ -3660,7 +3668,7 @@ func handleGetDiskMetrics(client *truenas.Client, args map[string]interface{}) (
 }
 
 // fallbackArcGraphs is used when the server's supported graphs cannot be
-// discovered. 'arcsize' is accepted by reporting.get_data on 25.04 through
+// discovered. 'arcsize' is accepted by reporting.get_data on 25.10 through
 // 27.0; other ARC graphs vary between releases.
 var fallbackArcGraphs = []string{"arcsize"}
 

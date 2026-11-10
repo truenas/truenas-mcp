@@ -201,6 +201,9 @@ func main() {
 		log.Fatalf("%s", startupAuthError(err))
 	}
 	log.Println("Successfully authenticated with TrueNAS middleware")
+	if err := client.RequireSupportedVersion(); err != nil {
+		log.Fatalf("%s", err)
+	}
 
 	// Create task manager
 	taskConfig := tasks.PollerConfig{

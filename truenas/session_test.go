@@ -173,8 +173,8 @@ func TestOldTrueNASGets404Hint(t *testing.T) {
 	}
 	defer c.Close()
 	err = c.Authenticate()
-	if err == nil || !strings.Contains(err.Error(), "TrueNAS 25.04 or later required") {
-		t.Errorf("got %v, want the TrueNAS 25.04 hint", err)
+	if err == nil || !strings.Contains(err.Error(), "TrueNAS 25.10 or later required") {
+		t.Errorf("got %v, want the TrueNAS 25.10 hint", err)
 	}
 }
 
