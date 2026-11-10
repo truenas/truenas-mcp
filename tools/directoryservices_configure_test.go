@@ -665,6 +665,7 @@ func TestConfigureDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	}
 
 	var reply struct {
+		Status        string `json:"status"`
 		Success       bool   `json:"success"`
 		DirectoryType string `json:"directory_type"`
 		Enabled       bool   `json:"enabled"`
@@ -674,7 +675,7 @@ func TestConfigureDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &reply); err != nil {
 		t.Fatal(err)
 	}
-	if !reply.Success || reply.DirectoryType != "ACTIVEDIRECTORY" || !reply.Enabled || reply.JobID != 4242 || reply.TaskID == "" {
+	if reply.Status != "submitted" || reply.Success || reply.DirectoryType != "ACTIVEDIRECTORY" || !reply.Enabled || reply.JobID != 4242 || reply.TaskID == "" {
 		t.Errorf("reply = %+v\n%s", reply, out)
 	}
 	if strings.Contains(out, "s3cret") {
@@ -976,6 +977,7 @@ func TestLeaveDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	onlyMethods(t, fake, "auth.login_ex", "directoryservices.status", "directoryservices.leave", "core.get_jobs")
 
 	var reply struct {
+		Status        string `json:"status"`
 		Success       bool   `json:"success"`
 		DirectoryType string `json:"directory_type"`
 		JobID         int    `json:"job_id"`
@@ -984,7 +986,7 @@ func TestLeaveDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &reply); err != nil {
 		t.Fatal(err)
 	}
-	if !reply.Success || reply.DirectoryType != "ACTIVEDIRECTORY" || reply.JobID != 77 || reply.TaskID == "" {
+	if reply.Status != "submitted" || reply.Success || reply.DirectoryType != "ACTIVEDIRECTORY" || reply.JobID != 77 || reply.TaskID == "" {
 		t.Fatalf("reply = %s", out)
 	}
 	if strings.Contains(out, "s3cret") {

@@ -93,7 +93,8 @@ func TestShareDryRunWarnings(t *testing.T) {
 	t.Run("NFS without maproot does not claim root access", func(t *testing.T) {
 		r := shareDryRunRegistry(t, nil)
 		resp := callShareDryRun(t, r, "create_nfs_share", mergeShareArgs(nfsBase, nil))
-		if hasWarning(warningStrings(resp), "root access") {
+		ws := warningStrings(resp)
+		if hasWarning(ws, "root access") || hasWarning(ws, "root file access") {
 			t.Errorf("default export is root_squash, but got root-access warning: %v", resp["security_warnings"])
 		}
 	})
@@ -118,7 +119,7 @@ func TestShareDryRunWarnings(t *testing.T) {
 			"maproot_group": "root",
 		}))
 		ws := warningStrings(resp)
-		if hasWarning(ws, "no_root_squash") || hasWarning(ws, "root access") {
+		if hasWarning(ws, "no_root_squash") || hasWarning(ws, "root access") || hasWarning(ws, "root file access") {
 			t.Errorf("maproot_group=root alone is not no_root_squash or root access: %v", ws)
 		}
 		if !hasWarning(ws, "gid 0") || !hasWarning(ws, "root_squash") {

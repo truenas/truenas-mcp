@@ -249,6 +249,7 @@ func TestConfigureDirectoryServiceBareDisable(t *testing.T) {
 			t.Fatalf("params = %v", calls)
 		}
 		var reply struct {
+			Status        string `json:"status"`
 			Success       bool   `json:"success"`
 			Enabled       bool   `json:"enabled"`
 			DirectoryType string `json:"directory_type"`
@@ -259,7 +260,7 @@ func TestConfigureDirectoryServiceBareDisable(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &reply); err != nil {
 			t.Fatal(err)
 		}
-		if !reply.Success || reply.Enabled || reply.DirectoryType != "" || reply.JobID != 4242 || reply.TaskID == "" ||
+		if reply.Status != "submitted" || reply.Success || reply.Enabled || reply.DirectoryType != "" || reply.JobID != 4242 || reply.TaskID == "" ||
 			!strings.Contains(reply.Message, "Disabling the configured directory service") {
 			t.Errorf("reply = %+v", reply)
 		}

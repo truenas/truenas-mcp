@@ -306,7 +306,7 @@ func (r *Registry) handleConfigureDirectoryService(client *truenas.Client, args 
 	jobID := parseJobID(result)
 
 	response := map[string]interface{}{
-		"success": true,
+		"status":  "submitted",
 		"enabled": enabled,
 	}
 	if serviceType != "" {
@@ -369,7 +369,7 @@ func (r *Registry) handleLeaveDirectoryService(client *truenas.Client, args map[
 	jobID := parseJobID(result)
 
 	response := map[string]interface{}{
-		"success":        true,
+		"status":         "submitted",
 		"directory_type": status.Type,
 		"message":        fmt.Sprintf("Leaving %s was submitted to TrueNAS; track the task for the result.", status.Type),
 	}
