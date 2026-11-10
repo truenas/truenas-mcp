@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func goBuildLines(src string) []string {
@@ -92,25 +94,161 @@ func TestBuildAndReleaseBinariesDisableCgo(t *testing.T) {
 	}
 }
 
-// TestBuildWorkflowChecksLinuxBinaryIsStatic requires a build.yml step
-// that inspects the Linux amd64 binary with file (and ldd) and fails when
-// that binary is dynamically linked.
-func TestBuildWorkflowChecksLinuxBinaryIsStatic(t *testing.T) {
-	src := issue114Read(t, ".github/workflows/build.yml")
-	if !strings.Contains(src, "truenas-mcp-linux-amd64") {
-		t.Fatal("build.yml does not mention truenas-mcp-linux-amd64")
+type workflowStep struct {
+	Name string `yaml:"name"`
+	Run  string `yaml:"run"`
+}
+
+type workflowDoc struct {
+	Jobs map[string]struct {
+		Steps []workflowStep `yaml:"steps"`
+	} `yaml:"jobs"`
+}
+
+// linuxStaticCheckSteps parses a GitHub Actions workflow and returns the
+// steps whose run scripts inspect truenas-mcp-linux-amd64 with file and ldd.
+func linuxStaticCheckSteps(src string) ([]workflowStep, error) {
+	var doc workflowDoc
+	if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
+		return nil, err
 	}
-	if !strings.Contains(src, "file") || !strings.Contains(src, "truenas-mcp-linux-amd64") {
-		t.Error("build.yml should run file on truenas-mcp-linux-amd64")
+	var found []workflowStep
+	for _, job := range doc.Jobs {
+		for _, step := range job.Steps {
+			if isLinuxStaticCheckStep(step) {
+				found = append(found, step)
+			}
+		}
 	}
-	// A passing check must look for the static file(1) tag and fail otherwise.
-	if !strings.Contains(src, "statically linked") {
-		t.Error("build.yml should assert that file reports the Linux binary as statically linked")
+	return found, nil
+}
+
+func isLinuxStaticCheckStep(step workflowStep) bool {
+	run := step.Run
+	return strings.Contains(run, "truenas-mcp-linux-amd64") &&
+		strings.Contains(run, "file") &&
+		strings.Contains(run, "ldd")
+}
+
+func assertLinuxStaticCheckStep(t *testing.T, rel string, step workflowStep) {
+	t.Helper()
+	run := step.Run
+	if !strings.Contains(run, "file") || !strings.Contains(run, "truenas-mcp-linux-amd64") {
+		t.Errorf("%s step %q should run file on truenas-mcp-linux-amd64", rel, step.Name)
 	}
-	if !strings.Contains(src, "ldd") || !strings.Contains(src, "not a dynamic executable") {
-		t.Error("build.yml should also run ldd and accept 'not a dynamic executable'")
+	if !strings.Contains(run, "statically linked") {
+		t.Errorf("%s step %q should assert that file reports the Linux binary as statically linked", rel, step.Name)
 	}
-	if !strings.Contains(src, "exit 1") {
-		t.Error("build.yml static-link check should fail (exit 1) when the Linux binary is dynamic")
+	if !strings.Contains(run, "ldd") || !strings.Contains(run, "not a dynamic executable") {
+		t.Errorf("%s step %q should also run ldd and accept 'not a dynamic executable'", rel, step.Name)
 	}
+	if !strings.Contains(run, "exit 1") {
+		t.Errorf("%s step %q should fail (exit 1) when the Linux binary is dynamic", rel, step.Name)
+	}
+	// If linux-arm64 is added, ldd on a foreign-arch binary is not reliable.
+	lower := strings.ToLower(run)
+	if !strings.Contains(lower, "arm64") || !(strings.Contains(lower, "readelf") || strings.Contains(lower, "file or readelf")) {
+		t.Errorf("%s step %q should comment that a future linux-arm64 check should use file or readelf rather than ldd", rel, step.Name)
+	}
+}
+
+// TestBuildAndReleaseWorkflowsCheckLinuxBinaryIsStatic requires both
+// build.yml and release.yml to contain a parsed step that runs file and
+// ldd on truenas-mcp-linux-amd64 and fails when that binary is dynamic.
+// Whole-file substring checks are not enough: "file" already appears on
+// main as go-version-file.
+func TestBuildAndReleaseWorkflowsCheckLinuxBinaryIsStatic(t *testing.T) {
+	for _, rel := range []string{".github/workflows/build.yml", ".github/workflows/release.yml"} {
+		src := issue114Read(t, rel)
+		steps, err := linuxStaticCheckSteps(src)
+		if err != nil {
+			t.Fatalf("%s is not valid YAML: %v", rel, err)
+		}
+		if len(steps) != 1 {
+			t.Errorf("%s: want exactly one Linux static-link check step, got %d", rel, len(steps))
+			continue
+		}
+		assertLinuxStaticCheckStep(t, rel, steps[0])
+	}
+}
+
+func TestLinuxStaticCheckStepFinder(t *testing.T) {
+	t.Run("missing step", func(t *testing.T) {
+		// Resembles main: go-version-file contains "file", but there is no
+		// static-link check step.
+		src := `
+name: Build and Package
+jobs:
+  build:
+    steps:
+    - name: Set up Go
+      uses: actions/setup-go@deadbeef
+      with:
+        go-version-file: go.mod
+    - name: Build for Linux AMD64
+      run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o truenas-mcp-linux-amd64 ./cmd/truenas-mcp
+`
+		steps, err := linuxStaticCheckSteps(src)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if len(steps) != 0 {
+			t.Fatalf("workflow missing the check step: got %+v", steps)
+		}
+	})
+
+	t.Run("strings elsewhere are not a check step", func(t *testing.T) {
+		src := `
+name: Build
+jobs:
+  build:
+    steps:
+    - name: Set up Go
+      with:
+        go-version-file: go.mod
+    - name: Notes
+      run: |
+        echo "statically linked"
+        echo "not a dynamic executable"
+        exit 1
+`
+		steps, err := linuxStaticCheckSteps(src)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if len(steps) != 0 {
+			t.Fatalf("unrelated step must not count as the static-link check: got %+v", steps)
+		}
+	})
+
+	t.Run("valid step is found", func(t *testing.T) {
+		src := `
+name: Release
+jobs:
+  release:
+    steps:
+    - name: Check Linux binary is statically linked
+      run: |
+        # If a linux-arm64 artifact is added, check it with file or
+        # readelf -l (no INTERP) instead: ldd on a foreign-arch binary
+        # is not reliable.
+        bin=truenas-mcp-linux-amd64
+        file_out=$(file "$bin")
+        ldd_out=$(ldd "$bin" 2>&1 || true)
+        if ! echo "$file_out" | grep -q 'statically linked'; then
+          exit 1
+        fi
+        if ! echo "$ldd_out" | grep -qi 'not a dynamic executable'; then
+          exit 1
+        fi
+`
+		steps, err := linuxStaticCheckSteps(src)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if len(steps) != 1 {
+			t.Fatalf("want 1 step, got %d", len(steps))
+		}
+		assertLinuxStaticCheckStep(t, "fixture", steps[0])
+	})
 }

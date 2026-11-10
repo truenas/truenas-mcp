@@ -76,6 +76,9 @@ jobs:
 
     - name: Check Linux binary is statically linked
       run: |
+        # If a linux-arm64 artifact is added, check it with file or
+        # readelf -l (no INTERP) instead: ldd on a foreign-arch binary
+        # is not reliable.
         set -euo pipefail
         bin=truenas-mcp-linux-amd64
         file_out=$(file "$bin")
