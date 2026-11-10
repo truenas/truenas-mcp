@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
+	"os"
 	"strings"
 	"testing"
 
@@ -140,5 +142,34 @@ func TestRedactErrorData(t *testing.T) {
 	got = string(redactErrorData(json.RawMessage(`{"password":"` + secret + `"}`)))
 	if strings.Contains(got, secret) || !strings.Contains(got, redact.Marker) {
 		t.Errorf("object data not redacted: %s", got)
+	}
+}
+
+// TestDebugLogsRedactMethodName covers the debug-only stderr line that
+// logs the method being handled: a client-supplied name that looks like
+// a secret must be redacted, and the secret must not appear on stderr.
+func TestDebugLogsRedactMethodName(t *testing.T) {
+	const secret = "s3cret"
+	var logs syncBuffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	c, run := session(t, newTestHandler(fakeRegistry{}, true))
+	c.initialize()
+	if m := c.call(float64(1), "tools/call", toolArgs("password="+secret, nil)); errorCode(m) != -32602 {
+		t.Errorf("unknown tool: %v; want -32602", m)
+	}
+	if err := run.wait(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "Handling method:") {
+		t.Errorf("debug log is missing the Handling method line:\n%s", out)
+	}
+	if strings.Contains(out, secret) {
+		t.Errorf("debug log leaked %q:\n%s", secret, out)
+	}
+	if !strings.Contains(out, redact.Marker) {
+		t.Errorf("debug log has no redaction marker:\n%s", out)
 	}
 }

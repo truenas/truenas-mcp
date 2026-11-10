@@ -130,12 +130,12 @@ func (c *lineConn) decode(line []byte) (jsonrpc.Message, error) {
 		// anything. Only notifications/* methods are notifications in MCP.
 		if !req.IsCall() && !strings.HasPrefix(req.Method, "notifications/") {
 			if c.debug {
-				log.Printf("Ignoring %s sent without an id (a notification)", req.Method)
+				log.Printf("Ignoring %s sent without an id (a notification)", redact.Text(req.Method))
 			}
 			return nil, nil
 		}
 		if c.debug {
-			log.Printf("Handling method: %s (id: %v)", req.Method, req.ID.Raw())
+			log.Printf("Handling method: %s (id: %v)", redact.Text(req.Method), req.ID.Raw())
 		}
 		c.track(req)
 	}
