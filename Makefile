@@ -33,7 +33,7 @@ clean:
 
 test:
 	@echo "Running tests..."
-	go test -v ./...
+	go test -v -race ./...
 
 # Pinned linter versions (Go 1.27 compatible). CI runs this same target.
 STATICCHECK_VERSION ?= v0.8.2
