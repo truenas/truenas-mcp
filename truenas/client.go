@@ -123,6 +123,11 @@ const (
 // running the request, so larger requests are refused before sending.
 const maxRequestBytes = 64 * 1024
 
+// maxResponseBytes is the largest TrueNAS response this client will read
+// (10 MiB). A larger frame is not delivered; the connection is dropped
+// and readError explains that the query should be narrowed.
+const maxResponseBytes = 10 * 1024 * 1024
+
 // errRequestTooLarge explains a request over maxRequestBytes.
 func errRequestTooLarge(method string, size int) error {
 	return fmt.Errorf("request too large for the TrueNAS API: the %s request is %.1f KiB, over the %d KiB limit for a single API message; "+
@@ -133,11 +138,18 @@ func errRequestTooLarge(method string, size int) error {
 // readError words a read failure that drops the connection. A close with
 // code 1009 means TrueNAS refused a message over its size limit; the raw
 // "websocket: close 1009 (message too big)" text does not say what to do.
+// websocket.ErrReadLimit means a response exceeded maxResponseBytes; the
+// raw "websocket: read limit exceeded" text looks like a lost connection
+// and does not say to narrow the query.
 func readError(err error) error {
 	if websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
 		return fmt.Errorf("TrueNAS closed the connection because a request was too large for its API (limit %d KiB per message); "+
 			"the oversized request was not executed. Reduce the size of the input and try again; the connection is re-established on the next request (%w)",
 			maxRequestBytes/1024, err)
+	}
+	if errors.Is(err, websocket.ErrReadLimit) {
+		return fmt.Errorf("the TrueNAS response was larger than %d MiB; narrow the query with filters or a limit and try again. The connection is re-established on the next request (%w)",
+			maxResponseBytes/(1024*1024), err)
 	}
 	return fmt.Errorf("failed to read response: %w", err)
 }
@@ -387,7 +399,7 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 
 	// Set read limit to handle large responses (e.g., large upgrade summaries)
-	conn.SetReadLimit(10 * 1024 * 1024) // 10MB
+	conn.SetReadLimit(maxResponseBytes)
 
 	// JSON-RPC 2.0 has no connect handshake: the socket is ready once upgraded.
 	c.conn = conn

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +36,10 @@ type fakeTrueNAS struct {
 	noPong      bool   // ignore websocket pings, like a half-open connection
 	maxMessage  int    // close with 1009 on a frame larger than this, as TrueNAS does (0 = no limit)
 	infoVersion string // system.info version field; default 25.10.0
+	// oversizeResultFor, when set, makes that method's result larger than
+	// the client's response read limit (oversizeResultBytes, or 10 MiB+1).
+	oversizeResultFor   string
+	oversizeResultBytes int
 
 	mu         sync.Mutex
 	frames     []string
@@ -183,6 +188,13 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 			calls++
 			// Secret-bearing result, like core.get_jobs job arguments
 			reply["result"] = map[string]interface{}{"bindpw": "responsesecret9", "domain": "example.com"}
+		}
+		if f.oversizeResultFor != "" && req.Method == f.oversizeResultFor {
+			n := f.oversizeResultBytes
+			if n <= 0 {
+				n = 10*1024*1024 + 1
+			}
+			reply["result"] = strings.Repeat("x", n)
 		}
 		if f.holdMethod != "" && (f.holdMethod == "*" || f.holdMethod == req.Method) && (f.holdConn == 0 || f.holdConn == index) {
 			go func() {
