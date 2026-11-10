@@ -207,7 +207,7 @@ func TestReadOnlyHidesAndRefusesWrites(t *testing.T) {
 			continue
 		}
 		for _, args := range []map[string]interface{}{{}, {"confirm": true}, {"dry_run": true}} {
-			_, err := r.CallTool(name, args)
+			_, err := r.CallTool(t.Context(), name, args)
 			if err == nil || !strings.Contains(err.Error(), "read-only mode") {
 				t.Errorf("read-only: CallTool(%s, %v) err = %v, want read-only refusal", name, args, err)
 			}
@@ -216,7 +216,7 @@ func TestReadOnlyHidesAndRefusesWrites(t *testing.T) {
 			t.Errorf("read-only: handler for %s ran", name)
 		}
 	}
-	if _, err := r.CallTool("query_pools", nil); err != nil {
+	if _, err := r.CallTool(t.Context(), "query_pools", nil); err != nil {
 		t.Errorf("read-only: read tool refused: %v", err)
 	}
 }
@@ -230,10 +230,10 @@ func TestAllowAndDenyLists(t *testing.T) {
 	if names := listed(r); len(names) != 2 || !names["query_pools"] || !names["create_dataset"] {
 		t.Errorf("allowlist exposed %v", names)
 	}
-	if _, err := r.CallTool("create_dataset", map[string]interface{}{}); err != nil {
+	if _, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{}); err != nil {
 		t.Errorf("allowed tool refused: %v", err)
 	}
-	if _, err := r.CallTool("query_apps", nil); err == nil || !strings.Contains(err.Error(), "--allow-tools") {
+	if _, err := r.CallTool(t.Context(), "query_apps", nil); err == nil || !strings.Contains(err.Error(), "--allow-tools") {
 		t.Errorf("unlisted tool: err = %v", err)
 	}
 
@@ -243,7 +243,7 @@ func TestAllowAndDenyLists(t *testing.T) {
 	if listed(r)["system_reboot"] || !listed(r)["query_pools"] {
 		t.Error("deny list not applied to tools/list")
 	}
-	if _, err := r.CallTool("system_reboot", map[string]interface{}{"confirm": true}); err == nil {
+	if _, err := r.CallTool(t.Context(), "system_reboot", map[string]interface{}{"confirm": true}); err == nil {
 		t.Error("denied tool was callable")
 	}
 
@@ -269,7 +269,7 @@ func TestDestructiveToolsRequireConfirm(t *testing.T) {
 		if hasParam(r.tools[name], "app_name") {
 			args["app_name"] = "plex"
 		}
-		out, err := r.CallTool(name, args)
+		out, err := r.CallTool(t.Context(), name, args)
 		if err != nil {
 			t.Fatalf("%s without confirm: %v", name, err)
 		}
@@ -284,10 +284,10 @@ func TestDestructiveToolsRequireConfirm(t *testing.T) {
 			t.Errorf("%s: preview mutated the caller's arguments", name)
 		}
 
-		if _, err := r.CallTool(name, map[string]interface{}{"dry_run": true}); err != nil {
+		if _, err := r.CallTool(t.Context(), name, map[string]interface{}{"dry_run": true}); err != nil {
 			t.Errorf("%s dry run: %v", name, err)
 		}
-		if _, err := r.CallTool(name, map[string]interface{}{"confirm": true}); err != nil {
+		if _, err := r.CallTool(t.Context(), name, map[string]interface{}{"confirm": true}); err != nil {
 			t.Errorf("%s with confirm: %v", name, err)
 		}
 		calls := seen[name]
@@ -296,7 +296,7 @@ func TestDestructiveToolsRequireConfirm(t *testing.T) {
 		}
 	}
 	// Write tools that are not destructive run without confirm.
-	if _, err := r.CallTool("create_dataset", map[string]interface{}{}); err != nil || len(seen["create_dataset"]) != 1 {
+	if _, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{}); err != nil || len(seen["create_dataset"]) != 1 {
 		t.Errorf("create_dataset gated: %v", err)
 	}
 }
@@ -305,21 +305,21 @@ func TestSystemRebootAgainstFakeTrueNAS(t *testing.T) {
 	client, fake := newFakeClient(t)
 	r := NewRegistry(client, nil)
 
-	out, err := r.CallTool("system_reboot", map[string]interface{}{})
+	out, err := r.CallTool(t.Context(), "system_reboot", map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "confirmation_required") || !strings.Contains(out, `"hostname": "nas"`) {
 		t.Errorf("unconfirmed reboot reply: %s", out)
 	}
-	if _, err := r.CallTool("system_reboot", map[string]interface{}{"dry_run": true}); err != nil {
+	if _, err := r.CallTool(t.Context(), "system_reboot", map[string]interface{}{"dry_run": true}); err != nil {
 		t.Fatal(err)
 	}
 	if calls := fake.called("system.reboot"); len(calls) != 0 {
 		t.Fatalf("system.reboot sent without confirm: %v", calls)
 	}
 
-	if _, err := r.CallTool("system_reboot", map[string]interface{}{"confirm": true, "delay": float64(30)}); err != nil {
+	if _, err := r.CallTool(t.Context(), "system_reboot", map[string]interface{}{"confirm": true, "delay": float64(30)}); err != nil {
 		t.Fatal(err)
 	}
 	calls := fake.called("system.reboot")
@@ -335,7 +335,7 @@ func TestSystemRebootAgainstFakeTrueNAS(t *testing.T) {
 	}
 
 	for _, d := range []interface{}{-1.0, 86401.0, 1e12, 1.5, "60", true} {
-		if _, err := r.CallTool("system_reboot", map[string]interface{}{"confirm": true, "delay": d}); err == nil {
+		if _, err := r.CallTool(t.Context(), "system_reboot", map[string]interface{}{"confirm": true, "delay": d}); err == nil {
 			t.Errorf("delay %v accepted", d)
 		}
 	}
@@ -374,7 +374,7 @@ func TestAnnotationsPresent(t *testing.T) {
 	if a := r.tools["update_app"].Definition.Annotations; !a.DestructiveHint {
 		t.Error("update_app: destructiveHint false")
 	}
-	if _, err := r.CallTool("update_app", map[string]interface{}{}); err != nil && strings.Contains(err.Error(), "confirm") {
+	if _, err := r.CallTool(t.Context(), "update_app", map[string]interface{}{}); err != nil && strings.Contains(err.Error(), "confirm") {
 		t.Errorf("update_app gated: %v", err)
 	}
 
@@ -390,7 +390,7 @@ func TestConfirmAndDryRunMustBeBooleans(t *testing.T) {
 	seen := stubHandlers(r)
 	for _, v := range []interface{}{"true", 1.0, nil, []interface{}{true}, map[string]interface{}{"x": true}} {
 		for _, key := range []string{"confirm", "dry_run"} {
-			out, err := r.CallTool("delete_app", map[string]interface{}{"app_name": "plex", key: v})
+			out, err := r.CallTool(t.Context(), "delete_app", map[string]interface{}{"app_name": "plex", key: v})
 			if err != nil || !strings.Contains(out, "confirmation_required") {
 				t.Errorf("%s=%#v: out=%s err=%v, want preview", key, v, out, err)
 			}
@@ -416,11 +416,11 @@ func TestDryRunOnlyCountsWhereDeclared(t *testing.T) {
 			return "done", nil
 		},
 	}
-	out, err := r.CallTool("test_unclassified", map[string]interface{}{"dry_run": true})
+	out, err := r.CallTool(t.Context(), "test_unclassified", map[string]interface{}{"dry_run": true})
 	if err != nil || !strings.Contains(out, "confirmation_required") || ran != 0 {
 		t.Errorf("dry_run bypassed the gate: out=%s err=%v ran=%d", out, err, ran)
 	}
-	if _, err := r.CallTool("test_unclassified", map[string]interface{}{"confirm": true}); err != nil || ran != 1 {
+	if _, err := r.CallTool(t.Context(), "test_unclassified", map[string]interface{}{"confirm": true}); err != nil || ran != 1 {
 		t.Errorf("confirm: err=%v ran=%d", err, ran)
 	}
 }
@@ -432,7 +432,7 @@ func TestPreviewFailureDoesNotInviteConfirm(t *testing.T) {
 		return "", fmt.Errorf("app not found: plex")
 	}
 	r.tools["delete_app"] = tool
-	_, err := r.CallTool("delete_app", map[string]interface{}{"app_name": "plex"})
+	_, err := r.CallTool(t.Context(), "delete_app", map[string]interface{}{"app_name": "plex"})
 	if err == nil || !strings.Contains(err.Error(), "Preview failed: app not found: plex. Resolve this before confirming") ||
 		!strings.Contains(err.Error(), "NOT executed") {
 		t.Errorf("preview failure error = %v", err)
@@ -447,7 +447,7 @@ func TestCallToolRecoversFromPanics(t *testing.T) {
 		return m["x"].(string), nil
 	}
 	r.tools["query_pools"] = tool
-	_, err := r.CallTool("query_pools", nil)
+	_, err := r.CallTool(t.Context(), "query_pools", nil)
 	if err == nil || !strings.Contains(err.Error(), "internal error in tool query_pools") {
 		t.Errorf("err = %v", err)
 	}
@@ -554,7 +554,7 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 						for k, v := range extra {
 							call[k] = v
 						}
-						out, err := r.CallTool(name, call)
+						out, err := r.CallTool(t.Context(), name, call)
 						if err != nil && strings.Contains(err.Error(), "internal error") {
 							t.Errorf("%s(%v) panicked", name, call)
 						}
@@ -593,7 +593,7 @@ func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
 		{"id": "25.04.1", "dry_run": true},
 		{"id": "25.04.1"},
 	} {
-		out, err := r.CallTool("delete_boot_environment", args)
+		out, err := r.CallTool(t.Context(), "delete_boot_environment", args)
 		if err != nil {
 			t.Fatalf("delete_boot_environment(%v): %v", args, err)
 		}
@@ -610,7 +610,7 @@ func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
 	// Boot environments that cannot be deleted are reported as blocked in
 	// the preview, with no planned action.
 	for id, want := range map[string]string{"running": "currently running", "protected": "keep flag is set"} {
-		out, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": id, "dry_run": true})
+		out, err := r.CallTool(t.Context(), "delete_boot_environment", map[string]interface{}{"id": id, "dry_run": true})
 		if err != nil {
 			t.Fatalf("delete_boot_environment(%s) dry run: %v", id, err)
 		}
@@ -623,7 +623,7 @@ func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
 	}
 
 	// Confirmed: the real handler runs and destroys exactly that environment.
-	if _, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": "25.04.1", "confirm": true}); err != nil {
+	if _, err := r.CallTool(t.Context(), "delete_boot_environment", map[string]interface{}{"id": "25.04.1", "confirm": true}); err != nil {
 		t.Fatal(err)
 	}
 	calls := fake.called("boot.environment.destroy")
@@ -651,7 +651,7 @@ func TestDeleteBootEnvironmentConfirmedRefusesProtected(t *testing.T) {
 		"protected":       "keep flag is set",
 		"running-minimal": "currently running",
 	} {
-		_, err := r.CallTool("delete_boot_environment", map[string]interface{}{"id": id, "confirm": true})
+		_, err := r.CallTool(t.Context(), "delete_boot_environment", map[string]interface{}{"id": id, "confirm": true})
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("confirmed delete of %q: err = %v, want an error containing %q", id, err, want)
 		}

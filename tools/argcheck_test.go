@@ -36,7 +36,7 @@ func TestUnknownArgumentRejected(t *testing.T) {
 		{"system_reboot", map[string]interface{}{"confirm": true, "padding": secretValue}},
 		{"delete_app", map[string]interface{}{"app_name": "plex", "dry_run": true, "padding": secretValue}},
 	} {
-		out, err := r.CallTool(tc.tool, tc.args)
+		out, err := r.CallTool(t.Context(), tc.tool, tc.args)
 		if err == nil {
 			t.Errorf("%s with unknown key: no error, out=%s", tc.tool, out)
 			continue
@@ -64,14 +64,14 @@ func TestUnknownArgumentRejected(t *testing.T) {
 func TestUnknownArgumentRejectedBeforeAnyMiddlewareCall(t *testing.T) {
 	client, fake := newFakeClient(t)
 	r := NewRegistry(client, nil)
-	if _, err := r.CallTool("query_pools", map[string]interface{}{"padding": 1}); err == nil || !strings.Contains(err.Error(), `"padding"`) {
+	if _, err := r.CallTool(t.Context(), "query_pools", map[string]interface{}{"padding": 1}); err == nil || !strings.Contains(err.Error(), `"padding"`) {
 		t.Fatalf("err = %v", err)
 	}
 	if got := fake.called("pool.query"); len(got) != 0 {
 		t.Errorf("pool.query was called %d time(s)", len(got))
 	}
 	// Without the extra key the same call goes through.
-	if _, err := r.CallTool("query_pools", map[string]interface{}{}); err != nil {
+	if _, err := r.CallTool(t.Context(), "query_pools", map[string]interface{}{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := fake.called("pool.query"); len(got) != 1 {
@@ -96,7 +96,7 @@ func TestEveryToolRejectsUnknownArguments(t *testing.T) {
 				// but then the error legitimately names them as well.
 				continue
 			}
-			_, err := r.CallTool(name, args)
+			_, err := r.CallTool(t.Context(), name, args)
 			if err == nil {
 				t.Errorf("%s accepted %v", name, args)
 				continue
@@ -110,7 +110,7 @@ func TestEveryToolRejectsUnknownArguments(t *testing.T) {
 		}
 		// A key that merely resembles a declared one is unknown too.
 		if keys := declaredKeys(tool); len(keys) > 0 {
-			if _, err := r.CallTool(name, map[string]interface{}{keys[0] + "_": "x"}); err == nil {
+			if _, err := r.CallTool(t.Context(), name, map[string]interface{}{keys[0] + "_": "x"}); err == nil {
 				t.Errorf("%s accepted %q", name, keys[0]+"_")
 			}
 		}
@@ -133,17 +133,17 @@ func TestEveryDeclaredArgumentIsAccepted(t *testing.T) {
 			if !hasParam(tool, "confirm") {
 				delete(args, "confirm")
 			}
-			if _, err := r.CallTool(name, args); err != nil {
+			if _, err := r.CallTool(t.Context(), name, args); err != nil {
 				t.Errorf("%s rejected declared key %q: %v", name, key, err)
 			}
 		}
-		if _, err := r.CallTool(name, all); err != nil {
+		if _, err := r.CallTool(t.Context(), name, all); err != nil {
 			t.Errorf("%s rejected all declared keys: %v", name, err)
 		}
-		if _, err := r.CallTool(name, nil); err != nil {
+		if _, err := r.CallTool(t.Context(), name, nil); err != nil {
 			t.Errorf("%s rejected nil arguments: %v", name, err)
 		}
-		if _, err := r.CallTool(name, map[string]interface{}{}); err != nil {
+		if _, err := r.CallTool(t.Context(), name, map[string]interface{}{}); err != nil {
 			t.Errorf("%s rejected empty arguments: %v", name, err)
 		}
 		if len(seen[name]) == 0 {
@@ -164,23 +164,23 @@ func TestGatedToolsStillAcceptConfirmAndDryRun(t *testing.T) {
 		if !hasParam(tool, "confirm") {
 			t.Errorf("%s: gated tool does not declare confirm", name)
 		}
-		if _, err := r.CallTool(name, map[string]interface{}{"confirm": true}); err != nil {
+		if _, err := r.CallTool(t.Context(), name, map[string]interface{}{"confirm": true}); err != nil {
 			t.Errorf("%s confirm=true: %v", name, err)
 		}
 		if hasParam(tool, "dry_run") {
-			out, err := r.CallTool(name, map[string]interface{}{"dry_run": true})
+			out, err := r.CallTool(t.Context(), name, map[string]interface{}{"dry_run": true})
 			if err != nil {
 				t.Errorf("%s dry_run=true: %v", name, err)
 			}
 			if strings.Contains(out, "confirmation_required") {
 				t.Errorf("%s: dry_run=true was held for confirmation: %s", name, out)
 			}
-			if _, err := r.CallTool(name, map[string]interface{}{"dry_run": true, "confirm": true}); err != nil {
+			if _, err := r.CallTool(t.Context(), name, map[string]interface{}{"dry_run": true, "confirm": true}); err != nil {
 				t.Errorf("%s dry_run+confirm: %v", name, err)
 			}
 		}
 		// Without confirm the call is still held for approval, not rejected.
-		out, err := r.CallTool(name, map[string]interface{}{})
+		out, err := r.CallTool(t.Context(), name, map[string]interface{}{})
 		if err != nil || !strings.Contains(out, "confirmation_required") {
 			t.Errorf("%s without confirm: out=%s err=%v", name, out, err)
 		}
@@ -192,11 +192,11 @@ func TestGatedToolsStillAcceptConfirmAndDryRun(t *testing.T) {
 		t.Fatal("no gated tools found")
 	}
 	// Write tools declare dry_run themselves and accept it.
-	if _, err := r.CallTool("create_dataset", map[string]interface{}{"name": "tank/x", "dry_run": true}); err != nil {
+	if _, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{"name": "tank/x", "dry_run": true}); err != nil {
 		t.Errorf("create_dataset dry_run: %v", err)
 	}
 	// confirm is only declared by destructive tools.
-	if _, err := r.CallTool("create_dataset", map[string]interface{}{"name": "tank/x", "confirm": true}); err == nil || !strings.Contains(err.Error(), `"confirm"`) {
+	if _, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{"name": "tank/x", "confirm": true}); err == nil || !strings.Contains(err.Error(), `"confirm"`) {
 		t.Errorf("create_dataset confirm: err = %v", err)
 	}
 }
@@ -305,7 +305,7 @@ func TestAdditionalPropertiesStayPermissive(t *testing.T) {
 			return "ok", nil
 		},
 	}
-	if _, err := r.CallTool("test_open", map[string]interface{}{"anything": 1, "confirm": true}); err != nil || !ran {
+	if _, err := r.CallTool(t.Context(), "test_open", map[string]interface{}{"anything": 1, "confirm": true}); err != nil || !ran {
 		t.Errorf("permissive tool: err=%v ran=%v", err, ran)
 	}
 }
@@ -316,7 +316,7 @@ func TestPolicyRefusalComesBeforeArgumentValidation(t *testing.T) {
 	if err := r.SetPolicy(Policy{ReadOnly: true}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := r.CallTool("create_dataset", map[string]interface{}{"padding": 1})
+	_, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{"padding": 1})
 	if err == nil || !strings.Contains(err.Error(), "read-only mode") {
 		t.Errorf("err = %v, want the read-only refusal", err)
 	}
@@ -324,7 +324,7 @@ func TestPolicyRefusalComesBeforeArgumentValidation(t *testing.T) {
 
 func TestUnknownToolStillReported(t *testing.T) {
 	r := NewRegistry(nil, nil)
-	if _, err := r.CallTool("no_such_tool", map[string]interface{}{"padding": 1}); err == nil || !strings.Contains(err.Error(), "unknown tool") {
+	if _, err := r.CallTool(t.Context(), "no_such_tool", map[string]interface{}{"padding": 1}); err == nil || !strings.Contains(err.Error(), "unknown tool") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -332,7 +332,7 @@ func TestUnknownToolStillReported(t *testing.T) {
 func TestUnknownArgsErrorKeepsDirectoryServiceMigrationHint(t *testing.T) {
 	client, fake := newFakeClient(t)
 	r := NewRegistry(client, nil)
-	_, err := r.CallTool("configure_directory_service", map[string]interface{}{"type": "activedirectory", "domain": "example.com", "bindpw": "s3cret-value", "enable": true, "confirm": true})
+	_, err := r.CallTool(t.Context(), "configure_directory_service", map[string]interface{}{"type": "activedirectory", "domain": "example.com", "bindpw": "s3cret-value", "enable": true, "confirm": true})
 	if err == nil {
 		t.Fatal("flat arguments accepted")
 	}
@@ -348,12 +348,12 @@ func TestUnknownArgsErrorKeepsDirectoryServiceMigrationHint(t *testing.T) {
 		t.Error("flat arguments reached directoryservices.update")
 	}
 	// A typo that is not an old flat name gets no migration hint.
-	_, err = r.CallTool("configure_directory_service", map[string]interface{}{"enabel": true})
+	_, err = r.CallTool(t.Context(), "configure_directory_service", map[string]interface{}{"enabel": true})
 	if err == nil || strings.Contains(err.Error(), "no longer top-level") {
 		t.Errorf("err = %v", err)
 	}
 	// Other tools never get the hint.
-	_, err = r.CallTool("query_pools", map[string]interface{}{"type": "x"})
+	_, err = r.CallTool(t.Context(), "query_pools", map[string]interface{}{"type": "x"})
 	if err == nil || strings.Contains(err.Error(), "no longer top-level") {
 		t.Errorf("err = %v", err)
 	}

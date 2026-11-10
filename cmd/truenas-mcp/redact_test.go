@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -15,27 +16,29 @@ type secretRegistry struct {
 	err    error
 }
 
-func (r secretRegistry) ListTools() []mcp.Tool { return nil }
+func (r secretRegistry) ListTools() []mcp.Tool {
+	return []mcp.Tool{{Name: "query_directory_services", Description: "fake", InputSchema: map[string]interface{}{"type": "object"}}}
+}
 
-func (r secretRegistry) CallTool(string, map[string]interface{}) (string, error) {
+func (r secretRegistry) CallTool(context.Context, string, map[string]interface{}) (string, error) {
 	return r.result, r.err
 }
 
-func callText(t *testing.T, reg mcp.ToolRegistry) mcp.ToolCallResult {
+// callText calls the tool over the wire and returns the reply's text, so
+// redaction is checked on what actually reaches stdout.
+func callText(t *testing.T, reg mcp.ToolRegistry) (string, bool) {
 	t.Helper()
-	h := NewStdioHandler(reg, false)
-	resp := h.handleToolsCall(&mcp.Request{JSONRPC: "2.0", ID: 1, Method: "tools/call",
-		Params: map[string]interface{}{"name": "query_directory_services"}})
-	res, ok := resp.Result.(mcp.ToolCallResult)
-	if !ok || len(res.Content) != 1 {
-		t.Fatalf("unexpected response: %+v", resp)
+	c, run := session(t, newTestHandler(reg, false))
+	c.initialize()
+	text, isError := toolText(t, c.call(float64(1), "tools/call", toolArgs("query_directory_services", nil)))
+	if err := run.wait(); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	return res
+	return text, isError
 }
 
 func TestToolsCallRedactsResult(t *testing.T) {
-	res := callText(t, secretRegistry{result: "{\n  \"bindpw\": \"fake-bind-pw\",\n  \"binddn\": \"cn=admin\"\n}"})
-	text := res.Content[0].Text
+	text, _ := callText(t, secretRegistry{result: "{\n  \"bindpw\": \"fake-bind-pw\",\n  \"binddn\": \"cn=admin\"\n}"})
 	if strings.Contains(text, "fake-bind-pw") || !strings.Contains(text, redact.Marker) || !strings.Contains(text, "cn=admin") {
 		t.Errorf("result not redacted as expected:\n%s", text)
 	}
@@ -43,9 +46,8 @@ func TestToolsCallRedactsResult(t *testing.T) {
 
 func TestToolsCallRedactsError(t *testing.T) {
 	err := errors.New("API error: [EINVAL] {'bindpw': 'fake-bind-pw'}\n-----BEGIN PRIVATE KEY-----\nFAKEFAKE\n-----END PRIVATE KEY-----")
-	res := callText(t, secretRegistry{err: err})
-	text := res.Content[0].Text
-	if !res.IsError || strings.Contains(text, "fake-bind-pw") || strings.Contains(text, "FAKEFAKE") || !strings.HasPrefix(text, "Error: API error") {
+	text, isError := callText(t, secretRegistry{err: err})
+	if !isError || strings.Contains(text, "fake-bind-pw") || strings.Contains(text, "FAKEFAKE") || !strings.HasPrefix(text, "Error: API error") {
 		t.Errorf("error not redacted as expected:\n%s", text)
 	}
 }

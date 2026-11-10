@@ -96,7 +96,7 @@ func TestReadOnlyDryRunMakesNoWrites(t *testing.T) {
 			for k, v := range extra {
 				args[k] = v
 			}
-			out, err := r.CallTool("upgrade_app", args)
+			out, err := r.CallTool(t.Context(), "upgrade_app", args)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +126,7 @@ func TestReadOnlyRefusesRealUpgrade(t *testing.T) {
 			for k, v := range extra {
 				args[k] = v
 			}
-			out, err := r.CallTool("upgrade_app", args)
+			out, err := r.CallTool(t.Context(), "upgrade_app", args)
 			if err == nil || !strings.Contains(err.Error(), "read-only mode") || !strings.Contains(err.Error(), "NOT executed") {
 				t.Fatalf("out=%q err=%v, want the read-only refusal", out, err)
 			}
@@ -157,7 +157,7 @@ func TestReadOnlyDryRunExceptionIsExplicit(t *testing.T) {
 		if safetyOf(name).Access == Read || readOnlyDryRunTools[name] || !hasParam(tool, "dry_run") {
 			continue
 		}
-		if _, err := r.CallTool(name, map[string]interface{}{"dry_run": true}); err == nil || !strings.Contains(err.Error(), "read-only mode") {
+		if _, err := r.CallTool(t.Context(), name, map[string]interface{}{"dry_run": true}); err == nil || !strings.Contains(err.Error(), "read-only mode") {
 			t.Errorf("%s dry run in read-only mode: err = %v", name, err)
 		}
 		if len(seen[name]) > 0 {
@@ -173,7 +173,7 @@ func TestReadOnlyDryRunExceptionIsExplicit(t *testing.T) {
 	if names := listed(r); len(names) != 2 || !names["upgrade_app"] {
 		t.Errorf("listed %v", names)
 	}
-	if _, err := r.CallTool("upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true}); err == nil || !strings.Contains(err.Error(), "read-only mode") {
+	if _, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true}); err == nil || !strings.Contains(err.Error(), "read-only mode") {
 		t.Errorf("allowlisted real run: err = %v", err)
 	}
 	if err := r.SetPolicy(Policy{ReadOnly: true, Deny: []string{"upgrade_app"}}); err != nil {
@@ -182,7 +182,7 @@ func TestReadOnlyDryRunExceptionIsExplicit(t *testing.T) {
 	if listed(r)["upgrade_app"] {
 		t.Error("denied upgrade_app listed")
 	}
-	if _, err := r.CallTool("upgrade_app", map[string]interface{}{"app_name": "plex", "dry_run": true}); err == nil || !strings.Contains(err.Error(), "--deny-tools") {
+	if _, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex", "dry_run": true}); err == nil || !strings.Contains(err.Error(), "--deny-tools") {
 		t.Errorf("denied dry run: err = %v", err)
 	}
 	if len(seen["upgrade_app"]) > 0 {

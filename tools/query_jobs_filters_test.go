@@ -150,7 +150,7 @@ func TestQueryJobsRejectsBadStateAndMethod(t *testing.T) {
 		fake := &fakeMiddleware{handle: jobsHandle(numberedJobs(3), 3)}
 		client, _ := newFakeClientFrom(t, fake)
 		mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
-		_, err := NewRegistry(client, mgr).CallTool("query_jobs", c.args)
+		_, err := NewRegistry(client, mgr).CallTool(t.Context(), "query_jobs", c.args)
 		mgr.Shutdown()
 		if err == nil {
 			t.Errorf("%v: no error", c.args)
@@ -180,7 +180,7 @@ func TestQueryJobsNeverReturnsRawResult(t *testing.T) {
 		fake := &fakeMiddleware{handle: jobsHandle(jobs, 1)}
 		client, _ := newFakeClientFrom(t, fake)
 		mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
-		out, err := NewRegistry(client, mgr).CallTool("query_jobs", args)
+		out, err := NewRegistry(client, mgr).CallTool(t.Context(), "query_jobs", args)
 		mgr.Shutdown()
 		if err != nil {
 			t.Fatal(err)
@@ -209,7 +209,7 @@ func TestQueryJobsRejectsBadLimit(t *testing.T) {
 		fake := &fakeMiddleware{handle: jobsHandle(numberedJobs(3), 3)}
 		client, _ := newFakeClientFrom(t, fake)
 		mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
-		_, err := NewRegistry(client, mgr).CallTool("query_jobs", args)
+		_, err := NewRegistry(client, mgr).CallTool(t.Context(), "query_jobs", args)
 		mgr.Shutdown()
 		if err == nil {
 			t.Errorf("limit %#v: no error", limit)

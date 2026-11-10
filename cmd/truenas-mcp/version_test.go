@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,17 +39,11 @@ func TestInitializeReportsVersion(t *testing.T) {
 	old := Version
 	Version = "1.2.3-test"
 	t.Cleanup(func() { Version = old })
-	var stdout bytes.Buffer
-	in := rpcLine(t, map[string]interface{}{"id": 1, "method": "initialize"})
-	h := newStdioHandler(fakeRegistry{}, false, strings.NewReader(in), &stdout)
-	if err := h.Run(); err != nil {
+	c, run := session(t, newTestHandler(fakeRegistry{}, false))
+	res := c.initialize()
+	if err := run.wait(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	msgs := checkOnlyJSONRPC(t, stdout.Bytes())
-	if len(msgs) != 1 {
-		t.Fatalf("responses = %v", msgs)
-	}
-	res, _ := msgs[0]["result"].(map[string]interface{})
 	si, _ := res["serverInfo"].(map[string]interface{})
 	if si["name"] != "truenas-mcp" || si["version"] != "1.2.3-test" {
 		t.Errorf("serverInfo = %v, want version 1.2.3-test", si)
