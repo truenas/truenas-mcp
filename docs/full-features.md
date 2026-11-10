@@ -190,8 +190,10 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 
 - **update_app** - Change an installed application's configuration (**destructive**: replaces the configuration in place and restarts the app)
   - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
-  - Applies the same host-path storage and dataset-exists checks as install_app (schema-positive: every storage entry must be present as `type: host_path` with a cleaned path under `/mnt/<pool>/`)
-  - Every call must include the full storage section; omitted storage is refused. Apps that already use ix_volume storage cannot be updated through this tool without converting those entries to host_path
+  - Storage may be omitted to leave current storage unchanged, including existing `ix_volume` entries. If a partial storage object is sent, omitted slots are filled from the current config before the update is submitted, so they do not revert to schema defaults. When a provided slot keeps the same type and location, omitted top-level keys (such as `read_only`) and omitted fields of `host_path_config`, `nfs_config`, and `cifs_config` are also filled from the current slot
+  - New storage entries, and type or location changes that are not a same-type NFS or CIFS server/path change, must be `type: host_path` with a cleaned path under `/mnt/<pool>/` on an existing dataset (the same path and dataset-exists checks as install_app). Unchanged existing entries, including `ix_volume`, are left as they are
+  - Changing the type or location of an existing slot, including an NFS or CIFS server or path, requires `allow_storage_change=true`. The preview and confirmation prompt name each changed slot, its old and new location, and state that data is not migrated
+  - A change to `read_only` or ACL settings (`acl_enable` or `acl`) on a slot whose type and location are unchanged does not need the flag, but is listed as a plan warning with the old and new values
   - Supports dry-run mode
 
 - **start_app** - Start a stopped application
