@@ -72,6 +72,14 @@ func planSystemReboot(ctx context.Context, client *truenas.Client, args map[stri
 		params = append(params, map[string]interface{}{"delay": delay})
 		names = append(names, "options")
 	}
+	hostname, _ := info["hostname"].(string)
+	if hostname == "" {
+		hostname = "system"
+	}
+	delayFact := "delay: immediate (0 seconds)"
+	if delay > 0 {
+		delayFact = confirmFact("delay", delay) + " seconds"
+	}
 	return &writePlan{
 		Tool:       "system_reboot",
 		Method:     systemRebootMethod,
@@ -93,8 +101,10 @@ func planSystemReboot(ctx context.Context, client *truenas.Client, args map[stri
 			"All services (shares, apps, VMs) will be interrupted and every client connection will be dropped.",
 			"This MCP server will lose its connection until TrueNAS is back up.",
 		},
-		EstimatedTime: &EstimatedTime{MinSeconds: 120, MaxSeconds: 600, Note: "Time for the system to come back up"},
-		Result:        map[string]interface{}{"delay": delay},
+		EstimatedTime:  &EstimatedTime{MinSeconds: 120, MaxSeconds: 600, Note: "Time for the system to come back up"},
+		TargetName:     hostname,
+		Result:         map[string]interface{}{"delay": delay},
+		ConfirmSummary: newConfirmSummary("Reboot the system", delayFact),
 	}, nil
 }
 

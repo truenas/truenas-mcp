@@ -909,6 +909,11 @@ func TestLeaveDirectoryServiceDryRunPastPreChecks(t *testing.T) {
 					"A KERBEROS_USER credential with the administrative privileges needed to remove the computer account",
 				}},
 				EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 60, Note: "Time varies based on network and domain controller response"},
+				ConfirmSummary: newConfirmSummary("Leave a directory service",
+					confirmFact("service_type", dsType),
+					confirmBoolFact("enabled", true),
+					confirmFact("status", "HEALTHY"),
+				),
 			}
 			gotJSON, _ := json.Marshal(got)
 			wantJSON, _ := json.Marshal(want)

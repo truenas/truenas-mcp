@@ -670,8 +670,15 @@ optional `dry_run`, and read tools never take one.
 
 **Elicitation (primary path).** If the client declared the MCP form
 elicitation capability, a destructive call without a valid token runs the
-preview and then sends an elicitation whose message is a short summary of
-that preview (tool, target, main warnings) with one required boolean field,
+preview and then sends an elicitation whose message names the tool, the
+target, a short headline of what will happen, and the key facts a human
+needs to approve it (for example current and new versions and whether a
+reboot will follow for `apply_update`; the keys and storage paths
+`update_app` will change; the object name and state for delete and stop
+tools). Those facts are redacted with the same rules as other tool output
+and are cut at 2 KiB with a "more changes not shown" line when the change
+set is larger. The message also includes the main warnings, and has one
+required boolean field,
 `approved`. The server uses the official Go MCP SDK for this: mid-call
 `elicitation/create` on protocol revisions 2025-06-18 and 2025-11-25, and a
 tool result with `inputRequests` (the client retries with the answer) on
@@ -679,7 +686,11 @@ tool result with `inputRequests` (the client retries with the answer) on
 only the plan that was previewed. The prompt is valid for 5 minutes. A
 declined, cancelled, failed or expired prompt executes nothing and does not
 fall back to a confirmation token. A blocked preview (the operation cannot
-proceed) is an error, issues no prompt, and executes nothing.
+proceed) is an error, issues no prompt, and executes nothing. Dry-run
+`planned_actions` for `apply_update` and `download_update` list the
+middleware call and the versions read from the system, not invented
+connect, stop, or verify steps.
+
 
 `--require-human-confirm` (or `TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM`) never
 issues a confirmation token and never redeems one. Destructive tools on
@@ -692,7 +703,9 @@ confirmation token:
 
 1. Call the tool without a token. Nothing is executed. The reply is a
    normal (non-error) result with `"status": "confirmation_required"`,
-   `"executed": false`, the tool's dry-run `preview`, a `confirmation_token`
+   `"executed": false`, the tool's dry-run `preview` (including a
+   `confirm_summary` with the same headline and key facts as the
+   elicitation message, already redacted), a `confirmation_token`
    and `expires_in_seconds` (300).
 2. Show the preview to the user and get their explicit approval.
 3. Call the tool again with exactly the same arguments plus

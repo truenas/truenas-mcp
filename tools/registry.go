@@ -4300,6 +4300,24 @@ func planUpgradeApp(ctx context.Context, client *truenas.Client, args map[string
 		"snapshot_hostpaths": snapshotHostpaths,
 	}
 
+	fromVersion, _ := currentApp["version"].(string)
+	if hv, _ := currentApp["human_version"].(string); hv != "" && hv != fromVersion {
+		if fromVersion == "" {
+			fromVersion = hv
+		} else {
+			fromVersion = fromVersion + " (" + hv + ")"
+		}
+	}
+	toVersion := upgradeTargetDescription(version, summary)
+	upgradeFacts := []string{
+		confirmFact("app", appName),
+		confirmFact("from version", fromVersion),
+		confirmFact("to version", toVersion),
+		confirmBoolFact("snapshot_hostpaths", snapshotHostpaths),
+	}
+	if imageOnly, reason := upgradeIsImageOnly(currentApp, summary); imageOnly {
+		upgradeFacts = append(upgradeFacts, "no snapshot is taken ("+reason+")")
+	}
 	return &writePlan{
 		Tool:          "upgrade_app",
 		Method:        upgradeAppMethod,
@@ -4316,7 +4334,8 @@ func planUpgradeApp(ctx context.Context, client *truenas.Client, args map[string
 			"health_timeout":     healthTimeout,
 			"snapshot_hostpaths": snapshotHostpaths,
 		},
-		Bind: upgradeBind(summary),
+		Bind:           upgradeBind(summary),
+		ConfirmSummary: newConfirmSummary("Upgrade an application", upgradeFacts...),
 	}, nil
 }
 
@@ -4579,6 +4598,10 @@ func planStopApp(ctx context.Context, client *truenas.Client, args map[string]in
 		},
 		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 60, Note: "Depends on app shutdown time"},
 		TargetName:    appName,
+		ConfirmSummary: newConfirmSummary("Stop an application",
+			confirmFact("app", appName),
+			confirmFact("state", state),
+		),
 	}, nil
 }
 
@@ -4744,6 +4767,9 @@ func planUpdateApp(ctx context.Context, client *truenas.Client, args map[string]
 		EstimatedTime: &EstimatedTime{MinSeconds: 10, MaxSeconds: 300, Note: "Depends on app restart time"},
 		TargetName:    appName,
 		Result:        map[string]interface{}{"missing": missing},
+		ConfirmSummary: newConfirmSummary("Update an application configuration",
+			append([]string{confirmFact("app", appName)}, updateAppConfirmFacts(currentConfig, valuesOut)...)...,
+		),
 	}, nil
 }
 
@@ -6192,21 +6218,14 @@ func planDownloadUpdate(ctx context.Context, client *truenas.Client, args map[st
 		Actions: []PlannedAction{
 			{
 				Step:        1,
-				Description: "Connect to TrueNAS update server",
-				Operation:   "connect",
-				Target:      "update.truenas.com",
-			},
-			{
-				Step:        2,
-				Description: desc,
+				Description: "Call update.download to " + strings.ToLower(desc[:1]) + desc[1:],
 				Operation:   "download",
 				Target:      target,
-			},
-			{
-				Step:        3,
-				Description: "Verify update package integrity",
-				Operation:   "verify",
-				Target:      "downloaded update",
+				Details: map[string]interface{}{
+					"current_version":   currentVersion,
+					"requested_train":   train,
+					"requested_version": version,
+				},
 			},
 		},
 		EstimatedTime: &EstimatedTime{
@@ -6337,8 +6356,8 @@ func applyUpdateBlockReasons(result map[string]interface{}) []string {
 
 // planApplyUpdate builds the apply_update plan used by both the dry-run
 // preview and the real call. The middleware write is a single update.run;
-// the preview still describes the stop/update/verify (and optional reboot)
-// steps that call performs.
+// the preview lists that middleware call and the versions and reboot flag
+// read from the system.
 func planApplyUpdate(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	reboot := false
 	if r, ok := args["reboot"].(bool); ok {
@@ -6370,35 +6389,19 @@ func planApplyUpdate(ctx context.Context, client *truenas.Client, args map[strin
 		return nil, fmt.Errorf("failed to parse update status: %w", err)
 	}
 
+	newVersion := applyUpdateBoundVersion(status)
 	actions := []PlannedAction{
 		{
 			Step:        1,
-			Description: "Stop critical system services",
-			Operation:   "stop",
-			Target:      "system services",
-		},
-		{
-			Step:        2,
-			Description: "Apply system update",
+			Description: "Call update.run to apply the available system update",
 			Operation:   "update",
 			Target:      "system",
-			Details:     status,
+			Details: map[string]interface{}{
+				"current_version": currentVersion,
+				"new_version":     newVersion,
+				"reboot":          reboot,
+			},
 		},
-		{
-			Step:        3,
-			Description: "Verify update installation",
-			Operation:   "verify",
-			Target:      "system",
-		},
-	}
-
-	if reboot {
-		actions = append(actions, PlannedAction{
-			Step:        4,
-			Description: "Reboot system to complete update",
-			Operation:   "reboot",
-			Target:      "system",
-		})
 	}
 
 	warnings := []string{
@@ -6437,7 +6440,13 @@ func planApplyUpdate(ctx context.Context, client *truenas.Client, args map[strin
 			MaxSeconds: 900,
 			Note:       "Time varies based on system configuration. Add 60-120s for reboot if enabled.",
 		},
-		Result: map[string]interface{}{"reboot": reboot},
+		TargetName: "system",
+		Result:     map[string]interface{}{"reboot": reboot},
+		ConfirmSummary: newConfirmSummary("Apply a system update",
+			confirmFact("current version", currentVersion),
+			confirmFact("new version", newVersion),
+			confirmBoolFact("reboot", reboot),
+		),
 	}, nil
 }
 

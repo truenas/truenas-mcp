@@ -53,6 +53,9 @@ func (r *Registry) startElicit(ctx context.Context, name string, tool Tool, args
 	if err := plan.blockedReply(); err != nil {
 		return "", err
 	}
+	if err := requireConfirmSummary(name, plan); err != nil {
+		return "", err
+	}
 	tok, err := r.confirmTokens.issueElicit(name, argsHash, planHash)
 	if err != nil {
 		return "", fmt.Errorf("%s%s was NOT executed: %w; nothing was executed", rejectedNote, name, err)
@@ -105,9 +108,11 @@ func requireHumanConfirmError(name string) error {
 	return fmt.Errorf("%s was NOT executed: this server was started with --require-human-confirm / TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM, which requires a client that supports MCP form elicitation; nothing was executed", name)
 }
 
-// elicitationMessage is a short, already-redacted summary of the preview
-// (tool, target, main warnings). It does not include parameter details or
-// current state, which may hold secrets, and it is passed through
+// elicitationMessage is an already-redacted summary of what is being
+// approved: the tool, target, ConfirmSummary headline and key facts, and
+// main warnings. Facts come only from ConfirmSummary, never from
+// Actions[0] or a parsed preview step. Values shown in facts have already
+// been through redact.Value; the finished message is passed through
 // redact.Text as a final backstop.
 func elicitationMessage(name, preview string, plan *writePlan, args map[string]interface{}, legacyConfirm bool) string {
 	var b strings.Builder
@@ -118,16 +123,28 @@ func elicitationMessage(name, preview string, plan *writePlan, args map[string]i
 	b.WriteString(name)
 	b.WriteString(".\n")
 
-	target, action, warnings := elicitationSummary(preview, plan, args)
+	target, warnings := elicitationTargetAndWarnings(preview, plan, args)
 	if target != "" {
 		b.WriteString("\nTarget: ")
 		b.WriteString(target)
 		b.WriteByte('\n')
 	}
-	if action != "" {
+	sum := (*ConfirmSummary)(nil)
+	if plan != nil {
+		sum = plan.ConfirmSummary.forDisplay()
+	}
+	if sum != nil && sum.Headline != "" {
 		b.WriteString("\nThis will: ")
-		b.WriteString(action)
+		b.WriteString(sum.Headline)
 		b.WriteByte('\n')
+		if len(sum.Facts) > 0 {
+			b.WriteString("\nFacts:\n")
+			for _, f := range sum.Facts {
+				b.WriteString("- ")
+				b.WriteString(f)
+				b.WriteByte('\n')
+			}
+		}
 	}
 	if len(warnings) > 0 {
 		b.WriteString("\nWarnings:\n")
@@ -146,38 +163,16 @@ func elicitationMessage(name, preview string, plan *writePlan, args map[string]i
 // argument values (passwords, keys, free-text parameters) are omitted.
 var elicitationIdentityKeys = []string{"app_name", "id", "name", "service_type", "target"}
 
-func elicitationSummary(preview string, plan *writePlan, args map[string]interface{}) (target, action string, warnings []string) {
+func elicitationTargetAndWarnings(preview string, plan *writePlan, args map[string]interface{}) (target string, warnings []string) {
 	if plan != nil {
 		target = strings.TrimSpace(plan.TargetName)
-		action = strings.TrimSpace(plan.Description)
-		if len(plan.Actions) > 0 {
-			if target == "" {
-				target = strings.TrimSpace(plan.Actions[0].Target)
-			}
-			if action == "" {
-				action = strings.TrimSpace(plan.Actions[0].Description)
-			}
-		}
 		warnings = append([]string{}, plan.Warnings...)
 	}
 	var parsed struct {
-		Tool           string `json:"tool"`
-		Warnings       []string
-		PlannedActions []struct {
-			Description string `json:"description"`
-			Target      string `json:"target"`
-		} `json:"planned_actions"`
+		Warnings []string `json:"warnings"`
 	}
-	if json.Unmarshal([]byte(preview), &parsed) == nil {
-		if target == "" && len(parsed.PlannedActions) > 0 {
-			target = strings.TrimSpace(parsed.PlannedActions[0].Target)
-		}
-		if action == "" && len(parsed.PlannedActions) > 0 {
-			action = strings.TrimSpace(parsed.PlannedActions[0].Description)
-		}
-		if len(warnings) == 0 {
-			warnings = parsed.Warnings
-		}
+	if json.Unmarshal([]byte(preview), &parsed) == nil && len(warnings) == 0 {
+		warnings = parsed.Warnings
 	}
 	if target == "" {
 		target = identityTarget(args)
@@ -185,7 +180,7 @@ func elicitationSummary(preview string, plan *writePlan, args map[string]interfa
 	if target == "" && plan != nil {
 		target = identityTargetFromPlan(plan)
 	}
-	return target, action, warnings
+	return target, warnings
 }
 
 func identityTarget(args map[string]interface{}) string {

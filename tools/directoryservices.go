@@ -417,6 +417,7 @@ func planConfigureDirectoryService(ctx context.Context, client *truenas.Client, 
 		conditions = []string{"A directory service is configured on TrueNAS"}
 	}
 
+	force, _ := payload["force"].(bool)
 	return &writePlan{
 		Tool:       "configure_directory_service",
 		Method:     directoryServicesUpdateMethod,
@@ -443,6 +444,14 @@ func planConfigureDirectoryService(ctx context.Context, client *truenas.Client, 
 			"enabled":      enabled,
 			"label":        label,
 		},
+		TargetName: target,
+		ConfirmSummary: newConfirmSummary("Configure a directory service",
+			append([]string{
+				confirmFact("service_type", target),
+				confirmBoolFact("enable", enabled),
+				confirmBoolFact("force", force),
+			}, directoryServiceTargetFacts(payload)...)...,
+		),
 	}, nil
 }
 
@@ -577,7 +586,13 @@ func planLeaveDirectoryService(ctx context.Context, client *truenas.Client, args
 			MaxSeconds: 60,
 			Note:       "Time varies based on network and domain controller response",
 		},
-		Result: map[string]interface{}{"directory_type": status.Type},
+		Result:     map[string]interface{}{"directory_type": status.Type},
+		TargetName: status.Type,
+		ConfirmSummary: newConfirmSummary("Leave a directory service",
+			confirmFact("service_type", status.Type),
+			confirmBoolFact("enabled", status.Enabled),
+			confirmFact("status", directoryStatusLabel(status)),
+		),
 	}, nil
 }
 

@@ -280,6 +280,12 @@ func planDeleteBootEnvironment(ctx context.Context, client *truenas.Client, args
 		Warnings:   warnings,
 		Blocked:    blocked,
 		TargetName: id,
+		ConfirmSummary: newConfirmSummary("Delete a boot environment",
+			confirmFact("id", id),
+			confirmBoolFact("active", active),
+			confirmBoolFact("activated", activated),
+			confirmBoolFact("keep", keep),
+		),
 	}, nil
 }
 

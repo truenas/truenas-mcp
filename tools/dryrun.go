@@ -30,6 +30,10 @@ type DryRunResult struct {
 	// optional so tools that do not set them keep their output unchanged.
 	DryRun   *bool `json:"dry_run,omitempty"`
 	Executed *bool `json:"executed,omitempty"`
+	// ConfirmSummary is the same headline and key facts shown in the
+	// elicitation prompt, already redacted and size-bounded. Omitted when
+	// the plan has none (non-destructive previews).
+	ConfirmSummary *ConfirmSummary `json:"confirm_summary,omitempty"`
 }
 
 // PlannedAction describes a single step in the operation

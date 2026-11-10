@@ -202,6 +202,10 @@ func TestElicitationMasksSecretsInPrompt(t *testing.T) {
 			CurrentState: map[string]interface{}{
 				"bindpw": secret,
 			},
+			ConfirmSummary: newConfirmSummary("Configure a directory service",
+				confirmFact("service_type", "LDAP"),
+				confirmFact("bindpw", secret),
+			),
 		}, nil
 	}
 	tool.Execute = func(_ context.Context, _ *truenas.Client, args map[string]interface{}, _ *writePlan) (string, error) {
