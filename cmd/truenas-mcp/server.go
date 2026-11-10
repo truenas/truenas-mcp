@@ -322,11 +322,32 @@ func elicitationFromRequest(ss *sdk.ServerSession, p *sdk.CallToolParamsRaw) mcp
 		return e
 	}
 	e.Action = res.Action
-	if res.Action == "accept" && res.Content != nil {
-		approved, _ := res.Content[tools.ElicitApprovedField].(bool)
+	if res.Action == "accept" {
+		approved, err := approvedOnly(res.Content)
+		if err != nil {
+			e.ResponseErr = err
+			return e
+		}
 		e.Approved = approved
 	}
 	return e
+}
+
+// approvedOnly reads the required approved boolean from an accept response.
+// Anything other than exactly {approved: bool} is rejected, including extra
+// fields (the 2026-07-28 path does not schema-validate content).
+func approvedOnly(content map[string]any) (bool, error) {
+	if content == nil {
+		return false, errUnexpectedElicitResponse
+	}
+	if len(content) != 1 {
+		return false, errUnexpectedElicitResponse
+	}
+	approved, ok := content[tools.ElicitApprovedField].(bool)
+	if !ok {
+		return false, errUnexpectedElicitResponse
+	}
+	return approved, nil
 }
 
 var errUnexpectedElicitResponse = errors.New("unexpected elicitation response")
@@ -365,7 +386,8 @@ func elicitCallResult(prompt *mcp.ElicitPrompt) *sdk.CallToolResult {
 							"description": "Set true to execute this destructive operation. Nothing is executed unless you accept with approved=true.",
 						},
 					},
-					"required": []string{tools.ElicitApprovedField},
+					"required":             []string{tools.ElicitApprovedField},
+					"additionalProperties": false,
 				},
 			},
 		},

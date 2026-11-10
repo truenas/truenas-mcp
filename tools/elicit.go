@@ -137,7 +137,7 @@ func elicitationMessage(name, preview string, plan *writePlan, args map[string]i
 			b.WriteByte('\n')
 		}
 	}
-	b.WriteString("\nNothing is executed unless you accept and set approved=true. A decline, cancel, or timeout executes nothing.")
+	b.WriteString("\nNothing is executed unless you accept and set approved=true. The prompt is valid for 5 minutes. A decline, cancel, or expiry executes nothing.")
 	return strings.TrimSpace(redact.Text(b.String()))
 }
 

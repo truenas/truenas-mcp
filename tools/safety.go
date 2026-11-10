@@ -347,11 +347,16 @@ func hasParam(tool Tool, name string) bool {
 }
 
 // callDestructive runs a destructive tool. dry_run=true (on a tool that
-// declares it) only previews. A valid confirmation_token for this tool and
-// these exact arguments executes the call, once. Anything else runs the
-// preview and returns it with a fresh token, or with an error when the
-// preview says the operation cannot proceed. legacyConfirm reports that the
-// caller sent the old confirm=true.
+// declares it) only previews. When the client supports form elicitation, a
+// call without a valid token (or, under --require-human-confirm, any call
+// that still needs confirmation) starts an elicitation prompt. A valid
+// confirmation_token executes the call once only when --require-human-confirm
+// is off. Under that flag, tokens are never issued or redeemed: a supplied
+// token is ignored and the call is either prompted or refused. With the flag
+// off, a rejected token on an elicitation-capable client re-prompts instead
+// of minting a new token. Clients without elicitation and with the flag off
+// keep the confirmation-token flow. legacyConfirm reports that the caller
+// sent the old confirm=true.
 func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, args map[string]interface{}, legacyConfirm bool) (string, error) {
 	if dryRun, _ := args["dry_run"].(bool); dryRun && hasParam(tool, "dry_run") {
 		return tool.Handler(ctx, r.client, withoutKeys(args, "confirmation_token"))
@@ -375,9 +380,27 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 			return "", fmt.Errorf("%s was NOT executed: %w; nothing was executed", name, err)
 		}
 	}
-	var rejected error
-	if v, sent := args["confirmation_token"]; sent {
-		tok, _ := v.(string)
+	previewArgs := withoutKeys(args, "confirmation_token", "dry_run")
+	sink := elicitFrom(ctx)
+	if sink != nil && (sink.e.HasResponse || sink.e.RequestState != "") {
+		return r.completeElicit(ctx, name, tool, previewArgs, argsHash, planHash, plan, sink)
+	}
+	supportsForm := sink != nil && sink.e.SupportsForm
+	_, tokenSent := args["confirmation_token"]
+
+	// --require-human-confirm: never issue a token and never redeem one.
+	// A supplied token is ignored. Form-capable clients get a prompt;
+	// everyone else is refused.
+	if r.requireHumanConfirm {
+		if supportsForm {
+			return r.startElicit(ctx, name, tool, previewArgs, argsHash, planHash, plan, sink, legacyConfirm, "")
+		}
+		return "", requireHumanConfirmError(name)
+	}
+
+	if tokenSent {
+		tok, _ := args["confirmation_token"].(string)
+		var rejected error
 		if tool.Plan != nil {
 			rejected = r.confirmTokens.redeemWithPlan(tok, name, argsHash, planHash)
 		} else {
@@ -387,7 +410,7 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 			if err := plan.blockedReply(); err != nil {
 				return "", err
 			}
-			callArgs := withoutKeys(args, "confirmation_token", "dry_run")
+			callArgs := previewArgs
 			if tool.Plan != nil {
 				if tool.Execute == nil {
 					return "", fmt.Errorf("%s was NOT executed: it has a plan but no Execute path; nothing was executed", name)
@@ -396,23 +419,18 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 			}
 			return tool.Handler(ctx, r.client, callArgs)
 		}
-		// A presented token is the token path only: do not also prompt
-		// through elicitation (no double prompt, no mixed flows).
-		return r.confirmationRequired(ctx, name, tool, withoutKeys(args, "confirmation_token", "dry_run"), argsHash, planHash, rejected, legacyConfirm)
-	}
-	previewArgs := withoutKeys(args, "confirmation_token", "dry_run")
-	if sink := elicitFrom(ctx); sink != nil {
-		if sink.e.HasResponse || sink.e.RequestState != "" {
-			return r.completeElicit(ctx, name, tool, previewArgs, argsHash, planHash, plan, sink)
-		}
-		if sink.e.SupportsForm {
+		// A rejected token must not mint a new one when the client can
+		// be prompted instead; that was how the prompt could be skipped.
+		if supportsForm {
 			return r.startElicit(ctx, name, tool, previewArgs, argsHash, planHash, plan, sink, legacyConfirm, "")
 		}
+		return r.confirmationRequired(ctx, name, tool, previewArgs, argsHash, planHash, rejected, legacyConfirm)
 	}
-	if r.requireHumanConfirm {
-		return "", requireHumanConfirmError(name)
+
+	if supportsForm {
+		return r.startElicit(ctx, name, tool, previewArgs, argsHash, planHash, plan, sink, legacyConfirm, "")
 	}
-	return r.confirmationRequired(ctx, name, tool, previewArgs, argsHash, planHash, rejected, legacyConfirm)
+	return r.confirmationRequired(ctx, name, tool, previewArgs, argsHash, planHash, nil, legacyConfirm)
 }
 
 // confirmationRequired runs the tool's dry-run preview and returns it with a

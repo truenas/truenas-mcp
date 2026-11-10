@@ -220,3 +220,74 @@ func TestElicitationRequireHumanConfirmOverStdio(t *testing.T) {
 		t.Errorf("Run: %v", err)
 	}
 }
+
+func TestElicitationRejectsExtraResponseFields(t *testing.T) {
+	versions := sdk.SupportedProtocolVersions()
+	if len(versions) == 0 || versions[0] < "2026-07-28" {
+		t.Fatal("SDK newest version should be 2026-07-28 or later")
+	}
+	proto := versions[0]
+	if proto < "2026-07-28" {
+		t.Fatalf("newest protocol is %s, want 2026-07-28+", proto)
+	}
+
+	reg := &elicitReg{}
+	inW, outR, done := startElicitServer(t, reg)
+	ctx := t.Context()
+	cs := connectElicitClient(t, ctx, inW, outR, func(_ context.Context, _ *sdk.ElicitRequest) (*sdk.ElicitResult, error) {
+		return &sdk.ElicitResult{Action: "accept", Content: map[string]any{
+			toolsApproved(): true,
+			"extra":         "ignored-or-rejected",
+		}}, nil
+	}, proto)
+	res, err := cs.CallTool(ctx, &sdk.CallToolParams{Name: "stop_app", Arguments: map[string]interface{}{"app_name": "plex"}})
+	if err != nil {
+		// The SDK may reject extra fields against additionalProperties:false
+		// before the tool handler runs. That is also a closed refusal.
+		if !strings.Contains(err.Error(), "additional properties") && !strings.Contains(err.Error(), "schema") &&
+			!strings.Contains(err.Error(), "nothing was executed") {
+			t.Fatalf("CallTool err = %v; want a refusal of extra fields", err)
+		}
+	} else {
+		text, isErr := toolResultText(t, res)
+		if !isErr || !strings.Contains(text, "nothing was executed") {
+			t.Errorf("extra content fields: result = %q isError=%v; want an error saying nothing was executed", text, isErr)
+		}
+	}
+	if reg.writes != 0 {
+		t.Errorf("writes = %d, want 0", reg.writes)
+	}
+	if err := cs.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	inW.Close()
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
+}
+
+func TestApprovedOnlyRejectsExtraFields(t *testing.T) {
+	if _, err := approvedOnly(map[string]any{"approved": true, "extra": "nope"}); err == nil {
+		t.Error("extra field accepted")
+	}
+	if _, err := approvedOnly(map[string]any{"approved": true, "approved2": false}); err == nil {
+		t.Error("second field accepted")
+	}
+	if _, err := approvedOnly(map[string]any{"approved": "true"}); err == nil {
+		t.Error("string approved accepted")
+	}
+	if _, err := approvedOnly(nil); err == nil {
+		t.Error("nil content accepted")
+	}
+	if _, err := approvedOnly(map[string]any{}); err == nil {
+		t.Error("empty content accepted")
+	}
+	ok, err := approvedOnly(map[string]any{"approved": true})
+	if err != nil || !ok {
+		t.Errorf("approved true: ok=%v err=%v", ok, err)
+	}
+	ok, err = approvedOnly(map[string]any{"approved": false})
+	if err != nil || ok {
+		t.Errorf("approved false: ok=%v err=%v", ok, err)
+	}
+}

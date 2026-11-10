@@ -232,21 +232,21 @@ func (c *confirmationTokens) redeemElicit(tok, tool string, argsHash, planHash [
 	now := c.now()
 	switch {
 	case !ok || !e.elicitOnly:
-		return fmt.Errorf("%w: the confirmation prompt is unknown (it was not issued by this server, or it expired and was removed, or the server restarted)", errTokenRejected)
+		return fmt.Errorf("the confirmation prompt is unknown (it was not issued by this server, or it expired and was removed, or the server restarted)")
 	case e.used:
-		return fmt.Errorf("%w: the confirmation prompt was already used; it executes at most once", errTokenRejected)
+		return fmt.Errorf("the confirmation prompt was already used; it executes at most once")
 	case !now.Before(e.expires):
 		delete(c.entries, key)
-		return fmt.Errorf("%w: the confirmation prompt expired; prompts are valid for %s", errTokenRejected, confirmationTokenTTL)
+		return fmt.Errorf("the confirmation prompt expired; prompts are valid for %d minutes", int(confirmationTokenTTL/time.Minute))
 	}
 	e.used = true
 	switch {
 	case e.tool != tool:
-		return fmt.Errorf("%w: the confirmation prompt was issued for a different tool", errTokenRejected)
+		return fmt.Errorf("the confirmation prompt was issued for a different tool")
 	case e.argsHash != argsHash:
-		return fmt.Errorf("%w: the confirmation prompt was issued for different arguments; repeat the previewed call with exactly the same arguments", errTokenRejected)
+		return fmt.Errorf("the confirmation prompt was issued for different arguments; repeat the previewed call with exactly the same arguments")
 	case e.planHash != planHash:
-		return fmt.Errorf("%w: the confirmation prompt was issued for a different planned operation (the system state changed since the preview)", errTokenRejected)
+		return fmt.Errorf("the confirmation prompt was issued for a different planned operation (the system state changed since the preview)")
 	}
 	return nil
 }

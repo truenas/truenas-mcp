@@ -666,14 +666,16 @@ that preview (tool, target, main warnings) with one required boolean field,
 `elicitation/create` on protocol revisions 2025-06-18 and 2025-11-25, and a
 tool result with `inputRequests` (the client retries with the answer) on
 2026-07-28. The call executes only on `accept` with `approved` true, and
-only the plan that was previewed. A declined, cancelled, failed or timed-out
-prompt executes nothing and does not fall back to a confirmation token. A
-blocked preview (the operation cannot proceed) is an error, issues no
-prompt, and executes nothing.
+only the plan that was previewed. The prompt is valid for 5 minutes. A
+declined, cancelled, failed or expired prompt executes nothing and does not
+fall back to a confirmation token. A blocked preview (the operation cannot
+proceed) is an error, issues no prompt, and executes nothing.
 
-`--require-human-confirm` (or `TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM`) refuses
-destructive tools on clients that did not declare form elicitation, instead
-of falling back to the token flow. Dry runs and `--read-only` are unchanged.
+`--require-human-confirm` (or `TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM`) never
+issues a confirmation token and never redeems one. Destructive tools on
+clients that did not declare form elicitation are refused; a client that
+declared it is prompted, even if the call carried a `confirmation_token`.
+Dry runs and `--read-only` are unchanged.
 
 **Token flow (fallback).** Clients that do not declare elicitation use a
 confirmation token:
@@ -686,9 +688,10 @@ confirmation token:
 3. Call the tool again with exactly the same arguments plus
    `"confirmation_token": "<token>"`. The call executes once.
 
-A call that already carries a valid token is executed without elicitation
-(no double prompt). A call approved through elicitation does not need a
-token.
+When `--require-human-confirm` is not set, a call that already carries a
+valid token is executed without elicitation (no double prompt). A rejected
+token on a client that declared elicitation re-prompts instead of issuing
+a new token. A call approved through elicitation does not need a token.
 
 The token is 128 bits from a cryptographically secure random source, single
 use, valid for 5 minutes, and held in the server's memory only (a restart

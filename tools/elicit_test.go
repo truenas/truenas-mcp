@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -362,5 +364,170 @@ func TestElicitationHandleIsNotAConfirmationToken(t *testing.T) {
 	}
 	if n := realCalls(seen["stop_app"]); n != 0 {
 		t.Errorf("stop_app ran %d times, want 0", n)
+	}
+}
+
+// issuedToken returns a confirmation_token found in a successful reply or in
+// a *mcp.ReplyError body, or "".
+func issuedToken(out string, err error) string {
+	tokenFrom := func(s string) string {
+		var reply map[string]interface{}
+		if json.Unmarshal([]byte(s), &reply) != nil {
+			return ""
+		}
+		tok, _ := reply["confirmation_token"].(string)
+		return tok
+	}
+	if tok := tokenFrom(out); tok != "" {
+		return tok
+	}
+	var re *mcp.ReplyError
+	if errors.As(err, &re) {
+		return tokenFrom(re.Reply)
+	}
+	return ""
+}
+
+// neo's exact repro: with --require-human-confirm, stop_app called with
+// confirmation_token "x" must not return a live token, and a follow-up
+// redeem must not execute. Clients without elicitation get the flag error.
+func TestRequireHumanConfirmBogusTokenDoesNotIssueOne(t *testing.T) {
+	r, seen, _ := clockedRegistry(t)
+	if err := r.SetPolicy(Policy{RequireHumanConfirm: true}); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]interface{}{"app_name": "plex", "confirmation_token": "x"}
+
+	out, prompt, err := elicitReply(t, r, "stop_app", args, mcp.Elicitation{})
+	tok := issuedToken(out, err)
+	if prompt != nil || tok != "" || err == nil ||
+		!strings.Contains(err.Error(), "require-human-confirm") ||
+		!strings.Contains(err.Error(), "nothing was executed") {
+		t.Fatalf("bogus token with the flag on: out=%q prompt=%+v tok=%q err=%v; want the require-human-confirm error and no token", out, prompt, tok, err)
+	}
+	if n := realCalls(seen["stop_app"]); n != 0 {
+		t.Fatalf("stop_app ran %d times after the bogus token, want 0", n)
+	}
+
+	// A real-looking token must also be refused, not redeemed, and must
+	// not produce a fresh token.
+	out, prompt, err = elicitReply(t, r, "stop_app", map[string]interface{}{
+		"app_name": "plex", "confirmation_token": "0123456789abcdef0123456789abcdef",
+	}, mcp.Elicitation{})
+	tok = issuedToken(out, err)
+	if prompt != nil || tok != "" || err == nil ||
+		!strings.Contains(err.Error(), "require-human-confirm") ||
+		!strings.Contains(err.Error(), "nothing was executed") {
+		t.Errorf("real-looking token with the flag on: out=%q prompt=%+v tok=%q err=%v", out, prompt, tok, err)
+	}
+	if n := realCalls(seen["stop_app"]); n != 0 {
+		t.Errorf("stop_app ran %d times, want 0", n)
+	}
+}
+
+// The same bogus-token call, when the client declared elicitation, must
+// prompt rather than issue a token or execute.
+func TestRequireHumanConfirmBogusTokenGetsPrompt(t *testing.T) {
+	r, seen, _ := clockedRegistry(t)
+	if err := r.SetPolicy(Policy{RequireHumanConfirm: true}); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]interface{}{"app_name": "plex", "confirmation_token": "x"}
+
+	out, prompt, err := elicitReply(t, r, "stop_app", args, formElicit())
+	tok := issuedToken(out, err)
+	if err != nil || prompt == nil || tok != "" {
+		t.Fatalf("bogus token with the flag and elicitation: out=%q prompt=%+v tok=%q err=%v; want a prompt and no token", out, prompt, tok, err)
+	}
+	if n := realCalls(seen["stop_app"]); n != 0 {
+		t.Fatalf("stop_app ran %d times before accept, want 0", n)
+	}
+
+	out, prompt2, err := elicitReply(t, r, "stop_app", map[string]interface{}{"app_name": "plex"}, acceptElicit(prompt.State))
+	if err != nil || prompt2 != nil || issuedToken(out, err) != "" {
+		t.Fatalf("accept after a supplied token: out=%q prompt=%+v err=%v", out, prompt2, err)
+	}
+	if n := realCalls(seen["stop_app"]); n != 1 {
+		t.Errorf("stop_app ran %d times after accept, want 1", n)
+	}
+}
+
+// With the flag on, a token issued before the flag was set is not redeemed.
+func TestRequireHumanConfirmDoesNotRedeemToken(t *testing.T) {
+	r, seen, _ := clockedRegistry(t)
+	args := map[string]interface{}{"app_name": "plex"}
+	tok := previewToken(t, r, "stop_app", args)
+	if err := r.SetPolicy(Policy{RequireHumanConfirm: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, prompt, err := elicitReply(t, r, "stop_app", tokenArgs(args, map[string]interface{}{"confirmation_token": tok}), mcp.Elicitation{})
+	fresh := issuedToken(out, err)
+	if prompt != nil || fresh != "" || err == nil || !strings.Contains(err.Error(), "require-human-confirm") {
+		t.Errorf("redeem without elicitation: out=%q prompt=%+v fresh=%q err=%v; want the flag error and no new token", out, prompt, fresh, err)
+	}
+	if n := realCalls(seen["stop_app"]); n != 0 {
+		t.Errorf("stop_app ran %d times without elicitation, want 0", n)
+	}
+
+	out, prompt, err = elicitReply(t, r, "stop_app", tokenArgs(args, map[string]interface{}{"confirmation_token": tok}), formElicit())
+	fresh = issuedToken(out, err)
+	if err != nil || prompt == nil || fresh != "" {
+		t.Errorf("redeem with elicitation: out=%q prompt=%+v fresh=%q err=%v; want a prompt and no token", out, prompt, fresh, err)
+	}
+	if n := realCalls(seen["stop_app"]); n != 0 {
+		t.Errorf("stop_app ran %d times before accept, want 0", n)
+	}
+}
+
+// With the flag off, a rejected token on an elicitation-capable client
+// re-prompts and does not mint a new token.
+func TestRejectedTokenRePromptsWhenElicitationSupported(t *testing.T) {
+	r, seen, _ := clockedRegistry(t)
+	args := map[string]interface{}{"app_name": "plex", "confirmation_token": "x"}
+
+	out, prompt, err := elicitReply(t, r, "stop_app", args, formElicit())
+	tok := issuedToken(out, err)
+	if err != nil || prompt == nil || tok != "" {
+		t.Fatalf("rejected token with elicitation: out=%q prompt=%+v tok=%q err=%v; want a prompt and no token", out, prompt, tok, err)
+	}
+	if n := realCalls(seen["stop_app"]); n != 0 {
+		t.Fatalf("stop_app ran %d times before accept, want 0", n)
+	}
+
+	// The prompt can be accepted; a minted token is not needed and must
+	// not have been issued.
+	out, prompt2, err := elicitReply(t, r, "stop_app", map[string]interface{}{"app_name": "plex"}, acceptElicit(prompt.State))
+	if err != nil || prompt2 != nil || issuedToken(out, err) != "" {
+		t.Fatalf("accept after a rejected token: out=%q prompt=%+v err=%v", out, prompt2, err)
+	}
+	if n := realCalls(seen["stop_app"]); n != 1 {
+		t.Errorf("stop_app ran %d times after accept, want 1", n)
+	}
+}
+
+func TestElicitationRefusalsDoNotMentionConfirmationToken(t *testing.T) {
+	r, _, clock := clockedRegistry(t)
+	args := map[string]interface{}{"app_name": "plex"}
+	_, prompt, err := elicitReply(t, r, "stop_app", args, formElicit())
+	if err != nil || prompt == nil {
+		t.Fatalf("preview: prompt=%+v err=%v", prompt, err)
+	}
+	clock.advance(confirmationTokenTTL)
+	_, _, err = elicitReply(t, r, "stop_app", args, acceptElicit(prompt.State))
+	if err == nil || strings.Contains(err.Error(), "confirmation token") {
+		t.Errorf("expired prompt error = %v; must not mention a confirmation token", err)
+	}
+
+	_, prompt, err = elicitReply(t, r, "stop_app", args, formElicit())
+	if err != nil || prompt == nil {
+		t.Fatalf("second preview: %v", err)
+	}
+	e := acceptElicit(prompt.State)
+	e.Action = "decline"
+	e.Approved = false
+	_, _, err = elicitReply(t, r, "stop_app", args, e)
+	if err == nil || strings.Contains(err.Error(), "confirmation token") {
+		t.Errorf("decline error = %v; must not mention a confirmation token", err)
 	}
 }
