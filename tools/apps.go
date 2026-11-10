@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -332,29 +333,34 @@ func formatAppDetails(details map[string]interface{}, train string, trains []str
 	return string(formatted)
 }
 
-// extractAppSchema extracts schema from app details
+// extractAppSchema extracts the latest version's schema from app details.
 func extractAppSchema(appDetails map[string]interface{}) map[string]interface{} {
+	schema, _ := extractAppSchemaVersion(appDetails, "latest")
+	return schema
+}
+
+// extractAppSchemaVersion returns the schema for version, or the latest
+// version when version is empty or "latest". A specific version that is
+// not in the catalog is an error; it does not fall back to latest.
+func extractAppSchemaVersion(appDetails map[string]interface{}, version string) (map[string]interface{}, error) {
+	if version == "" || version == "latest" {
+		if v, ok := appDetails["latest_version"].(string); ok {
+			version = v
+		}
+	}
 	versions, ok := appDetails["versions"].(map[string]interface{})
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("app details have no versions/schema")
 	}
-
-	latestVersion, ok := appDetails["latest_version"].(string)
+	versionData, ok := versions[version].(map[string]interface{})
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("app schema for version %q not found", version)
 	}
-
-	versionData, ok := versions[latestVersion].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-
 	schema, ok := versionData["schema"].(map[string]interface{})
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("app version has no schema")
 	}
-
-	return schema
+	return schema, nil
 }
 
 // formatSchemaForWizard structures schema for LLM consumption
@@ -561,24 +567,16 @@ func handleInstallApp(client *truenas.Client, args map[string]interface{}, taskM
 		return "", fmt.Errorf("values parameter is required. Use get_app_catalog_details to see the schema and build the configuration")
 	}
 
-	// CRITICAL SECURITY: Enforce host-path-only storage
-	if err := enforceHostPathStorage(values); err != nil {
-		return "", fmt.Errorf("storage validation failed: %v", err)
+	// CRITICAL SECURITY: every schema storage entry must be a host_path
+	// under /mnt/<pool>/, and those datasets must already exist.
+	schema, err := fetchCatalogAppSchema(client, catalogApp, train, version)
+	if err != nil {
+		return "", err
 	}
-
-	// Extract storage paths for dataset verification
-	storagePaths := extractStoragePathsFromValues(values)
-
-	// Verify datasets exist
-	if len(storagePaths) > 0 {
-		missing, err := verifyDatasetPathsExist(client, storagePaths)
-		if err != nil {
-			return "", fmt.Errorf("failed to verify datasets: %v", err)
-		}
-		if len(missing) > 0 {
-			return "", fmt.Errorf("datasets must exist before installation. Missing:\n%s\n\nUse create_dataset tool first.",
-				strings.Join(missing, "\n  - "))
-		}
+	if _, missing, err := checkAppHostPathStorage(client, schema, values); err != nil {
+		return "", fmt.Errorf("storage validation failed: %v", err)
+	} else if len(missing) > 0 {
+		return "", datasetsMustExistError(missing, "installation")
 	}
 
 	// Call app.create API
@@ -669,23 +667,18 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 		return nil, fmt.Errorf("values parameter is required. Use get_app_catalog_details to see the schema")
 	}
 
-	// Validate storage security
-	if err := enforceHostPathStorage(valuesParam); err != nil {
-		return nil, fmt.Errorf("storage validation failed: %v", err)
+	version := "latest"
+	if v, ok := args["version"].(string); ok && v != "" {
+		version = v
 	}
 
-	// Extract storage paths
-	storagePaths := extractStoragePathsFromValues(valuesParam)
-	datasetPaths := storagePaths
-
-	// Verify datasets exist
-	var missing []string
-	var err error
-	if len(storagePaths) > 0 {
-		missing, err = verifyDatasetPathsExist(client, storagePaths)
-		if err != nil {
-			return nil, fmt.Errorf("failed to verify datasets: %v", err)
-		}
+	schema, err := fetchCatalogAppSchema(client, catalogApp, train, version)
+	if err != nil {
+		return nil, err
+	}
+	datasetPaths, missing, err := checkAppHostPathStorage(client, schema, valuesParam)
+	if err != nil {
+		return nil, fmt.Errorf("storage validation failed: %v", err)
 	}
 
 	// Check if app already exists
@@ -709,11 +702,16 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	})
 
 	var detailsMap map[string]interface{}
-	latestVersion := "unknown"
+	resolvedVersion := version
 	if err == nil && json.Unmarshal(appDetails, &detailsMap) == nil {
-		if v, ok := detailsMap["latest_version"].(string); ok {
-			latestVersion = v
+		if version == "" || version == "latest" {
+			if v, ok := detailsMap["latest_version"].(string); ok {
+				resolvedVersion = v
+			}
 		}
+	}
+	if resolvedVersion == "" {
+		resolvedVersion = "unknown"
 	}
 
 	// Build planned actions
@@ -734,7 +732,7 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	// Add installation action
 	actions = append(actions, PlannedAction{
 		Step:        step,
-		Description: fmt.Sprintf("Install %s app version %s", catalogApp, latestVersion),
+		Description: fmt.Sprintf("Install %s app version %s", catalogApp, resolvedVersion),
 		Operation:   "create",
 		Target:      "app.create",
 		Details: map[string]interface{}{
@@ -742,6 +740,7 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 			"catalog_app":   catalogApp,
 			"train":         train,
 			"storage_paths": datasetPaths,
+			"version":       resolvedVersion,
 		},
 	})
 
@@ -764,7 +763,7 @@ func (d *installAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 			"app_exists":       appExists,
 			"missing_datasets": missing,
 			"storage_paths":    datasetPaths,
-			"app_version":      latestVersion,
+			"app_version":      resolvedVersion,
 		},
 		PlannedActions: actions,
 		Warnings:       warnings,
@@ -1183,20 +1182,27 @@ func extractStorageVolumes(args map[string]interface{}) ([]StorageVolume, error)
 
 // enforceHostPathStorage recursively validates storage configs use host_path
 func enforceHostPathStorage(values map[string]interface{}) error {
-	return validateStorageRecursive(values, "")
+	return validateStorageRecursive(values, "", nil)
 }
 
 // validateStorageRecursive recursively validates storage configuration
-func validateStorageRecursive(obj map[string]interface{}, path string) error {
+func validateStorageRecursive(obj map[string]interface{}, path string, pools map[string]bool) error {
 	// Check type field FIRST (before iterating) to ensure consistent error messages
 	if typeVal, ok := obj["type"]; ok {
 		if typeStr, ok := typeVal.(string); ok {
-			if typeStr == "ix_volume" {
-				currentPath := "type"
-				if path != "" {
-					currentPath = path + ".type"
+			if isForbiddenStorageType(typeStr) {
+				loc := path
+				if loc == "" {
+					loc = "values"
 				}
-				return fmt.Errorf("ix_volume not allowed at %s. Use type='host_path'", currentPath)
+				if typeStr == "ix_volume" {
+					currentPath := "type"
+					if path != "" {
+						currentPath = path + ".type"
+					}
+					return fmt.Errorf("ix_volume not allowed at %s. Use type='host_path'", currentPath)
+				}
+				return fmt.Errorf("storage at %s must use type='host_path' (got %s)", loc, typeStr)
 			}
 		}
 	}
@@ -1213,12 +1219,19 @@ func validateStorageRecursive(obj map[string]interface{}, path string) error {
 			return fmt.Errorf("ix_volume_config not allowed at %s. Use host_path_config only", currentPath)
 		}
 
-		// Validate host_path_config paths
+		// Validate host_path_config paths, including acl.path when present.
 		if key == "host_path_config" {
 			if configMap, ok := value.(map[string]interface{}); ok {
-				if pathVal, ok := configMap["path"].(string); ok {
-					if !strings.HasPrefix(pathVal, "/mnt/") {
-						return fmt.Errorf("invalid path at %s: must start with /mnt/", currentPath)
+				if pathVal, ok := configMap["path"].(string); ok && pathVal != "" {
+					if err := validateHostPathLocation(pathVal, currentPath+".path", pools); err != nil {
+						return err
+					}
+				}
+				if acl, ok := configMap["acl"].(map[string]interface{}); ok {
+					if aclPath, ok := acl["path"].(string); ok && aclPath != "" {
+						if err := validateHostPathLocation(aclPath, currentPath+".acl.path", pools); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -1226,7 +1239,7 @@ func validateStorageRecursive(obj map[string]interface{}, path string) error {
 
 		// Recurse into nested objects and arrays
 		if nestedObj, ok := value.(map[string]interface{}); ok {
-			if err := validateStorageRecursive(nestedObj, currentPath); err != nil {
+			if err := validateStorageRecursive(nestedObj, currentPath, pools); err != nil {
 				return err
 			}
 		}
@@ -1235,7 +1248,7 @@ func validateStorageRecursive(obj map[string]interface{}, path string) error {
 			for i, item := range array {
 				if itemObj, ok := item.(map[string]interface{}); ok {
 					itemPath := fmt.Sprintf("%s[%d]", currentPath, i)
-					if err := validateStorageRecursive(itemObj, itemPath); err != nil {
+					if err := validateStorageRecursive(itemObj, itemPath, pools); err != nil {
 						return err
 					}
 				}
@@ -1244,6 +1257,554 @@ func validateStorageRecursive(obj map[string]interface{}, path string) error {
 	}
 
 	return nil
+}
+
+// storageSlot is one schema storage entry or hostpath-typed field.
+// kind is "storage", "hostpath", or "hostpathfile". path may contain
+// "[]" markers for list items (for example storage.shares[].share_entry.host_path).
+type storageSlot struct {
+	path string
+	list bool
+	kind string
+}
+
+func datasetsMustExistError(missing []string, action string) error {
+	if action == "" {
+		action = "installation"
+	}
+	return fmt.Errorf("datasets must exist before %s. Missing:\n%s\n\nUse create_dataset tool first.",
+		action, strings.Join(missing, "\n  - "))
+}
+
+func isForbiddenStorageType(typeStr string) bool {
+	switch typeStr {
+	case "ix_volume", "nfs", "cifs", "tmpfs", "temporary", "smb", "smb_share":
+		return true
+	default:
+		return false
+	}
+}
+
+func fetchCatalogAppSchema(client *truenas.Client, catalogApp, train, version string) (map[string]interface{}, error) {
+	if train == "" {
+		train = "stable"
+	}
+	result, err := client.Call("catalog.get_app_details", catalogApp, map[string]interface{}{
+		"train": train,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get app schema: %w", err)
+	}
+	var details map[string]interface{}
+	if err := json.Unmarshal(result, &details); err != nil {
+		return nil, fmt.Errorf("failed to parse app details: %w", err)
+	}
+	return extractAppSchemaVersion(details, version)
+}
+
+func fetchInstalledAppSchema(client *truenas.Client, appName string) (map[string]interface{}, error) {
+	result, err := client.Call("app.query",
+		[]interface{}{[]interface{}{"name", "=", appName}},
+		map[string]interface{}{},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query installed app: %w", err)
+	}
+	var apps []map[string]interface{}
+	if err := json.Unmarshal(result, &apps); err != nil {
+		return nil, fmt.Errorf("failed to parse app query: %w", err)
+	}
+	if len(apps) == 0 {
+		return nil, fmt.Errorf("app %q was not found", appName)
+	}
+	app := apps[0]
+	catalogApp := appName
+	train := ""
+	version, _ := app["version"].(string)
+	if md, ok := app["metadata"].(map[string]interface{}); ok {
+		if n, ok := md["name"].(string); ok && n != "" {
+			catalogApp = n
+		} else if n, ok := md["app"].(string); ok && n != "" {
+			catalogApp = n
+		}
+		if t, ok := md["train"].(string); ok {
+			train = t
+		}
+	}
+	if train == "" {
+		resolved, _, err := resolveCatalogTrain(client, catalogApp)
+		if err != nil {
+			return nil, err
+		}
+		train = resolved
+	}
+	return fetchCatalogAppSchema(client, catalogApp, train, version)
+}
+
+func listPoolNames(client *truenas.Client) (map[string]bool, error) {
+	result, err := client.Call("pool.query", []interface{}{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pools: %v", err)
+	}
+	var raw []interface{}
+	if err := json.Unmarshal(result, &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse pools: %v", err)
+	}
+	names := map[string]bool{}
+	for _, p := range raw {
+		if m, ok := p.(map[string]interface{}); ok {
+			if n, ok := m["name"].(string); ok && n != "" {
+				names[n] = true
+			}
+		}
+	}
+	return names, nil
+}
+
+// checkAppHostPathStorage is the shared storage check for install_app and
+// update_app (and their dry runs). It requires every schema storage entry to
+// be present as type host_path with a cleaned path under /mnt/<pool>/, then
+// reports which of those datasets are missing.
+func checkAppHostPathStorage(client *truenas.Client, schema, values map[string]interface{}) ([]string, []string, error) {
+	if values == nil {
+		return nil, nil, fmt.Errorf("values parameter is required")
+	}
+	if schema == nil {
+		return nil, nil, fmt.Errorf("app schema is required to enforce host_path storage")
+	}
+	pools, err := listPoolNames(client)
+	if err != nil {
+		return nil, nil, err
+	}
+	var collected []string
+	for _, slot := range collectStorageSlots(schema) {
+		if err := collectSlotPaths(values, slot, pools, &collected); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := validateStorageRecursive(values, "", pools); err != nil {
+		return nil, nil, err
+	}
+	missing, err := verifyDatasetPathsExist(client, collected)
+	if err != nil {
+		return nil, nil, err
+	}
+	return collected, missing, nil
+}
+
+func collectSlotPaths(values map[string]interface{}, slot storageSlot, pools map[string]bool, collected *[]string) error {
+	if slot.kind == "hostpath" || slot.kind == "hostpathfile" {
+		dotted := slot.path
+		if slot.list && !strings.Contains(dotted, "[]") {
+			dotted += "[]"
+		}
+		located, err := iterValuesAt(values, dotted, "")
+		if err != nil {
+			return err
+		}
+		for _, lv := range located {
+			if lv.val == nil {
+				continue
+			}
+			p, ok := lv.val.(string)
+			if !ok {
+				return fmt.Errorf("host path at %s must be a string", lv.loc)
+			}
+			if p == "" {
+				return fmt.Errorf("host path at %s must be a non-empty string", lv.loc)
+			}
+			target, err := hostPathDatasetTarget(p, slot.kind, lv.loc, pools)
+			if err != nil {
+				return err
+			}
+			*collected = append(*collected, target)
+		}
+		return nil
+	}
+
+	if slot.list {
+		raw, ok := lookupValuesPath(values, slot.path)
+		if !ok || raw == nil {
+			return nil
+		}
+		arr, ok := raw.([]interface{})
+		if !ok {
+			return fmt.Errorf("storage at %s must be a list of host_path entries", slot.path)
+		}
+		for i, item := range arr {
+			entry, ok := item.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("storage at %s[%d] must be a host_path entry", slot.path, i)
+			}
+			p, err := validateHostPathEntry(entry, fmt.Sprintf("%s[%d]", slot.path, i), pools)
+			if err != nil {
+				return err
+			}
+			*collected = append(*collected, p)
+		}
+		return nil
+	}
+	raw, ok := lookupValuesPath(values, slot.path)
+	if !ok {
+		return fmt.Errorf("storage at %s is required and must use type='host_path' with host_path_config.path", slot.path)
+	}
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("storage at %s must use type='host_path' with host_path_config.path", slot.path)
+	}
+	p, err := validateHostPathEntry(entry, slot.path, pools)
+	if err != nil {
+		return err
+	}
+	*collected = append(*collected, p)
+	return nil
+}
+
+func collectStorageSlots(schema map[string]interface{}) []storageSlot {
+	var slots []storageSlot
+	questions, _ := schema["questions"].([]interface{})
+	for _, q := range questions {
+		if qm, ok := q.(map[string]interface{}); ok {
+			walkSchemaQuestion(qm, "", &slots)
+		}
+	}
+	return slots
+}
+
+func walkSchemaQuestion(q map[string]interface{}, prefix string, slots *[]storageSlot) {
+	variable, _ := q["variable"].(string)
+	sch, _ := q["schema"].(map[string]interface{})
+	if sch == nil {
+		return
+	}
+	walkSchemaNode(sch, joinValuePath(prefix, variable), slots)
+}
+
+func joinValuePath(prefix, name string) string {
+	if name == "" {
+		return prefix
+	}
+	if prefix == "" {
+		return name
+	}
+	return prefix + "." + name
+}
+
+func walkSchemaNode(schema map[string]interface{}, valuePath string, slots *[]storageSlot) {
+	typ := appSchemaType(schema)
+	if typ == "list" {
+		item := listItemSchema(schema)
+		if item == nil {
+			return
+		}
+		if isStorageDictSchema(item) {
+			*slots = append(*slots, storageSlot{path: valuePath, list: true, kind: "storage"})
+			return
+		}
+		if kind := hostPathSchemaKind(item); kind != "" {
+			*slots = append(*slots, storageSlot{path: valuePath, list: true, kind: kind})
+			return
+		}
+		// Descend into list items with a [] marker so lookup expands each element.
+		walkSchemaNode(item, valuePath+"[]", slots)
+		return
+	}
+	if kind := hostPathSchemaKind(schema); kind != "" {
+		*slots = append(*slots, storageSlot{path: valuePath, list: false, kind: kind})
+		return
+	}
+	if isStorageDictSchema(schema) {
+		// Stop here so host_path_config.path is handled by validateHostPathEntry
+		// (which also covers acl.path) rather than as a bare hostpath field.
+		*slots = append(*slots, storageSlot{path: valuePath, list: false, kind: "storage"})
+		return
+	}
+	for _, attr := range schemaAttrs(schema) {
+		walkSchemaQuestion(attr, valuePath, slots)
+	}
+}
+
+func hostPathSchemaKind(schema map[string]interface{}) string {
+	switch appSchemaType(schema) {
+	case "hostpathfile":
+		return "hostpathfile"
+	case "hostpath", "hostpathdirectory":
+		return "hostpath"
+	default:
+		return ""
+	}
+}
+
+func appSchemaType(schema map[string]interface{}) string {
+	t, _ := schema["type"].(string)
+	return t
+}
+
+func schemaAttrs(schema map[string]interface{}) []map[string]interface{} {
+	raw, _ := schema["attrs"].([]interface{})
+	var out []map[string]interface{}
+	for _, a := range raw {
+		if m, ok := a.(map[string]interface{}); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func listItemSchema(schema map[string]interface{}) map[string]interface{} {
+	switch v := schema["items"].(type) {
+	case []interface{}:
+		if len(v) == 0 {
+			return nil
+		}
+		if m, ok := v[0].(map[string]interface{}); ok {
+			if s, ok := m["schema"].(map[string]interface{}); ok {
+				return s
+			}
+			return m
+		}
+	case map[string]interface{}:
+		if s, ok := v["schema"].(map[string]interface{}); ok {
+			return s
+		}
+		return v
+	}
+	return nil
+}
+
+func schemaEnumValues(schema map[string]interface{}) []string {
+	enum, ok := schema["enum"].([]interface{})
+	if !ok {
+		return nil
+	}
+	var vals []string
+	for _, e := range enum {
+		switch v := e.(type) {
+		case string:
+			vals = append(vals, v)
+		case map[string]interface{}:
+			if s, ok := v["value"].(string); ok {
+				vals = append(vals, s)
+			}
+		}
+	}
+	return vals
+}
+
+func isStorageTypeAttr(schema map[string]interface{}) bool {
+	if def, ok := schema["default"].(string); ok {
+		if def == "host_path" || def == "ix_volume" {
+			return true
+		}
+	}
+	for _, v := range schemaEnumValues(schema) {
+		if v == "host_path" || v == "ix_volume" {
+			return true
+		}
+	}
+	return false
+}
+
+func isStorageDictSchema(schema map[string]interface{}) bool {
+	typ := appSchemaType(schema)
+	if typ != "" && typ != "dict" && typ != "object" {
+		return false
+	}
+	for _, attr := range schemaAttrs(schema) {
+		if attr["variable"] == "type" {
+			sub, _ := attr["schema"].(map[string]interface{})
+			if sub != nil && isStorageTypeAttr(sub) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func lookupValuesPath(values map[string]interface{}, dotted string) (interface{}, bool) {
+	if dotted == "" {
+		return values, true
+	}
+	cur := interface{}(values)
+	for _, part := range strings.Split(dotted, ".") {
+		m, ok := cur.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		next, ok := m[part]
+		if !ok {
+			return nil, false
+		}
+		cur = next
+	}
+	return cur, true
+}
+
+func validateHostPathEntry(entry map[string]interface{}, loc string, pools map[string]bool) (string, error) {
+	typeStr, _ := entry["type"].(string)
+	if typeStr != "host_path" {
+		got := typeStr
+		if got == "" {
+			got = "missing"
+		}
+		return "", fmt.Errorf("storage at %s must use type='host_path' (got %s)", loc, got)
+	}
+	if _, ok := entry["ix_volume_config"]; ok {
+		return "", fmt.Errorf("ix_volume_config not allowed at %s. Use host_path_config only", loc)
+	}
+	cfg, ok := entry["host_path_config"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("storage at %s must have host_path_config.path", loc)
+	}
+
+	pathVal, pathOK := cfg["path"].(string)
+	if pathOK && pathVal != "" {
+		if err := validateHostPathLocation(pathVal, loc+".host_path_config.path", pools); err != nil {
+			return "", err
+		}
+	}
+
+	aclPath := ""
+	if acl, ok := cfg["acl"].(map[string]interface{}); ok {
+		if p, ok := acl["path"].(string); ok && p != "" {
+			aclPath = p
+			if err := validateHostPathLocation(aclPath, loc+".host_path_config.acl.path", pools); err != nil {
+				return "", err
+			}
+		}
+	}
+
+	aclEnable, _ := cfg["acl_enable"].(bool)
+	if aclEnable {
+		if aclPath == "" {
+			return "", fmt.Errorf("storage at %s has host_path_config.acl_enable=true but no host_path_config.acl.path", loc)
+		}
+		// The apps library bind-mounts acl.path and ignores host_path_config.path.
+		return aclPath, nil
+	}
+	if !pathOK || pathVal == "" {
+		return "", fmt.Errorf("storage at %s must have host_path_config.path", loc)
+	}
+	return pathVal, nil
+}
+
+// validateHostPathLocation requires a cleaned path under /mnt/<pool>/ for an
+// existing pool, with at least one component below the pool.
+func validateHostPathLocation(p, loc string, pools map[string]bool) error {
+	cleaned := path.Clean(p)
+	if cleaned != p {
+		return fmt.Errorf("invalid path %q at %s: must be a cleaned path under /mnt/<pool>/", p, loc)
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return fmt.Errorf("invalid path %q at %s: must not contain '..'", p, loc)
+		}
+	}
+	if !strings.HasPrefix(p, "/mnt/") || p == "/mnt/" {
+		return fmt.Errorf("invalid path %q at %s: must start with /mnt/", p, loc)
+	}
+	parts := strings.Split(strings.TrimPrefix(p, "/mnt/"), "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("invalid path %q at %s: must be under /mnt/<pool>/ for an existing pool (at least one component below the pool)", p, loc)
+	}
+	if pools != nil && !pools[parts[0]] {
+		return fmt.Errorf("invalid path %q at %s: pool %q does not exist", p, loc, parts[0])
+	}
+	if parts[1] == ".system" || parts[1] == "ix-applications" {
+		return fmt.Errorf("invalid path %q at %s: %s is a reserved system dataset", p, loc, parts[1])
+	}
+	return nil
+}
+
+func hostPathDatasetTarget(p, kind, loc string, pools map[string]bool) (string, error) {
+	if err := validateHostPathLocation(p, loc, pools); err != nil {
+		return "", err
+	}
+	if kind == "hostpathfile" {
+		parent := path.Dir(p)
+		if err := validateHostPathLocation(parent, loc, pools); err != nil {
+			return "", fmt.Errorf("invalid path %q at %s: file must be under a dataset below the pool (not the pool root)", p, loc)
+		}
+		return parent, nil
+	}
+	return p, nil
+}
+
+type locatedValue struct {
+	loc string
+	val interface{}
+}
+
+// iterValuesAt walks a dotted path that may contain "[]" list markers and
+// returns every matching value with a concrete location (indexes filled in).
+func iterValuesAt(root interface{}, dotted, locPrefix string) ([]locatedValue, error) {
+	if dotted == "" {
+		return []locatedValue{{loc: strings.TrimSuffix(locPrefix, "."), val: root}}, nil
+	}
+	i := strings.Index(dotted, "[]")
+	if i < 0 {
+		v, ok := lookupFrom(root, dotted)
+		if !ok {
+			return nil, nil
+		}
+		return []locatedValue{{loc: locPrefix + dotted, val: v}}, nil
+	}
+	head := dotted[:i]
+	tail := strings.TrimPrefix(dotted[i+2:], ".")
+	var arrSrc interface{}
+	if head == "" {
+		arrSrc = root
+	} else {
+		var ok bool
+		arrSrc, ok = lookupFrom(root, head)
+		if !ok {
+			return nil, nil
+		}
+	}
+	arr, ok := arrSrc.([]interface{})
+	if !ok {
+		loc := locPrefix + strings.TrimSuffix(head, ".")
+		if loc == "" {
+			loc = "values"
+		}
+		return nil, fmt.Errorf("value at %s must be a list", loc)
+	}
+	var out []locatedValue
+	for idx, item := range arr {
+		itemLoc := locPrefix + head + fmt.Sprintf("[%d]", idx)
+		if tail == "" {
+			out = append(out, locatedValue{loc: itemLoc, val: item})
+			continue
+		}
+		more, err := iterValuesAt(item, tail, itemLoc+".")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, more...)
+	}
+	return out, nil
+}
+
+func lookupFrom(root interface{}, dotted string) (interface{}, bool) {
+	if dotted == "" {
+		return root, true
+	}
+	cur := root
+	for _, part := range strings.Split(dotted, ".") {
+		if part == "" {
+			continue
+		}
+		m, ok := cur.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		next, ok := m[part]
+		if !ok {
+			return nil, false
+		}
+		cur = next
+	}
+	return cur, true
 }
 
 // extractStoragePathsFromValues finds all host paths in values config
@@ -1294,15 +1855,16 @@ func verifyDatasetPathsExist(client *truenas.Client, paths []string) ([]string, 
 			},
 			map[string]interface{}{},
 		)
-
-		if err != nil || result == nil {
-			missing = append(missing, dataset)
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("failed to look up dataset %s: %w", dataset, err)
+		}
+		if result == nil {
+			return nil, fmt.Errorf("failed to look up dataset %s: empty response", dataset)
 		}
 
 		var datasets []interface{}
 		if err := json.Unmarshal(result, &datasets); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to look up dataset %s: %w", dataset, err)
 		}
 
 		if len(datasets) == 0 {
