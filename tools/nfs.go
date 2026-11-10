@@ -10,167 +10,184 @@ import (
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
-// handleCreateNFSShare creates a new NFS share
-func handleCreateNFSShare(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	// Extract required parameter
+// Middleware method names used as writePlan.Method must be declared in
+// this file (same-file contract for TestMiddlewareMethodContract).
+const sharingNFSCreateMethod = "sharing.nfs.create"
+
+// buildCreateNFSSharePayload constructs the sharing.nfs.create body.
+// The map is unchanged from main: enabled defaults to true.
+func buildCreateNFSSharePayload(args map[string]interface{}) (map[string]interface{}, error) {
 	path, ok := args["path"].(string)
 	if !ok || path == "" {
-		return "", fmt.Errorf("path is required")
+		return nil, fmt.Errorf("path is required")
 	}
-
-	// Validate path
 	if err := validateSharePath(path); err != nil {
-		return "", err
+		return nil, err
 	}
 
-	// Build the payload
 	payload := map[string]interface{}{
 		"path": path,
 	}
-
-	// Optional parameters with defaults
 	if enabled, ok := args["enabled"].(bool); ok {
 		payload["enabled"] = enabled
 	} else {
-		payload["enabled"] = true // Default to enabled
+		payload["enabled"] = true
 	}
-
 	if comment, ok := args["comment"].(string); ok && comment != "" {
 		payload["comment"] = comment
 	}
-
 	if ro, ok := args["ro"].(bool); ok {
 		payload["ro"] = ro
 	}
-
-	// Network access control
 	if networks, ok := args["networks"].([]interface{}); ok && len(networks) > 0 {
-		// Validate CIDR notation
 		for _, net := range networks {
 			if netStr, ok := net.(string); ok {
 				if err := validateCIDR(netStr); err != nil {
-					return "", fmt.Errorf("invalid network CIDR '%s': %w", netStr, err)
+					return nil, fmt.Errorf("invalid network CIDR '%s': %w", netStr, err)
 				}
 			}
 		}
 		payload["networks"] = networks
 	}
-
 	if hosts, ok := args["hosts"].([]interface{}); ok && len(hosts) > 0 {
-		// Validate hosts (no quotes or spaces)
 		for _, host := range hosts {
 			if hostStr, ok := host.(string); ok {
 				if err := validateNFSHost(hostStr); err != nil {
-					return "", fmt.Errorf("invalid host '%s': %w", hostStr, err)
+					return nil, fmt.Errorf("invalid host '%s': %w", hostStr, err)
 				}
 			}
 		}
 		payload["hosts"] = hosts
 	}
-
-	// User/group mapping
 	if maprootUser, ok := args["maproot_user"].(string); ok && maprootUser != "" {
 		payload["maproot_user"] = maprootUser
 	}
-
 	if maprootGroup, ok := args["maproot_group"].(string); ok && maprootGroup != "" {
 		payload["maproot_group"] = maprootGroup
 	}
-
 	if mapallUser, ok := args["mapall_user"].(string); ok && mapallUser != "" {
 		payload["mapall_user"] = mapallUser
 	}
-
 	if mapallGroup, ok := args["mapall_group"].(string); ok && mapallGroup != "" {
 		payload["mapall_group"] = mapallGroup
 	}
-
-	// Security settings
 	if security, ok := args["security"].([]interface{}); ok && len(security) > 0 {
 		payload["security"] = security
 	}
+	return payload, nil
+}
 
-	// Check if this is a dry run
-	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		host, hostNote := lookupNASHostname(ctx, client)
-		// Return preview of what would be created
-		preview := map[string]interface{}{
-			"dry_run":       true,
-			"operation":     "sharing.nfs.create",
-			"payload":       payload,
-			"note":          "This is a preview. No NFS share has been created.",
-			"next_step":     "Remove dry_run parameter or set to false to execute",
-			"mount_example": fmt.Sprintf("mount -t nfs %s:%s /mnt/point", host, path),
+func nfsShareSecurityWarnings(ctx context.Context, client *truenas.Client, payload map[string]interface{}) []string {
+	warnings := []string{}
+	if networks, ok := payload["networks"]; !ok || networks == nil {
+		if hosts, ok := payload["hosts"]; !ok || hosts == nil {
+			warnings = append(warnings, "Share will be accessible from any network/host (no network or host restrictions)")
 		}
+	}
+	if ro, ok := payload["ro"].(bool); !ok || !ro {
+		warnings = append(warnings, "Share allows read-write access")
+	}
+	warnings = append(warnings, nfsRootMappingWarning(payload))
+	warnings = append(warnings, checkDirectoryServiceForShareWarnings(ctx, client)...)
+	return warnings
+}
 
-		// Add security warnings
-		warnings := []string{}
-		if networks, ok := payload["networks"]; !ok || networks == nil {
-			if hosts, ok := payload["hosts"]; !ok || hosts == nil {
-				warnings = append(warnings, "Share will be accessible from any network/host (no network or host restrictions)")
-			}
-		}
-		if ro, ok := payload["ro"].(bool); !ok || !ro {
-			warnings = append(warnings, "Share allows read-write access")
-		}
-		warnings = append(warnings, nfsRootMappingWarning(payload))
+// planCreateNFSShare builds the create_nfs_share plan used by both the
+// dry-run preview and the real call.
+func planCreateNFSShare(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
+	payload, err := buildCreateNFSSharePayload(args)
+	if err != nil {
+		return nil, err
+	}
+	path, _ := payload["path"].(string)
+	host, hostNote := lookupNASHostname(ctx, client)
+	mountExample := fmt.Sprintf("mount -t nfs %s:%s /mnt/point", host, path)
+	warnings := nfsShareSecurityWarnings(ctx, client, payload)
 
-		warnings = append(warnings, checkDirectoryServiceForShareWarnings(ctx, client)...)
-
-		if len(warnings) > 0 {
-			preview["security_warnings"] = warnings
-		}
-		if hostNote != "" {
-			preview["hostname_note"] = hostNote
-		}
-
-		formatted, err := json.MarshalIndent(preview, "", "  ")
-		if err != nil {
-			return "", err
-		}
-		return string(formatted), nil
+	current := map[string]interface{}{
+		"payload":       payload,
+		"mount_example": mountExample,
+	}
+	if hostNote != "" {
+		current["hostname_note"] = hostNote
 	}
 
-	// Call the API
-	result, err := client.Call(ctx, "sharing.nfs.create", payload)
+	return &writePlan{
+		Tool:         "create_nfs_share",
+		Method:       sharingNFSCreateMethod,
+		CallParams:   []interface{}{payload},
+		ParamNames:   []string{"data"},
+		TargetName:   path,
+		CurrentState: current,
+		Warnings:     warnings,
+		Actions: []PlannedAction{{
+			Step:        1,
+			Description: fmt.Sprintf("Create NFS share at %s", path),
+			Operation:   "create",
+			Target:      sharingNFSCreateMethod,
+			Details: map[string]interface{}{
+				"payload":       payload,
+				"mount_example": mountExample,
+			},
+		}},
+		Result: map[string]interface{}{
+			"path":          path,
+			"mount_example": mountExample,
+			"hostname_note": hostNote,
+		},
+	}, nil
+}
+
+// handleCreateNFSShare creates a new NFS share
+func handleCreateNFSShare(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planCreateNFSShare(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return executeCreateNFSShare(ctx, client, args, plan)
+}
+
+func executeCreateNFSShare(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to create NFS share: %w", err)
 	}
-
 	var share map[string]interface{}
 	if err := json.Unmarshal(result, &share); err != nil {
 		return "", fmt.Errorf("failed to parse NFS share response: %w", err)
 	}
-
-	// Format response with key information
+	mountExample, _ := plan.Result["mount_example"].(string)
+	hostNote, _ := plan.Result["hostname_note"].(string)
 	response := map[string]interface{}{
-		"success": true,
-		"id":      share["id"],
-		"path":    share["path"],
-		"enabled": share["enabled"],
+		"success":       true,
+		"id":            share["id"],
+		"path":          share["path"],
+		"enabled":       share["enabled"],
+		"mount_example": mountExample,
+		"note":          "NFS share is now accessible. Ensure NFS service is running and firewall allows NFS traffic.",
 	}
-
 	if comment, ok := share["comment"].(string); ok && comment != "" {
 		response["comment"] = comment
 	}
-
 	if ro, ok := share["ro"].(bool); ok {
 		response["read_only"] = ro
 	}
-
-	// Add mount instructions
-	host, hostNote := lookupNASHostname(ctx, client)
-	response["mount_example"] = fmt.Sprintf("mount -t nfs %s:%s /mnt/point", host, path)
 	if hostNote != "" {
 		response["hostname_note"] = hostNote
 	}
-	response["note"] = "NFS share is now accessible. Ensure NFS service is running and firewall allows NFS traffic."
-
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
 }
 

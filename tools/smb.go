@@ -9,73 +9,58 @@ import (
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
-// handleCreateSMBShare creates a new SMB share
-func handleCreateSMBShare(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	// Extract required parameters
+// Middleware method names used as writePlan.Method must be declared in
+// this file (same-file contract for TestMiddlewareMethodContract).
+const sharingSMBCreateMethod = "sharing.smb.create"
+
+// buildCreateSMBSharePayload constructs the sharing.smb.create body.
+// The map is unchanged from main: enabled defaults to true.
+func buildCreateSMBSharePayload(args map[string]interface{}) (map[string]interface{}, error) {
 	name, ok := args["name"].(string)
 	if !ok || name == "" {
-		return "", fmt.Errorf("name is required")
+		return nil, fmt.Errorf("name is required")
 	}
-
 	path, ok := args["path"].(string)
 	if !ok || path == "" {
-		return "", fmt.Errorf("path is required")
+		return nil, fmt.Errorf("path is required")
 	}
-
-	// Validate share name
 	if err := validateShareName(name); err != nil {
-		return "", err
+		return nil, err
 	}
-
-	// Validate path
 	if err := validateSharePath(path); err != nil {
-		return "", err
+		return nil, err
 	}
 
-	// Build the payload
 	payload := map[string]interface{}{
 		"name": name,
 		"path": path,
 	}
-
-	// Optional parameters with defaults
 	if purpose, ok := args["purpose"].(string); ok && purpose != "" {
 		payload["purpose"] = purpose
 	}
-
 	if enabled, ok := args["enabled"].(bool); ok {
 		payload["enabled"] = enabled
 	} else {
-		payload["enabled"] = true // Default to enabled
+		payload["enabled"] = true
 	}
-
 	if comment, ok := args["comment"].(string); ok && comment != "" {
 		payload["comment"] = comment
 	}
-
 	if readonly, ok := args["readonly"].(bool); ok {
 		payload["readonly"] = readonly
 	}
-
 	if browsable, ok := args["browsable"].(bool); ok {
 		payload["browsable"] = browsable
 	}
-
 	if abse, ok := args["access_based_share_enumeration"].(bool); ok {
 		payload["access_based_share_enumeration"] = abse
 	}
-
-	// Audit configuration
 	if audit, ok := args["audit"].(map[string]interface{}); ok {
 		payload["audit"] = audit
 	}
-
-	// Purpose-specific options
 	if options, ok := args["options"].(map[string]interface{}); ok {
 		payload["options"] = options
 	}
-
-	// Host access control
 	if hostsallow, ok := args["hostsallow"].([]interface{}); ok && len(hostsallow) > 0 {
 		if payload["options"] == nil {
 			payload["options"] = make(map[string]interface{})
@@ -83,7 +68,6 @@ func handleCreateSMBShare(ctx context.Context, client *truenas.Client, args map[
 		optionsMap := payload["options"].(map[string]interface{})
 		optionsMap["hostsallow"] = hostsallow
 	}
-
 	if hostsdeny, ok := args["hostsdeny"].([]interface{}); ok && len(hostsdeny) > 0 {
 		if payload["options"] == nil {
 			payload["options"] = make(map[string]interface{})
@@ -91,86 +75,118 @@ func handleCreateSMBShare(ctx context.Context, client *truenas.Client, args map[
 		optionsMap := payload["options"].(map[string]interface{})
 		optionsMap["hostsdeny"] = hostsdeny
 	}
+	return payload, nil
+}
 
-	// Check if this is a dry run
-	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		host, hostNote := lookupNASHostname(ctx, client)
-		// Return preview of what would be created
-		preview := map[string]interface{}{
-			"dry_run":      true,
-			"operation":    "sharing.smb.create",
-			"payload":      payload,
-			"note":         "This is a preview. No SMB share has been created.",
-			"next_step":    "Remove dry_run parameter or set to false to execute",
-			"network_path": fmt.Sprintf("\\\\%s\\%s", host, name),
-		}
+func smbShareSecurityWarnings(ctx context.Context, client *truenas.Client, payload map[string]interface{}) []string {
+	warnings := []string{}
+	if smbShareBrowsable(payload) && !smbHasHostsallow(payload) {
+		warnings = append(warnings, "Share will be visible and accessible from any network host (browsable=true, no hostsallow restrictions)")
+	}
+	if readonly, ok := payload["readonly"].(bool); ok && !readonly {
+		warnings = append(warnings, "Share allows read-write access")
+	}
+	warnings = append(warnings, checkDirectoryServiceForShareWarnings(ctx, client)...)
+	return warnings
+}
 
-		// Add security warnings
-		warnings := []string{}
-		if smbShareBrowsable(payload) && !smbHasHostsallow(payload) {
-			warnings = append(warnings, "Share will be visible and accessible from any network host (browsable=true, no hostsallow restrictions)")
-		}
-		if readonly, ok := payload["readonly"].(bool); ok && !readonly {
-			warnings = append(warnings, "Share allows read-write access")
-		}
+// planCreateSMBShare builds the create_smb_share plan used by both the
+// dry-run preview and the real call.
+func planCreateSMBShare(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
+	payload, err := buildCreateSMBSharePayload(args)
+	if err != nil {
+		return nil, err
+	}
+	name, _ := payload["name"].(string)
+	host, hostNote := lookupNASHostname(ctx, client)
+	networkPath := fmt.Sprintf("\\\\%s\\%s", host, name)
+	warnings := smbShareSecurityWarnings(ctx, client, payload)
 
-		warnings = append(warnings, checkDirectoryServiceForShareWarnings(ctx, client)...)
-
-		if len(warnings) > 0 {
-			preview["security_warnings"] = warnings
-		}
-		if hostNote != "" {
-			preview["hostname_note"] = hostNote
-		}
-
-		formatted, err := json.MarshalIndent(preview, "", "  ")
-		if err != nil {
-			return "", err
-		}
-		return string(formatted), nil
+	current := map[string]interface{}{
+		"payload":      payload,
+		"network_path": networkPath,
+	}
+	if hostNote != "" {
+		current["hostname_note"] = hostNote
 	}
 
-	// Call the API
-	result, err := client.Call(ctx, "sharing.smb.create", payload)
+	return &writePlan{
+		Tool:         "create_smb_share",
+		Method:       sharingSMBCreateMethod,
+		CallParams:   []interface{}{payload},
+		ParamNames:   []string{"data"},
+		TargetName:   name,
+		CurrentState: current,
+		Warnings:     warnings,
+		Actions: []PlannedAction{{
+			Step:        1,
+			Description: fmt.Sprintf("Create SMB share %s", name),
+			Operation:   "create",
+			Target:      sharingSMBCreateMethod,
+			Details: map[string]interface{}{
+				"payload":      payload,
+				"network_path": networkPath,
+			},
+		}},
+		Result: map[string]interface{}{
+			"name":          name,
+			"network_path":  networkPath,
+			"hostname_note": hostNote,
+		},
+	}, nil
+}
+
+// handleCreateSMBShare creates a new SMB share
+func handleCreateSMBShare(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planCreateSMBShare(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return executeCreateSMBShare(ctx, client, args, plan)
+}
+
+func executeCreateSMBShare(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to create SMB share: %w", err)
 	}
-
 	var share map[string]interface{}
 	if err := json.Unmarshal(result, &share); err != nil {
 		return "", fmt.Errorf("failed to parse SMB share response: %w", err)
 	}
-
-	// Format response with key information
+	networkPath, _ := plan.Result["network_path"].(string)
+	hostNote, _ := plan.Result["hostname_note"].(string)
 	response := map[string]interface{}{
-		"success": true,
-		"id":      share["id"],
-		"name":    share["name"],
-		"path":    share["path"],
-		"enabled": share["enabled"],
+		"success":      true,
+		"id":           share["id"],
+		"name":         share["name"],
+		"path":         share["path"],
+		"enabled":      share["enabled"],
+		"network_path": networkPath,
+		"note":         "Share is now accessible over the network. You may need to configure permissions.",
 	}
-
 	if purpose, ok := share["purpose"].(string); ok {
 		response["purpose"] = purpose
 	}
-
 	if comment, ok := share["comment"].(string); ok && comment != "" {
 		response["comment"] = comment
 	}
-
-	// Add connection information
-	host, hostNote := lookupNASHostname(ctx, client)
-	response["network_path"] = fmt.Sprintf("\\\\%s\\%s", host, name)
 	if hostNote != "" {
 		response["hostname_note"] = hostNote
 	}
-	response["note"] = "Share is now accessible over the network. You may need to configure permissions."
-
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
 }
 

@@ -63,8 +63,38 @@ func createDatasetDryRun(t *testing.T, client *truenas.Client, args map[string]i
 	return preview
 }
 
+func datasetPreviewMap(preview map[string]interface{}, key string) (interface{}, bool) {
+	if raw, ok := preview[key]; ok {
+		return raw, true
+	}
+	if cs, ok := preview["current_state"].(map[string]interface{}); ok {
+		if raw, ok := cs[key]; ok {
+			return raw, true
+		}
+	}
+	return nil, false
+}
+
+func datasetPreviewPayload(preview map[string]interface{}) map[string]interface{} {
+	raw, _ := datasetPreviewMap(preview, "payload")
+	m, _ := raw.(map[string]interface{})
+	return m
+}
+
+func previewAncestorsField(preview map[string]interface{}) (interface{}, bool) {
+	if raw, ok := preview["ancestors_to_create"]; ok {
+		return raw, true
+	}
+	if cs, ok := preview["current_state"].(map[string]interface{}); ok {
+		if raw, ok := cs["ancestors_to_create"]; ok {
+			return raw, true
+		}
+	}
+	return nil, false
+}
+
 func ancestorStrings(preview map[string]interface{}) []string {
-	raw, ok := preview["ancestors_to_create"]
+	raw, ok := previewAncestorsField(preview)
 	if !ok || raw == nil {
 		return nil
 	}
@@ -83,7 +113,7 @@ func ancestorStrings(preview map[string]interface{}) []string {
 
 func requireAncestors(t *testing.T, preview map[string]interface{}, want []string) {
 	t.Helper()
-	raw, ok := preview["ancestors_to_create"]
+	raw, ok := previewAncestorsField(preview)
 	if !ok {
 		t.Fatalf("ancestors_to_create is missing, want %v", want)
 	}
@@ -117,7 +147,7 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 			"name": "tank/apps/jellyfin/config",
 		})
 		requireAncestors(t, preview, []string{"tank/apps", "tank/apps/jellyfin"})
-		payload, _ := preview["payload"].(map[string]interface{})
+		payload := datasetPreviewPayload(preview)
 		if payload["create_ancestors"] != true {
 			t.Errorf("default create_ancestors = %v, want true", payload["create_ancestors"])
 		}
@@ -162,7 +192,7 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 			"create_ancestors": false,
 		})
 		requireAncestors(t, preview, []string{})
-		payload, _ := preview["payload"].(map[string]interface{})
+		payload := datasetPreviewPayload(preview)
 		if payload["create_ancestors"] != false {
 			t.Errorf("payload create_ancestors = %v, want false", payload["create_ancestors"])
 		}
@@ -189,7 +219,8 @@ func TestCreateDatasetDryRunListsMissingAncestors(t *testing.T) {
 			},
 		})
 		requireAncestors(t, preview, []string{"tank/apps", "tank/apps/jellyfin"})
-		note, _ := preview["ancestors_note"].(string)
+		rawNote, _ := datasetPreviewMap(preview, "ancestors_note")
+		note, _ := rawNote.(string)
 		low := strings.ToLower(note)
 		for _, want := range []string{"inherit", "encryption", "unencrypted", "no quota of their own"} {
 			if !strings.Contains(low, want) {

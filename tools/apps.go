@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/truenas"
 )
@@ -541,22 +542,58 @@ func generateWizardGuidance(schema map[string]interface{}) map[string]interface{
 // Section 2: Installation Handler and Dry-Run
 // ============================================================================
 
-// handleInstallApp installs an app from the catalog
-func handleInstallApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, taskManager *tasks.Manager) (string, error) {
-	// Extract parameters
+// Middleware method names used as writePlan.Method must be declared in
+// this file (same-file contract for TestMiddlewareMethodContract).
+const appCreateMethod = "app.create"
+
+// maskInstallAppArgs returns a deep copy of install_app arguments with
+// secret values (passwords, tokens, and similar, including nested ones)
+// replaced by redact.Marker. Use this for stored task arguments so a
+// later tasks_get cannot recover the secrets the install used.
+func maskInstallAppArgs(args map[string]interface{}) map[string]interface{} {
+	if args == nil {
+		return nil
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return map[string]interface{}{}
+	}
+	var copied map[string]interface{}
+	if err := json.Unmarshal(raw, &copied); err != nil {
+		return map[string]interface{}{}
+	}
+	masked := redact.Value(copied)
+	if m, ok := masked.(map[string]interface{}); ok {
+		return m
+	}
+	return map[string]interface{}{}
+}
+
+// planInstallApp builds the install_app plan used by both the dry-run
+// preview and the real call. The app.create payload is unchanged from
+// main: version is sent as "latest" when the caller omitted it, even
+// when the preview also resolves the catalog version for display.
+// Missing host-path datasets and an existing instance name refuse both
+// the preview and the real call.
+func planInstallApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
-		return "", fmt.Errorf("app_name is required")
+		return nil, fmt.Errorf("app_name is required")
 	}
-
 	catalogApp, ok := args["catalog_app"].(string)
 	if !ok || catalogApp == "" {
-		return "", fmt.Errorf("catalog_app is required")
+		return nil, fmt.Errorf("catalog_app is required")
 	}
-
 	train, trainNote, err := catalogTrainForInstall(ctx, client, catalogApp, args)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	if err := validateAppName(appName); err != nil {
+		return nil, fmt.Errorf("invalid app_name: %v", err)
+	}
+	values, ok := args["values"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("values parameter is required. Use get_app_catalog_details to see the schema and build the configuration")
 	}
 
 	version := "latest"
@@ -564,30 +601,39 @@ func handleInstallApp(ctx context.Context, client *truenas.Client, args map[stri
 		version = v
 	}
 
-	// Validate app name
-	if err := validateAppName(appName); err != nil {
-		return "", fmt.Errorf("invalid app_name: %v", err)
-	}
-
-	// Extract values parameter (required)
-	values, ok := args["values"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("values parameter is required. Use get_app_catalog_details to see the schema and build the configuration")
-	}
-
-	// CRITICAL SECURITY: every schema storage entry must be a host_path
-	// under /mnt/<pool>/, and those datasets must already exist.
 	schema, err := fetchCatalogAppSchema(ctx, client, catalogApp, train, version)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if _, missing, err := checkAppHostPathStorage(ctx, client, schema, values); err != nil {
-		return "", fmt.Errorf("storage validation failed: %v", err)
-	} else if len(missing) > 0 {
-		return "", datasetsMustExistError(missing, "installation")
+	datasetPaths, missing, err := checkAppHostPathStorage(ctx, client, schema, values)
+	if err != nil {
+		return nil, fmt.Errorf("storage validation failed: %v", err)
+	}
+	if len(missing) > 0 {
+		return nil, datasetsMustExistError(missing, "installation")
 	}
 
-	// Call app.create API
+	existing, err := client.Call(ctx, "app.query",
+		[]interface{}{[]interface{}{"name", "=", appName}},
+		map[string]interface{}{},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check existing app instance: %w", err)
+	}
+	var apps []interface{}
+	if err := json.Unmarshal(existing, &apps); err != nil {
+		return nil, fmt.Errorf("failed to parse installed apps: %w", err)
+	}
+	for _, raw := range apps {
+		m, _ := raw.(map[string]interface{})
+		if m == nil {
+			continue
+		}
+		if m["name"] == appName || m["id"] == appName {
+			return nil, fmt.Errorf("app instance %q already exists", appName)
+		}
+	}
+
 	params := map[string]interface{}{
 		"app_name":    appName,
 		"catalog_app": catalogApp,
@@ -596,36 +642,133 @@ func handleInstallApp(ctx context.Context, client *truenas.Client, args map[stri
 		"values":      values,
 	}
 
-	result, err := client.Call(ctx, "app.create", params)
+	resolvedVersion := version
+	detailsResult, detailsErr := client.Call(ctx, "catalog.get_app_details", catalogApp, map[string]interface{}{
+		"train": train,
+	})
+	var detailsMap map[string]interface{}
+	if detailsErr == nil && json.Unmarshal(detailsResult, &detailsMap) == nil {
+		if version == "" || version == "latest" {
+			if v, ok := detailsMap["latest_version"].(string); ok {
+				resolvedVersion = v
+			}
+		}
+	}
+	if resolvedVersion == "" {
+		resolvedVersion = "unknown"
+	}
+
+	current := map[string]interface{}{
+		"app_exists":       false,
+		"storage_paths":    datasetPaths,
+		"version":          version,
+		"resolved_version": resolvedVersion,
+		"values":           values,
+	}
+	if trainNote != "" {
+		current["train_note"] = trainNote
+	}
+
+	details := map[string]interface{}{
+		"app_name":      appName,
+		"catalog_app":   catalogApp,
+		"train":         train,
+		"version":       version,
+		"values":        values,
+		"storage_paths": datasetPaths,
+	}
+	if trainNote != "" {
+		details["train_note"] = trainNote
+	}
+
+	return &writePlan{
+		Tool:         "install_app",
+		Method:       appCreateMethod,
+		JobMethod:    appCreateMethod,
+		CallParams:   []interface{}{params},
+		ParamNames:   []string{"data"},
+		TargetName:   appName,
+		CurrentState: current,
+		Actions: []PlannedAction{{
+			Step:        1,
+			Description: fmt.Sprintf("Install %s app version %s", catalogApp, resolvedVersion),
+			Operation:   "create",
+			Target:      appCreateMethod,
+			Details:     details,
+		}},
+		Warnings: []string{
+			"App will use host-path volumes (not ix-volumes) as configured.",
+		},
+		Requirements: &Requirements{
+			Conditions: []string{
+				"All datasets must exist and be mounted",
+				"Sufficient disk space in target pool",
+				"No existing app with the same instance name",
+			},
+		},
+		EstimatedTime: &EstimatedTime{
+			MinSeconds: 30,
+			MaxSeconds: 300,
+			Note:       "Time varies based on container image size and network speed",
+		},
+		Result: map[string]interface{}{
+			"app_name":    appName,
+			"catalog_app": catalogApp,
+			"train":       train,
+			"version":     version,
+			"train_note":  trainNote,
+		},
+	}, nil
+}
+
+func (r *Registry) handleInstallAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planInstallApp(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return r.executeInstallApp(ctx, client, args, plan)
+}
+
+func (r *Registry) executeInstallApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to install app: %v", err)
 	}
 
-	// Parse job ID (app.create may return an array [job_id] or just job_id)
-	var jobID int
-	// First try to parse as an integer
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		// If that fails, try parsing as an array and extract the first element
-		var jobIDArray []int
-		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
-			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
-		}
-		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("app.create returned empty job ID array")
-		}
-		jobID = jobIDArray[0]
+	jobID := parseJobID(result)
+	if jobID == 0 {
+		return "", fmt.Errorf("failed to parse job ID as int or array: app.create returned %s", result)
 	}
 
-	// Create task for tracking
-	task, err := taskManager.CreateJobTask(ctx,
+	opts := []tasks.TaskOption{}
+	if plan.JobMethod != "" {
+		opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+	}
+	task, err := r.taskManager.CreateJobTask(ctx,
 		"install_app",
-		args,
+		maskInstallAppArgs(args),
 		jobID,
-		1*time.Hour, // 1 hour TTL
+		1*time.Hour,
+		opts...,
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
+
+	appName, _ := plan.Result["app_name"].(string)
+	catalogApp, _ := plan.Result["catalog_app"].(string)
+	train, _ := plan.Result["train"].(string)
+	version, _ := plan.Result["version"].(string)
+	trainNote, _ := plan.Result["train_note"].(string)
 
 	response := map[string]interface{}{
 		"app_name":      appName,
@@ -641,174 +784,11 @@ func handleInstallApp(ctx context.Context, client *truenas.Client, args map[stri
 	if trainNote != "" {
 		response["train_note"] = trainNote
 	}
-
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
-}
-
-// installAppDryRun implements dry-run for app installation
-type installAppDryRun struct{}
-
-func (d *installAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	appName, ok := args["app_name"].(string)
-	if !ok || appName == "" {
-		return nil, fmt.Errorf("app_name is required")
-	}
-	catalogApp, ok := args["catalog_app"].(string)
-	if !ok || catalogApp == "" {
-		return nil, fmt.Errorf("catalog_app is required")
-	}
-	train, trainNote, err := catalogTrainForInstall(ctx, client, catalogApp, args)
-	if err != nil {
-		return nil, err
-	}
-
-	// Validate app name
-	if err := validateAppName(appName); err != nil {
-		return nil, fmt.Errorf("invalid app_name: %v", err)
-	}
-
-	// Extract values parameter (required)
-	valuesParam, ok := args["values"].(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("values parameter is required. Use get_app_catalog_details to see the schema")
-	}
-
-	version := "latest"
-	if v, ok := args["version"].(string); ok && v != "" {
-		version = v
-	}
-
-	schema, err := fetchCatalogAppSchema(ctx, client, catalogApp, train, version)
-	if err != nil {
-		return nil, err
-	}
-	datasetPaths, missing, err := checkAppHostPathStorage(ctx, client, schema, valuesParam)
-	if err != nil {
-		return nil, fmt.Errorf("storage validation failed: %v", err)
-	}
-
-	// Check if app already exists
-	existingApps, err := client.Call(ctx, "app.query",
-		[]interface{}{
-			[]interface{}{"name", "=", appName},
-		},
-		map[string]interface{}{},
-	)
-
-	var apps []interface{}
-	if err == nil {
-		json.Unmarshal(existingApps, &apps)
-	}
-
-	appExists := len(apps) > 0
-
-	// Get app details for version info
-	appDetails, err := client.Call(ctx, "catalog.get_app_details", catalogApp, map[string]interface{}{
-		"train": train,
-	})
-
-	var detailsMap map[string]interface{}
-	resolvedVersion := version
-	if err == nil && json.Unmarshal(appDetails, &detailsMap) == nil {
-		if version == "" || version == "latest" {
-			if v, ok := detailsMap["latest_version"].(string); ok {
-				resolvedVersion = v
-			}
-		}
-	}
-	if resolvedVersion == "" {
-		resolvedVersion = "unknown"
-	}
-
-	// Build planned actions
-	actions := []PlannedAction{}
-	step := 1
-
-	// Add warnings for missing datasets
-	for _, dataset := range missing {
-		actions = append(actions, PlannedAction{
-			Step:        step,
-			Description: fmt.Sprintf("WARNING: Dataset %s does not exist. Create it first with create_dataset.", dataset),
-			Operation:   "verify",
-			Target:      "pool.dataset.query",
-		})
-		step++
-	}
-
-	// Add installation action
-	actions = append(actions, PlannedAction{
-		Step:        step,
-		Description: fmt.Sprintf("Install %s app version %s", catalogApp, resolvedVersion),
-		Operation:   "create",
-		Target:      "app.create",
-		Details: map[string]interface{}{
-			"app_name":      appName,
-			"catalog_app":   catalogApp,
-			"train":         train,
-			"storage_paths": datasetPaths,
-			"version":       resolvedVersion,
-		},
-	})
-
-	// Build warnings
-	warnings := []string{}
-	if appExists {
-		warnings = append(warnings, fmt.Sprintf("WARNING: App instance '%s' already exists. Installation will fail.", appName))
-	}
-	if len(missing) > 0 {
-		warnings = append(warnings, "CRITICAL: The following datasets must exist before installation. Use create_dataset tool:")
-		for _, ds := range missing {
-			warnings = append(warnings, fmt.Sprintf("  - %s", ds))
-		}
-	}
-	warnings = append(warnings, "App will use host-path volumes (not ix-volumes) as configured.")
-
-	result := &DryRunResult{
-		Tool: "install_app",
-		CurrentState: map[string]interface{}{
-			"app_exists":       appExists,
-			"missing_datasets": missing,
-			"storage_paths":    datasetPaths,
-			"app_version":      resolvedVersion,
-		},
-		PlannedActions: actions,
-		Warnings:       warnings,
-		Requirements: &Requirements{
-			Conditions: []string{
-				"All datasets must exist and be mounted",
-				"Sufficient disk space in target pool",
-				"No existing app with the same instance name",
-			},
-		},
-		EstimatedTime: &EstimatedTime{
-			MinSeconds: 30,
-			MaxSeconds: 300,
-			Note:       "Time varies based on container image size and network speed",
-		},
-	}
-	if trainNote != "" {
-		result.CurrentState.(map[string]interface{})["train_note"] = trainNote
-		if len(actions) > 0 && actions[len(actions)-1].Details != nil {
-			if details, ok := actions[len(actions)-1].Details.(map[string]interface{}); ok {
-				details["train_note"] = trainNote
-			}
-		}
-	}
-
-	return result, nil
-}
-
-// handleInstallAppWithDryRun wraps handleInstallApp with dry-run support
-func (r *Registry) handleInstallAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	dryRun := &installAppDryRun{}
-	return ExecuteWithDryRun(ctx, client, args, dryRun, func(ctx context.Context, c *truenas.Client, a map[string]interface{}) (string, error) {
-		return handleInstallApp(ctx, c, a, r.taskManager)
-	})
 }
 
 // ============================================================================

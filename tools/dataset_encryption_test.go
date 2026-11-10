@@ -186,14 +186,22 @@ func TestCreateDatasetDryRunMasksSecrets(t *testing.T) {
 				t.Fatalf("dry run leaks a secret: %s", out)
 			}
 			var preview struct {
-				Payload map[string]interface{} `json:"payload"`
+				Payload      map[string]interface{} `json:"payload"`
+				CurrentState map[string]interface{} `json:"current_state"`
 			}
 			if err := json.Unmarshal([]byte(out), &preview); err != nil {
 				t.Fatal(err)
 			}
-			got := preview.Payload["encryption_options"].(map[string]interface{})
-			if preview.Payload["encryption"] != true || preview.Payload["inherit_encryption"] != false {
-				t.Errorf("preview payload = %v", preview.Payload)
+			payload := preview.Payload
+			if payload == nil && preview.CurrentState != nil {
+				payload, _ = preview.CurrentState["payload"].(map[string]interface{})
+			}
+			if payload == nil {
+				t.Fatalf("preview has no payload: %s", out)
+			}
+			got := payload["encryption_options"].(map[string]interface{})
+			if payload["encryption"] != true || payload["inherit_encryption"] != false {
+				t.Errorf("preview payload = %v", payload)
 			}
 			for _, k := range []string{"passphrase", "key"} {
 				if _, ok := opts[k]; ok && got[k] != "[REDACTED]" {
@@ -229,6 +237,7 @@ func TestMaskDatasetPayloadDoesNotMutateInput(t *testing.T) {
 
 func TestCreateDatasetSuccessResponseHasNoSecrets(t *testing.T) {
 	client, _ := newFakeClientWith(t, map[string]interface{}{
+		"pool.query": []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
 		"pool.dataset.create": map[string]interface{}{
 			"id": "tank/secure", "name": "tank/secure", "type": "FILESYSTEM", "pool": "tank",
 			"encrypted": true, "key_loaded": true,
@@ -254,12 +263,16 @@ func TestCreateDatasetMiddlewareErrorMasksSecrets(t *testing.T) {
 		"key":        {"key": testKeyHex},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fake := &fakeMiddleware{handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
-				if method == "pool.dataset.create" {
-					return nil, map[string]interface{}{"code": -32001, "message": "[EINVAL] pool.dataset.create: invalid request"}, true
-				}
-				return nil, nil, false
-			}}
+			fake := &fakeMiddleware{
+				results: map[string]interface{}{
+					"pool.query": []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+				},
+				handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
+					if method == "pool.dataset.create" {
+						return nil, map[string]interface{}{"code": -32001, "message": "[EINVAL] pool.dataset.create: invalid request"}, true
+					}
+					return nil, nil, false
+				}}
 			client, _ := newFakeClientFrom(t, fake)
 			_, err := handleCreateDataset(context.Background(), client, map[string]interface{}{
 				"name": "tank/secure", "encryption": true, "encryption_options": opts,
@@ -407,13 +420,19 @@ func TestKeyBackupGuidancePerMode(t *testing.T) {
 		}
 	}
 	// A plain dataset gets no warning.
-	client, _ := newFakeClientWith(t, map[string]interface{}{"pool.dataset.create": map[string]interface{}{"id": "tank/p", "name": "tank/p", "encrypted": false, "key_loaded": true}}, nil)
+	client, _ := newFakeClientWith(t, map[string]interface{}{
+		"pool.query":          []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+		"pool.dataset.create": map[string]interface{}{"id": "tank/p", "name": "tank/p", "encrypted": false, "key_loaded": true},
+	}, nil)
 	out, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/p"})
 	if err != nil || strings.Contains(out, "encryption_warning") {
 		t.Errorf("unexpected warning: %s %v", out, err)
 	}
 	// An encrypted child that inherits gets the generic note.
-	client, _ = newFakeClientWith(t, map[string]interface{}{"pool.dataset.create": map[string]interface{}{"id": "tank/e/c", "name": "tank/e/c", "encrypted": true}}, nil)
+	client, _ = newFakeClientWith(t, map[string]interface{}{
+		"pool.query":          []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+		"pool.dataset.create": map[string]interface{}{"id": "tank/e/c", "name": "tank/e/c", "encrypted": true},
+	}, nil)
 	out, err = handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/e/c"})
 	if err != nil || !strings.Contains(out, "This dataset is encrypted") {
 		t.Errorf("generic note missing: %s %v", out, err)
@@ -454,12 +473,16 @@ func TestCreateDatasetMiddlewareErrorScrubsLiteralSecrets(t *testing.T) {
 			if name == "key" {
 				secret = testKeyHex
 			}
-			fake := &fakeMiddleware{handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
-				if method == "pool.dataset.create" {
-					return nil, map[string]interface{}{"code": -32001, "message": "[EINVAL] rejected value '" + secret + "' for new dataset"}, true
-				}
-				return nil, nil, false
-			}}
+			fake := &fakeMiddleware{
+				results: map[string]interface{}{
+					"pool.query": []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+				},
+				handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
+					if method == "pool.dataset.create" {
+						return nil, map[string]interface{}{"code": -32001, "message": "[EINVAL] rejected value '" + secret + "' for new dataset"}, true
+					}
+					return nil, nil, false
+				}}
 			client, _ := newFakeClientFrom(t, fake)
 			_, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": opts})
 			if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[REDACTED]") {
@@ -510,12 +533,16 @@ func TestKeyBackupGuidanceDoesNotNameExportTool(t *testing.T) {
 // fails with msg, and returns the resulting error text.
 func createWithEchoingMiddleware(t *testing.T, name, msg string, opts map[string]interface{}) string {
 	t.Helper()
-	fake := &fakeMiddleware{handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
-		if method == "pool.dataset.create" {
-			return nil, map[string]interface{}{"code": -32001, "message": msg}, true
-		}
-		return nil, nil, false
-	}}
+	fake := &fakeMiddleware{
+		results: map[string]interface{}{
+			"pool.query": []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+		},
+		handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
+			if method == "pool.dataset.create" {
+				return nil, map[string]interface{}{"code": -32001, "message": msg}, true
+			}
+			return nil, nil, false
+		}}
 	client, _ := newFakeClientFrom(t, fake)
 	_, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": name, "encryption": true, "encryption_options": opts})
 	if err == nil {
@@ -604,16 +631,20 @@ func TestRedactLiteralSecretsPassphraseIsCaseInsensitive(t *testing.T) {
 }
 
 func TestCreateDatasetErrorScrubCoversDetailsAndTrace(t *testing.T) {
-	fake := &fakeMiddleware{handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
-		if method == "pool.dataset.create" {
-			return nil, map[string]interface{}{"code": -32001, "message": "failed", "data": map[string]interface{}{
-				"error": 22, "errname": "EINVAL", "reason": "bad " + testPassphrase,
-				"trace": "Traceback: value " + testPassphrase,
-				"extra": []interface{}{[]interface{}{"pool_dataset_create.encryption_options", "echoed " + testPassphrase, 22}},
-			}}, true
-		}
-		return nil, nil, false
-	}}
+	fake := &fakeMiddleware{
+		results: map[string]interface{}{
+			"pool.query": []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+		},
+		handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
+			if method == "pool.dataset.create" {
+				return nil, map[string]interface{}{"code": -32001, "message": "failed", "data": map[string]interface{}{
+					"error": 22, "errname": "EINVAL", "reason": "bad " + testPassphrase,
+					"trace": "Traceback: value " + testPassphrase,
+					"extra": []interface{}{[]interface{}{"pool_dataset_create.encryption_options", "echoed " + testPassphrase, 22}},
+				}}, true
+			}
+			return nil, nil, false
+		}}
 	client, _ := newFakeClientFrom(t, fake)
 	_, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/secure", "encryption": true, "encryption_options": map[string]interface{}{"passphrase": testPassphrase}})
 	if err == nil {
