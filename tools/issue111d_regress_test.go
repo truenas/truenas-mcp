@@ -27,6 +27,8 @@ func TestPlanBackedDestructiveToolsRegisterAPlan(t *testing.T) {
 		"delete_scrub_schedule",
 		"upgrade_app",
 		"update_app",
+		"system_reboot",
+		"apply_update",
 	} {
 		if safetyOf(name).Access != Destructive {
 			t.Errorf("%s is listed as plan-backed but is not classified destructive", name)
@@ -461,6 +463,7 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 		"pool.query":              []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
 		"boot.environment.query":  bootEnvs,
 		"pool.scrub.query":        schedules,
+		"update.status":           map[string]interface{}{"status": "AVAILABLE"},
 	}, nil)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)

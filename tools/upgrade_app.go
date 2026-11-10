@@ -145,6 +145,30 @@ func upgradeTargetDescription(version string, summary interface{}) string {
 	return "the latest available version (app.upgrade_summary did not name it)"
 }
 
+// upgradeBoundVersion is the catalog version the preview resolved the
+// upgrade to: upgrade_version, or latest_version if that is missing.
+// It is hashed with the plan so a "latest" token is refused when that
+// target moves. The app.upgrade payload is unchanged.
+func upgradeBoundVersion(summary interface{}) string {
+	s, _ := summary.(map[string]interface{})
+	if l, ok := summary.([]interface{}); ok && len(l) > 0 {
+		s, _ = l[0].(map[string]interface{})
+	}
+	for _, key := range []string{"upgrade_version", "latest_version"} {
+		if v, _ := s[key].(string); strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func upgradeBind(summary interface{}) interface{} {
+	if v := upgradeBoundVersion(summary); v != "" {
+		return map[string]interface{}{"upgrade_version": v}
+	}
+	return nil
+}
+
 // normalizeUpgradeSummary makes an app.upgrade_summary result safe to show:
 // a null or blank changelog becomes "no changelog provided" instead of null,
 // a very long changelog is truncated (changelog_truncated, changelog_length),

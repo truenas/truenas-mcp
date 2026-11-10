@@ -85,10 +85,18 @@ func confirmationArgsHash(args map[string]interface{}) ([sha256.Size]byte, error
 // encoding/json writes object keys in sorted order, so the same method and
 // params hash the same.
 func confirmationPlanHash(method string, params []interface{}) ([sha256.Size]byte, error) {
+	return confirmationPlanHashBound(method, params, nil)
+}
+
+// confirmationPlanHashBound is confirmationPlanHash plus optional bind
+// data. bind is omitted from the JSON when nil, so a plan with no Bind
+// hashes the same as confirmationPlanHash of its method and params.
+func confirmationPlanHashBound(method string, params []interface{}, bind interface{}) ([sha256.Size]byte, error) {
 	data, err := json.Marshal(struct {
 		Method string        `json:"method"`
 		Params []interface{} `json:"params"`
-	}{Method: method, Params: params})
+		Bind   interface{}   `json:"bind,omitempty"`
+	}{Method: method, Params: params, Bind: bind})
 	if err != nil {
 		return [sha256.Size]byte{}, err
 	}
@@ -102,7 +110,7 @@ func (p *writePlan) planHash() ([sha256.Size]byte, error) {
 	if err := p.paramNamesOK(); err != nil {
 		return [sha256.Size]byte{}, err
 	}
-	return confirmationPlanHash(p.Method, p.CallParams)
+	return confirmationPlanHashBound(p.Method, p.CallParams, p.Bind)
 }
 
 // prune drops expired entries and, at the cap, the entry closest to expiry.
