@@ -331,7 +331,9 @@ You should now be able to ask TrueNAS questions:
 
 By default, logs written to stderr contain only metadata (method names, request
 IDs, response sizes) - never request or response bodies. Set `TRUENAS_MCP_DEBUG=1`
-(or pass `--debug`) to log full request/response bodies for troubleshooting.
+(or pass `--debug`) to log full request/response bodies for troubleshooting,
+and to log middleware error traces (Python tracebacks) to stderr. Those traces
+are not included in tool errors sent to the MCP client.
 
 Even in debug mode, credentials are never logged: API keys and other
 credential-bearing values (`password`, `bindpw`, `secret`, `token`, etc.) are
@@ -530,6 +532,7 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - **API Key Storage**: Recommend using environment variables instead of command-line args
 - **Log Safety**: Credentials are redacted from all log output and error messages; full request/response bodies are only logged in debug mode (see [Debug Logging](#debug-logging))
 - **Tool Output Redaction**: Secrets are always removed from tool results and error messages before they reach the MCP client (and the model), with no opt-out. Values under credential-bearing names (`password`, `DB_PASS`, `adminPwd`, `bindpw`, `secret`, `token`, `api_key`, `private_key`, `passphrase`, `credential`, `pin`, `otp`, `cookie`, `authorization`, password hashes, a key named `key` or ending in `_key`, ...) are replaced with `[REDACTED]`; the key is kept so the model knows the field exists, and a whole object or list under such a name is replaced. `{name, value}` environment entries and `NAME=VALUE` strings are redacted by name. Free text, including strings inside JSON results such as job errors, is also scrubbed of PEM private key blocks, `key=value`/`"key": "value"` pairs, Bearer tokens and passwords in URLs. This is a safety net, not a substitute for restricting the API key's permissions
+- **Tool Output Size**: Tool results and errors sent to the MCP client are capped at 100 KiB. A larger value is redacted first, then cut on a rune boundary, and a notice is appended saying the output was truncated and to narrow the query with `limit`, `select`, or filters. Redacting first prevents a secret from surviving as a fragment at the cut. Middleware error traces (Python tracebacks) are never sent to the client; with `--debug` they are logged to stderr, still redacted
 
 **Known gaps of output redaction.** Redaction works on names and on common text shapes, so it cannot catch everything:
 
@@ -657,7 +660,9 @@ The token is returned to the client in the tool result. Debug logs
 `token` key, both in the request that presents it and in the reply that
 returns it. In tool results only the top-level `confirmation_token` of a
 reply, and only while it is a live token issued by this server, is exempt
-from redaction.
+from redaction. The token is the first key of the reply, so the 100 KiB
+output cap never cuts it; if a cut ever would, the call returns an error
+without the token instead (nothing is executed).
 
 > **Breaking change (confirmation tokens):** `"confirm": true` no longer
 > executes a destructive tool. A call that sends it without a token gets the

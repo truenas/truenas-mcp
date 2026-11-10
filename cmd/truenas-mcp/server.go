@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/redact"
+	"github.com/truenas/truenas-mcp/tasks"
 )
 
 const (
@@ -26,6 +28,15 @@ const (
 	// the wait for a slot. It is above what the slowest tools need: a few
 	// sequential middleware calls of up to 120 s each.
 	toolCallTimeout = 10 * time.Minute
+	// maxToolOutputBytes is the cap on a tool result or error sent to the
+	// MCP client, in bytes (100 KiB). Larger output is redacted first,
+	// then cut on a rune boundary, and a notice is appended so the total
+	// stays within the cap.
+	maxToolOutputBytes = 100 * 1024
+	// toolOutputTruncationNotice is appended when a redacted tool result
+	// or error exceeds maxToolOutputBytes. It tells the model the output
+	// was cut and how to narrow the query.
+	toolOutputTruncationNotice = "\n\n[truncated] Output exceeded 100 KiB and was cut. Narrow the query with limit, select, or filters and call again."
 )
 
 // StdioHandler serves MCP over newline-delimited JSON-RPC on stdin/stdout.
@@ -177,11 +188,12 @@ func (h *StdioHandler) interrupted(ctx context.Context, name string, started boo
 
 // callResult builds the tools/call result. Every result and error is
 // redacted before it reaches the client: TrueNAS returns secrets
-// (passwords, keys, tokens) in many query results. The one exception is
-// the top-level confirmation_token of a destructive tool's reply, and only
-// when the registry confirms it issued that token (see
-// redact.ToolOutputKeeping). A *mcp.ReplyError is an error whose content is
-// its JSON reply.
+// (passwords, keys, tokens) in many query results. The redacted text is
+// then cut to maxToolOutputBytes so a secret cannot survive as a fragment
+// at the cut. The one redaction exception is the top-level
+// confirmation_token of a destructive tool's reply, and only when the
+// registry confirms it issued that token (see redact.ToolOutputKeeping). A
+// *mcp.ReplyError is an error whose content is its JSON reply.
 func (h *StdioHandler) callResult(result string, err error) *sdk.CallToolResult {
 	var keep func(string) bool
 	if tokens, ok := h.registry.(mcp.ConfirmationTokens); ok {
@@ -189,15 +201,50 @@ func (h *StdioHandler) callResult(result string, err error) *sdk.CallToolResult 
 	}
 	var reply *mcp.ReplyError
 	if errors.As(err, &reply) {
-		return &sdk.CallToolResult{
-			Content: []sdk.Content{&sdk.TextContent{Text: redact.ToolOutputKeeping(reply.Reply, confirmationTokenKey, keep)}},
-			IsError: true,
-		}
+		return keptTokenResult(reply.Reply, keep, true)
 	}
 	if err != nil {
 		return toolResult("", err)
 	}
-	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: redact.ToolOutputKeeping(result, confirmationTokenKey, keep)}}}
+	return keptTokenResult(result, keep, false)
+}
+
+// keptTokenResult redacts s with the confirmation_token exemption and caps
+// it. The reply encodes its keys in sorted order, so confirmation_token
+// comes first and is never cut. Should the cut still remove any part of a
+// kept token, the call fails closed: the client gets an error without the
+// token instead of a reply it cannot use.
+func keptTokenResult(s string, keep func(string) bool, isError bool) *sdk.CallToolResult {
+	text := capToolOutput(redact.ToolOutputKeeping(s, confirmationTokenKey, keep))
+	if tok := keptToken(s, keep); tok != "" && !strings.Contains(text, tok) {
+		return &sdk.CallToolResult{
+			Content: []sdk.Content{&sdk.TextContent{Text: "Error: " + confirmationTooLargeMessage}},
+			IsError: true,
+		}
+	}
+	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: text}}, IsError: isError}
+}
+
+// confirmationTooLargeMessage replaces a confirmation reply whose token the
+// output cap would cut.
+const confirmationTooLargeMessage = "the confirmation reply was too large to return with its confirmation_token; nothing was executed. " +
+	"Call the tool with dry_run=true to see the preview, or narrow the request"
+
+// keptToken returns the top-level confirmation_token of s when keep accepts
+// it, else "".
+func keptToken(s string, keep func(string) bool) string {
+	if keep == nil {
+		return ""
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal([]byte(s), &top) != nil {
+		return ""
+	}
+	var tok string
+	if json.Unmarshal(top[confirmationTokenKey], &tok) != nil || tok == "" || !keep(tok) {
+		return ""
+	}
+	return tok
 }
 
 // confirmationTokenKey is the result field that carries a confirmation
@@ -208,9 +255,24 @@ const confirmationTokenKey = "confirmation_token"
 func toolResult(result string, err error) *sdk.CallToolResult {
 	if err != nil {
 		return &sdk.CallToolResult{
-			Content: []sdk.Content{&sdk.TextContent{Text: "Error: " + redact.Text(err.Error())}},
+			Content: []sdk.Content{&sdk.TextContent{Text: capToolOutput("Error: " + redact.Text(err.Error()))}},
 			IsError: true,
 		}
 	}
-	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: redact.ToolOutput(result)}}}
+	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: capToolOutput(redact.ToolOutput(result))}}}
+}
+
+// capToolOutput cuts already-redacted text to at most maxToolOutputBytes.
+// When s is larger, it is cut on a rune boundary and the truncation
+// notice is appended; the notice is included in the cap.
+func capToolOutput(s string) string {
+	if len(s) <= maxToolOutputBytes {
+		return s
+	}
+	budget := maxToolOutputBytes - len(toolOutputTruncationNotice)
+	if budget < 0 {
+		budget = 0
+	}
+	cut, _ := tasks.TruncateText(s, budget)
+	return cut + toolOutputTruncationNotice
 }

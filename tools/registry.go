@@ -2369,7 +2369,7 @@ func handleQueryPools(client *truenas.Client, args map[string]interface{}) (stri
 
 	var pools []map[string]interface{}
 	if err := json.Unmarshal(result, &pools); err != nil {
-		return "", fmt.Errorf("failed to parse pools (raw response: %s): %w", string(result), err)
+		return "", fmt.Errorf("failed to parse pools: %w", err)
 	}
 
 	formatted, err := json.MarshalIndent(pools, "", "  ")

@@ -620,9 +620,12 @@ func TestCreateDatasetErrorScrubCoversDetailsAndTrace(t *testing.T) {
 	if strings.Contains(err.Error(), testPassphrase) {
 		t.Errorf("passphrase leaked:\n%s", err)
 	}
-	for _, want := range []string{"bad [REDACTED]", "Traceback: value [REDACTED]", "echoed [REDACTED]"} {
+	for _, want := range []string{"bad [REDACTED]", "echoed [REDACTED]"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q:\n%s", want, err)
 		}
+	}
+	if strings.Contains(err.Error(), "Trace:") || strings.Contains(err.Error(), "Traceback") {
+		t.Errorf("client error includes the server trace:\n%s", err)
 	}
 }

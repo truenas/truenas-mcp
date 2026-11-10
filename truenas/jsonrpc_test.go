@@ -3,6 +3,7 @@ package truenas
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -206,10 +207,17 @@ func TestErrorDataReachesToolText(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"EINVAL", "bad name", "(code 22)", "pool.dataset.create.name", "Method: pool.dataset.create", "Traceback", "Details:", "must not contain spaces"} {
+	for _, want := range []string{"EINVAL", "bad name", "(code 22)", "pool.dataset.create.name", "Method: pool.dataset.create", "Details:", "must not contain spaces"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error text missing %q:\n%s", want, err)
 		}
+	}
+	if strings.Contains(err.Error(), "Trace:") || strings.Contains(err.Error(), "Traceback") {
+		t.Errorf("client error includes the server trace:\n%s", err)
+	}
+	var apiErr *APICallError
+	if !errors.As(err, &apiErr) || !strings.Contains(apiErr.Trace, "Traceback") {
+		t.Errorf("Trace field = %+v", apiErr)
 	}
 }
 

@@ -297,3 +297,23 @@ func TestIsConfirmationToken(t *testing.T) {
 		t.Error("used token recognised")
 	}
 }
+
+// confirmation_token is the first key of every reply that carries one, so
+// the server's output cap (which keeps the start) never cuts it.
+func TestConfirmationTokenIsFirstKey(t *testing.T) {
+	r, _, _ := clockedRegistry(t)
+	out, err := r.CallTool(t.Context(), "delete_app", map[string]interface{}{"app_name": "plex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.CallTool(t.Context(), "delete_app", map[string]interface{}{"app_name": "plex", "confirmation_token": "bogus"})
+	var reply *mcp.ReplyError
+	if !errors.As(err, &reply) {
+		t.Fatalf("err = %v", err)
+	}
+	for _, s := range []string{out, reply.Reply} {
+		if !strings.HasPrefix(s, "{\n  \"confirmation_token\": ") {
+			t.Errorf("confirmation_token is not the first key:\n%.200s", s)
+		}
+	}
+}

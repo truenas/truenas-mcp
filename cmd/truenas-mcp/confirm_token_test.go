@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -79,5 +80,55 @@ func TestReplyErrorCarriesTokenAsErrorResult(t *testing.T) {
 	}
 	if strings.Contains(text, "fake-bind-pw") {
 		t.Errorf("reply error result not redacted:\n%s", text)
+	}
+}
+
+// bigReplyRegistry returns a confirmation reply (or, as a ReplyError, a
+// rejection) with an oversized preview. With padFirst a top-level key that
+// sorts before confirmation_token carries the padding, so a cut would
+// remove the token.
+type bigReplyRegistry struct {
+	tokenRegistry
+	padFirst bool
+	asError  bool
+}
+
+func (r bigReplyRegistry) CallTool(context.Context, string, map[string]interface{}) (string, error) {
+	pad := strings.Repeat("x", 2*maxToolOutputBytes)
+	reply := map[string]interface{}{
+		"confirmation_token": liveToken,
+		"status":             "confirmation_required",
+		"preview":            map[string]interface{}{"bindpw": "fake-bind-pw", "notes": pad},
+	}
+	if r.padFirst {
+		reply["a_padding"] = pad
+	}
+	b, err := json.MarshalIndent(reply, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if r.asError {
+		return "", &mcp.ReplyError{Message: "rejected; nothing was executed", Reply: string(b)}
+	}
+	return string(b), nil
+}
+
+// The output cap keeps a whole live token: confirmation_token sorts first in
+// the reply, so the redact-then-cut path returns it intact. If a cut would
+// still remove it, the reply fails closed without the token.
+func TestConfirmationTokenSurvivesOutputCap(t *testing.T) {
+	for _, asError := range []bool{false, true} {
+		text, isError := callText(t, bigReplyRegistry{asError: asError})
+		if len(text) > maxToolOutputBytes || !strings.HasSuffix(text, toolOutputTruncationNotice) {
+			t.Errorf("asError=%v: reply not capped (len %d)", asError, len(text))
+		}
+		if isError != asError || !strings.Contains(text, `"confirmation_token": "`+liveToken+`"`) || strings.Contains(text, "fake-bind-pw") {
+			t.Errorf("asError=%v: capped reply lost the token or leaked a secret (isError=%v):\n%.300s", asError, isError, text)
+		}
+
+		text, isError = callText(t, bigReplyRegistry{padFirst: true, asError: asError})
+		if !isError || strings.Contains(text, liveToken[:8]) || !strings.Contains(text, "nothing was executed") {
+			t.Errorf("asError=%v: a reply whose token would be cut did not fail closed (isError=%v):\n%.300s", asError, isError, text)
+		}
 	}
 }
