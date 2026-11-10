@@ -112,6 +112,24 @@ func TestHiddenToolKeepsPolicyError(t *testing.T) {
 	}
 }
 
+// A non-boolean dry_run or confirm is refused by the registry as a tool
+// error through the SDK dispatch, and nothing runs (the registry has no
+// client, so a handler or preview that ran would fail differently).
+func TestNonBooleanSafetyArgumentsOverStdio(t *testing.T) {
+	c, run := session(t, newTestHandler(tools.NewRegistry(nil, nil), false))
+	c.initialize()
+	for _, key := range []string{"confirm", "dry_run"} {
+		m := c.call(float64(1), "tools/call", toolArgs("delete_app", map[string]interface{}{"app_name": "plex", key: "true"}))
+		text, isError := toolText(t, m)
+		if !isError || !strings.Contains(text, key+" must be a JSON boolean") || !strings.Contains(text, "nothing was executed") {
+			t.Errorf("%s=\"true\": %q (isError %v); want the invalid-arguments error", key, text, isError)
+		}
+	}
+	if err := run.wait(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 // tools/list on the wire is exactly the registry's tool list, in its order:
 // the same names, descriptions, schemas and annotations.
 func TestToolsListMatchesRegistry(t *testing.T) {
