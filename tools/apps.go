@@ -1229,7 +1229,7 @@ func validateStorageRecursive(obj map[string]interface{}, path string, pools map
 	// Check type field FIRST (before iterating) to ensure consistent error messages
 	if typeVal, ok := obj["type"]; ok {
 		if typeStr, ok := typeVal.(string); ok {
-			if isStorageLikeType(typeStr) && typeStr != "host_path" {
+			if isStorageLikeObject(obj, typeStr) && typeStr != "host_path" {
 				loc := path
 				if loc == "" {
 					loc = "values"
@@ -1299,8 +1299,9 @@ func validateStorageRecursive(obj map[string]interface{}, path string, pools map
 }
 
 // storageSlot is one schema storage entry or hostpath-typed field.
-// kind is "storage", "hostpath", or "hostpathfile". path may contain
-// "[]" markers for list items (for example storage.shares[].share_entry.host_path).
+// kind is "storage", "hostpath", "hostpathdirectory", or "hostpathfile".
+// path may contain "[]" markers for list items (for example
+// storage.shares[].share_entry.host_path).
 type storageSlot struct {
 	path string
 	list bool
@@ -1327,6 +1328,31 @@ func isStorageLikeType(typeStr string) bool {
 	default:
 		return false
 	}
+}
+
+// volumeConfigKeys are the per-type config objects used on a storage entry
+// in the TrueNAS apps library. An unknown type that carries one of these
+// is still treated as storage, so new volume types are refused.
+var volumeConfigKeys = []string{
+	"host_path_config", "ix_volume_config", "nfs_config", "cifs_config",
+	"smb_config", "tmpfs_config", "volume_config", "anonymous_config",
+}
+
+func hasVolumeConfigKey(obj map[string]interface{}) bool {
+	for _, k := range volumeConfigKeys {
+		if _, ok := obj[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// isStorageLikeObject reports whether obj should be held to the host_path
+// rule. Known storage type strings are always caught. An unrecognized type
+// is also caught when the object carries a volume config key, so unknown
+// off-schema types fail closed instead of passing.
+func isStorageLikeObject(obj map[string]interface{}, typeStr string) bool {
+	return isStorageLikeType(typeStr) || hasVolumeConfigKey(obj)
 }
 
 func fetchCatalogAppSchema(ctx context.Context, client *truenas.Client, catalogApp, train, version string) (map[string]interface{}, error) {
@@ -1426,7 +1452,7 @@ func checkAppHostPathStorage(ctx context.Context, client *truenas.Client, schema
 	}
 	var collected []string
 	for _, slot := range slots {
-		if err := collectSlotPaths(values, slot, pools, &collected); err != nil {
+		if err := collectSlotPaths(ctx, client, values, slot, pools, &collected); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1440,8 +1466,8 @@ func checkAppHostPathStorage(ctx context.Context, client *truenas.Client, schema
 	return collected, missing, nil
 }
 
-func collectSlotPaths(values map[string]interface{}, slot storageSlot, pools map[string]bool, collected *[]string) error {
-	if slot.kind == "hostpath" || slot.kind == "hostpathfile" {
+func collectSlotPaths(ctx context.Context, client *truenas.Client, values map[string]interface{}, slot storageSlot, pools map[string]bool, collected *[]string) error {
+	if slot.kind == "hostpath" || slot.kind == "hostpathfile" || slot.kind == "hostpathdirectory" {
 		dotted := slot.path
 		if slot.list && !strings.Contains(dotted, "[]") {
 			dotted += "[]"
@@ -1461,7 +1487,7 @@ func collectSlotPaths(values map[string]interface{}, slot storageSlot, pools map
 			if p == "" {
 				return fmt.Errorf("host path at %s must be a non-empty string", lv.loc)
 			}
-			target, err := hostPathDatasetTarget(p, slot.kind, lv.loc, pools)
+			target, err := hostPathDatasetTarget(ctx, client, p, slot.kind, lv.loc, pools)
 			if err != nil {
 				return err
 			}
@@ -1535,9 +1561,17 @@ func collectStorageSlots(schema map[string]interface{}) ([]storageSlot, error) {
 
 func walkSchemaQuestion(q map[string]interface{}, prefix string, slots *[]storageSlot) error {
 	variable, _ := q["variable"].(string)
-	sch, _ := q["schema"].(map[string]interface{})
-	if sch == nil {
-		return nil
+	loc := joinValuePath(prefix, variable)
+	if loc == "" {
+		loc = "questions"
+	}
+	raw, ok := q["schema"]
+	if !ok || raw == nil {
+		return fmt.Errorf("app schema question at %s has no schema map; refusing to validate storage", loc)
+	}
+	sch, ok := raw.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("app schema question at %s has no schema map; refusing to validate storage", loc)
 	}
 	return walkSchemaNode(sch, joinValuePath(prefix, variable), slots)
 }
@@ -1563,7 +1597,11 @@ func walkSchemaNode(schema map[string]interface{}, valuePath string, slots *[]st
 			}
 			return fmt.Errorf("app schema list at %s has items that cannot be parsed; refusing to validate storage", loc)
 		}
-		if isStorageDictSchema(item) {
+		isStorage, err := isStorageDictSchema(item, valuePath)
+		if err != nil {
+			return err
+		}
+		if isStorage {
 			*slots = append(*slots, storageSlot{path: valuePath, list: true, kind: "storage"})
 			return nil
 		}
@@ -1578,13 +1616,21 @@ func walkSchemaNode(schema map[string]interface{}, valuePath string, slots *[]st
 		*slots = append(*slots, storageSlot{path: valuePath, list: false, kind: kind})
 		return nil
 	}
-	if isStorageDictSchema(schema) {
+	isStorage, err := isStorageDictSchema(schema, valuePath)
+	if err != nil {
+		return err
+	}
+	if isStorage {
 		// Stop here so host_path_config.path is handled by validateHostPathEntry
 		// (which also covers acl.path) rather than as a bare hostpath field.
 		*slots = append(*slots, storageSlot{path: valuePath, list: false, kind: "storage"})
 		return nil
 	}
-	for _, attr := range schemaAttrs(schema) {
+	attrs, err := schemaAttrs(schema, valuePath)
+	if err != nil {
+		return err
+	}
+	for _, attr := range attrs {
 		if err := walkSchemaQuestion(attr, valuePath, slots); err != nil {
 			return err
 		}
@@ -1596,7 +1642,9 @@ func hostPathSchemaKind(schema map[string]interface{}) string {
 	switch appSchemaType(schema) {
 	case "hostpathfile":
 		return "hostpathfile"
-	case "hostpath", "hostpathdirectory":
+	case "hostpathdirectory":
+		return "hostpathdirectory"
+	case "hostpath":
 		return "hostpath"
 	default:
 		return ""
@@ -1608,15 +1656,30 @@ func appSchemaType(schema map[string]interface{}) string {
 	return t
 }
 
-func schemaAttrs(schema map[string]interface{}) []map[string]interface{} {
-	raw, _ := schema["attrs"].([]interface{})
-	var out []map[string]interface{}
-	for _, a := range raw {
-		if m, ok := a.(map[string]interface{}); ok {
-			out = append(out, m)
-		}
+func schemaAttrs(schema map[string]interface{}, loc string) ([]map[string]interface{}, error) {
+	raw, ok := schema["attrs"]
+	if !ok || raw == nil {
+		return nil, nil
 	}
-	return out
+	list, ok := raw.([]interface{})
+	if !ok {
+		if loc == "" {
+			loc = "schema"
+		}
+		return nil, fmt.Errorf("app schema attrs at %s is not a list; refusing to validate storage", loc)
+	}
+	var out []map[string]interface{}
+	for i, a := range list {
+		m, ok := a.(map[string]interface{})
+		if !ok {
+			if loc == "" {
+				loc = "schema"
+			}
+			return nil, fmt.Errorf("app schema attrs[%d] at %s is not a map; refusing to validate storage", i, loc)
+		}
+		out = append(out, m)
+	}
+	return out, nil
 }
 
 func listItemSchema(schema map[string]interface{}) map[string]interface{} {
@@ -1673,20 +1736,24 @@ func isStorageTypeAttr(schema map[string]interface{}) bool {
 	return false
 }
 
-func isStorageDictSchema(schema map[string]interface{}) bool {
+func isStorageDictSchema(schema map[string]interface{}, loc string) (bool, error) {
 	typ := appSchemaType(schema)
 	if typ != "" && typ != "dict" && typ != "object" {
-		return false
+		return false, nil
 	}
-	for _, attr := range schemaAttrs(schema) {
+	attrs, err := schemaAttrs(schema, loc)
+	if err != nil {
+		return false, err
+	}
+	for _, attr := range attrs {
 		if attr["variable"] == "type" {
 			sub, _ := attr["schema"].(map[string]interface{})
 			if sub != nil && isStorageTypeAttr(sub) {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 func lookupValuesPath(values map[string]interface{}, dotted string) (interface{}, bool) {
@@ -1793,29 +1860,74 @@ func validateHostPathLocation(p, loc string, pools map[string]bool) error {
 	return nil
 }
 
-func hostPathDatasetTarget(p, kind, loc string, pools map[string]bool) (string, error) {
+func hostPathDatasetTarget(ctx context.Context, client *truenas.Client, p, kind, loc string, pools map[string]bool) (string, error) {
 	if err := validateHostPathLocation(p, loc, pools); err != nil {
 		return "", err
 	}
-	// hostpathfile is explicit. hostpath is typed as a directory in the
-	// catalog, but some templates (nextcloud custom_confs) bind-mount a
-	// file; treat a last component with a "." as a file so valid configs work.
-	if kind == "hostpathfile" || (kind == "hostpath" && hostPathLooksLikeFile(p)) {
-		parent := path.Dir(p)
-		if err := validateHostPathLocation(parent, loc, pools); err != nil {
-			return "", fmt.Errorf("invalid path %q at %s: file must be under a dataset below the pool (not the pool root)", p, loc)
-		}
+	switch kind {
+	case "hostpathfile":
+		return hostPathFileParent(p, loc, pools)
+	case "hostpathdirectory":
+		return p, nil
+	case "hostpath":
+		// Catalog type hostpath is used for both directories (webdav,
+		// rsyncd) and files (nextcloud custom_confs). Classify by
+		// whether the path exists as a dataset, not by a "." in the name.
+		return resolveHostPathTarget(ctx, client, p, loc, pools)
+	default:
+		return p, nil
+	}
+}
+
+func hostPathFileParent(p, loc string, pools map[string]bool) (string, error) {
+	parent := path.Dir(p)
+	if err := validateHostPathLocation(parent, loc, pools); err != nil {
+		return "", fmt.Errorf("invalid path %q at %s: file must be under a dataset below the pool (not the pool root)", p, loc)
+	}
+	return parent, nil
+}
+
+// resolveHostPathTarget classifies an ambiguous hostpath value. If the path
+// exists as a dataset, it is a directory. If it does not, and the parent is
+// a valid location under /mnt/<pool>/ whose dataset exists, it is a file.
+// If it is not a dataset and the parent is not a valid file location
+// (for example the path sits directly under the pool), the path itself is
+// returned so the missing-dataset check can report it. A typo for a missing
+// subdirectory whose parent dataset exists is accepted as a file;
+// distinguishing that from a real file would need a filesystem stat.
+func resolveHostPathTarget(ctx context.Context, client *truenas.Client, p, loc string, pools map[string]bool) (string, error) {
+	exists, err := hostPathDatasetExists(ctx, client, p)
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		return p, nil
+	}
+	parent, err := hostPathFileParent(p, loc, pools)
+	if err != nil {
+		// A file can never sit directly under the pool. Keep the path so
+		// the later dataset check can report it as missing (the real call
+		// gives the create_dataset hint; dry-run warns).
+		return p, nil
+	}
+	parentExists, err := hostPathDatasetExists(ctx, client, parent)
+	if err != nil {
+		return "", err
+	}
+	if parentExists {
 		return parent, nil
 	}
+	// Neither the path nor the parent exists. Keep the path so the
+	// later dataset check can report it as missing (dry-run warns).
 	return p, nil
 }
 
-func hostPathLooksLikeFile(p string) bool {
-	base := path.Base(p)
-	if base == "" || base == "." || base == ".." {
-		return false
+func hostPathDatasetExists(ctx context.Context, client *truenas.Client, p string) (bool, error) {
+	missing, err := verifyDatasetPathsExist(ctx, client, []string{p})
+	if err != nil {
+		return false, err
 	}
-	return strings.Contains(base, ".")
+	return len(missing) == 0, nil
 }
 
 type locatedValue struct {

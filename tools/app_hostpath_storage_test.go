@@ -805,4 +805,200 @@ func TestAppHostPathCatalogFollowups(t *testing.T) {
 			mustRefuseWrite(t, hostPathTestSchema(), values, "host_path", false)
 		}
 	})
+
+	t.Run("question with no schema map refuses", func(t *testing.T) {
+		schema := hostPathTestSchema()
+		qs := schema["questions"].([]interface{})
+		qs = append(qs, map[string]interface{}{"variable": "orphaned"})
+		schema["questions"] = qs
+		mustRefuseWrite(t, schema, validHostPathValues(), "schema map", false)
+		mustRefuseWrite(t, schema, validHostPathValues(), "schema map", true)
+	})
+
+	t.Run("question schema that is not a map refuses", func(t *testing.T) {
+		schema := hostPathTestSchema()
+		qs := schema["questions"].([]interface{})
+		qs = append(qs, map[string]interface{}{"variable": "orphaned", "schema": "not-a-map"})
+		schema["questions"] = qs
+		mustRefuseWrite(t, schema, validHostPathValues(), "schema map", false)
+	})
+
+	t.Run("attrs entry that is not a map refuses", func(t *testing.T) {
+		schema := hostPathTestSchema()
+		qs := schema["questions"].([]interface{})
+		st := qs[0].(map[string]interface{})["schema"].(map[string]interface{})
+		attrs := st["attrs"].([]interface{})
+		st["attrs"] = append(attrs, "not-a-map")
+		mustRefuseWrite(t, schema, validHostPathValues(), "attrs", false)
+	})
+
+	t.Run("off-schema unknown type with volume config is rejected", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["extra"] = map[string]interface{}{
+			"type": "bind",
+			"host_path_config": map[string]interface{}{
+				"path": "/mnt/tank/apps/jellyfin/config",
+			},
+		}
+		mustRefuseWrite(t, hostPathTestSchema(), values, "host_path", false)
+	})
+}
+
+// addHostPathDatasets wraps a host-path fake so extra datasets exist.
+func addHostPathDatasets(fake *fakeMiddleware, names ...string) {
+	extra := map[string]bool{}
+	for _, n := range names {
+		extra[n] = true
+	}
+	orig := fake.handle
+	fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if method == "pool.dataset.query" {
+			var args []interface{}
+			if err := json.Unmarshal(params, &args); err == nil && len(args) > 0 {
+				if filters, ok := args[0].([]interface{}); ok && len(filters) > 0 {
+					if f, ok := filters[0].([]interface{}); ok && len(f) >= 3 {
+						if s, ok := f[2].(string); ok && extra[s] {
+							return []interface{}{map[string]interface{}{"name": s}}, nil, true
+						}
+					}
+				}
+			}
+		}
+		if orig != nil {
+			return orig(method, params)
+		}
+		return nil, nil, false
+	}
+}
+
+// TestAppHostPathClassifyAndSchemaNits covers the remaining #127 review nits
+// around file-vs-directory classification for hostpath values.
+func TestAppHostPathClassifyAndSchemaNits(t *testing.T) {
+	callInstall := func(t *testing.T, schema map[string]interface{}, values map[string]interface{}, extraDS []string) (string, error, *fakeMiddleware) {
+		t.Helper()
+		r, fake := hostPathReviewFake(t, schema, nil)
+		if len(extraDS) > 0 {
+			addHostPathDatasets(fake, extraDS...)
+		}
+		out, err := r.CallTool(t.Context(), "install_app", map[string]interface{}{
+			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": values,
+		})
+		return out, err, fake
+	}
+	mustRefuse := func(t *testing.T, schema map[string]interface{}, values map[string]interface{}, want string, extraDS []string) {
+		t.Helper()
+		out, err, fake := callInstall(t, schema, values, extraDS)
+		if err == nil {
+			t.Fatalf("accepted: %s", out)
+		}
+		if want != "" && !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Errorf("error %q, want it to mention %q", err, want)
+		}
+		creates, updates := writeCalls(fake)
+		if creates != 0 || updates != 0 {
+			t.Errorf("app.create=%d app.update=%d, want no write", creates, updates)
+		}
+	}
+	mustAccept := func(t *testing.T, schema map[string]interface{}, values map[string]interface{}, extraDS []string) {
+		t.Helper()
+		out, err, fake := callInstall(t, schema, values, extraDS)
+		if err != nil {
+			t.Fatalf("refused: %v (out=%s)", err, out)
+		}
+		if n := len(fake.called("app.create")); n != 1 {
+			t.Errorf("app.create called %d times, want 1", n)
+		}
+	}
+
+	t.Run("webdav dotted directory dataset at the pool is accepted", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["shares"] = []interface{}{
+			map[string]interface{}{"name": "share1", "host_path": "/mnt/tank/share.1"},
+		}
+		mustAccept(t, hostPathFieldSchema(), values, []string{"tank/share.1"})
+	})
+
+	t.Run("webdav dotted directory at the pool with no dataset is a missing-dataset error", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["shares"] = []interface{}{
+			map[string]interface{}{"name": "share1", "host_path": "/mnt/tank/share.1"},
+		}
+		mustRefuse(t, hostPathFieldSchema(), values, "create_dataset", nil)
+	})
+
+	t.Run("missing dataset directly under the pool uses the missing-dataset check", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["shares"] = []interface{}{
+			map[string]interface{}{"name": "share1", "host_path": "/mnt/tank/webdav"},
+		}
+
+		out, err, fake := callInstall(t, hostPathFieldSchema(), values, nil)
+		if err == nil {
+			t.Fatalf("real call accepted a missing pool-root dataset: %s", out)
+		}
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "create_dataset") || !strings.Contains(msg, "tank/webdav") || !strings.Contains(msg, "missing") {
+			t.Errorf("real call error %q, want the missing-dataset error with a create_dataset hint for tank/webdav", err)
+		}
+		if strings.Contains(msg, "not a file under a dataset") {
+			t.Errorf("real call used the hard classification error: %v", err)
+		}
+		creates, updates := writeCalls(fake)
+		if creates != 0 || updates != 0 {
+			t.Errorf("app.create=%d app.update=%d, want no write", creates, updates)
+		}
+
+		r, fake := hostPathReviewFake(t, hostPathFieldSchema(), nil)
+		out, err = r.CallTool(t.Context(), "install_app", map[string]interface{}{
+			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community",
+			"values": values, "dry_run": true,
+		})
+		if err != nil {
+			t.Fatalf("dry-run returned an error: %v (out=%s)", err, out)
+		}
+		low := strings.ToLower(out)
+		if !strings.Contains(low, "critical") || !strings.Contains(low, "create_dataset") || !strings.Contains(low, "tank/webdav") {
+			t.Errorf("dry-run output %q, want a CRITICAL missing-dataset warning for tank/webdav", out)
+		}
+		if strings.Contains(low, "not a file under a dataset") {
+			t.Errorf("dry-run used the hard classification error: %s", out)
+		}
+		if n := len(fake.called("app.create")); n != 0 {
+			t.Errorf("dry-run app.create called %d times, want 0", n)
+		}
+	})
+
+	t.Run("rsyncd dotted directory dataset is accepted when the parent is not a dataset", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["rsyncd"] = map[string]interface{}{
+			"rsync_modules": []interface{}{
+				map[string]interface{}{"name": "module1", "host_path": "/mnt/tank/apps/jellyfin/media.data"},
+			},
+		}
+		mustAccept(t, hostPathFieldSchema(), values, []string{"tank/apps/jellyfin/media.data"})
+	})
+
+	t.Run("nextcloud custom_confs dotless file under an existing dataset is accepted", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["network"] = map[string]interface{}{
+			"nginx": map[string]interface{}{
+				"custom_confs": []interface{}{"/mnt/tank/apps/jellyfin/config/nginx_custom"},
+			},
+		}
+		mustAccept(t, hostPathFieldSchema(), values, nil)
+	})
+
+	t.Run("hostpathdirectory dotted dataset is accepted when the parent is not a dataset", func(t *testing.T) {
+		schema := hostPathTestSchema()
+		qs := schema["questions"].([]interface{})
+		st := qs[0].(map[string]interface{})["schema"].(map[string]interface{})
+		attrs := st["attrs"].([]interface{})
+		st["attrs"] = append(attrs, map[string]interface{}{
+			"variable": "media_dir",
+			"schema":   map[string]interface{}{"type": "hostpathdirectory", "required": true},
+		})
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["media_dir"] = "/mnt/tank/apps/jellyfin/media.data"
+		mustAccept(t, schema, values, []string{"tank/apps/jellyfin/media.data"})
+	})
 }
