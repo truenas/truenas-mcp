@@ -972,7 +972,7 @@ A dry run of `refresh_directory_cache` now returns an error when no directory se
 
 > **Behaviour change:** `refresh_directory_cache` no longer reports `cache_refreshed: true` when the `directoryservices.cache_refresh` job is only submitted. Clients should treat `status: "submitted"` like the other directory-service tools and poll the task.
 
-`get_app_catalog_details` returns the app schema (groups and questions, including each question's defaults) and, when the schema defines them, a `defaults` object with run-as user/group and resource limits taken from `catalog.get_app_details`. Resource defaults keep the schema nesting (`defaults.resources.limits.cpus` and `defaults.resources.limits.memory`). Only numeric defaults are passed through. When the schema has `run_as_custom_user` and its default is false, `run_as` is omitted because those values only apply when that flag is true. Those defaults are omitted when the schema has none. Workflow guidance for installation (review schema groups, query pools, create datasets, use `host_path`, use schema defaults when present) lives in the `get_app_catalog_details` and `install_app` tool descriptions, worded so any MCP client can follow it.
+`get_app_catalog_details` returns the app schema (groups and questions, including each question's defaults) and, when the schema defines them, a `defaults` object with run-as user/group and resource limits taken from `catalog.get_app_details`. Resource defaults keep the schema nesting (`defaults.resources.limits.cpus` and `defaults.resources.limits.memory`). Only numeric defaults are passed through. When the schema has `run_as_custom_user` and its default is false, `run_as` is omitted because those values only apply when that flag is true. When the schema has `enable_resource_limits` and its default is false, `defaults.resources.limits` is omitted for the same reason. Those defaults are omitted when the schema has none. Workflow guidance for installation (review schema groups, query pools, create datasets, use `host_path`, use schema defaults when present) lives in the `get_app_catalog_details` and `install_app` tool descriptions, worded so any MCP client can follow it.
 
 > **Behaviour change:** `get_app_catalog_details` no longer includes a `wizard_guidance` object with client-specific instructions (for example a named tool of one MCP client) or fixed run-as and resource defaults. Clients that read `wizard_guidance` should use the schema and the `defaults` field (when present) instead, and follow the tool descriptions for the install workflow.
 
@@ -993,6 +993,9 @@ make lint
 # Run tests (includes the race detector)
 make test
 
+# Run tests without the race detector (faster)
+make test RACE=
+
 # Check dependencies for known vulnerabilities (version used in CI)
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
@@ -1002,7 +1005,7 @@ make clean
 
 The "Build and Package" workflow runs the linters (`make lint`, including
 staticcheck and errcheck), a single test step with the
-race detector and coverage (`go test -race -coverprofile=coverage.out -covermode=atomic ./...`), `govulncheck`
+race detector and coverage (`go test -race -coverprofile=coverage.out -covermode=atomic ./...`), a non-race `go test -count=1 ./redact` so the randomized and linear redaction tests run at full strength, `govulncheck`
 and builds for macOS (Apple Silicon), Linux and Windows on every pull request
 and on every push to `main`. The release workflow, which runs for version
 tags, runs the linters and tests again (with the race detector) and publishes those three platforms, with SLSA build provenance attestations for the release archives. A test in
