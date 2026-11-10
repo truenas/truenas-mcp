@@ -61,6 +61,8 @@ var sensitiveExactKeys = map[string]bool{
 	// LDAP/SSSD free-text extra parameters can carry bind secrets
 	// (ldap_default_authtok, etc.). The whole field is redacted.
 	"auxiliaryparameters": true,
+	// MCP elicitation requestState is an opaque confirmation handle.
+	"requeststate": true,
 }
 
 // publicKeyNames are exact normalised names of public key fields, which are

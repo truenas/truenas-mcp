@@ -354,6 +354,7 @@ You should now be able to ask TrueNAS questions:
 - `--read-only` - Hide and refuse every tool that changes the system (or set `TRUENAS_MCP_READ_ONLY=1`); see [Safety Controls](#safety-controls)
 - `--allow-tools` - Comma-separated list of the only tools to expose (or use `TRUENAS_MCP_ALLOW_TOOLS`)
 - `--deny-tools` - Comma-separated list of tools to hide and refuse (or use `TRUENAS_MCP_DENY_TOOLS`)
+- `--require-human-confirm` - Refuse destructive tools on clients that do not support MCP elicitation, instead of falling back to a confirmation token (or set `TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM=1`); see [Safety Controls](#safety-controls)
 - `--version` - Print version and exit
 
 ### Debug Logging
@@ -632,8 +633,11 @@ is set (`upgrade_app` may be named; it stays limited to dry runs).
 TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
-**Confirmation tokens for destructive tools.** These ten tools execute only
-with a `confirmation_token` from a preview of the same call:
+**Confirmation for destructive tools.** These ten tools execute only after
+confirmation. When the MCP client supports form elicitation, the server asks
+the user to approve a short preview in the client and executes only if they
+accept. Otherwise the tools execute only with a `confirmation_token` from a
+preview of the same call:
 
 | Tool | Why it is destructive |
 |------|-----------------------|
@@ -654,7 +658,25 @@ No other tool needs a token: the other write tools (`create_dataset`,
 `restore_alert`, `refresh_directory_cache`) run directly and keep their
 optional `dry_run`, and read tools never take one.
 
-The flow:
+**Elicitation (primary path).** If the client declared the MCP form
+elicitation capability, a destructive call without a valid token runs the
+preview and then sends an elicitation whose message is a short summary of
+that preview (tool, target, main warnings) with one required boolean field,
+`approved`. The server uses the official Go MCP SDK for this: mid-call
+`elicitation/create` on protocol revisions 2025-06-18 and 2025-11-25, and a
+tool result with `inputRequests` (the client retries with the answer) on
+2026-07-28. The call executes only on `accept` with `approved` true, and
+only the plan that was previewed. A declined, cancelled, failed or timed-out
+prompt executes nothing and does not fall back to a confirmation token. A
+blocked preview (the operation cannot proceed) is an error, issues no
+prompt, and executes nothing.
+
+`--require-human-confirm` (or `TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM`) refuses
+destructive tools on clients that did not declare form elicitation, instead
+of falling back to the token flow. Dry runs and `--read-only` are unchanged.
+
+**Token flow (fallback).** Clients that do not declare elicitation use a
+confirmation token:
 
 1. Call the tool without a token. Nothing is executed. The reply is a
    normal (non-error) result with `"status": "confirmation_required"`,
@@ -663,6 +685,10 @@ The flow:
 2. Show the preview to the user and get their explicit approval.
 3. Call the tool again with exactly the same arguments plus
    `"confirmation_token": "<token>"`. The call executes once.
+
+A call that already carries a valid token is executed without elicitation
+(no double prompt). A call approved through elicitation does not need a
+token.
 
 The token is 128 bits from a cryptographically secure random source, single
 use, valid for 5 minutes, and held in the server's memory only (a restart
@@ -693,14 +719,17 @@ no token (a token sent with `dry_run: true` is not used up). `dry_run` must
 be a JSON boolean (`true` or `false`); a string such as `"true"` or a number
 is rejected and nothing is executed.
 
-**What the token does and does not prove.** It guarantees that a preview
-of these exact arguments was produced by this server within the last 5
-minutes and that the executed arguments match it. It does **not** prove
-that a human saw or approved the preview: the client holds the token and
-can send it straight back. Approval in the client (MCP elicitation) is
-planned as the primary path where the client supports it, with the token as
-the fallback. Hard enforcement is `--read-only`, `--allow-tools` /
-`--deny-tools`, and the TrueNAS role of the API key.
+**What confirmation does and does not prove.** A confirmation token
+guarantees that a preview of these exact arguments was produced by this
+server within the last 5 minutes and that the executed arguments match it.
+It does **not** prove that a human saw or approved the preview: the client
+holds the token and can send it straight back. MCP elicitation raises the
+bar by asking the client to show the preview and return the user's
+decision, but the capability is self-declared: a headless or auto-approving
+host can answer `accept` without a person. Elicitation is not proof that a
+human approved. Hard enforcement is `--read-only`, `--allow-tools` /
+`--deny-tools`, `--require-human-confirm`, and the TrueNAS role of the API
+key.
 
 The token is returned to the client in the tool result. Debug logs
 (`--debug`) never show it: it is redacted like any other value under a

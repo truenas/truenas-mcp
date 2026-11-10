@@ -42,11 +42,12 @@ var confirmationControlArgs = map[string]bool{"confirm": true, "confirmation_tok
 var errTokenRejected = errors.New("confirmation token rejected")
 
 type tokenEntry struct {
-	tool     string
-	argsHash [sha256.Size]byte
-	planHash [sha256.Size]byte
-	expires  time.Time
-	used     bool
+	tool       string
+	argsHash   [sha256.Size]byte
+	planHash   [sha256.Size]byte
+	expires    time.Time
+	used       bool
+	elicitOnly bool
 }
 
 // confirmationTokens is the in-memory token store. Tokens are kept by their
@@ -172,7 +173,7 @@ func (c *confirmationTokens) redeemWithPlan(tok, tool string, argsHash, planHash
 	e, ok := c.entries[key]
 	now := c.now()
 	switch {
-	case !ok:
+	case !ok || e.elicitOnly:
 		return fmt.Errorf("%w: it is unknown (it was not issued by this server, or it expired and was removed, or the server restarted)", errTokenRejected)
 	case e.used:
 		return fmt.Errorf("%w: it was already used; every token executes at most once", errTokenRejected)
@@ -200,7 +201,54 @@ func (c *confirmationTokens) live(tok string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[sha256.Sum256([]byte(tok))]
-	return ok && !e.used && c.now().Before(e.expires)
+	return ok && !e.used && !e.elicitOnly && c.now().Before(e.expires)
+}
+
+// issueElicit returns a new elicitation handle bound to tool, argsHash,
+// and planHash. The handle is not a confirmation_token: redeem and
+// IsConfirmationToken treat it as unknown.
+func (c *confirmationTokens) issueElicit(tool string, argsHash, planHash [sha256.Size]byte) (string, error) {
+	b := make([]byte, confirmationTokenBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("could not generate a confirmation prompt: %w", err)
+	}
+	tok := hex.EncodeToString(b)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	c.prune(now)
+	c.entries[sha256.Sum256([]byte(tok))] = &tokenEntry{tool: tool, argsHash: argsHash, planHash: planHash, expires: now.Add(confirmationTokenTTL), elicitOnly: true}
+	return tok, nil
+}
+
+// redeemElicit consumes an elicitation handle for tool, argsHash, and
+// planHash. A handle presented for another tool, other arguments, or a
+// different planned operation is consumed too, so it cannot be retried.
+func (c *confirmationTokens) redeemElicit(tok, tool string, argsHash, planHash [sha256.Size]byte) error {
+	key := sha256.Sum256([]byte(tok))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	now := c.now()
+	switch {
+	case !ok || !e.elicitOnly:
+		return fmt.Errorf("%w: the confirmation prompt is unknown (it was not issued by this server, or it expired and was removed, or the server restarted)", errTokenRejected)
+	case e.used:
+		return fmt.Errorf("%w: the confirmation prompt was already used; it executes at most once", errTokenRejected)
+	case !now.Before(e.expires):
+		delete(c.entries, key)
+		return fmt.Errorf("%w: the confirmation prompt expired; prompts are valid for %s", errTokenRejected, confirmationTokenTTL)
+	}
+	e.used = true
+	switch {
+	case e.tool != tool:
+		return fmt.Errorf("%w: the confirmation prompt was issued for a different tool", errTokenRejected)
+	case e.argsHash != argsHash:
+		return fmt.Errorf("%w: the confirmation prompt was issued for different arguments; repeat the previewed call with exactly the same arguments", errTokenRejected)
+	case e.planHash != planHash:
+		return fmt.Errorf("%w: the confirmation prompt was issued for a different planned operation (the system state changed since the preview)", errTokenRejected)
+	}
+	return nil
 }
 
 // IsConfirmationToken reports whether tok is a live token this registry
