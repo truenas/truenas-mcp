@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 
@@ -145,26 +146,24 @@ func TestRedactErrorData(t *testing.T) {
 	}
 }
 
-// TestDebugLogsRedactMethodName covers the debug-only stderr line that
-// logs the method being handled: a client-supplied name that looks like
-// a secret must be redacted, and the secret must not appear on stderr.
-func TestDebugLogsRedactMethodName(t *testing.T) {
-	const secret = "s3cret"
+// captureDebugLogs sends log output to a buffer for the rest of the test.
+func captureDebugLogs(t *testing.T) *syncBuffer {
+	t.Helper()
 	var logs syncBuffer
 	log.SetOutput(&logs)
-	defer log.SetOutput(os.Stderr)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	return &logs
+}
 
-	c, run := session(t, newTestHandler(fakeRegistry{}, true))
-	c.initialize()
-	if m := c.call(float64(1), "tools/call", toolArgs("password="+secret, nil)); errorCode(m) != -32602 {
-		t.Errorf("unknown tool: %v; want -32602", m)
-	}
-	if err := run.wait(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	out := logs.String()
-	if !strings.Contains(out, "Handling method:") {
-		t.Errorf("debug log is missing the Handling method line:\n%s", out)
+// assertDebugHidesSecret checks that stderr debug logs include the given
+// phrases, replace secrets with the redaction marker, and never contain
+// secret itself.
+func assertDebugHidesSecret(t *testing.T, out, secret string, phrases ...string) {
+	t.Helper()
+	for _, p := range phrases {
+		if !strings.Contains(out, p) {
+			t.Errorf("debug log is missing %q:\n%s", p, out)
+		}
 	}
 	if strings.Contains(out, secret) {
 		t.Errorf("debug log leaked %q:\n%s", secret, out)
@@ -172,4 +171,63 @@ func TestDebugLogsRedactMethodName(t *testing.T) {
 	if !strings.Contains(out, redact.Marker) {
 		t.Errorf("debug log has no redaction marker:\n%s", out)
 	}
+}
+
+// TestDebugLogsRedactMethodName covers debug-only stderr lines that echo
+// client-supplied JSON-RPC methods and ids. A value that looks like a
+// secret must be redacted, and the secret must not appear on stderr.
+// A secret-looking tool name is not enough: [STDIN] already redacts
+// that, so the cases below use a method or string id of password=s3cret.
+func TestDebugLogsRedactMethodName(t *testing.T) {
+	const secret = "s3cret"
+	const suspicious = "password=" + secret
+
+	t.Run("method", func(t *testing.T) {
+		logs := captureDebugLogs(t)
+		c, run := session(t, newTestHandler(fakeRegistry{}, true))
+		c.initialize()
+		if m := c.call(float64(1), suspicious, nil); m["error"] == nil {
+			t.Errorf("unknown method: %v; want an error", m)
+		}
+		if err := run.wait(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		assertDebugHidesSecret(t, logs.String(), secret, "Handling method:")
+	})
+
+	t.Run("notification without id", func(t *testing.T) {
+		logs := captureDebugLogs(t)
+		c, run := session(t, newTestHandler(fakeRegistry{}, true))
+		c.initialize()
+		c.send(map[string]interface{}{"method": suspicious})
+		c.call(float64(1), "ping", nil)
+		if err := run.wait(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		assertDebugHidesSecret(t, logs.String(), secret, "Ignoring ", "sent without an id")
+	})
+
+	t.Run("string id", func(t *testing.T) {
+		logs := captureDebugLogs(t)
+		reg := newBlockingRegistry(t)
+		c, run := session(t, newTestHandler(reg, true))
+		c.initialize()
+		c.send(map[string]interface{}{"id": suspicious, "method": "tools/call", "params": toolArgs("slow", nil)})
+		reg.waitStarted(t, "slow")
+		c.send(map[string]interface{}{"method": "notifications/cancelled", "params": map[string]interface{}{"requestId": suspicious}})
+		c.call(float64(2), "ping", nil)
+		close(reg.release)
+		deadline := time.After(replyTimeout)
+		for !strings.Contains(logs.String(), "Dropping the reply to cancelled request") {
+			select {
+			case <-deadline:
+				t.Fatalf("debug log never had the dropped-reply line:\n%s", logs.String())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		if err := run.wait(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		assertDebugHidesSecret(t, logs.String(), secret, "Handling method:", "Dropping the reply to cancelled request")
+	})
 }
