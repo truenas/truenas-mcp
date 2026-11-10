@@ -138,6 +138,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Audit logging for compliance
   - Security warnings for public shares
   - Dry-run mode to preview with security analysis
+  - The "any network host" warning looks at `options.hostsallow` and treats an omitted `browsable` as true (the TrueNAS default)
+  - `network_path` uses the short hostname from `system.info` (preview and result), which is not the HA virtual hostname. If that lookup fails, the path uses the shell-safe placeholder `NAS_HOSTNAME` and a `hostname_note` marks it as a placeholder
 
 - **create_nfs_share** - Create NFS shares for Unix/Linux file sharing
   - Interactive wizard walks through NFS configuration
@@ -147,6 +149,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Security level selection (SYS, Kerberos)
   - Security warnings for unrestricted access
   - Dry-run mode to preview with mount examples
+  - Root-mapping warning: `no_root_squash` only when both `maproot_user` and `maproot_group` are `root`/`wheel`. A single root mapping keeps `root_squash` and sets `anonuid`/`anongid`. If the mapped user is uid 0, the warning says that means root file access. Other maproot names (for example `alice`) are reported as mapped to that account, not to nobody. `mapall_*` is described as `all_squash` to the named account, and mapall to uid 0 is called out as root file access for every client
+  - `mount_example` uses the short hostname from `system.info` (preview and result), which is not the HA virtual hostname. If that lookup fails, the example uses the shell-safe placeholder `NAS_HOSTNAME` and a `hostname_note` marks it as a placeholder
 
 ### Application Management
 - **install_app** - Install applications from the catalog with guided storage setup
@@ -274,7 +278,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Reports ongoing operations (JOINING/LEAVING)
 
 - **create_smb_share** and **create_nfs_share** - Directory service awareness
-  - Dry-run mode shows warnings when directory service is enabled
+  - Dry-run mode shows warnings when a directory service is enabled (the share handlers pass their TrueNAS client; middleware types such as `ACTIVEDIRECTORY`, `LDAP`, and `IPA` are recognised, including an enabled notice for IPA)
   - Reminds users that domain accounts will be used for permissions
   - Warns if directory service is FAULTED (authentication may not work)
   - Helps prevent configuration mistakes
