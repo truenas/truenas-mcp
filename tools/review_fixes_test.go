@@ -7,13 +7,22 @@ import (
 	"time"
 
 	"github.com/truenas/truenas-mcp/tasks"
+	"github.com/truenas/truenas-mcp/truenas"
 )
+
+func tankDryRunClient(t *testing.T) *truenas.Client {
+	t.Helper()
+	client, _ := newFakeClientWith(t, map[string]interface{}{
+		"pool.query": []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+	}, nil)
+	return client
+}
 
 func TestCreateDatasetVolblocksize(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	preview := func(args map[string]interface{}) (map[string]interface{}, error) {
 		args["dry_run"] = true
-		out, err := handleCreateDataset(nil, args)
+		out, err := handleCreateDataset(tankDryRunClient(t), args)
 		if err != nil {
 			return nil, err
 		}
@@ -65,7 +74,7 @@ func TestCreateDatasetVolblocksize(t *testing.T) {
 func TestCreateDatasetUserProperties(t *testing.T) {
 	prop := func(k, v interface{}) interface{} { return map[string]interface{}{"key": k, "value": v} }
 	call := func(up interface{}) error {
-		_, err := handleCreateDataset(nil, map[string]interface{}{"name": "tank/x", "dry_run": true, "user_properties": up})
+		_, err := handleCreateDataset(tankDryRunClient(t), map[string]interface{}{"name": "tank/x", "dry_run": true, "user_properties": up})
 		return err
 	}
 
