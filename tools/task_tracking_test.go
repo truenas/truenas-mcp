@@ -136,13 +136,14 @@ func TestTaskJobIDReusedAfterRestart(t *testing.T) {
 		t.Fatalf("before restart: %v", st)
 	}
 
-	// Restart: the connection drops, and job 3 is now someone else's job,
-	// which has already succeeded.
+	// Restart: the connection drops after this poll's reply, and from then
+	// on job 3 is someone else's job, which has already succeeded. Every
+	// later read goes over a new connection and login.
+	f.set(func(f *jobFake) { f.drop = true })
+	mgr.PollNow()
 	f.set(func(f *jobFake) {
-		f.drop = true
 		f.jobs = []interface{}{jobRow(3, "pool.dataset.query", "SUCCESS", 1_700_000_900_000)}
 	})
-	mgr.PollNow() // lands on the dropped connection
 	st := pollUntil(t, r, mgr, task.TaskID, 5)
 	if st["status"] != "failed" {
 		t.Fatalf("status = %v (%v), want failed: the job id now belongs to another job", st["status"], st["statusMessage"])
