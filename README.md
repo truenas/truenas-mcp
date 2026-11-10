@@ -109,7 +109,7 @@ make build
 make build-all
 ```
 
-Binaries report their version with `--version`. `make` takes the version from `git describe`; override it with `make build VERSION=1.2.3`. Without `make`, `go build -o truenas-mcp ./cmd/truenas-mcp` produces the same binary; its version is the module version Go records from the git checkout (or from `go install ...@vX.Y.Z`), or `dev` when none is available. `make clean` removes the binaries.
+Binaries report their version with `--version`. `make` takes the version from `git describe`; override it with `make build VERSION=1.2.3`. The `build` and `build-all` targets set `CGO_ENABLED=0`, so the Linux binary is statically linked. Without `make`, `CGO_ENABLED=0 go build -o truenas-mcp ./cmd/truenas-mcp` produces the same binary; omit `CGO_ENABLED=0` and a Linux build may be dynamically linked if a C compiler is present. The binary's version is the module version Go records from the git checkout (or from `go install ...@vX.Y.Z`), or `dev` when none is available. `make clean` removes the binaries.
 
 ## Installation
 
@@ -214,7 +214,7 @@ is visible in the process list.
     "truenas": {
       "command": "truenas-mcp",
       "env": {
-        "TRUENAS_URL": "truenas.local",
+        "TRUENAS_URL": "192.168.0.31",
         "TRUENAS_API_KEY": "your-api-key-here",
         "TRUENAS_API_USER": "your-api-user"
       }
@@ -222,6 +222,13 @@ is visible in the process list.
   }
 }
 ```
+
+On Linux, the static release binary cannot resolve `.local` (mDNS) names:
+Go's pure resolver uses `files,dns` and does not use nss-mdns. Use the IP
+address, an `/etc/hosts` entry, or a DNS name (`truenas.example.com`)
+instead, or build from source with cgo (`CGO_ENABLED=1 go build`). macOS
+and Windows builds are unaffected, because cgo was already off for those
+cross-builds.
 
 **Configuration options:**
 
@@ -339,7 +346,7 @@ You should now be able to ask TrueNAS questions:
 ### Flags
 
 - `--truenas-url` - TrueNAS hostname (required, or use `TRUENAS_URL` env var)
-  - Examples: `truenas.local`, `192.168.0.31` or `fd00::10` (automatically uses `wss://<host>:443/api/current`), a host with a port such as `truenas.local:8443` or `[2001:db8::10]:8443`, or a full `wss://host[:port]/api/current` URL
+  - Examples: `192.168.0.31`, `truenas.example.com` or `fd00::10` (automatically uses `wss://<host>:443/api/current`), a host with a port such as `192.168.0.31:8443` or `[2001:db8::10]:8443`, or a full `wss://host[:port]/api/current` URL. A `.local` name such as `truenas.local` is accepted, but on Linux the static release binary cannot resolve it via mDNS (use the IP, an `/etc/hosts` entry, or a DNS name, or build from source with `CGO_ENABLED=1 go build`); macOS and Windows builds are unaffected
   - Credentials go in `TRUENAS_API_KEY` (or `--api-key-file` / `--api-key`) and `--api-user`; a URL containing `user:password@` is refused
   - A bare host cannot include a path; use a full `wss://` URL for that
   - A `wss://` URL ending in the legacy `/websocket` (or `/websocket/`) path is rewritten to `/api/current` with a one-time warning; the legacy endpoint is deprecated and planned for removal in TrueNAS 28
@@ -538,7 +545,8 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 ### Troubleshooting
 
 **Connection Issues:**
-- "invalid TrueNAS host or URL: ...": `--truenas-url` / `TRUENAS_URL` is unusable (bad port, user info in the URL, `https://`, ...); the message says why. Use the host name alone (`truenas.local`, `truenas.local:8443`, `[fd00::1]:8443`) or a `wss://host[:port]` URL
+- "invalid TrueNAS host or URL: ...": `--truenas-url` / `TRUENAS_URL` is unusable (bad port, user info in the URL, `https://`, ...); the message says why. Use the host name alone (`192.168.0.31`, `truenas.example.com:8443`, `[fd00::1]:8443`) or a `wss://host[:port]` URL
+- A `.local` name such as `truenas.local` does not resolve on Linux with the static release binary (or `make build`), because that binary does not use mDNS/nss-mdns. Use the IP address, an `/etc/hosts` entry, or a DNS name, or build from source with cgo (`CGO_ENABLED=1 go build`). macOS and Windows builds are unaffected, because cgo was already off for those cross-builds
 - "Could not connect to TrueNAS (no login was attempted)" means the TCP, proxy, TLS or WebSocket step failed; "Failed to authenticate with TrueNAS" means the connection worked and the login was rejected. If the connection drops during login and reconnecting fails, the message says so ("the connection was lost during login, and reconnecting failed") instead. The URL is logged without any query, fragment or user info, and error messages never quote them (at most they quote the host name or a short URL scheme)
 - Verify TrueNAS is accessible from your machine
 - Check firewall allows port 443 (wss), or the port you configured
@@ -1009,7 +1017,10 @@ The "Build and Package" workflow runs the linters (`make lint`, including
 staticcheck and errcheck), a single test step with the
 race detector and coverage (`go test -race -coverprofile=coverage.out -covermode=atomic ./...`), a non-race `go test -count=1 ./redact` so the randomized and linear redaction tests run at full strength, `govulncheck`
 and builds for macOS (Apple Silicon), Linux and Windows on every pull request
-and on every push to `main`. The release workflow, which runs for version
+and on every push to `main`. Those binary builds, and the release workflow's
+builds, set `CGO_ENABLED=0`. After the Linux binary is built, CI runs `file`
+and `ldd` and fails if it is not statically linked. Test steps leave cgo
+enabled, because the race detector requires it. The release workflow, which runs for version
 tags, runs the linters and tests again (with the race detector) and publishes those three platforms, with SLSA build provenance attestations for the release archives. A test in
 `cmd/truenas-mcp` checks that the flags documented in this README match the
 flags the binary registers, and that the Go version above matches `go.mod`.
