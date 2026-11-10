@@ -210,11 +210,13 @@ func deleteAppRegistry(t *testing.T) (*Registry, *fakeMiddleware) {
 	app := appEntry("plex", "RUNNING")
 	app["version"] = "1.2.3"
 	fake := &fakeMiddleware{
-		results: map[string]interface{}{"app.delete": 99},
+		results: map[string]interface{}{"app.delete": 99, "app.config": map[string]interface{}{}},
 		handle: func(method string, _ json.RawMessage) (interface{}, map[string]interface{}, bool) {
 			switch method {
 			case "app.query":
 				return []interface{}{app}, nil, true
+			case "app.config":
+				return map[string]interface{}{}, nil, true
 			case "core.get_jobs":
 				return []interface{}{
 					map[string]interface{}{
