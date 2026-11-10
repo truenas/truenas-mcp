@@ -109,6 +109,11 @@ func checkDirectoryServiceForShareWarnings(ctx context.Context, client *truenas.
 			"NOTICE: LDAP is enabled - ensure POSIX attributes are configured for LDAP users")
 	}
 
+	if status.Enabled && strings.EqualFold(status.Type, "ipa") {
+		warnings = append(warnings,
+			"NOTICE: IPA is enabled - ensure permissions are configured for IPA users/groups")
+	}
+
 	return warnings
 }
 
