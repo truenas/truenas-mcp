@@ -290,3 +290,46 @@ func TestBlockedReasonsReadsBlockedField(t *testing.T) {
 		t.Errorf("BLOCKED: warning: got %q", got)
 	}
 }
+
+// Preview details are derived from CallParams (via ParamNames or a single
+// map argument), so they cannot drift from the payload that is executed.
+func TestWritePlanPreviewIsDerivedFromCallParams(t *testing.T) {
+	cases := []struct {
+		name string
+		plan *writePlan
+		want interface{}
+	}{
+		{
+			name: "positional with ParamNames",
+			plan: &writePlan{
+				Method:     startAppMethod,
+				CallParams: []interface{}{"plex"},
+				ParamNames: []string{"app_name"},
+			},
+			want: map[string]interface{}{"app_name": "plex"},
+		},
+		{
+			name: "single map argument",
+			plan: &writePlan{
+				Method:     bootEnvironmentDestroyMethod,
+				CallParams: []interface{}{map[string]interface{}{"id": "25.04.1"}},
+			},
+			want: map[string]interface{}{"id": "25.04.1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := json.Marshal(tc.plan.previewDetails())
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := json.Marshal(tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !jsonBytesEqual(t, got, want) {
+				t.Errorf("preview details %s, want %s (derived from CallParams)", got, want)
+			}
+		})
+	}
+}

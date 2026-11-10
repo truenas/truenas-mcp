@@ -138,8 +138,23 @@ func newFakeClientFrom(t *testing.T, fake *fakeMiddleware) (*truenas.Client, *fa
 	return client, fake
 }
 
+// stubPlanMethod is a stand-in *Method value for handler stubs. Tests are
+// not scanned by the middleware contract, so a raw string is fine here.
+const stubPlanMethod = "stub.plan"
+
+func stubToolPlan(name string) func(context.Context, *truenas.Client, map[string]interface{}) (*writePlan, error) {
+	return func(_ context.Context, _ *truenas.Client, args map[string]interface{}) (*writePlan, error) {
+		return &writePlan{
+			Tool:       name,
+			Method:     stubPlanMethod,
+			CallParams: []interface{}{withoutKeys(args, "confirm", "confirmation_token", "dry_run")},
+		}, nil
+	}
+}
+
 // stubHandlers replaces every handler with one that records its arguments
-// and touches no client.
+// and touches no client. Plan-backed tools get a matching stub Plan so
+// confirmation tokens can be issued without a live client.
 func stubHandlers(r *Registry) map[string][]map[string]interface{} {
 	seen := map[string][]map[string]interface{}{}
 	for name, tool := range r.tools {
@@ -147,6 +162,9 @@ func stubHandlers(r *Registry) map[string][]map[string]interface{} {
 		tool.Handler = func(_ context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
 			seen[name] = append(seen[name], args)
 			return `{"ok":true}`, nil
+		}
+		if tool.Plan != nil {
+			tool.Plan = stubToolPlan(name)
 		}
 		r.tools[name] = tool
 	}
@@ -644,7 +662,19 @@ func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
 		if err != nil {
 			t.Fatalf("delete_boot_environment(%s) dry run: %v", id, err)
 		}
-		if !strings.Contains(out, "BLOCKED") || !strings.Contains(out, want) || !strings.Contains(out, `"deletion_allowed": false`) || strings.Contains(out, "Delete boot environment") {
+		var preview struct {
+			Blocked []string `json:"blocked"`
+		}
+		if err := json.Unmarshal([]byte(out), &preview); err != nil {
+			t.Fatalf("delete_boot_environment(%s) preview is not JSON: %v\n%s", id, err, out)
+		}
+		found := false
+		for _, b := range preview.Blocked {
+			if strings.Contains(b, want) {
+				found = true
+			}
+		}
+		if !found || !strings.Contains(out, `"deletion_allowed": false`) || strings.Contains(out, "Delete boot environment") {
 			t.Errorf("delete_boot_environment(%s) preview:\n%s", id, out)
 		}
 	}

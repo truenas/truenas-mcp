@@ -167,10 +167,12 @@ func collectMiddlewareCalls(t *testing.T, root string) (map[string]bool, []strin
 		for m := range got {
 			found[m] = true
 		}
-		for m := range planMethodConsts(data) {
+		planFound, planProbs := planMethodsInSource(src, data)
+		for m := range planFound {
 			found[m] = true
 		}
 		problems = append(problems, probs...)
+		problems = append(problems, planProbs...)
 		return nil
 	})
 	if err != nil {
@@ -265,17 +267,19 @@ func methodArg(fn string, args []ast.Expr) (method string, literal, ok bool) {
 	}
 }
 
-// planMethodConsts returns middleware methods declared as string constants
-// whose name ends in "Method" (for example startAppMethod = "app.start").
-// writePlan stores the method in that constant and Call uses plan.Method,
-// so the contract cannot see a string literal at the Call site.
-func planMethodConsts(src string) map[string]bool {
+// planMethodsInSource records middleware methods assigned to writePlan.Method
+// from a *Method constant. A raw string literal (or any non-*Method
+// expression) is a contract problem. Unused *Method constants are not
+// counted as called.
+func planMethodsInSource(filename, src string) (map[string]bool, []string) {
 	found := map[string]bool{}
+	var problems []string
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "plan.go", src, 0)
+	file, err := parser.ParseFile(fset, filename, src, 0)
 	if err != nil {
-		return found
+		return found, []string{filename + ": " + err.Error()}
 	}
+	consts := map[string]string{}
 	for _, decl := range file.Decls {
 		gd, ok := decl.(*ast.GenDecl)
 		if !ok || gd.Tok != token.CONST {
@@ -298,9 +302,82 @@ func planMethodConsts(src string) map[string]bool {
 				if err != nil || !strings.Contains(s, ".") {
 					continue
 				}
-				found[s] = true
+				consts[name.Name] = s
 			}
 		}
 	}
-	return found
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok || !isWritePlanComposite(lit) {
+			return true
+		}
+		for _, elt := range lit.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok || key.Name != "Method" {
+				continue
+			}
+			pos := fset.Position(kv.Value.Pos())
+			ident, ok := kv.Value.(*ast.Ident)
+			if !ok || !strings.HasSuffix(ident.Name, "Method") {
+				problems = append(problems, pos.String()+": writePlan.Method must be a *Method constant, not a raw literal or other expression")
+				continue
+			}
+			method, ok := consts[ident.Name]
+			if !ok {
+				problems = append(problems, pos.String()+": writePlan.Method uses "+ident.Name+", which is not a *Method string constant in this file")
+				continue
+			}
+			found[method] = true
+		}
+		return true
+	})
+	return found, problems
+}
+
+func isWritePlanComposite(lit *ast.CompositeLit) bool {
+	switch t := lit.Type.(type) {
+	case *ast.Ident:
+		return t.Name == "writePlan"
+	}
+	return false
+}
+
+func TestPlanMethodContractRequiresNamedConstants(t *testing.T) {
+	src := `package p
+const usedMethod = "app.start"
+const unusedMethod = "foo.bar"
+func f() *writePlan {
+	return &writePlan{Method: usedMethod}
+}
+`
+	found, problems := planMethodsInSource("fake.go", src)
+	if len(problems) != 0 {
+		t.Fatalf("problems: %v", problems)
+	}
+	if !found["app.start"] {
+		t.Fatalf("found = %v, want app.start from usedMethod", found)
+	}
+	if found["foo.bar"] {
+		t.Fatalf("unused *Method constant was counted as called: %v", found)
+	}
+}
+
+func TestPlanMethodContractRejectsRawLiteral(t *testing.T) {
+	src := `package p
+func f() *writePlan {
+	return &writePlan{Method: "app.stop"}
+}
+`
+	_, problems := planMethodsInSource("fake.go", src)
+	if len(problems) == 0 {
+		t.Fatal("want a problem for a raw writePlan.Method literal")
+	}
+	joined := strings.Join(problems, "\n")
+	if !strings.Contains(joined, "*Method constant") {
+		t.Errorf("problem should mention a *Method constant, got %q", joined)
+	}
 }

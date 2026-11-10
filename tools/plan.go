@@ -21,14 +21,16 @@ type writePlan struct {
 	JobMethod   string // expected job method for task identity
 	Description string
 	Operation   string
-	// PreviewDetails are named fields shown in the preview (masked with
-	// redact.Value). The real call uses CallParams, which may be positional.
-	PreviewDetails map[string]interface{}
-	CurrentState   interface{}
-	Warnings       []string
-	Blocked        []string
-	Requirements   *Requirements
-	EstimatedTime  *EstimatedTime
+	// ParamNames, when set, names each positional CallParams entry in the
+	// preview (masked with redact.Value). A single map argument is already
+	// named and is shown as that map. Either way the preview is derived
+	// from CallParams, so the two cannot drift.
+	ParamNames    []string
+	CurrentState  interface{}
+	Warnings      []string
+	Blocked       []string
+	Requirements  *Requirements
+	EstimatedTime *EstimatedTime
 	// TargetName is an optional label used in execute responses (for
 	// example the app name for start_app).
 	TargetName string
@@ -37,23 +39,15 @@ type writePlan struct {
 func (p *writePlan) dryRunResult() *DryRunResult {
 	dry, executed := true, false
 	return &DryRunResult{
-		Tool:         p.Tool,
-		CurrentState: p.CurrentState,
-		PlannedActions: []PlannedAction{
-			{
-				Step:        1,
-				Description: p.Description,
-				Operation:   p.Operation,
-				Target:      p.Method,
-				Details:     planPreviewDetails(p.PreviewDetails, p.CallParams),
-			},
-		},
-		Warnings:      p.Warnings,
-		Blocked:       p.Blocked,
-		Requirements:  p.Requirements,
-		EstimatedTime: p.EstimatedTime,
-		DryRun:        &dry,
-		Executed:      &executed,
+		Tool:           p.Tool,
+		CurrentState:   p.CurrentState,
+		PlannedActions: p.plannedActions(),
+		Warnings:       p.Warnings,
+		Blocked:        p.Blocked,
+		Requirements:   p.Requirements,
+		EstimatedTime:  p.EstimatedTime,
+		DryRun:         &dry,
+		Executed:       &executed,
 	}
 }
 
@@ -70,6 +64,46 @@ func (p *writePlan) blockedReply() error {
 		return fmt.Errorf("%s", msg)
 	}
 	return &mcp.ReplyError{Message: msg, Reply: body}
+}
+
+func (p *writePlan) plannedActions() []PlannedAction {
+	if p == nil || len(p.Blocked) > 0 {
+		return []PlannedAction{}
+	}
+	return []PlannedAction{
+		{
+			Step:        1,
+			Description: p.Description,
+			Operation:   p.Operation,
+			Target:      p.Method,
+			Details:     p.previewDetails(),
+		},
+	}
+}
+
+// previewDetails is the preview view of the plan's CallParams. Named
+// fields come from ParamNames (or a single map argument) and are masked
+// with redact.Value. Positional values have no key for the redactor to
+// match, so a non-empty string is replaced with redact.Marker.
+func (p *writePlan) previewDetails() interface{} {
+	if p == nil {
+		return nil
+	}
+	if len(p.ParamNames) > 0 {
+		named := make(map[string]interface{}, len(p.ParamNames))
+		for i, name := range p.ParamNames {
+			if i < len(p.CallParams) {
+				named[name] = p.CallParams[i]
+			}
+		}
+		return planPreviewDetails(named, nil)
+	}
+	if len(p.CallParams) == 1 {
+		if m, ok := p.CallParams[0].(map[string]interface{}); ok {
+			return planPreviewDetails(m, nil)
+		}
+	}
+	return planPreviewDetails(nil, p.CallParams)
 }
 
 // planPreviewDetails is the preview view of a plan's parameters. Named

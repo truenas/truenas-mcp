@@ -344,14 +344,34 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 	if err != nil {
 		return "", fmt.Errorf("%s was NOT executed: its arguments could not be encoded; nothing was executed", name)
 	}
+	var planHash [32]byte
+	var plan *writePlan
+	if tool.Plan != nil {
+		plan, err = tool.Plan(ctx, r.client, withoutKeys(args, "confirmation_token", "dry_run"))
+		if err != nil {
+			return "", err
+		}
+		planHash, err = plan.planHash()
+		if err != nil {
+			return "", fmt.Errorf("%s was NOT executed: its plan could not be encoded; nothing was executed", name)
+		}
+	}
 	var rejected error
 	if v, sent := args["confirmation_token"]; sent {
 		tok, _ := v.(string)
-		if rejected = r.confirmTokens.redeem(tok, name, argsHash); rejected == nil {
+		if tool.Plan != nil {
+			rejected = r.confirmTokens.redeemWithPlan(tok, name, argsHash, planHash)
+		} else {
+			rejected = r.confirmTokens.redeem(tok, name, argsHash)
+		}
+		if rejected == nil {
+			if err := plan.blockedReply(); err != nil {
+				return "", err
+			}
 			return tool.Handler(ctx, r.client, withoutKeys(args, "confirmation_token", "dry_run"))
 		}
 	}
-	return r.confirmationRequired(ctx, name, tool, withoutKeys(args, "confirmation_token", "dry_run"), argsHash, rejected, legacyConfirm)
+	return r.confirmationRequired(ctx, name, tool, withoutKeys(args, "confirmation_token", "dry_run"), argsHash, planHash, rejected, legacyConfirm)
 }
 
 // confirmationRequired runs the tool's dry-run preview and returns it with a
@@ -359,7 +379,7 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 // reports the operation cannot proceed, is an error and issues no token. When
 // a presented token was rejected, the reply (with the fresh preview and
 // token) is an error that gives the reason.
-func (r *Registry) confirmationRequired(ctx context.Context, name string, tool Tool, args map[string]interface{}, argsHash [32]byte, rejected error, legacyConfirm bool) (string, error) {
+func (r *Registry) confirmationRequired(ctx context.Context, name string, tool Tool, args map[string]interface{}, argsHash, planHash [32]byte, rejected error, legacyConfirm bool) (string, error) {
 	reply := map[string]interface{}{
 		"status":   "confirmation_required",
 		"tool":     name,
@@ -377,8 +397,16 @@ func (r *Registry) confirmationRequired(ctx context.Context, name string, tool T
 		preview["dry_run"] = true
 		out, err := tool.Handler(ctx, r.client, preview)
 		if err != nil {
-			return "", fmt.Errorf("%s%s was NOT executed. Preview failed: %w. Resolve this before confirming; "+
-				"the user must see a successful preview and explicitly approve it first", rejectedNote, name, err)
+			var re *mcp.ReplyError
+			// A blocked plan returns a ReplyError whose body is the
+			// structured preview. Surface that preview (status blocked,
+			// no token) instead of wrapping it as "Preview failed".
+			if errors.As(err, &re) && len(blockedReasons(re.Reply)) > 0 {
+				out = re.Reply
+			} else {
+				return "", fmt.Errorf("%s%s was NOT executed. Preview failed: %w. Resolve this before confirming; "+
+					"the user must see a successful preview and explicitly approve it first", rejectedNote, name, err)
+			}
 		}
 		// The preview is a dry run: say so explicitly, next to executed.
 		reply["dry_run"] = true
@@ -399,7 +427,13 @@ func (r *Registry) confirmationRequired(ctx context.Context, name string, tool T
 			return "", &mcp.ReplyError{Message: msg, Reply: body}
 		}
 	}
-	tok, err := r.confirmTokens.issue(name, argsHash)
+	var tok string
+	var err error
+	if tool.Plan != nil {
+		tok, err = r.confirmTokens.issueWithPlan(name, argsHash, planHash)
+	} else {
+		tok, err = r.confirmTokens.issue(name, argsHash)
+	}
 	if err != nil {
 		return "", fmt.Errorf("%s%s was NOT executed: %w; nothing was executed", rejectedNote, name, err)
 	}

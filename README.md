@@ -669,7 +669,11 @@ use, valid for 5 minutes, and held in the server's memory only (a restart
 invalidates every token). It is bound to the tool and to a SHA-256 hash of
 the canonical JSON of the arguments (keys sorted; `confirmation_token`,
 `dry_run` and the old `confirm` are left out; an optional argument sent as
-`null` counts as omitted). A token that is unknown, expired, already used,
+`null` counts as omitted). For tools that share a plan between preview and
+execute (`stop_app`, `delete_boot_environment`), the token is also bound to
+a hash of the planned middleware method and parameters, so it cannot
+execute a different planned operation. The token store does not hold those
+parameters. A token that is unknown, expired, already used,
 issued for another tool or issued for different arguments is rejected with
 an error that says why and that nothing was executed; that error result
 carries a fresh preview and a fresh token. A token presented for another
@@ -896,7 +900,11 @@ Returns:
 
 `upgrade_app` previews carry `"dry_run": true, "executed": false` (also on the `confirmation_required` reply returned without a `confirmation_token`); a started upgrade carries `"dry_run": false, "executed": true`. When no `version` is given, the upgrade step names the version the middleware resolved "latest" to. For a custom app, or a catalog app whose only update is new images, the plan is instead `redeploy` (pull updated images and redeploy; no snapshot is taken) followed by `verify`, with a warning that there is no rollback point. A preview of a STOPPED app warns that TrueNAS rejects upgrading it. The changelog and version details come from the middleware's `app.upgrade_summary` and may be empty.
 
-`start_app` builds one plan and uses it for both the dry-run preview and the real call, so the preview lists only the `app.start` middleware call that will be made. Preview `details` use named fields (masked for secrets) rather than raw positional parameters; the real call still sends those parameters. A dry run of a STOPPED app no longer warns that the app "must be STOPPED". If the app is already RUNNING, or is DEPLOYING or STOPPING, both the preview and the real call return an error and do not start it (DEPLOYING and STOPPING say to retry when the app settles). A CRASHED app can still be started.
+`start_app` builds one plan and uses it for both the dry-run preview and the real call, so the preview lists only the `app.start` middleware call that will be made. Preview `details` are derived from the same parameters as the real call and use named fields (masked for secrets) rather than raw positional parameters; the real call still sends those parameters. A dry run of a STOPPED app no longer warns that the app "must be STOPPED". If the app is already RUNNING, or is DEPLOYING or STOPPING, both the preview and the real call return an error and do not start it (DEPLOYING and STOPPING say to retry when the app settles). A CRASHED app can still be started.
+
+`stop_app` uses the same shared plan for its preview and the real `app.stop` call. A malformed app query or a non-string app state is a parse error, not a misleading "app not found" or a warning that prints the raw value. Stopping an already STOPPED app is not refused.
+
+`delete_boot_environment` also uses the shared plan. Preview `details` come from the same parameters as the real `boot.environment.destroy` call. A boot environment that is running, selected for the next reboot, or protected is listed in the plan's `blocked` field: an explicit dry run still returns that preview (with `deletion_allowed` false and no planned action), and a confirmed call is refused.
 
 **Benefits:**
 - See exactly what will change before committing
