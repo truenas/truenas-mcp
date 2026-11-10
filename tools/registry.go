@@ -4491,13 +4491,97 @@ func (u *upgradeAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string
 	return result, nil
 }
 
-func (r *Registry) handleStartApp(client *truenas.Client, args map[string]interface{}) (string, error) {
+// startAppPlan is the shared plan for start_app. The dry-run preview is this
+// plan, and the real call executes the same plan, so validation cannot diverge.
+type startAppPlan struct {
+	appName      string
+	callParams   []interface{}
+	currentState map[string]interface{}
+	warnings     []string
+}
+
+func (p *startAppPlan) dryRunResult() *DryRunResult {
+	dry, executed := true, false
+	return &DryRunResult{
+		Tool:         "start_app",
+		CurrentState: p.currentState,
+		PlannedActions: []PlannedAction{
+			{
+				Step:        1,
+				Description: fmt.Sprintf("Start application %q", p.appName),
+				Operation:   "start",
+				Target:      "app.start",
+				Details:     p.callParams,
+			},
+		},
+		Warnings:      p.warnings,
+		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 120, Note: "Depends on app startup time"},
+		DryRun:        &dry,
+		Executed:      &executed,
+	}
+}
+
+// planStartApp builds the start_app plan used by both the dry-run preview and
+// the real call. An already RUNNING app is refused.
+func planStartApp(client *truenas.Client, args map[string]interface{}) (*startAppPlan, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
-		return "", fmt.Errorf("app_name is required")
+		return nil, fmt.Errorf("app_name is required")
 	}
 
-	result, err := client.Call("app.start", appName)
+	currentResult, err := client.Call("app.query", []interface{}{
+		[]interface{}{"name", "=", appName},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query app: %w", err)
+	}
+
+	var apps []map[string]interface{}
+	if err := json.Unmarshal(currentResult, &apps); err != nil {
+		return nil, fmt.Errorf("failed to parse app query result: %w", err)
+	}
+	if len(apps) == 0 {
+		return nil, fmt.Errorf("app not found: %s", appName)
+	}
+
+	stateVal := apps[0]["state"]
+	state, _ := stateVal.(string)
+	if state == "" && stateVal != nil {
+		state = fmt.Sprint(stateVal)
+	}
+	if strings.EqualFold(state, "RUNNING") {
+		return nil, fmt.Errorf("cannot start app %q: it is already RUNNING; nothing was executed", appName)
+	}
+
+	var warnings []string
+	if state != "" && !strings.EqualFold(state, "STOPPED") {
+		warnings = append(warnings, fmt.Sprintf("App is currently in state: %s.", state))
+	}
+
+	return &startAppPlan{
+		appName:    appName,
+		callParams: []interface{}{appName},
+		currentState: map[string]interface{}{
+			"app_name": appName,
+			"state":    stateVal,
+		},
+		warnings: warnings,
+	}, nil
+}
+
+func (r *Registry) handleStartAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planStartApp(client, args)
+	if err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return marshalJSON(plan.dryRunResult())
+	}
+	return r.executeStartApp(client, args, plan)
+}
+
+func (r *Registry) executeStartApp(client *truenas.Client, args map[string]interface{}, plan *startAppPlan) (string, error) {
+	result, err := client.Call("app.start", plan.callParams...)
 	if err != nil {
 		return "", fmt.Errorf("failed to start app: %w", err)
 	}
@@ -4520,7 +4604,7 @@ func (r *Registry) handleStartApp(client *truenas.Client, args map[string]interf
 	}
 
 	response := map[string]interface{}{
-		"app_name":      appName,
+		"app_name":      plan.appName,
 		"task_id":       task.TaskID,
 		"task_status":   task.Status,
 		"poll_interval": task.PollInterval,
@@ -4532,54 +4616,6 @@ func (r *Registry) handleStartApp(client *truenas.Client, args map[string]interf
 		return "", fmt.Errorf("failed to format response: %w", err)
 	}
 	return string(formatted), nil
-}
-
-func (r *Registry) handleStartAppWithDryRun(client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(client, args, &startAppDryRun{}, r.handleStartApp)
-}
-
-type startAppDryRun struct{}
-
-func (s *startAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	appName, ok := args["app_name"].(string)
-	if !ok || appName == "" {
-		return nil, fmt.Errorf("app_name is required")
-	}
-
-	currentResult, err := client.Call("app.query", []interface{}{
-		[]interface{}{"name", "=", appName},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query app: %w", err)
-	}
-
-	var apps []map[string]interface{}
-	if err := json.Unmarshal(currentResult, &apps); err != nil || len(apps) == 0 {
-		return nil, fmt.Errorf("app not found: %s", appName)
-	}
-
-	currentState := apps[0]["state"]
-
-	return &DryRunResult{
-		Tool: "start_app",
-		CurrentState: map[string]interface{}{
-			"app_name": appName,
-			"state":    currentState,
-		},
-		PlannedActions: []PlannedAction{
-			{
-				Step:        1,
-				Description: "Start application containers",
-				Operation:   "start",
-				Target:      "app.start",
-				Details:     map[string]interface{}{"app_name": appName},
-			},
-		},
-		Warnings: []string{
-			fmt.Sprintf("App is currently in state: %v. App must be STOPPED to start.", currentState),
-		},
-		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 120, Note: "Depends on app startup time"},
-	}, nil
 }
 
 func (r *Registry) handleStopApp(client *truenas.Client, args map[string]interface{}) (string, error) {
