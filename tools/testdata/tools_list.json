@@ -1925,9 +1925,14 @@
   },
   {
     "name": "update_app",
-    "description": "Update an installed app's configuration. Job-based; use tasks_get with returned task_id to track progress. Use get_app_config first to retrieve current config, then pass modified values. Every call must include the full storage section: omitted storage is refused, and apps that already use ix_volume storage cannot be updated through this tool without converting those entries to host_path. Supports dry_run to preview changes. This is a write operation that modifies the system. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "description": "Update an installed app's configuration. Job-based; use tasks_get with returned task_id to track progress. Use get_app_config first to retrieve current config, then pass modified values. Storage may be omitted to leave it unchanged, including existing ix_volume entries. A partial storage object has omitted slots filled from the current config before it is sent, so they do not revert to schema defaults. New or changed storage entries must use host_path with a cleaned path under /mnt/\u003cpool\u003e/ on an existing dataset. Changing the type or path of an existing slot requires allow_storage_change=true; the preview and confirmation name each changed slot and state that data is not migrated. Supports dry_run to preview changes. This is a write operation that modifies the system. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
       "properties": {
+        "allow_storage_change": {
+          "default": false,
+          "description": "Allow changing the type or path of an existing storage slot. Data is not migrated. Required when this update changes an existing slot's type or path (default: false).",
+          "type": "boolean"
+        },
         "app_name": {
           "description": "Name of the installed application to update",
           "type": "string"
@@ -1942,7 +1947,7 @@
           "type": "boolean"
         },
         "values": {
-          "description": "Updated configuration values. Use get_app_config to retrieve current values first. Every call must include the full storage section as host_path (not ix_volume); this tool cannot update ix_volume apps without converting their storage.",
+          "description": "Updated configuration values. Use get_app_config to retrieve current values first. Storage may be omitted to leave current storage unchanged. If a partial storage object is sent, omitted slots are filled from the current config before the update is submitted. New or changed entries must be host_path; unchanged existing entries, including ix_volume, are left as they are.",
           "type": "object"
         }
       },
