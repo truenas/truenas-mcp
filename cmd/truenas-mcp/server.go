@@ -17,6 +17,7 @@ import (
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/tasks"
+	"github.com/truenas/truenas-mcp/tools"
 )
 
 const (
@@ -95,7 +96,7 @@ func (h *StdioHandler) newServer() *sdk.Server {
 	for _, t := range h.registry.ListTools() {
 		listed[t.Name] = true
 		server.AddTool(sdkTool(t), func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
-			return h.callTool(ctx, req.Params)
+			return h.callTool(ctx, req.Session, req.Params)
 		})
 	}
 	// A tool the policy hides is not listed, so the SDK would answer a call
@@ -108,7 +109,8 @@ func (h *StdioHandler) newServer() *sdk.Server {
 		return func(ctx context.Context, method string, req sdk.Request) (sdk.Result, error) {
 			if method == "tools/call" && checker != nil {
 				if p, ok := req.GetParams().(*sdk.CallToolParamsRaw); ok && !listed[p.Name] && checker.HasTool(p.Name) {
-					return h.callTool(ctx, p)
+					ss, _ := req.GetSession().(*sdk.ServerSession)
+					return h.callTool(ctx, ss, p)
 				}
 			}
 			return next(ctx, method, req)
@@ -133,14 +135,14 @@ func sdkTool(t mcp.Tool) *sdk.Tool {
 	return st
 }
 
-func (h *StdioHandler) callTool(ctx context.Context, p *sdk.CallToolParamsRaw) (*sdk.CallToolResult, error) {
+func (h *StdioHandler) callTool(ctx context.Context, ss *sdk.ServerSession, p *sdk.CallToolParamsRaw) (*sdk.CallToolResult, error) {
 	var args map[string]interface{}
 	if len(p.Arguments) > 0 {
 		if err := json.Unmarshal(p.Arguments, &args); err != nil {
 			return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "Invalid params: arguments must be an object"}
 		}
 	}
-	return h.runTool(ctx, p.Name, args)
+	return h.runTool(ctx, p.Name, args, elicitationFromRequest(ss, p))
 }
 
 // runTool runs a tool under the concurrency limit and the call deadline.
@@ -148,7 +150,7 @@ func (h *StdioHandler) callTool(ctx context.Context, p *sdk.CallToolParamsRaw) (
 // session ending). Handlers observe ctx and release their middleware
 // request and concurrency slot promptly; a handler that ignores ctx can
 // still finish in the background, and its result is dropped.
-func (h *StdioHandler) runTool(ctx context.Context, name string, args map[string]interface{}) (*sdk.CallToolResult, error) {
+func (h *StdioHandler) runTool(ctx context.Context, name string, args map[string]interface{}, e mcp.Elicitation) (*sdk.CallToolResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, h.callTimeout)
 	defer cancel()
 
@@ -159,13 +161,19 @@ func (h *StdioHandler) runTool(ctx context.Context, name string, args map[string
 	}
 	type outcome struct {
 		result string
+		prompt *mcp.ElicitPrompt
 		err    error
 	}
 	done := make(chan outcome, 1)
 	go func() {
 		defer func() { <-h.callSlots }()
+		if caller, ok := h.registry.(mcp.ToolCallerElicit); ok {
+			result, prompt, err := caller.CallToolElicit(ctx, name, args, e)
+			done <- outcome{result, prompt, err}
+			return
+		}
 		result, err := h.registry.CallTool(ctx, name, args)
-		done <- outcome{result, err}
+		done <- outcome{result, nil, err}
 	}()
 
 	select {
@@ -175,6 +183,9 @@ func (h *StdioHandler) runTool(ctx context.Context, name string, args map[string
 		// a cancelled request gets no reply.
 		if ctx.Err() != nil {
 			return h.interrupted(ctx, name, true)
+		}
+		if o.prompt != nil {
+			return elicitCallResult(o.prompt), nil
 		}
 		return h.callResult(o.result, o.err), nil
 	case <-ctx.Done():
@@ -284,4 +295,102 @@ func capToolOutput(s string) string {
 	}
 	cut, _ := tasks.TruncateText(s, budget)
 	return cut + toolOutputTruncationNotice
+}
+
+// elicitationFromRequest reads the client's form-elicitation capability and
+// any input response from this tools/call. A malformed response is recorded
+// as ResponseErr so the tool executes nothing.
+func elicitationFromRequest(ss *sdk.ServerSession, p *sdk.CallToolParamsRaw) mcp.Elicitation {
+	var e mcp.Elicitation
+	e.SupportsForm = clientSupportsFormElicitation(ss)
+	if p == nil {
+		return e
+	}
+	e.RequestState = p.RequestState
+	if len(p.InputResponses) == 0 {
+		return e
+	}
+	e.HasResponse = true
+	raw, ok := p.InputResponses[tools.ElicitConfirmID]
+	if !ok || len(p.InputResponses) != 1 {
+		e.ResponseErr = errUnexpectedElicitResponse
+		return e
+	}
+	res, ok := raw.(*sdk.ElicitResult)
+	if !ok || res == nil {
+		e.ResponseErr = errUnexpectedElicitResponse
+		return e
+	}
+	e.Action = res.Action
+	if res.Action == "accept" {
+		approved, err := approvedOnly(res.Content)
+		if err != nil {
+			e.ResponseErr = err
+			return e
+		}
+		e.Approved = approved
+	}
+	return e
+}
+
+// approvedOnly reads the required approved boolean from an accept response.
+// Anything other than exactly {approved: bool} is rejected, including extra
+// fields (the 2026-07-28 path does not schema-validate content).
+func approvedOnly(content map[string]any) (bool, error) {
+	if content == nil {
+		return false, errUnexpectedElicitResponse
+	}
+	if len(content) != 1 {
+		return false, errUnexpectedElicitResponse
+	}
+	approved, ok := content[tools.ElicitApprovedField].(bool)
+	if !ok {
+		return false, errUnexpectedElicitResponse
+	}
+	return approved, nil
+}
+
+var errUnexpectedElicitResponse = errors.New("unexpected elicitation response")
+
+// clientSupportsFormElicitation reports whether the client declared form
+// elicitation. When elicitation is declared with neither form nor url set,
+// form is assumed, matching the Go SDK.
+func clientSupportsFormElicitation(ss *sdk.ServerSession) bool {
+	if ss == nil {
+		return false
+	}
+	params := ss.InitializeParams()
+	if params == nil || params.Capabilities == nil || params.Capabilities.Elicitation == nil {
+		return false
+	}
+	caps := params.Capabilities.Elicitation
+	if caps.Form == nil && caps.URL != nil {
+		return false
+	}
+	return true
+}
+
+// elicitCallResult is the tools/call result that asks the user to confirm.
+// Content is left empty: the SDK forbids combining content with InputRequests.
+func elicitCallResult(prompt *mcp.ElicitPrompt) *sdk.CallToolResult {
+	return &sdk.CallToolResult{
+		InputRequests: sdk.InputRequestMap{
+			tools.ElicitConfirmID: &sdk.ElicitParams{
+				Mode:    "form",
+				Message: prompt.Message,
+				RequestedSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						tools.ElicitApprovedField: map[string]interface{}{
+							"type":        "boolean",
+							"description": "Set true to execute this destructive operation. Nothing is executed unless you accept with approved=true.",
+						},
+					},
+					"required":             []string{tools.ElicitApprovedField},
+					"additionalProperties": false,
+				},
+			},
+		},
+		RequestState: prompt.State,
+	}
 }

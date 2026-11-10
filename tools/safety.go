@@ -142,7 +142,7 @@ var readOnlyDryRunTools = map[string]bool{
 }
 
 // destructiveNote is appended to the description of every destructive tool.
-const destructiveNote = " **DESTRUCTIVE: requires a confirmation_token.** Called without one, the server changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments. Show the preview to the user, get their explicit approval, then call again with the same arguments plus confirmation_token."
+const destructiveNote = " **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token."
 
 // safetyOf returns a tool's classification, failing closed for tools that
 // are missing from the table.
@@ -162,6 +162,10 @@ type Policy struct {
 	Allow []string
 	// Deny hides and refuses the named tools.
 	Deny []string
+	// RequireHumanConfirm refuses destructive tools on clients that did
+	// not declare form elicitation, instead of falling back to the
+	// confirmation-token flow. Dry runs and --read-only are unchanged.
+	RequireHumanConfirm bool
 }
 
 // ParseToolList splits a comma-separated tool list, dropping blanks.
@@ -202,7 +206,7 @@ func (r *Registry) SetPolicy(p Policy) error {
 		sort.Strings(readOnlyConflict)
 		return fmt.Errorf("--allow-tools lists write tool(s) %s, which --read-only disables", strings.Join(readOnlyConflict, ", "))
 	}
-	r.readOnly, r.allow, r.deny = p.ReadOnly, nil, deny
+	r.readOnly, r.allow, r.deny, r.requireHumanConfirm = p.ReadOnly, nil, deny, p.RequireHumanConfirm
 	if len(allow) > 0 {
 		r.allow = allow
 	}
@@ -343,11 +347,16 @@ func hasParam(tool Tool, name string) bool {
 }
 
 // callDestructive runs a destructive tool. dry_run=true (on a tool that
-// declares it) only previews. A valid confirmation_token for this tool and
-// these exact arguments executes the call, once. Anything else runs the
-// preview and returns it with a fresh token, or with an error when the
-// preview says the operation cannot proceed. legacyConfirm reports that the
-// caller sent the old confirm=true.
+// declares it) only previews. When the client supports form elicitation, a
+// call without a valid token (or, under --require-human-confirm, any call
+// that still needs confirmation) starts an elicitation prompt. A valid
+// confirmation_token executes the call once only when --require-human-confirm
+// is off. Under that flag, tokens are never issued or redeemed: a supplied
+// token is ignored and the call is either prompted or refused. With the flag
+// off, a rejected token on an elicitation-capable client re-prompts instead
+// of minting a new token. Clients without elicitation and with the flag off
+// keep the confirmation-token flow. legacyConfirm reports that the caller
+// sent the old confirm=true.
 func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, args map[string]interface{}, legacyConfirm bool) (string, error) {
 	if dryRun, _ := args["dry_run"].(bool); dryRun && hasParam(tool, "dry_run") {
 		return tool.Handler(ctx, r.client, withoutKeys(args, "confirmation_token"))
@@ -371,9 +380,27 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 			return "", fmt.Errorf("%s was NOT executed: %w; nothing was executed", name, err)
 		}
 	}
-	var rejected error
-	if v, sent := args["confirmation_token"]; sent {
-		tok, _ := v.(string)
+	previewArgs := withoutKeys(args, "confirmation_token", "dry_run")
+	sink := elicitFrom(ctx)
+	if sink != nil && (sink.e.HasResponse || sink.e.RequestState != "") {
+		return r.completeElicit(ctx, name, tool, previewArgs, argsHash, planHash, plan, sink)
+	}
+	supportsForm := sink != nil && sink.e.SupportsForm
+	_, tokenSent := args["confirmation_token"]
+
+	// --require-human-confirm: never issue a token and never redeem one.
+	// A supplied token is ignored. Form-capable clients get a prompt;
+	// everyone else is refused.
+	if r.requireHumanConfirm {
+		if supportsForm {
+			return r.startElicit(ctx, name, tool, previewArgs, argsHash, planHash, plan, sink, legacyConfirm, "")
+		}
+		return "", requireHumanConfirmError(name)
+	}
+
+	if tokenSent {
+		tok, _ := args["confirmation_token"].(string)
+		var rejected error
 		if tool.Plan != nil {
 			rejected = r.confirmTokens.redeemWithPlan(tok, name, argsHash, planHash)
 		} else {
@@ -383,7 +410,7 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 			if err := plan.blockedReply(); err != nil {
 				return "", err
 			}
-			callArgs := withoutKeys(args, "confirmation_token", "dry_run")
+			callArgs := previewArgs
 			if tool.Plan != nil {
 				if tool.Execute == nil {
 					return "", fmt.Errorf("%s was NOT executed: it has a plan but no Execute path; nothing was executed", name)
@@ -392,8 +419,18 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 			}
 			return tool.Handler(ctx, r.client, callArgs)
 		}
+		// A rejected token must not mint a new one when the client can
+		// be prompted instead; that was how the prompt could be skipped.
+		if supportsForm {
+			return r.startElicit(ctx, name, tool, previewArgs, argsHash, planHash, plan, sink, legacyConfirm, "")
+		}
+		return r.confirmationRequired(ctx, name, tool, previewArgs, argsHash, planHash, rejected, legacyConfirm)
 	}
-	return r.confirmationRequired(ctx, name, tool, withoutKeys(args, "confirmation_token", "dry_run"), argsHash, planHash, rejected, legacyConfirm)
+
+	if supportsForm {
+		return r.startElicit(ctx, name, tool, previewArgs, argsHash, planHash, plan, sink, legacyConfirm, "")
+	}
+	return r.confirmationRequired(ctx, name, tool, previewArgs, argsHash, planHash, nil, legacyConfirm)
 }
 
 // confirmationRequired runs the tool's dry-run preview and returns it with a
@@ -485,6 +522,51 @@ func (r *Registry) confirmationRequired(ctx context.Context, name string, tool T
 		return "", &mcp.ReplyError{Message: errMsg, Reply: body}
 	}
 	return body, nil
+}
+
+// destructivePreview runs the tool's dry-run preview and issues no token.
+// A failed or blocked preview is an error; the operation cannot be confirmed.
+func (r *Registry) destructivePreview(ctx context.Context, name string, tool Tool, args map[string]interface{}, rejectedNote string) (string, error) {
+	if !hasParam(tool, "dry_run") {
+		return "", nil
+	}
+	preview := make(map[string]interface{}, len(args)+1)
+	for k, v := range args {
+		preview[k] = v
+	}
+	preview["dry_run"] = true
+	out, err := tool.Handler(ctx, r.client, preview)
+	if err != nil {
+		var re *mcp.ReplyError
+		if errors.As(err, &re) && len(blockedReasons(re.Reply)) > 0 {
+			out = re.Reply
+		} else {
+			return "", fmt.Errorf("%s%s was NOT executed. Preview failed: %w. Resolve this before confirming; "+
+				"the user must see a successful preview and explicitly approve it first", rejectedNote, name, err)
+		}
+	}
+	if reasons := blockedReasons(out); len(reasons) > 0 {
+		msg := fmt.Sprintf("%s%s cannot proceed: %s; nothing was executed and no confirmation token was issued. "+
+			"Do not ask the user to confirm this call; resolve the problem shown in the preview first", rejectedNote, name, strings.Join(reasons, "; "))
+		reply := map[string]interface{}{
+			"status":   "blocked",
+			"tool":     name,
+			"executed": false,
+			"dry_run":  true,
+			"error":    msg,
+		}
+		if json.Valid([]byte(out)) {
+			reply["preview"] = json.RawMessage(out)
+		} else {
+			reply["preview"] = out
+		}
+		body, err := marshalJSON(reply)
+		if err != nil {
+			return "", errors.New(msg)
+		}
+		return "", &mcp.ReplyError{Message: msg, Reply: body}
+	}
+	return out, nil
 }
 
 // blockedReasons returns the reasons a dry-run preview says the operation

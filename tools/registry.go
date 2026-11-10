@@ -33,8 +33,12 @@ type Registry struct {
 	deny     map[string]bool
 
 	// confirmTokens holds the confirmation tokens of destructive tools
-	// (tools/confirm_token.go).
+	// (tools/confirm_token.go), including elicit-only handles.
 	confirmTokens *confirmationTokens
+
+	// requireHumanConfirm refuses destructive tools on clients that did
+	// not declare form elicitation, instead of falling back to a token.
+	requireHumanConfirm bool
 }
 
 type Tool struct {

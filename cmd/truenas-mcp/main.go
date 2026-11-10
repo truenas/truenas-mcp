@@ -21,16 +21,17 @@ import (
 )
 
 var (
-	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'wss://10.0.0.1/api/current')")
-	apiUser    = flag.String("api-user", "", "User that owns the API key, sent to auth.login_ex (required; env TRUENAS_API_USER)")
-	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication (env TRUENAS_API_KEY; visible in the process list)")
-	apiKeyFile = flag.String("api-key-file", "", "Path to a file containing the TrueNAS API key (env TRUENAS_API_KEY_FILE)")
-	insecure   = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks; prefer --tls-ca)")
-	tlsCA      = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
-	proxyURL   = flag.String("proxy", "", "Proxy for the TrueNAS connection: http://, socks5:// or socks5h://host:port, or none to ignore proxy env vars (env TRUENAS_PROXY; overrides HTTPS_PROXY and ALL_PROXY)")
-	versionFlg = flag.Bool("version", false, "Print version and exit")
-	debug      = flag.Bool("debug", false, "Enable debug logging")
-	readOnly   = flag.Bool("read-only", false, "Hide and refuse every tool that changes the system (env TRUENAS_MCP_READ_ONLY)")
+	truenasURL          = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'wss://10.0.0.1/api/current')")
+	apiUser             = flag.String("api-user", "", "User that owns the API key, sent to auth.login_ex (required; env TRUENAS_API_USER)")
+	apiKey              = flag.String("api-key", "", "TrueNAS API key for middleware authentication (env TRUENAS_API_KEY; visible in the process list)")
+	apiKeyFile          = flag.String("api-key-file", "", "Path to a file containing the TrueNAS API key (env TRUENAS_API_KEY_FILE)")
+	insecure            = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks; prefer --tls-ca)")
+	tlsCA               = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
+	proxyURL            = flag.String("proxy", "", "Proxy for the TrueNAS connection: http://, socks5:// or socks5h://host:port, or none to ignore proxy env vars (env TRUENAS_PROXY; overrides HTTPS_PROXY and ALL_PROXY)")
+	versionFlg          = flag.Bool("version", false, "Print version and exit")
+	debug               = flag.Bool("debug", false, "Enable debug logging")
+	readOnly            = flag.Bool("read-only", false, "Hide and refuse every tool that changes the system (env TRUENAS_MCP_READ_ONLY)")
+	requireHumanConfirm = flag.Bool("require-human-confirm", false, "Refuse destructive tools on clients that do not support MCP elicitation, instead of falling back to a confirmation token (env TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM)")
 )
 
 // --allow-tools and --deny-tools are read through flag.Visit in main (a passed
@@ -99,7 +100,7 @@ func truthy(v string) bool {
 // setFlags holds the flags passed on the command line; a passed flag wins
 // over its variable. An allow list that is set but names no tools is an
 // error rather than "allow everything".
-func safetyPolicy(readOnly bool, setFlags map[string]string, lookupEnv func(string) (string, bool)) (tools.Policy, error) {
+func safetyPolicy(readOnly, requireHumanConfirm bool, setFlags map[string]string, lookupEnv func(string) (string, bool)) (tools.Policy, error) {
 	setting := func(flagName, envName string) (string, bool) {
 		if v, ok := setFlags[flagName]; ok {
 			return v, true
@@ -107,12 +108,14 @@ func safetyPolicy(readOnly bool, setFlags map[string]string, lookupEnv func(stri
 		return lookupEnv(envName)
 	}
 	roEnv, _ := lookupEnv("TRUENAS_MCP_READ_ONLY")
+	rhcEnv, _ := lookupEnv("TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM")
 	allow, allowSet := setting("allow-tools", "TRUENAS_MCP_ALLOW_TOOLS")
 	deny, _ := setting("deny-tools", "TRUENAS_MCP_DENY_TOOLS")
 	p := tools.Policy{
-		ReadOnly: readOnly || truthy(roEnv),
-		Allow:    tools.ParseToolList(allow),
-		Deny:     tools.ParseToolList(deny),
+		ReadOnly:            readOnly || truthy(roEnv),
+		RequireHumanConfirm: requireHumanConfirm || truthy(rhcEnv),
+		Allow:               tools.ParseToolList(allow),
+		Deny:                tools.ParseToolList(deny),
 	}
 	if allowSet && len(p.Allow) == 0 {
 		return p, fmt.Errorf("--allow-tools / TRUENAS_MCP_ALLOW_TOOLS is set but names no tools; unset it to expose all tools")
@@ -221,7 +224,7 @@ func main() {
 	registry := tools.NewRegistry(client, taskManager)
 	setFlags := map[string]string{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = f.Value.String() })
-	policy, err := safetyPolicy(*readOnly, setFlags, os.LookupEnv)
+	policy, err := safetyPolicy(*readOnly, *requireHumanConfirm, setFlags, os.LookupEnv)
 	if err != nil {
 		log.Fatalf("Invalid tool safety settings: %v", err)
 	}
@@ -230,6 +233,9 @@ func main() {
 	}
 	if policy.ReadOnly {
 		log.Println("Read-only mode: tools that change the system are disabled (upgrade_app is available for dry runs only)")
+	}
+	if policy.RequireHumanConfirm {
+		log.Println("Require-human-confirm: destructive tools are refused on clients that do not support MCP elicitation")
 	}
 
 	handler := NewStdioHandler(registry, *debug)
