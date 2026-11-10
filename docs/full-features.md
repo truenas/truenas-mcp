@@ -2,7 +2,7 @@
 
 This document provides a comprehensive list of all available MCP tools for TrueNAS management.
 
-Tools are classified as read, write or destructive (`tools/safety.go`). Write and destructive tools are hidden and refused in `--read-only` mode (except `upgrade_app`, which stays available for `dry_run: true` previews only), and `--allow-tools` / `--deny-tools` restrict the exposed set. Destructive tools (marked below) require `confirm: true` to execute; without it they return a `confirmation_required` result with their dry-run preview. `confirm` and `dry_run` must be JSON booleans (`true` or `false`); a string such as `"true"` or a number is rejected and nothing is executed. **Breaking change:** callers that used these nine tools without `confirm` now get the preview instead. See [Safety Controls](../README.md#safety-controls).
+Tools are classified as read, write or destructive (`tools/safety.go`). Write and destructive tools are hidden and refused in `--read-only` mode (except `upgrade_app`, which stays available for `dry_run: true` previews only), and `--allow-tools` / `--deny-tools` restrict the exposed set. Destructive tools (marked below) require `confirm: true` to execute; without it they return a `confirmation_required` result with their dry-run preview. `confirm` and `dry_run` must be JSON booleans (`true` or `false`); a string such as `"true"` or a number is rejected and nothing is executed. Every other argument is checked against the tool's input schema before anything runs, too: unknown or missing required arguments, wrong JSON types (for example `"readonly": "true"`, `"create_ancestors": "false"` or `"quota": "10G"`), fractional integers, and values outside an enum or range (such as a negative `quota` or a `limit` of 0) are rejected with an error that names the argument without echoing its value; `null` on an optional argument means omitted (see [Argument validation](../README.md#safety-controls)). **Breaking change:** callers that used these nine tools without `confirm` now get the preview instead. See [Safety Controls](../README.md#safety-controls).
 
 ## Read-Only Monitoring Tools
 
@@ -156,7 +156,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 - **install_app** - Install applications from the catalog with guided storage setup
   - Multi-step wizard guides through app installation process
   - ALWAYS uses host-path volumes (NEVER ix-volumes)
-  - Fetches the app schema and requires every storage entry to be present as `type: host_path` with a cleaned path under `/mnt/<pool>/` (at least one component below an existing pool). When `host_path_config.acl_enable` is true, the mounted `acl.path` is the path that is validated and checked for an existing dataset. Fields whose schema type is `hostpath`, `hostpathdirectory`, or `hostpathfile` are also checked; a `hostpath` value whose last component has a file extension (for example Nextcloud `custom_confs`) is checked as a file against its parent dataset, matching how the catalog template mounts it. An app schema with no questions list, an empty list, or items that cannot be parsed is refused, including on dry runs. Off-schema storage-like types must be `host_path`. Paths under `/mnt/<pool>/.system` or `/mnt/<pool>/ix-applications` are refused.
+  - Fetches the app schema and requires every storage entry to be present as `type: host_path` with a cleaned path under `/mnt/<pool>/` (at least one component below an existing pool). `host_path_config.acl_enable` must be a JSON boolean; when it is true, the mounted `acl.path` is the path that is validated and checked for an existing dataset. Fields whose schema type is `hostpath`, `hostpathdirectory`, or `hostpathfile` are also checked; a `hostpath` value whose last component has a file extension (for example Nextcloud `custom_confs`) is checked as a file against its parent dataset, matching how the catalog template mounts it. An app schema with no questions list, an empty list, or items that cannot be parsed is refused, including on dry runs. Off-schema storage-like types must be `host_path`. Paths under `/mnt/<pool>/.system` or `/mnt/<pool>/ix-applications` are refused.
   - Enforces structured dataset layout: /mnt/<pool>/apps/<appname>/<volume>
   - Validates app instance names (lowercase, alphanumeric, hyphens)
   - Verifies datasets exist before installation
@@ -301,33 +301,33 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 **Active Directory Credentials:**
 ```json
 // Username and password (simpler but less secure)
-{"type": "KERBEROS_USER", "username": "admin@CORP.EXAMPLE.COM", "password": "********"}
+{"credential_type": "KERBEROS_USER", "username": "admin@CORP.EXAMPLE.COM", "password": "********"}
 
-// Principal with keytab (more secure, recommended for production)
-{"type": "KERBEROS_PRINCIPAL", "principal": "host/truenas.corp.example.com", "keytab": "[masked]"}
+// Principal from a keytab already on TrueNAS (more secure, recommended for production)
+{"credential_type": "KERBEROS_PRINCIPAL", "principal": "host/truenas.corp.example.com"}
 ```
 
 **LDAP Credentials:**
 ```json
 // Plain authentication with bind DN
-{"type": "LDAP_PLAIN", "binddn": "cn=admin,dc=example,dc=com", "bindpw": "********"}
+{"credential_type": "LDAP_PLAIN", "binddn": "cn=admin,dc=example,dc=com", "bindpw": "********"}
 
 // Anonymous (no credentials)
-{"type": "LDAP_ANONYMOUS"}
+{"credential_type": "LDAP_ANONYMOUS"}
 
-// Mutual TLS with client certificate
-{"type": "LDAP_MTLS", "certificate_id": 123}
+// Mutual TLS with a client certificate (its name on TrueNAS)
+{"credential_type": "LDAP_MTLS", "client_certificate": "ldap-client"}
 
 // Kerberos authentication (same as Active Directory)
-{"type": "KERBEROS_USER", "username": "admin", "password": "********"}
-{"type": "KERBEROS_PRINCIPAL", "principal": "host/truenas", "keytab": "[masked]"}
+{"credential_type": "KERBEROS_USER", "username": "admin", "password": "********"}
+{"credential_type": "KERBEROS_PRINCIPAL", "principal": "host/truenas"}
 ```
 
 **IPA/FreeIPA Credentials:**
 ```json
 // Same as Active Directory Kerberos options
-{"type": "KERBEROS_USER", "username": "admin", "password": "********"}
-{"type": "KERBEROS_PRINCIPAL", "principal": "host/truenas", "keytab": "[masked]"}
+{"credential_type": "KERBEROS_USER", "username": "admin", "password": "********"}
+{"credential_type": "KERBEROS_PRINCIPAL", "principal": "host/truenas"}
 ```
 
 ## System Update and Maintenance
