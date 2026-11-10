@@ -1,24 +1,20 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	runtimedebug "runtime/debug"
 	"strings"
-	"sync"
 	"time"
 
 	// Embed IANA zoneinfo so time.LoadLocation works on Windows (and other
 	// hosts without a system zone database) for NAS timezone next_run.
 	_ "time/tzdata"
 
-	"github.com/truenas/truenas-mcp/mcp"
-	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/tools"
 	"github.com/truenas/truenas-mcp/truenas"
@@ -231,255 +227,10 @@ func main() {
 		log.Println("Read-only mode: tools that change the system are disabled (upgrade_app is available for dry runs only)")
 	}
 
-	// Start stdio handler
 	handler := NewStdioHandler(registry, *debug)
-	if err := handler.Run(); err != nil {
+	if err := handler.Run(context.Background()); err != nil {
 		log.Fatalf("Stdio handler error: %v", err)
 	}
-}
-
-// StdioHandler manages stdio communication for MCP protocol
-type StdioHandler struct {
-	registry    mcp.ToolRegistry
-	stdin       *mcp.LineReader
-	stdout      io.Writer
-	stdoutMutex sync.Mutex
-	debug       bool
-}
-
-// NewStdioHandler serves the protocol on the process's stdin and stdout.
-func NewStdioHandler(registry mcp.ToolRegistry, debug bool) *StdioHandler {
-	return newStdioHandler(registry, debug, os.Stdin, os.Stdout)
-}
-
-func newStdioHandler(registry mcp.ToolRegistry, debug bool, in io.Reader, out io.Writer) *StdioHandler {
-	return &StdioHandler{
-		registry: registry,
-		stdin:    mcp.NewLineReader(in, mcp.MaxLineBytes),
-		stdout:   out,
-		debug:    debug,
-	}
-}
-
-func (h *StdioHandler) Run() error {
-	if h.debug {
-		log.Println("Starting stdio handler...")
-	}
-
-	for {
-		line, err := h.stdin.ReadLine()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if errors.Is(err, mcp.ErrLineTooLong) {
-			log.Printf("Rejected a request longer than %d bytes", mcp.MaxLineBytes)
-			if err := h.sendError(nil, -32600, fmt.Sprintf("Request too large: the limit is %d bytes", mcp.MaxLineBytes)); err != nil {
-				return err
-			}
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("stdin error: %w", err)
-		}
-		if h.debug {
-			log.Printf("[STDIN] %s", truenas.RedactJSONForLog(line))
-		}
-
-		var req mcp.Request
-		if err := json.Unmarshal(line, &req); err != nil {
-			if h.debug {
-				log.Printf("Parse error: %v", err)
-			}
-			if err := h.sendError(nil, -32700, fmt.Sprintf("Parse error: %v", err)); err != nil {
-				return err
-			}
-			continue
-		}
-
-		if h.debug {
-			log.Printf("Handling method: %s (id: %v)", req.Method, req.ID)
-		}
-
-		resp := h.handleRequest(&req)
-		// Only send response if not nil (notifications don't get responses)
-		if resp != nil {
-			if err := h.sendResponse(resp); err != nil {
-				if errors.Is(err, errStdoutWrite) {
-					return err // the client is gone: stop rather than drop every later response
-				}
-				log.Printf("Failed to send response: %v", err)
-			}
-		}
-	}
-}
-
-func (h *StdioHandler) handleRequest(req *mcp.Request) *mcp.Response {
-	// A message without an id is a notification: it gets no reply, and it
-	// must not run anything. (An explicit "id": null is treated the same;
-	// MCP does not allow null ids.) The ids 0 and "" are real ids.
-	if req.ID == nil {
-		switch req.Method {
-		case "initialize", "tools/list", "tools/call":
-			if h.debug {
-				log.Printf("Ignoring %s sent without an id (a notification)", req.Method)
-			}
-			return nil
-		}
-	}
-	switch req.Method {
-	case "initialize":
-		return h.handleInitialize(req)
-	case "notifications/initialized":
-		// This is a notification from the client after initialization
-		// Notifications don't require a response
-		return nil
-	case "tools/list":
-		return h.handleToolsList(req)
-	case "tools/call":
-		return h.handleToolsCall(req)
-	case "ping":
-		// MCP requires an empty result for ping; any params are ignored.
-		// A ping without an id is a notification and gets no reply.
-		if req.ID == nil {
-			return nil
-		}
-		return &mcp.Response{JSONRPC: "2.0", ID: req.ID, Result: struct{}{}}
-	default:
-		// Only return error if this is a request (has an ID)
-		if req.ID != nil {
-			return h.createErrorResponse(req.ID, -32601, "Method not found")
-		}
-		// For notifications, no response needed
-		return nil
-	}
-}
-
-func (h *StdioHandler) handleInitialize(req *mcp.Request) *mcp.Response {
-	result := mcp.InitializeResult{
-		ProtocolVersion: "2024-11-05",
-		ServerInfo: mcp.ServerInfo{
-			Name:    "truenas-mcp",
-			Version: Version,
-		},
-		Capabilities: mcp.Capabilities{
-			Tools: map[string]interface{}{
-				"listChanged": false,
-			},
-		},
-	}
-
-	return &mcp.Response{
-		JSONRPC: "2.0",
-		ID:      req.ID,
-		Result:  result,
-	}
-}
-
-func (h *StdioHandler) handleToolsList(req *mcp.Request) *mcp.Response {
-	tools := h.registry.ListTools()
-	result := mcp.ToolsListResult{
-		Tools: tools,
-	}
-
-	return &mcp.Response{
-		JSONRPC: "2.0",
-		ID:      req.ID,
-		Result:  result,
-	}
-}
-
-func (h *StdioHandler) handleToolsCall(req *mcp.Request) *mcp.Response {
-	// Extract tool call parameters
-	var params mcp.ToolCallParams
-	paramsBytes, err := json.Marshal(req.Params)
-	if err != nil {
-		return h.createErrorResponse(req.ID, -32602, fmt.Sprintf("Invalid params: %v", err))
-	}
-
-	if err := json.Unmarshal(paramsBytes, &params); err != nil {
-		return h.createErrorResponse(req.ID, -32602, fmt.Sprintf("Invalid params: %v", err))
-	}
-
-	// Call the tool. Every result and error is redacted before it reaches
-	// the client: TrueNAS returns secrets (passwords, keys, tokens) in many
-	// query results.
-	result, err := h.registry.CallTool(params.Name, params.Arguments)
-	if err != nil {
-		return &mcp.Response{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: mcp.ToolCallResult{
-				Content: []mcp.ContentBlock{
-					{
-						Type: "text",
-						Text: "Error: " + redact.Text(err.Error()),
-					},
-				},
-				IsError: true,
-			},
-		}
-	}
-
-	return &mcp.Response{
-		JSONRPC: "2.0",
-		ID:      req.ID,
-		Result: mcp.ToolCallResult{
-			Content: []mcp.ContentBlock{
-				{
-					Type: "text",
-					Text: redact.ToolOutput(result),
-				},
-			},
-		},
-	}
-}
-
-func (h *StdioHandler) createErrorResponse(id interface{}, code int, message string) *mcp.Response {
-	return &mcp.Response{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error: &mcp.Error{
-			Code:    code,
-			Message: message,
-		},
-	}
-}
-
-// errStdoutWrite marks a failure to write to stdout, after which no response
-// can reach the client.
-var errStdoutWrite = errors.New("failed to write to stdout")
-
-func (h *StdioHandler) sendResponse(resp *mcp.Response) error {
-	h.stdoutMutex.Lock()
-	defer h.stdoutMutex.Unlock()
-
-	data, err := json.Marshal(resp)
-	if err != nil {
-		return fmt.Errorf("failed to marshal response: %w", err)
-	}
-
-	if h.debug {
-		log.Printf("[STDOUT] %s", truenas.RedactJSONForLog(data))
-	}
-
-	// One write per message, so a line is never split by another writer.
-	if _, err := h.stdout.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("%w: %w", errStdoutWrite, err)
-	}
-	return nil
-}
-
-// sendError sends an error reply. It returns an error only when stdout can no
-// longer be written to.
-func (h *StdioHandler) sendError(id interface{}, code int, message string) error {
-	resp := h.createErrorResponse(id, code, message)
-	if err := h.sendResponse(resp); err != nil {
-		if errors.Is(err, errStdoutWrite) {
-			return err
-		}
-		log.Printf("Failed to send error response: %v", err)
-	}
-	return nil
 }
 
 // insecureWarning is logged at startup when TLS verification is disabled.

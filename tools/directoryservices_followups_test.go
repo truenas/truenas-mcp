@@ -82,7 +82,7 @@ func TestConfigureDirectoryServiceMasksNestedSecrets(t *testing.T) {
 	t.Run("preview", func(t *testing.T) {
 		for _, extra := range []obj{{"dry_run": true}, {}} {
 			r, fake, _ := dsFake(t)
-			out, err := r.CallTool("configure_directory_service", withArgs(args, extra))
+			out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, extra))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -98,7 +98,7 @@ func TestConfigureDirectoryServiceMasksNestedSecrets(t *testing.T) {
 
 	t.Run("confirm", func(t *testing.T) {
 		r, fake, mgr := dsFake(t)
-		out, err := r.CallTool("configure_directory_service", withArgs(args, obj{"confirm": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"confirm": true}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,7 +142,7 @@ func TestDirectoryServiceDryRunThroughOutputRedactor(t *testing.T) {
 	}
 	t.Run("configure", func(t *testing.T) {
 		r, _, _ := dsFake(t)
-		out, err := r.CallTool("configure_directory_service", withArgs(adWithIdmapSecrets(), obj{"dry_run": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(adWithIdmapSecrets(), obj{"dry_run": true}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,7 +153,7 @@ func TestDirectoryServiceDryRunThroughOutputRedactor(t *testing.T) {
 	})
 	t.Run("leave", func(t *testing.T) {
 		r, _, _ := leaveFake(t, dsStatus("ACTIVEDIRECTORY", "HEALTHY"))
-		out, err := r.CallTool("leave_directory_service", leaveArgs(obj{"dry_run": true}))
+		out, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(obj{"dry_run": true}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -188,7 +188,7 @@ func TestConfigureDirectoryServiceBareDisable(t *testing.T) {
 
 	t.Run("preview warns that domain authentication stops", func(t *testing.T) {
 		r, fake, _ := leaveFake(t, dsStatus("ACTIVEDIRECTORY", "HEALTHY"))
-		out, err := r.CallTool("configure_directory_service", withArgs(args, obj{"dry_run": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"dry_run": true}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,7 +220,7 @@ func TestConfigureDirectoryServiceBareDisable(t *testing.T) {
 
 	t.Run("nothing configured", func(t *testing.T) {
 		r, _, _ := leaveFake(t, dsStatus("none", nil))
-		out, err := r.CallTool("configure_directory_service", withArgs(args, obj{"dry_run": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"dry_run": true}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -240,7 +240,7 @@ func TestConfigureDirectoryServiceBareDisable(t *testing.T) {
 
 	t.Run("confirm sends exactly enable=false", func(t *testing.T) {
 		r, fake, mgr := dsFake(t)
-		out, err := r.CallTool("configure_directory_service", withArgs(args, obj{"confirm": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"confirm": true}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -270,7 +270,7 @@ func TestConfigureDirectoryServiceBareDisable(t *testing.T) {
 
 	t.Run("disable with a stored configuration warns too", func(t *testing.T) {
 		r, _, _ := dsFake(t)
-		out, err := r.CallTool("configure_directory_service", withArgs(fullDSExamples()["LDAP"], obj{"dry_run": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(fullDSExamples()["LDAP"], obj{"dry_run": true}))
 		if err != nil || !strings.Contains(out, "Disabling LDAP stops domain/directory authentication") {
 			t.Errorf("err=%v\n%s", err, out)
 		}
@@ -322,7 +322,7 @@ func TestConfigureDirectoryServiceFlatArgumentsHint(t *testing.T) {
 	// The hint names the offending arguments, and reaches the tool caller.
 	client, fake := newFakeClient(t)
 	r := NewRegistry(client, nil)
-	_, err := r.CallTool("configure_directory_service", obj{"type": "activedirectory", "domain": "example.com", "bindname": "a", "enable": true, "confirm": true})
+	_, err := r.CallTool(t.Context(), "configure_directory_service", obj{"type": "activedirectory", "domain": "example.com", "bindname": "a", "enable": true, "confirm": true})
 	if err == nil || !strings.Contains(err.Error(), "bindname, domain, type are no longer top-level arguments") {
 		t.Errorf("err = %v", err)
 	}
@@ -647,7 +647,7 @@ func TestConfigureDirectoryServiceAttributeMapsVisibleSecretsMasked(t *testing.T
 
 	t.Run("LDAP preview, response and task arguments", func(t *testing.T) {
 		r, _, _ := dsFake(t)
-		out, err := r.CallTool("configure_directory_service", withArgs(ldap, obj{"dry_run": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(ldap, obj{"dry_run": true}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -658,7 +658,7 @@ func TestConfigureDirectoryServiceAttributeMapsVisibleSecretsMasked(t *testing.T
 		}
 
 		r, fake, mgr := dsFake(t)
-		out, err = r.CallTool("configure_directory_service", withArgs(ldap, obj{"confirm": true}))
+		out, err = r.CallTool(t.Context(), "configure_directory_service", withArgs(ldap, obj{"confirm": true}))
 		if err != nil {
 			t.Fatal(err)
 		}

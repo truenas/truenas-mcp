@@ -94,6 +94,7 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 
 	// Check if this is a dry run
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		host, hostNote := lookupNASHostname(client)
 		// Return preview of what would be created
 		preview := map[string]interface{}{
 			"dry_run":      true,
@@ -101,29 +102,25 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 			"payload":      payload,
 			"note":         "This is a preview. No SMB share has been created.",
 			"next_step":    "Remove dry_run parameter or set to false to execute",
-			"network_path": fmt.Sprintf("\\\\truenas\\%s", name),
+			"network_path": fmt.Sprintf("\\\\%s\\%s", host, name),
 		}
 
 		// Add security warnings
 		warnings := []string{}
-		if browsable, ok := payload["browsable"].(bool); ok && browsable {
-			if hostsallow, ok := payload["hostsallow"]; !ok || hostsallow == nil {
-				warnings = append(warnings, "Share will be visible and accessible from any network host (browsable=true, no hostsallow restrictions)")
-			}
+		if smbShareBrowsable(payload) && !smbHasHostsallow(payload) {
+			warnings = append(warnings, "Share will be visible and accessible from any network host (browsable=true, no hostsallow restrictions)")
 		}
 		if readonly, ok := payload["readonly"].(bool); ok && !readonly {
 			warnings = append(warnings, "Share allows read-write access")
 		}
 
-		// Add directory service warnings if applicable
-		ctx := context.Background()
-		if tnClient, err := GetTrueNASClient(); err == nil {
-			dirWarnings := checkDirectoryServiceForShareWarnings(ctx, tnClient)
-			warnings = append(warnings, dirWarnings...)
-		}
+		warnings = append(warnings, checkDirectoryServiceForShareWarnings(context.Background(), client)...)
 
 		if len(warnings) > 0 {
 			preview["security_warnings"] = warnings
+		}
+		if hostNote != "" {
+			preview["hostname_note"] = hostNote
 		}
 
 		formatted, err := json.MarshalIndent(preview, "", "  ")
@@ -162,7 +159,11 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Add connection information
-	response["network_path"] = fmt.Sprintf("\\\\truenas\\%s", name)
+	host, hostNote := lookupNASHostname(client)
+	response["network_path"] = fmt.Sprintf("\\\\%s\\%s", host, name)
+	if hostNote != "" {
+		response["hostname_note"] = hostNote
+	}
 	response["note"] = "Share is now accessible over the network. You may need to configure permissions."
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -227,4 +228,50 @@ func validateSharePath(path string) error {
 	}
 
 	return nil
+}
+
+// smbShareBrowsable reports whether the share will be browsable. TrueNAS
+// defaults browsable to true, so an omitted value is treated as true.
+func smbShareBrowsable(payload map[string]interface{}) bool {
+	if v, ok := payload["browsable"].(bool); ok {
+		return v
+	}
+	return true
+}
+
+// smbHasHostsallow reports whether payload.options.hostsallow has any entries.
+func smbHasHostsallow(payload map[string]interface{}) bool {
+	opts, _ := payload["options"].(map[string]interface{})
+	list, _ := opts["hostsallow"].([]interface{})
+	return len(list) > 0
+}
+
+const nasHostnamePlaceholder = "NAS_HOSTNAME"
+const nasHostnameUnavailableNote = "NAS hostname unavailable; NAS_HOSTNAME is a placeholder"
+
+// lookupNASHostname returns system.info hostname for share paths and mount
+// examples. That value is the short hostname (socket.gethostname()), not
+// the HA virtual hostname from network.configuration. If it is missing or
+// unusable, the shell-safe placeholder NAS_HOSTNAME is returned with a
+// note so the result cannot be mistaken for the factory-default hostname
+// "truenas", and so a mount example can be pasted without being treated
+// as a shell redirect.
+func lookupNASHostname(client *truenas.Client) (host, note string) {
+	if client == nil {
+		return nasHostnamePlaceholder, nasHostnameUnavailableNote
+	}
+	result, err := client.Call("system.info")
+	if err != nil {
+		return nasHostnamePlaceholder, nasHostnameUnavailableNote
+	}
+	var info map[string]interface{}
+	if err := json.Unmarshal(result, &info); err != nil {
+		return nasHostnamePlaceholder, nasHostnameUnavailableNote
+	}
+	host, _ = info["hostname"].(string)
+	host = strings.TrimSpace(host)
+	if host == "" || strings.ContainsAny(host, `\/ "`) {
+		return nasHostnamePlaceholder, nasHostnameUnavailableNote
+	}
+	return host, ""
 }
