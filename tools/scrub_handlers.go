@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/truenas/truenas-mcp/truenas"
@@ -403,23 +402,19 @@ func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interf
 		return "", fmt.Errorf("scrub already running on pool '%s'", poolName)
 	}
 
-	if threshold > 0 {
-		if end := lastFinishedScrubEnd(poolInfo); end != nil {
-			daysAgo := int(time.Since(*end).Hours() / 24)
-			if daysAgo < threshold {
-				response := map[string]interface{}{
-					"pool":          poolName,
-					"scrub_started": false,
-					"reason":        fmt.Sprintf("last scrub finished %d days ago, within the threshold of %d days", daysAgo, threshold),
-					"message":       fmt.Sprintf("No scrub started on pool '%s': last scrub finished %d days ago, within the threshold of %d days", poolName, daysAgo, threshold),
-				}
-				formatted, err := json.MarshalIndent(response, "", "  ")
-				if err != nil {
-					return "", err
-				}
-				return string(formatted), nil
-			}
+	if end := lastFinishedScrubEnd(poolInfo); lastScrubWithinThreshold(end, threshold) {
+		daysAgo := int(time.Since(*end).Hours() / 24)
+		response := map[string]interface{}{
+			"pool":          poolName,
+			"scrub_started": false,
+			"reason":        fmt.Sprintf("last scrub finished %d days ago, within the threshold of %d days", daysAgo, threshold),
+			"message":       fmt.Sprintf("No scrub started on pool '%s': last scrub finished %d days ago, within the threshold of %d days", poolName, daysAgo, threshold),
 		}
+		formatted, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(formatted), nil
 	}
 
 	jobID, err := startScrubJob(client, poolName)
@@ -783,7 +778,7 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 		warnings = append(warnings, "Performance may be impacted during scrub")
 		if lastScrub != nil {
 			daysAgo, _ := lastScrub["days_ago"].(int)
-			if daysAgo < threshold {
+			if lastScrubWithinThreshold(lastFinishedScrubEnd(poolInfo), threshold) {
 				warnings = append(warnings, fmt.Sprintf("Last scrub was %d days ago (within threshold of %d days)", daysAgo, threshold))
 			} else {
 				warnings = append(warnings, fmt.Sprintf("Last scrub was %d days ago (exceeds threshold of %d days)", daysAgo, threshold))
@@ -1353,41 +1348,24 @@ func scrubJobPoolName(job map[string]interface{}) (string, bool) {
 	return "", false
 }
 
-func useZpoolScrubRun(client *truenas.Client) bool {
-	result, err := client.Call("system.info")
-	if err != nil {
+// lastScrubWithinThreshold reports whether the last finished scrub is still
+// inside middleware's skip window: age < (threshold-1)*24h. threshold <= 1
+// (or a missing end time) means a start is due. threshold <= 0 disables
+// the check, matching the tool's "0 means do not skip" behaviour.
+func lastScrubWithinThreshold(end *time.Time, threshold int) bool {
+	if threshold <= 1 || end == nil {
 		return false
 	}
-	var info map[string]interface{}
-	if err := json.Unmarshal(result, &info); err != nil {
-		return false
-	}
-	ver, _ := info["version"].(string)
-	major, _, ok := parseVersionMajorMinor(ver)
-	return ok && major >= 26
+	return time.Since(*end) < time.Duration(threshold-1)*24*time.Hour
 }
 
-func parseVersionMajorMinor(v string) (int, int, bool) {
-	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	var major, minor int
-	n, err := fmt.Sscanf(v, "%d.%d", &major, &minor)
-	return major, minor, err == nil && n == 2
-}
-
-// startScrubJob starts a scrub with a method that returns a job id and has
-// no threshold (threshold is enforced in the handler first).
+// startScrubJob starts a scrub with pool.scrub.scrub, which is present
+// on TrueNAS 25.04–27 and fails the job when the start fails. zpool.scrub.run
+// (26+) can finish successfully without starting a scrub (HA standby, a
+// race with a scheduled run, or the concurrent-scrub limit), so it is not
+// used for the start call. Threshold is enforced in the handler first.
 func startScrubJob(client *truenas.Client, poolName string) (int, error) {
-	var result json.RawMessage
-	var err error
-	if useZpoolScrubRun(client) {
-		result, err = client.Call("zpool.scrub.run", map[string]interface{}{
-			"pool_name": poolName,
-			"action":    "START",
-			"threshold": 0,
-		})
-	} else {
-		result, err = client.Call("pool.scrub.scrub", poolName, "START")
-	}
+	result, err := client.Call("pool.scrub.scrub", poolName, "START")
 	if err != nil {
 		return 0, fmt.Errorf("failed to start scrub: %w", err)
 	}

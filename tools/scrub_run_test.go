@@ -314,7 +314,9 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 			t.Errorf("zpool.scrub.run start was sent although a scrub is running")
 		}
 
-		// A start on a quiet 27.x system uses zpool.scrub.run.
+		// A start on a quiet 27.x system still uses pool.scrub.scrub,
+		// which fails the job when the start fails; zpool.scrub.run is
+		// only used for job lookups (scheduled scrubs).
 		results = scrubRunResults("27.0.0", scrubPoolRecord("tank", "ONLINE", 1.0e12, &days), nil)
 		r, fake, _ = newScrubRunRegistry(t, results)
 		out, err = r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
@@ -325,13 +327,13 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &resp); err != nil {
 			t.Fatal(err)
 		}
-		if n := len(fake.called("zpool.scrub.run")); n != 1 {
-			t.Errorf("zpool.scrub.run calls = %d, want 1; body=%s", n, out)
+		if n := len(fake.called("zpool.scrub.run")); n != 0 {
+			t.Errorf("zpool.scrub.run was used to start (%d call(s)); body=%s", n, out)
 		}
-		if n := len(fake.called("pool.scrub.scrub")); n != 0 {
-			t.Errorf("pool.scrub.scrub should not be the start call on 27.x")
+		if n := len(fake.called("pool.scrub.scrub")); n != 1 {
+			t.Errorf("pool.scrub.scrub calls = %d, want 1; body=%s", n, out)
 		}
-		if resp["job_id"] != float64(77) || resp["scrub_started"] != true {
+		if resp["job_id"] != float64(99) || resp["scrub_started"] != true {
 			t.Errorf("27.x start result = %s", out)
 		}
 	})
@@ -390,6 +392,53 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 			noStartCalls(t, fake)
 		})
 	}
+
+	t.Run("27.x start uses pool.scrub.scrub not zpool.scrub.run", func(t *testing.T) {
+		days := 30
+		r, fake, _ := newScrubRunRegistry(t, scrubRunResults("27.0.0", scrubPoolRecord("tank", "ONLINE", 1.0e12, &days), nil))
+		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		if err != nil {
+			t.Fatalf("27.x run_scrub: %v", err)
+		}
+		if n := len(fake.called("zpool.scrub.run")); n != 0 {
+			t.Errorf("zpool.scrub.run was used to start (%d call(s)); it can succeed without starting a scrub: %s", n, out)
+		}
+		if n := len(fake.called("pool.scrub.scrub")); n != 1 {
+			t.Errorf("pool.scrub.scrub calls = %d, want 1; body=%s", n, out)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp["job_id"] != float64(99) || resp["scrub_started"] != true {
+			t.Errorf("27.x start result = %s", out)
+		}
+	})
+
+	t.Run("threshold allows a scrub at 6.5 days with default 7", func(t *testing.T) {
+		// Middleware is due once age >= (threshold-1)*24h; 6.5 days must start.
+		ended := time.Now().UTC().Add(-13 * 12 * time.Hour)
+		pool := scrubPoolRecord("tank", "ONLINE", 1.0e12, nil)
+		pool["scan"] = map[string]interface{}{
+			"function": "SCRUB", "state": "FINISHED", "errors": 0.0,
+			"end_time": map[string]interface{}{"$date": float64(ended.Unix() * 1000)},
+		}
+		r, fake, _ := newScrubRunRegistry(t, scrubRunResults("25.10.0", pool, nil))
+		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "tank"})
+		if err != nil {
+			t.Fatalf("6.5-day run_scrub: %v", err)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp["scrub_started"] != true {
+			t.Errorf("6.5 days with threshold 7 was refused: %s", out)
+		}
+		if n := len(fake.called("pool.scrub.scrub")); n != 1 {
+			t.Errorf("start calls = %d, want 1; body=%s", n, out)
+		}
+	})
 
 	t.Run("DEGRADED pool is allowed", func(t *testing.T) {
 		days := 30
