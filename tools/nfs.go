@@ -11,7 +11,7 @@ import (
 )
 
 // handleCreateNFSShare creates a new NFS share
-func handleCreateNFSShare(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleCreateNFSShare(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Extract required parameter
 	path, ok := args["path"].(string)
 	if !ok || path == "" {
@@ -92,7 +92,7 @@ func handleCreateNFSShare(client *truenas.Client, args map[string]interface{}) (
 
 	// Check if this is a dry run
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		host, hostNote := lookupNASHostname(client)
+		host, hostNote := lookupNASHostname(ctx, client)
 		// Return preview of what would be created
 		preview := map[string]interface{}{
 			"dry_run":       true,
@@ -115,7 +115,7 @@ func handleCreateNFSShare(client *truenas.Client, args map[string]interface{}) (
 		}
 		warnings = append(warnings, nfsRootMappingWarning(payload))
 
-		warnings = append(warnings, checkDirectoryServiceForShareWarnings(context.Background(), client)...)
+		warnings = append(warnings, checkDirectoryServiceForShareWarnings(ctx, client)...)
 
 		if len(warnings) > 0 {
 			preview["security_warnings"] = warnings
@@ -132,7 +132,7 @@ func handleCreateNFSShare(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Call the API
-	result, err := client.Call("sharing.nfs.create", payload)
+	result, err := client.Call(ctx, "sharing.nfs.create", payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to create NFS share: %w", err)
 	}
@@ -159,7 +159,7 @@ func handleCreateNFSShare(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Add mount instructions
-	host, hostNote := lookupNASHostname(client)
+	host, hostNote := lookupNASHostname(ctx, client)
 	response["mount_example"] = fmt.Sprintf("mount -t nfs %s:%s /mnt/point", host, path)
 	if hostNote != "" {
 		response["hostname_note"] = hostNote

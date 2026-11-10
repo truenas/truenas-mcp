@@ -2,6 +2,7 @@ package truenas
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"log"
@@ -106,9 +107,9 @@ func runClientSession(t *testing.T, srv *httptest.Server) (string, error) {
 	}
 	defer client.Close()
 
-	authErr := client.Authenticate()
+	authErr := client.Authenticate(context.Background())
 	if authErr == nil {
-		if _, err := client.Call("test.echo"); err != nil {
+		if _, err := client.Call(context.Background(), "test.echo"); err != nil {
 			t.Fatalf("Call: %v", err)
 		}
 	}

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -336,7 +337,7 @@ func TestAdditionalPropertiesStayPermissive(t *testing.T) {
 	ran := false
 	r.tools["test_open"] = Tool{
 		Definition: mcp.Tool{Name: "test_open", InputSchema: map[string]interface{}{"type": "object", "additionalProperties": true}},
-		Handler: func(*truenas.Client, map[string]interface{}) (string, error) {
+		Handler: func(context.Context, *truenas.Client, map[string]interface{}) (string, error) {
 			ran = true
 			return "ok", nil
 		},

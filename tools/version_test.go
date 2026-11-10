@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -31,11 +32,11 @@ func TestStartupRejectsTrueNAS2504(t *testing.T) {
 	client, _ := newFakeClientWith(t, map[string]interface{}{
 		"system.info": map[string]interface{}{"hostname": "nas", "version": "25.04.2"},
 	}, nil)
-	if err := client.Authenticate(); err != nil {
+	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatalf("login should succeed: %v", err)
 	}
 	// main() calls this after Authenticate and exits on error.
-	err := client.RequireSupportedVersion()
+	err := client.RequireSupportedVersion(context.Background())
 	if err == nil {
 		t.Fatal("startup accepted TrueNAS 25.04.2")
 	}
@@ -48,7 +49,7 @@ func TestStartupAcceptsTrueNAS2510(t *testing.T) {
 	client, _ := newFakeClientWith(t, map[string]interface{}{
 		"system.info": map[string]interface{}{"hostname": "nas", "version": "25.10.0"},
 	}, nil)
-	if err := client.RequireSupportedVersion(); err != nil {
+	if err := client.RequireSupportedVersion(context.Background()); err != nil {
 		t.Fatalf("25.10.0 should be accepted: %v", err)
 	}
 }
@@ -66,8 +67,8 @@ func withGatedTool(t *testing.T, r *Registry, client *truenas.Client) {
 				"properties": map[string]interface{}{},
 			},
 		},
-		Handler: func(c *truenas.Client, _ map[string]interface{}) (string, error) {
-			if _, err := c.Call("future.method"); err != nil {
+		Handler: func(_ context.Context, c *truenas.Client, _ map[string]interface{}) (string, error) {
+			if _, err := c.Call(context.Background(), "future.method"); err != nil {
 				return "", err
 			}
 			return `{"ran":true}`, nil
@@ -92,7 +93,7 @@ func TestVersionGateHidesNewerToolsOn2510(t *testing.T) {
 	client, _ := newFakeClientWith(t, map[string]interface{}{
 		"system.info": map[string]interface{}{"hostname": "nas", "version": "25.10.1"},
 	}, nil)
-	if err := client.RequireSupportedVersion(); err != nil {
+	if err := client.RequireSupportedVersion(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	r := NewRegistry(client, nil)
@@ -111,7 +112,7 @@ func TestVersionGateRefusesNewerToolOn2510WithoutMiddlewareCall(t *testing.T) {
 	client, fake := newFakeClientWith(t, map[string]interface{}{
 		"system.info": map[string]interface{}{"hostname": "nas", "version": "25.10.1"},
 	}, nil)
-	if err := client.RequireSupportedVersion(); err != nil {
+	if err := client.RequireSupportedVersion(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	r := NewRegistry(client, nil)
@@ -139,7 +140,7 @@ func TestVersionGateAllowsToolOnRequiredVersion(t *testing.T) {
 		"system.info":   map[string]interface{}{"hostname": "nas", "version": "26.0.0"},
 		"future.method": map[string]interface{}{"ok": true},
 	}, nil)
-	if err := client.RequireSupportedVersion(); err != nil {
+	if err := client.RequireSupportedVersion(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	r := NewRegistry(client, nil)
@@ -164,12 +165,12 @@ func TestVersionGateRefusesAllToolsWhenNASIsTooOld(t *testing.T) {
 	client, fake := newFakeClientWith(t, map[string]interface{}{
 		"system.info": map[string]interface{}{"hostname": "nas", "version": "25.04.2"},
 	}, nil)
-	if err := client.Authenticate(); err != nil {
+	if err := client.Authenticate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// Load the cached version even though it is below the minimum, so
 	// CallTool uses the same message as startup.
-	err := client.RequireSupportedVersion()
+	err := client.RequireSupportedVersion(context.Background())
 	if err == nil {
 		t.Fatal("expected 25.04.2 to be rejected")
 	}

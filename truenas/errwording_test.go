@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"net"
@@ -46,7 +47,7 @@ func TestConnectFailuresAreConnectErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = c.Authenticate()
+			err = c.Authenticate(context.Background())
 			var ce *ConnectError
 			if !errors.As(err, &ce) {
 				t.Fatalf("Authenticate error %v (%T) is not a *ConnectError", err, err)
@@ -66,12 +67,14 @@ func TestConnectFailuresAreConnectErrors(t *testing.T) {
 
 func TestDialPanicIsConnectError(t *testing.T) {
 	orig := wsDial
-	wsDial = func(*websocket.Dialer, string) (*websocket.Conn, *http.Response, error) { panic("injected") }
+	wsDial = func(context.Context, *websocket.Dialer, string) (*websocket.Conn, *http.Response, error) {
+		panic("injected")
+	}
 	t.Cleanup(func() { wsDial = orig })
 	clearProxyEnv(t)
 	c, _ := NewClientWithOptions("wss://truenas.invalid", testAPIKey, &tls.Config{}, Options{APIUser: testAPIUser, Proxy: "none"})
 	var ce *ConnectError
-	if err := c.Authenticate(); !errors.As(err, &ce) {
+	if err := c.Authenticate(context.Background()); !errors.As(err, &ce) {
 		t.Errorf("Authenticate error %v (%T) is not a *ConnectError", err, err)
 	}
 }
@@ -80,7 +83,7 @@ func TestDialPanicIsConnectError(t *testing.T) {
 func TestAuthFailureIsNotConnectError(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.loginType = "AUTH_ERR" })
 	c := insecureClient(t, f, Options{})
-	err := c.Authenticate()
+	err := c.Authenticate(context.Background())
 	if err == nil {
 		t.Fatal("login succeeded")
 	}
@@ -232,7 +235,7 @@ func TestInvalidEndpointGivesReason(t *testing.T) {
 		}
 		// Connecting reports the same error, not a connection failure.
 		var ce *ConnectError
-		if cerr := c.Authenticate(); !errors.As(cerr, &ee) || errors.As(cerr, &ce) {
+		if cerr := c.Authenticate(context.Background()); !errors.As(cerr, &ee) || errors.As(cerr, &ce) {
 			t.Errorf("%q: Authenticate = %v", tc.endpoint, cerr)
 		}
 	}
@@ -282,7 +285,7 @@ func TestEndpointQueryAndFragmentAreNotLogged(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer c.Close()
-		if err := c.Authenticate(); err != nil {
+		if err := c.Authenticate(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		out := logs.String()
@@ -301,7 +304,7 @@ func TestEndpointQueryAndFragmentAreNotLogged(t *testing.T) {
 	t.Run("404", func(t *testing.T) {
 		orig := wsDial
 		t.Cleanup(func() { wsDial = orig })
-		wsDial = func(_ *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
+		wsDial = func(_ context.Context, _ *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
 			return nil, &http.Response{StatusCode: http.StatusNotFound}, websocket.ErrBadHandshake
 		}
 		for _, endpoint := range []string{
@@ -314,7 +317,7 @@ func TestEndpointQueryAndFragmentAreNotLogged(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = c.Authenticate()
+			err = c.Authenticate(context.Background())
 			if err == nil || !strings.Contains(err.Error(), "HTTP 404 for wss://truenas.example") {
 				t.Fatalf("%q: error = %v", endpoint, err)
 			}
@@ -336,19 +339,19 @@ func TestReconnectFailureAfterDroppedLoginSaysLoginWasAttempted(t *testing.T) {
 	orig := wsDial
 	t.Cleanup(func() { wsDial = orig })
 	dials := 0
-	wsDial = func(d *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
+	wsDial = func(ctx context.Context, d *websocket.Dialer, urlStr string) (*websocket.Conn, *http.Response, error) {
 		dials++
 		if dials > 1 {
 			return nil, nil, errors.New("dial tcp 192.0.2.1:443: connect: network is unreachable")
 		}
-		return orig(d, urlStr)
+		return orig(ctx, d, urlStr)
 	}
 	c, err := NewClientWithOptions(f.wsURL("127.0.0.1"), testAPIKey, &tls.Config{InsecureSkipVerify: true}, Options{APIUser: testAPIUser, Proxy: "none"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	err = c.Authenticate()
+	err = c.Authenticate(context.Background())
 	var ce *ConnectError
 	if !errors.As(err, &ce) || !ce.LoginAttempted {
 		t.Fatalf("Authenticate = %v; want a *ConnectError with LoginAttempted", err)
@@ -363,7 +366,7 @@ func TestReconnectFailureAfterDroppedLoginSaysLoginWasAttempted(t *testing.T) {
 	// A first connection that fails is not a login attempt.
 	dials = 1
 	c2, _ := NewClientWithOptions(f.wsURL("127.0.0.1"), testAPIKey, &tls.Config{InsecureSkipVerify: true}, Options{APIUser: testAPIUser, Proxy: "none"})
-	err = c2.Authenticate()
+	err = c2.Authenticate(context.Background())
 	if !errors.As(err, &ce) || ce.LoginAttempted {
 		t.Errorf("first connect failure = %v; want a *ConnectError without LoginAttempted", err)
 	}
@@ -379,7 +382,7 @@ func TestConnectFailureIsLoggedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c.Authenticate()
+	err = c.Authenticate(context.Background())
 	if err == nil {
 		t.Fatal("Authenticate succeeded")
 	}
@@ -387,7 +390,7 @@ func TestConnectFailureIsLoggedOnce(t *testing.T) {
 		t.Errorf("Authenticate logged the failure it returns:\n%s", logs)
 	}
 
-	if _, err := c.SessionGeneration(); err == nil {
+	if _, err := c.SessionGeneration(context.Background()); err == nil {
 		t.Fatal("SessionGeneration succeeded")
 	}
 	if n := strings.Count(logs.String(), "Connection failed"); n != 1 {
@@ -526,7 +529,7 @@ func TestEndpointErrorsNeverEchoQueryFragmentOrUserinfo(t *testing.T) {
 		if strings.Contains(verr.Error(), secret) || strings.Contains(verr.Error(), "token=") {
 			t.Errorf("%q: error echoes the query, fragment or userinfo: %v", endpoint, verr)
 		}
-		_, cerr := c.Call("core.ping")
+		_, cerr := c.Call(context.Background(), "core.ping")
 		if cerr != nil && (strings.Contains(cerr.Error(), secret) || strings.Contains(cerr.Error(), "token=")) {
 			t.Errorf("%q: connect error echoes the query, fragment or userinfo: %v", endpoint, cerr)
 		}
@@ -538,7 +541,7 @@ func TestEndpointErrorsNeverEchoQueryFragmentOrUserinfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c2.Call("core.ping"); err == nil || strings.Contains(err.Error(), secret) {
+	if _, err := c2.Call(context.Background(), "core.ping"); err == nil || strings.Contains(err.Error(), secret) {
 		t.Errorf("connect error = %v, want an error without the secret", err)
 	}
 	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), "token=") {

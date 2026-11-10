@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -127,7 +128,7 @@ func pollUntil(t *testing.T, r *Registry, mgr *tasks.Manager, id string, tries i
 func TestTaskJobIDReusedAfterRestart(t *testing.T) {
 	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
 	f.set(func(f *jobFake) { f.jobs = []interface{}{jobRow(3, "app.start", "RUNNING", 1_700_000_000_000)} })
-	task, err := mgr.CreateJobTask("start_app", nil, 3, 10*time.Minute)
+	task, err := mgr.CreateJobTask(context.Background(), "start_app", nil, 3, 10*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +163,7 @@ func TestTaskJobIDReusedAfterRestart(t *testing.T) {
 func TestApplyUpdateTaskAfterReboot(t *testing.T) {
 	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
 	f.set(func(f *jobFake) { f.jobs = []interface{}{jobRow(9, "update.run", "RUNNING", 1_700_000_000_000)} })
-	task, err := mgr.CreateJobTask("apply_update", nil, 9, 2*time.Hour)
+	task, err := mgr.CreateJobTask(context.Background(), "apply_update", nil, 9, 2*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +180,7 @@ func TestApplyUpdateTaskAfterReboot(t *testing.T) {
 func TestTaskJobRowMissing(t *testing.T) {
 	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
 	f.set(func(f *jobFake) { f.jobs = []interface{}{jobRow(5, "pool.scrub.scrub", "RUNNING", 1_700_000_000_000)} })
-	task, err := mgr.CreateJobTask("run_scrub", nil, 5, 48*time.Hour)
+	task, err := mgr.CreateJobTask(context.Background(), "run_scrub", nil, 5, 48*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +209,7 @@ func TestTaskPollErrorsReported(t *testing.T) {
 
 	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
 	f.set(func(f *jobFake) { f.jobs = []interface{}{jobRow(4, "app.stop", "RUNNING", 1_700_000_000_000)} })
-	task, err := mgr.CreateJobTask("stop_app", nil, 4, 5*time.Minute)
+	task, err := mgr.CreateJobTask(context.Background(), "stop_app", nil, 4, 5*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +247,7 @@ func TestTasksExposeToolJobIDAndResult(t *testing.T) {
 	small := jobRow(11, "app.create", "SUCCESS", 1_700_000_000_000)
 	small["result"] = map[string]interface{}{"name": "web", "ok": true}
 	f.set(func(f *jobFake) { f.jobs = []interface{}{small} })
-	task, err := mgr.CreateJobTask("install_app", nil, 11, time.Hour)
+	task, err := mgr.CreateJobTask(context.Background(), "install_app", nil, 11, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +264,7 @@ func TestTasksExposeToolJobIDAndResult(t *testing.T) {
 	big := jobRow(12, "update.download", "SUCCESS", 1_700_000_000_000)
 	big["result"] = strings.Repeat("x", 3*tasks.MaxJobResultBytes)
 	f.set(func(f *jobFake) { f.jobs = []interface{}{big} })
-	task2, err := mgr.CreateJobTask("download_update", nil, 12, time.Hour)
+	task2, err := mgr.CreateJobTask(context.Background(), "download_update", nil, 12, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +299,7 @@ func TestTasksExposeToolJobIDAndResult(t *testing.T) {
 func TestTaskIdentityUnconfirmedMessage(t *testing.T) {
 	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
 	f.set(func(f *jobFake) { f.rpcErr = map[string]interface{}{"code": -32000, "message": "busy"} })
-	task, err := mgr.CreateJobTask("start_app", nil, 6, 10*time.Minute)
+	task, err := mgr.CreateJobTask(context.Background(), "start_app", nil, 6, 10*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +324,7 @@ func TestTaskRequiresExpectedJobMethod(t *testing.T) {
 	f.set(func(f *jobFake) {
 		f.jobs = []interface{}{jobRow(1, "pool.dataset.query", "SUCCESS", 1_700_000_000_000)}
 	})
-	task, err := mgr.CreateJobTask("start_app", nil, 1, 10*time.Minute)
+	task, err := mgr.CreateJobTask(context.Background(), "start_app", nil, 1, 10*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +341,7 @@ func TestTaskRequiresExpectedJobMethod(t *testing.T) {
 func TestTaskUnknownStateClearsPollErrorMessage(t *testing.T) {
 	r, mgr, f := newJobFakeRegistry(t, tasks.PollerConfig{})
 	f.set(func(f *jobFake) { f.jobs = []interface{}{jobRow(8, "app.stop", "RUNNING", 1_700_000_000_000)} })
-	task, err := mgr.CreateJobTask("stop_app", nil, 8, 5*time.Minute)
+	task, err := mgr.CreateJobTask(context.Background(), "stop_app", nil, 8, 5*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"context"
 	"io"
 	"log"
 	"os"
@@ -26,7 +27,7 @@ func TestReadLoopPanicIsRecovered(t *testing.T) {
 
 	f := newFakeTrueNAS(t, nil)
 	c := insecureClient(t, f, Options{})
-	if err := c.Authenticate(); err != nil {
+	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
 
@@ -39,7 +40,7 @@ func TestReadLoopPanicIsRecovered(t *testing.T) {
 	armed.Store(true)
 
 	done := make(chan error, 1)
-	go func() { _, err := c.Call("system.info"); done <- err }()
+	go func() { _, err := c.Call(context.Background(), "system.info"); done <- err }()
 	select {
 	case err := <-done:
 		if err == nil || !strings.Contains(err.Error(), "read loop") {
@@ -52,7 +53,7 @@ func TestReadLoopPanicIsRecovered(t *testing.T) {
 		t.Errorf("panic was not logged: %s", logs.String())
 	}
 	// The client recovers by reconnecting and logging in again.
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("Call after the panic: %v", err)
 	}
 	if n := f.logins(t); n != 2 {

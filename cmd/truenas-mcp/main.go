@@ -200,11 +200,11 @@ func main() {
 	defer client.Close()
 
 	// Authenticate with TrueNAS middleware
-	if err := client.Authenticate(); err != nil {
+	if err := client.Authenticate(context.Background()); err != nil {
 		log.Fatalf("%s", startupAuthError(err))
 	}
 	log.Println("Successfully authenticated with TrueNAS middleware")
-	if err := client.RequireSupportedVersion(); err != nil {
+	if err := client.RequireSupportedVersion(context.Background()); err != nil {
 		log.Fatalf("%s", err)
 	}
 

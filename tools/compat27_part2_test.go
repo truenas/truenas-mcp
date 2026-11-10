@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -51,7 +52,7 @@ func TestAnalyzeNetworkCapacityLegendAndUnits(t *testing.T) {
 		"interface.query": []interface{}{map[string]interface{}{"name": "eth0", "state": map[string]interface{}{"link_speed": 1000.0}}},
 	}, nil)
 	client, _ := newFakeClientFrom(t, fake)
-	a, err := analyzeNetworkCapacity(client, "HOUR")
+	a, err := analyzeNetworkCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +84,7 @@ func TestAnalyzeDiskCapacityLegendAndUnits(t *testing.T) {
 		"reporting.graphs": []interface{}{map[string]interface{}{"name": "disk", "vertical_label": "Kibibytes/s", "identifiers": []interface{}{"sda | Type: SSD"}}},
 	}, nil)
 	client, _ := newFakeClientFrom(t, fake)
-	a, err := analyzeDiskCapacity(client, "HOUR")
+	a, err := analyzeDiskCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,14 +107,14 @@ func TestNetworkAndDiskMetricsUnit(t *testing.T) {
 		"reporting.graphs": []interface{}{map[string]interface{}{"name": "disk", "vertical_label": "Kibibytes/s", "identifiers": []interface{}{"sda"}}},
 	}, nil)
 	client, _ := newFakeClientFrom(t, fake)
-	out, err := handleGetNetworkMetrics(client, map[string]interface{}{})
+	out, err := handleGetNetworkMetrics(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, `"unit": "Kilobits/s"`) {
 		t.Errorf("network unit missing: %s", out)
 	}
-	out, err = handleGetDiskMetrics(client, map[string]interface{}{})
+	out, err = handleGetDiskMetrics(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestQuerySnapshotsPropertiesAndHolds(t *testing.T) {
 		return snaps, nil, true
 	}}
 	client, _ := newFakeClientFrom(t, fake)
-	out, err := handleQuerySnapshots(client, map[string]interface{}{"order_by": "created"})
+	out, err := handleQuerySnapshots(context.Background(), client, map[string]interface{}{"order_by": "created"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +218,7 @@ func TestQuerySnapshotsPropertiesAndHolds(t *testing.T) {
 		t.Errorf("third = %v", third)
 	}
 
-	out, err = handleQuerySnapshots(client, map[string]interface{}{"holds_only": true})
+	out, err = handleQuerySnapshots(context.Background(), client, map[string]interface{}{"holds_only": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func TestQuerySnapshotsPropertiesAndHolds(t *testing.T) {
 		t.Errorf("holds_only query options = %s", gotOptions)
 	}
 
-	out, err = handleQuerySnapshots(client, map[string]interface{}{"include_holds": true})
+	out, err = handleQuerySnapshots(context.Background(), client, map[string]interface{}{"include_holds": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +252,7 @@ func TestReadableDatesAcrossTools(t *testing.T) {
 		"alert.list": []interface{}{fakeAlert("00000000-0000-0000-0000-000000000001", "WARNING", false)},
 	}
 	client, _ := newFakeClientWith(t, results, nil)
-	out, err := handleSystemInfo(client, nil)
+	out, err := handleSystemInfo(context.Background(), client, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,21 +264,21 @@ func TestReadableDatesAcrossTools(t *testing.T) {
 	if info["buildtime"] != "1" {
 		t.Errorf("buildtime = %v", info["buildtime"])
 	}
-	out, err = handleQueryJobs(client, map[string]interface{}{"state": "all"})
+	out, err = handleQueryJobs(context.Background(), client, map[string]interface{}{"state": "all"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out, "$date") || !strings.Contains(out, `"time_started": "2026-01-01T00:00:00Z"`) {
 		t.Errorf("query_jobs = %s", out)
 	}
-	out, err = handleListAlerts(client, map[string]interface{}{})
+	out, err = handleListAlerts(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out, "$date") || !strings.Contains(out, `"2023-11-14T22:13:20Z"`) {
 		t.Errorf("list_alerts = %s", out)
 	}
-	out, err = handleSystemHealth(client, map[string]interface{}{})
+	out, err = handleSystemHealth(context.Background(), client, map[string]interface{}{})
 	if err == nil && strings.Contains(out, "$date") {
 		t.Errorf("system_health = %s", out)
 	}
@@ -291,7 +292,7 @@ func TestGetSystemMetricsGapsAndEnd(t *testing.T) {
 	g["end"] = end.Unix() - 120 // last bucket stamped 2 minutes after end
 	reported := g["aggregations"]
 	client, _ := newFakeClientFrom(t, reportingFake(t, map[string]map[string]interface{}{"load": g}, nil, nil))
-	out, err := handleGetSystemMetrics(client, map[string]interface{}{"graphs": []interface{}{"load"}, "unit": "MONTH"})
+	out, err := handleGetSystemMetrics(context.Background(), client, map[string]interface{}{"graphs": []interface{}{"load"}, "unit": "MONTH"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +318,7 @@ func TestGetSystemMetricsGapsAndEnd(t *testing.T) {
 func TestGetSystemMetricsNoGapsUnchanged(t *testing.T) {
 	g := multiGraph(time.Now(), "cpu", "", []string{"cpu"}, []float64{10}, []float64{20})
 	client, _ := newFakeClientFrom(t, reportingFake(t, map[string]map[string]interface{}{"cpu": g}, nil, nil))
-	out, err := handleGetSystemMetrics(client, map[string]interface{}{"graphs": []interface{}{"cpu"}})
+	out, err := handleGetSystemMetrics(context.Background(), client, map[string]interface{}{"graphs": []interface{}{"cpu"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +334,7 @@ func TestGetSystemMetricsNoGapsUnchanged(t *testing.T) {
 func TestAnalyzeCPUCapacitySkipsGaps(t *testing.T) {
 	g := reportingGraph("cpu", "cpu", 0, 0, 50, 50, 0)
 	client, _ := newFakeClientFrom(t, reportingFake(t, map[string]map[string]interface{}{"cpu": g}, nil, nil))
-	a, err := analyzeCPUCapacity(client, "MONTH")
+	a, err := analyzeCPUCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +349,7 @@ func TestAnalyzeMemoryCapacityBasisWithoutArc(t *testing.T) {
 	graphs := map[string]map[string]interface{}{"memory": reportingGraph("memory", "available", 12*gib)}
 	results := map[string]interface{}{"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 16 * gib}}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
-	a, err := analyzeMemoryCapacity(client, "HOUR")
+	a, err := analyzeMemoryCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +372,7 @@ func TestSystemHealthArcFreshnessNote(t *testing.T) {
 	}
 	graphs := map[string]map[string]interface{}{"cpu": reportingGraph("cpu", "cpu", 10), "memory": mem, "arcsize": arc}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
-	out, err := handleSystemHealth(client, map[string]interface{}{})
+	out, err := handleSystemHealth(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +386,7 @@ func TestSystemHealthArcFreshnessNote(t *testing.T) {
 		"cpu": reportingGraph("cpu", "cpu", 10), "memory": reportingGraph("memory", "available", 1*gib),
 		"arcsize": reportingGraph("arcsize", "size", 12*gib),
 	}, results, nil))
-	out, err = handleSystemHealth(client, map[string]interface{}{})
+	out, err = handleSystemHealth(context.Background(), client, map[string]interface{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +436,7 @@ func TestAnalyzeMemoryCapacityOneBasis(t *testing.T) {
 	}
 	results := map[string]interface{}{"system.info": map[string]interface{}{"hostname": "nas.example.invalid", "physmem": 16 * gib}}
 	client, _ := newFakeClientFrom(t, reportingFake(t, graphs, results, nil))
-	a, err := analyzeMemoryCapacity(client, "MONTH")
+	a, err := analyzeMemoryCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +461,7 @@ func TestGetSystemMetricsSkipZeroGraphKeepsAggregations(t *testing.T) {
 		"max":  map[string]interface{}{"cpu0": 52.0, "cpu1": 54.0},
 	}
 	client, _ := newFakeClientFrom(t, reportingFake(t, map[string]map[string]interface{}{"cputemp": g}, nil, nil))
-	out, err := handleGetSystemMetrics(client, map[string]interface{}{"graphs": []interface{}{"cputemp"}})
+	out, err := handleGetSystemMetrics(context.Background(), client, map[string]interface{}{"graphs": []interface{}{"cputemp"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,21 +497,21 @@ func TestCurrentFiguresSkipPartialBucket(t *testing.T) {
 		}, nil)
 	client, _ := newFakeClientFrom(t, fake)
 
-	m, err := analyzeMemoryCapacity(client, "MONTH")
+	m, err := analyzeMemoryCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m["current_used_bytes"] != int64(4*gib) || m["current_utilization_pct"] != "25.00" || m["partial_sample_note"] != partialSampleNote {
 		t.Errorf("memory = %v", m)
 	}
-	c, err := analyzeCPUCapacity(client, "MONTH")
+	c, err := analyzeCPUCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c["current_utilization_pct"] != "10.00" || c["peak_utilization_pct"] != "90.00" {
 		t.Errorf("cpu = %v", c)
 	}
-	n, err := analyzeNetworkCapacity(client, "MONTH")
+	n, err := analyzeNetworkCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +524,7 @@ func TestCurrentFiguresSkipPartialBucket(t *testing.T) {
 	if _, ok := rx["current_utilization_pct"]; ok {
 		t.Errorf("utilization without link speed: %v", rx)
 	}
-	d, err := analyzeDiskCapacity(client, "MONTH")
+	d, err := analyzeDiskCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +538,7 @@ func TestCurrentFiguresSkipPartialBucket(t *testing.T) {
 func TestAnalyzeCPUCapacityUsesCPULegend(t *testing.T) {
 	g := multiGraph(time.Now(), "cpu", "", []string{"cpu0", "cpu"}, []float64{90, 10}, []float64{90, 10})
 	client, _ := newFakeClientFrom(t, reportingFake(t, map[string]map[string]interface{}{"cpu": g}, nil, nil))
-	a, err := analyzeCPUCapacity(client, "HOUR")
+	a, err := analyzeCPUCapacity(context.Background(), client, "HOUR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,21 +586,21 @@ func TestCurrentFiguresAllPartialBucket(t *testing.T) {
 		}, nil)
 	client, _ := newFakeClientFrom(t, fake)
 
-	m, err := analyzeMemoryCapacity(client, "MONTH")
+	m, err := analyzeMemoryCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m["current_used_bytes"] != int64(4*gib) || m["partial_sample_note"] != allPartialSampleNote {
 		t.Errorf("memory = %v", m)
 	}
-	c, err := analyzeCPUCapacity(client, "MONTH")
+	c, err := analyzeCPUCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c["current_utilization_pct"] != "10.00" || c["partial_sample_note"] != allPartialSampleNote {
 		t.Errorf("cpu = %v", c)
 	}
-	n, err := analyzeNetworkCapacity(client, "MONTH")
+	n, err := analyzeNetworkCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,7 +608,7 @@ func TestCurrentFiguresAllPartialBucket(t *testing.T) {
 	if eth0["received"].(map[string]interface{})["current_mbps"] != "500.00" || eth0["partial_sample_note"] != allPartialSampleNote {
 		t.Errorf("eth0 = %v", eth0)
 	}
-	d, err := analyzeDiskCapacity(client, "MONTH")
+	d, err := analyzeDiskCapacity(context.Background(), client, "MONTH")
 	if err != nil {
 		t.Fatal(err)
 	}

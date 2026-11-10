@@ -2,6 +2,7 @@ package truenas
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"log"
@@ -47,7 +48,7 @@ func TestConcurrentFirstCallsLogInOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := c.Call("system.info"); err != nil {
+			if _, err := c.Call(context.Background(), "system.info"); err != nil {
 				errs <- err
 			}
 		}()
@@ -68,7 +69,7 @@ func TestConcurrentFirstCallsLogInOnce(t *testing.T) {
 func TestDropDuringLogin(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.dropLogins = 1 })
 	c := insecureClient(t, f, Options{})
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 	raws, _, conns := f.snapshot()
@@ -90,7 +91,7 @@ func TestDropDuringLogin(t *testing.T) {
 func TestDropDuringLoginTwiceFails(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.dropLogins = 2 })
 	c := insecureClient(t, f, Options{})
-	if _, err := c.Call("system.info"); err == nil {
+	if _, err := c.Call(context.Background(), "system.info"); err == nil {
 		t.Fatal("Call succeeded although every login was dropped")
 	}
 	if conn, _ := c.authedSession(); conn != nil {
@@ -105,7 +106,7 @@ func TestNotAuthenticatedReauthenticatesOnce(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.expireOnce = true })
 	c := insecureClient(t, f, Options{})
 	for i := 0; i < 2; i++ {
-		if _, err := c.Call("system.info"); err != nil {
+		if _, err := c.Call(context.Background(), "system.info"); err != nil {
 			t.Fatalf("Call %d: %v", i, err)
 		}
 	}
@@ -131,7 +132,7 @@ func TestNotAuthenticatedRetriedOnlyOnce(t *testing.T) {
 		}
 	})
 	c := insecureClient(t, f, Options{})
-	_, err := c.Call("system.info")
+	_, err := c.Call(context.Background(), "system.info")
 	if err == nil || !strings.Contains(err.Error(), "ENOTAUTHENTICATED") {
 		t.Fatalf("got %v, want the ENOTAUTHENTICATED error after one retry", err)
 	}
@@ -143,7 +144,7 @@ func TestNotAuthenticatedRetriedOnlyOnce(t *testing.T) {
 func TestNoRetryAfterWrite(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) { f.dropOn = "pool.scrub.run" })
 	c := insecureClient(t, f, Options{})
-	if _, err := c.Call("pool.scrub.run", "tank", 35); err == nil {
+	if _, err := c.Call(context.Background(), "pool.scrub.run", "tank", 35); err == nil {
 		t.Fatal("Call succeeded although the server dropped the connection")
 	}
 	raws, _, conns := f.snapshot()
@@ -158,7 +159,7 @@ func TestNoRetryAfterWrite(t *testing.T) {
 	}
 	// The client recovers for the next call.
 	waitDisconnected(t, c)
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Errorf("next Call: %v", err)
 	}
 }
@@ -172,7 +173,7 @@ func TestOldTrueNASGets404Hint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	err = c.Authenticate()
+	err = c.Authenticate(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "TrueNAS 25.10 or later required") {
 		t.Errorf("got %v, want the TrueNAS 25.10 hint", err)
 	}
@@ -187,7 +188,7 @@ func TestOtherPath404Hint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	err = c.Authenticate()
+	err = c.Authenticate(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "check the path") || !strings.Contains(err.Error(), apiPath) {
 		t.Errorf("got %v, want a hint about the path", err)
 	}
@@ -198,7 +199,7 @@ func TestNullIDErrorReachesOnlyPendingCaller(t *testing.T) {
 	c := insecureClient(t, f, Options{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.Call("system.info")
+		_, err := c.Call(context.Background(), "system.info")
 		done <- err
 	}()
 	select {
@@ -217,18 +218,18 @@ func TestNullIDErrorDoesNotFailOtherCalls(t *testing.T) {
 		f.holdMethod = "system.info"
 	})
 	c := insecureClient(t, f, Options{})
-	if err := c.Authenticate(); err != nil {
+	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	good := make(chan error, 1)
 	go func() {
-		_, err := c.Call("system.info")
+		_, err := c.Call(context.Background(), "system.info")
 		good <- err
 	}()
 	f.waitFrames(t, 2)
 	bad := make(chan error, 1)
 	go func() {
-		_, err := c.Call("bad.method")
+		_, err := c.Call(context.Background(), "bad.method")
 		bad <- err
 	}()
 	f.waitFrames(t, 3) // the null-id reply is sent right away, two calls pending
@@ -259,14 +260,14 @@ func TestNullIDErrorDoesNotFailOtherCalls(t *testing.T) {
 func TestUnencodableRequestIsNotSent(t *testing.T) {
 	f := newFakeTrueNAS(t, nil)
 	c := insecureClient(t, f, Options{})
-	if err := c.Authenticate(); err != nil {
+	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	_, err := c.Call("system.info", math.NaN())
+	_, err := c.Call(context.Background(), "system.info", math.NaN())
 	if err == nil || !strings.Contains(err.Error(), "failed to encode request") || errors.Is(err, errNotSent) {
 		t.Fatalf("got %v, want an encode error", err)
 	}
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatalf("next Call: %v", err)
 	}
 	raws, _, conns := f.snapshot()
@@ -278,11 +279,11 @@ func TestUnencodableRequestIsNotSent(t *testing.T) {
 func TestStaleNotAuthenticatedKeepsNewLogin(t *testing.T) {
 	f := newFakeTrueNAS(t, nil)
 	c := insecureClient(t, f, Options{})
-	if err := c.Authenticate(); err != nil {
+	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	conn, gen := c.authedSession()
-	if err := c.Authenticate(); err != nil { // a newer login on the same connection
+	if err := c.Authenticate(context.Background()); err != nil { // a newer login on the same connection
 		t.Fatal(err)
 	}
 	c.forgetSession(conn, gen) // stale ENOTAUTHENTICATED for the old login
@@ -305,7 +306,7 @@ func TestKeepaliveDropsSilentConnection(t *testing.T) {
 	c.pingInterval, c.pongWait = 20*time.Millisecond, 200*time.Millisecond
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.Call("system.info") // never answered
+		_, err := c.Call(context.Background(), "system.info") // never answered
 		done <- err
 	}()
 	select {
@@ -323,14 +324,14 @@ func TestKeepaliveKeepsIdleConnection(t *testing.T) {
 	f := newFakeTrueNAS(t, nil)
 	c := insecureClient(t, f, Options{})
 	c.pingInterval, c.pongWait = 20*time.Millisecond, 100*time.Millisecond
-	if err := c.Authenticate(); err != nil {
+	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(500 * time.Millisecond) // five pongWaits without traffic
 	if conn, _ := c.authedSession(); conn == nil {
 		t.Fatal("idle connection with pongs was dropped")
 	}
-	if _, err := c.Call("system.info"); err != nil {
+	if _, err := c.Call(context.Background(), "system.info"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, conns := f.snapshot(); conns != 1 {
@@ -357,7 +358,7 @@ func TestURLWithUserinfoRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = c.Authenticate()
+		err = c.Authenticate(context.Background())
 		c.Close()
 		log.SetOutput(os.Stderr)
 		if !errors.Is(err, errUserinfo) {
@@ -390,7 +391,7 @@ func TestURLLoggingAndLegacyWarningOnce(t *testing.T) {
 	defer c.Close()
 	// Each connection resolves the endpoint again.
 	for i := 0; i < 2; i++ {
-		if err := c.Authenticate(); err != nil {
+		if err := c.Authenticate(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		c.Close()
@@ -413,7 +414,7 @@ func TestURLLoggingAndLegacyWarningOnce(t *testing.T) {
 // running and only sees its read error later.
 func staleConnection(t *testing.T, c *Client) {
 	t.Helper()
-	if err := c.Authenticate(); err != nil {
+	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	c.connMu.Lock()
@@ -429,7 +430,7 @@ func TestOldConnectionDoesNotFailNewRequests(t *testing.T) {
 	errs := make(chan error, 3)
 	for i := 0; i < 3; i++ {
 		go func() {
-			_, err := c.Call("system.info")
+			_, err := c.Call(context.Background(), "system.info")
 			errs <- err
 		}()
 	}
@@ -451,7 +452,7 @@ func TestOldConnectionDoesNotFailNewLogin(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		_, err := c.Call("system.info")
+		_, err := c.Call(context.Background(), "system.info")
 		errs <- err
 	}()
 	f.waitFrames(t, 2) // login on conn 2, held

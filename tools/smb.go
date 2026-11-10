@@ -10,7 +10,7 @@ import (
 )
 
 // handleCreateSMBShare creates a new SMB share
-func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (string, error) {
+func handleCreateSMBShare(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Extract required parameters
 	name, ok := args["name"].(string)
 	if !ok || name == "" {
@@ -94,7 +94,7 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 
 	// Check if this is a dry run
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		host, hostNote := lookupNASHostname(client)
+		host, hostNote := lookupNASHostname(ctx, client)
 		// Return preview of what would be created
 		preview := map[string]interface{}{
 			"dry_run":      true,
@@ -114,7 +114,7 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 			warnings = append(warnings, "Share allows read-write access")
 		}
 
-		warnings = append(warnings, checkDirectoryServiceForShareWarnings(context.Background(), client)...)
+		warnings = append(warnings, checkDirectoryServiceForShareWarnings(ctx, client)...)
 
 		if len(warnings) > 0 {
 			preview["security_warnings"] = warnings
@@ -131,7 +131,7 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Call the API
-	result, err := client.Call("sharing.smb.create", payload)
+	result, err := client.Call(ctx, "sharing.smb.create", payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to create SMB share: %w", err)
 	}
@@ -159,7 +159,7 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Add connection information
-	host, hostNote := lookupNASHostname(client)
+	host, hostNote := lookupNASHostname(ctx, client)
 	response["network_path"] = fmt.Sprintf("\\\\%s\\%s", host, name)
 	if hostNote != "" {
 		response["hostname_note"] = hostNote
@@ -256,11 +256,11 @@ const nasHostnameUnavailableNote = "NAS hostname unavailable; NAS_HOSTNAME is a 
 // note so the result cannot be mistaken for the factory-default hostname
 // "truenas", and so a mount example can be pasted without being treated
 // as a shell redirect.
-func lookupNASHostname(client *truenas.Client) (host, note string) {
+func lookupNASHostname(ctx context.Context, client *truenas.Client) (host, note string) {
 	if client == nil {
 		return nasHostnamePlaceholder, nasHostnameUnavailableNote
 	}
-	result, err := client.Call("system.info")
+	result, err := client.Call(ctx, "system.info")
 	if err != nil {
 		return nasHostnamePlaceholder, nasHostnameUnavailableNote
 	}

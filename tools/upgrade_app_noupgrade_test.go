@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -108,7 +109,7 @@ func TestUpgradeAppOtherSummaryErrorUnchanged(t *testing.T) {
 		},
 	}
 	client, _ := newFakeClientFrom(t, fake)
-	_, err := (&upgradeAppDryRun{}).ExecuteDryRun(client, map[string]interface{}{"app_name": "plex"})
+	_, err := (&upgradeAppDryRun{}).ExecuteDryRun(context.Background(), client, map[string]interface{}{"app_name": "plex"})
 	if err == nil || !strings.Contains(err.Error(), "failed to get upgrade summary") || !strings.Contains(err.Error(), "Catalog is not synced") {
 		t.Fatalf("want the middleware error passed through, got %v", err)
 	}
@@ -141,7 +142,7 @@ func TestIsNoUpgradeAvailableNearMisses(t *testing.T) {
 				},
 			}
 			client, _ := newFakeClientFrom(t, fake)
-			_, err := (&upgradeAppDryRun{}).ExecuteDryRun(client, map[string]interface{}{"app_name": "plex", "dry_run": true})
+			_, err := (&upgradeAppDryRun{}).ExecuteDryRun(context.Background(), client, map[string]interface{}{"app_name": "plex", "dry_run": true})
 			if err == nil {
 				t.Fatal("expected an error")
 			}
