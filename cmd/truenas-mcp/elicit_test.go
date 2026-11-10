@@ -10,6 +10,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/truenas/truenas-mcp/mcp"
+	"github.com/truenas/truenas-mcp/tools"
 )
 
 // elicitReg is a registry that records the elicitation state the server
@@ -289,5 +290,99 @@ func TestApprovedOnlyRejectsExtraFields(t *testing.T) {
 	ok, err = approvedOnly(map[string]any{"approved": false})
 	if err != nil || ok {
 		t.Errorf("approved false: ok=%v err=%v", ok, err)
+	}
+}
+
+// MCP elicitation requestedSchema is a restricted JSON Schema object. The
+// specification allows only these top-level keys; a strict client may reject
+// a prompt that carries any other key (for example additionalProperties).
+var elicitRequestedSchemaKeys = map[string]bool{
+	"type":       true,
+	"properties": true,
+	"required":   true,
+}
+
+func TestAdvertisedElicitSchemaHasOnlySpecKeys(t *testing.T) {
+	res := elicitCallResult(&mcp.ElicitPrompt{Message: "confirm this", State: "s"})
+	req, ok := res.InputRequests[tools.ElicitConfirmID].(*sdk.ElicitParams)
+	if !ok || req == nil {
+		t.Fatal("elicitCallResult did not advertise a confirm input request")
+	}
+	schema, ok := req.RequestedSchema.(map[string]interface{})
+	if !ok || schema == nil {
+		t.Fatalf("requestedSchema type %T, want map[string]interface{}", req.RequestedSchema)
+	}
+	for k := range schema {
+		if !elicitRequestedSchemaKeys[k] {
+			t.Errorf("requestedSchema has %q, which is not part of the MCP elicitation requestedSchema shape", k)
+		}
+	}
+	if schema["type"] != "object" {
+		t.Errorf("requestedSchema type = %v, want object", schema["type"])
+	}
+	if _, ok := schema["properties"]; !ok {
+		t.Error("requestedSchema is missing properties")
+	}
+	if _, ok := schema["required"]; !ok {
+		t.Error("requestedSchema is missing required")
+	}
+}
+
+// protocol20260728Meta is the per-request _meta a 2026-07-28 client sends
+// instead of the initialize handshake (SEP-2575).
+func protocol20260728Meta() map[string]interface{} {
+	return map[string]interface{}{
+		"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+		"io.modelcontextprotocol/clientInfo":      map[string]interface{}{"name": "test-client", "version": "1.0"},
+		"io.modelcontextprotocol/clientCapabilities": map[string]interface{}{
+			"elicitation": map[string]interface{}{"form": map[string]interface{}{}},
+		},
+	}
+}
+
+func TestElicitationRejectsExtraFieldsViaRawInputResponses(t *testing.T) {
+	// A raw 2026-07-28 tools/call with inputResponses bypasses the go-sdk
+	// client's schema check, so this covers approvedOnly end to end.
+	reg := &elicitReg{}
+	c, run := session(t, newTestHandler(reg, false))
+	first := c.call(float64(1), "tools/call", map[string]interface{}{
+		"_meta":     protocol20260728Meta(),
+		"name":      "stop_app",
+		"arguments": map[string]interface{}{"app_name": "plex"},
+	})
+	result, _ := first["result"].(map[string]interface{})
+	state, _ := result["requestState"].(string)
+	if state == "" {
+		t.Fatalf("first tools/call = %v; want inputRequests and requestState", first)
+	}
+	reqs, _ := result["inputRequests"].(map[string]interface{})
+	if _, ok := reqs[tools.ElicitConfirmID]; !ok {
+		t.Fatalf("first tools/call missing confirm input request: %v", first)
+	}
+
+	second := c.call(float64(2), "tools/call", map[string]interface{}{
+		"_meta":        protocol20260728Meta(),
+		"name":         "stop_app",
+		"arguments":    map[string]interface{}{"app_name": "plex"},
+		"requestState": state,
+		"inputResponses": map[string]interface{}{
+			tools.ElicitConfirmID: map[string]interface{}{
+				"action": "accept",
+				"content": map[string]interface{}{
+					"approved": true,
+					"extra":    "should-be-rejected",
+				},
+			},
+		},
+	})
+	text, isErr := toolText(t, second)
+	if !isErr || !strings.Contains(text, "nothing was executed") {
+		t.Errorf("raw extra fields: result = %q isError=%v; want an error saying nothing was executed", text, isErr)
+	}
+	if reg.writes != 0 {
+		t.Errorf("writes = %d, want 0", reg.writes)
+	}
+	if err := run.wait(); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 }
