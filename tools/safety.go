@@ -321,6 +321,18 @@ func (r *Registry) applySafety() {
 		}
 		r.tools[name] = tool
 	}
+	r.checkPlanExecute()
+}
+
+// checkPlanExecute panics when a destructive tool has a Plan but no
+// Execute. That combination used to issue a token and then refuse after
+// redeem; catching it at registration fails earlier.
+func (r *Registry) checkPlanExecute() {
+	for name, tool := range r.tools {
+		if tool.Plan != nil && tool.Execute == nil && safetyOf(name).Access == Destructive {
+			panic(name + ": destructive plan-backed tool must register Execute")
+		}
+	}
 }
 
 // hasParam reports whether a tool's input schema declares the parameter.
@@ -344,6 +356,9 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 	if err != nil {
 		return "", fmt.Errorf("%s was NOT executed: its arguments could not be encoded; nothing was executed", name)
 	}
+	if tool.Plan != nil && tool.Execute == nil {
+		return "", fmt.Errorf("%s was NOT executed: it has a plan but no Execute path; nothing was executed", name)
+	}
 	var planHash [32]byte
 	var plan *writePlan
 	if tool.Plan != nil {
@@ -353,7 +368,7 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 		}
 		planHash, err = plan.planHash()
 		if err != nil {
-			return "", fmt.Errorf("%s was NOT executed: its plan could not be encoded; nothing was executed", name)
+			return "", fmt.Errorf("%s was NOT executed: %w; nothing was executed", name, err)
 		}
 	}
 	var rejected error
@@ -433,6 +448,9 @@ func (r *Registry) confirmationRequired(ctx context.Context, name string, tool T
 			}
 			return "", &mcp.ReplyError{Message: msg, Reply: body}
 		}
+	}
+	if tool.Plan != nil && tool.Execute == nil {
+		return "", fmt.Errorf("%s%s was NOT executed: it has a plan but no Execute path; nothing was executed", rejectedNote, name)
 	}
 	var tok string
 	var err error

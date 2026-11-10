@@ -671,7 +671,7 @@ the canonical JSON of the arguments (keys sorted; `confirmation_token`,
 `dry_run` and the old `confirm` are left out; an optional argument sent as
 `null` counts as omitted). For tools that share a plan between preview and
 execute (`stop_app`, `delete_boot_environment`, `delete_app`,
-`delete_scrub_schedule`), the token is also bound to
+`delete_scrub_schedule`, `upgrade_app`, `update_app`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
@@ -910,6 +910,8 @@ Returns:
 > **Breaking change:** an explicit `dry_run` of a blocked `delete_boot_environment` (the running, next-boot, or protected environment) now returns an error result with `"status": "blocked"` and the preview, instead of a successful preview. Clients that treated a blocked dry run as a normal result need to read the error result instead.
 
 `delete_app` and `delete_scrub_schedule` use the same shared plan for preview and the real call (`app.delete` and `pool.scrub.delete`). Preview `details` are derived from those parameters. Host-path datasets are not deleted with the app; the preview warns that data paths are preserved.
+
+`upgrade_app` and `update_app` use the same shared plan for preview and the real call (`app.upgrade` and `app.update`). The upgrade preview still describes the stop, snapshot, upgrade, start and verify steps (or redeploy and verify for a custom app or image-only update) that a single `app.upgrade` performs; those middleware parameters are what the confirmed call sends. An `update_app` dry run now includes `"dry_run": true, "executed": false` like the other plan-backed previews. Missing host-path datasets stay a preview warning; the real call still refuses until they exist.
 
 **Benefits:**
 - See exactly what will change before committing

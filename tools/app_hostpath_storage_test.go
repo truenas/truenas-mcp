@@ -204,7 +204,14 @@ func callHostPathTool(t *testing.T, r *Registry, tool string, values map[string]
 		args["train"] = "community"
 	}
 	if safetyOf(tool).Access == Destructive {
-		// update_app: the real handler, as after the user approved it.
+		// A plan-backed tool cannot issue a token when the plan
+		// itself fails (invalid storage). Return that error so the
+		// test sees the refusal instead of a helper fatal.
+		if plan := r.tools[tool].Plan; plan != nil {
+			if _, err := plan(t.Context(), r.client, args); err != nil {
+				return "", err
+			}
+		}
 		args = approve(t, r, tool, args)
 	}
 	return r.CallTool(t.Context(), tool, args)

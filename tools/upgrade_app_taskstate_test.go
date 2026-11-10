@@ -108,6 +108,10 @@ func TestUpgradeTaskJobAppFollowsLiveStateWhileWaiting(t *testing.T) {
 func TestUpgradeTaskJobAppLabelledWhenNotRefreshed(t *testing.T) {
 	r, mgr, f := newUpgradeRegistry(t, upgradeSummaryFixture("x"))
 	upgradeJobWithResult(f, appEntry("plex", "DEPLOYING", [2]string{"web", "starting"}))
+
+	id := startUpgrade(t, r, map[string]interface{}{"health_timeout_seconds": 600})["task_id"].(string)
+	// After the upgrade has started, live app.query fails. The plan
+	// still has to be able to query the app in order to start it.
 	handle := f.handle
 	f.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
 		if method == "app.query" {
@@ -115,8 +119,6 @@ func TestUpgradeTaskJobAppLabelledWhenNotRefreshed(t *testing.T) {
 		}
 		return handle(method, params)
 	}
-
-	id := startUpgrade(t, r, map[string]interface{}{"health_timeout_seconds": 600})["task_id"].(string)
 	mgr.PollNow()
 	st := taskState(t, r, id)
 	job, app := jobApp(t, st)
@@ -136,6 +138,9 @@ func TestUpgradeTaskJobAppLabelledWhenNotRefreshed(t *testing.T) {
 func TestUpgradeTaskJobAppLabelledWhenAppNotFound(t *testing.T) {
 	r, mgr, f := newUpgradeRegistry(t, upgradeSummaryFixture("x"))
 	upgradeJobWithResult(f, appEntry("plex", "DEPLOYING", [2]string{"web", "starting"}))
+
+	id := startUpgrade(t, r, map[string]interface{}{"health_timeout_seconds": 600})["task_id"].(string)
+	// After the upgrade has started, app.query no longer lists the app.
 	handle := f.handle
 	f.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
 		if method == "app.query" {
@@ -143,8 +148,6 @@ func TestUpgradeTaskJobAppLabelledWhenAppNotFound(t *testing.T) {
 		}
 		return handle(method, params)
 	}
-
-	id := startUpgrade(t, r, map[string]interface{}{"health_timeout_seconds": 600})["task_id"].(string)
 	mgr.PollNow()
 	job, app := jobApp(t, taskState(t, r, id))
 	if app["state"] != "DEPLOYING" {

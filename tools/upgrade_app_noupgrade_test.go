@@ -75,18 +75,22 @@ func TestUpgradeAppNoUpgradeAvailablePreview(t *testing.T) {
 }
 
 func TestUpgradeAppNoUpgradeAvailableExecute(t *testing.T) {
-	for _, failing := range []string{"app.upgrade_summary", "app.upgrade"} {
-		t.Run(failing, func(t *testing.T) {
-			r, fake := noUpgradeRegistry(t, failing)
-			out, err := r.CallTool(t.Context(), "upgrade_app", approve(t, r, "upgrade_app", map[string]interface{}{"app_name": "plex"}))
-			assertNoUpgradeError(t, err, out, `no upgrade available for app "plex"`, "(installed version 2.0.0_1.2.0)")
-			if failing == "app.upgrade_summary" {
-				if n := len(fake.called("app.upgrade")); n != 0 {
-					t.Errorf("app.upgrade called %d times after the summary said no upgrade", n)
-				}
-			}
-		})
-	}
+	t.Run("app.upgrade_summary", func(t *testing.T) {
+		r, fake := noUpgradeRegistry(t, "app.upgrade_summary")
+		// The plan is built for a confirmed call too, so a summary
+		// failure still refuses and issues no token. There is nothing
+		// to approve.
+		out, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex"})
+		assertNoUpgradeError(t, err, out, `no upgrade available for app "plex" (installed version 2.0.0_1.2.0)`, "nothing was changed")
+		if n := len(fake.called("app.upgrade")); n != 0 {
+			t.Errorf("app.upgrade called %d times after the summary said no upgrade", n)
+		}
+	})
+	t.Run("app.upgrade", func(t *testing.T) {
+		r, _ := noUpgradeRegistry(t, "app.upgrade")
+		out, err := r.CallTool(t.Context(), "upgrade_app", approve(t, r, "upgrade_app", map[string]interface{}{"app_name": "plex"}))
+		assertNoUpgradeError(t, err, out, `no upgrade available for app "plex"`, "(installed version 2.0.0_1.2.0)")
+	})
 }
 
 func TestUpgradeAppNoUpgradeToRequestedVersion(t *testing.T) {

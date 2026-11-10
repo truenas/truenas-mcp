@@ -1377,6 +1377,8 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: r.handleUpgradeAppWithDryRun,
+		Plan:    planUpgradeApp,
+		Execute: r.executeUpgradeApp,
 	}
 
 	// Start app
@@ -1475,6 +1477,8 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: r.handleUpdateAppWithDryRun,
+		Plan:    planUpdateApp,
+		Execute: r.executeUpdateApp,
 	}
 
 	// Search app catalog
@@ -4249,121 +4253,11 @@ func handleQueryApps(ctx context.Context, client *truenas.Client, args map[strin
 	return string(formatted), nil
 }
 
-func (r *Registry) handleUpgradeApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	appName, ok := args["app_name"].(string)
-	if !ok || appName == "" {
-		return "", fmt.Errorf("app_name is required")
-	}
-	healthTimeout, err := upgradeHealthTimeout(args)
-	if err != nil {
-		return "", err
-	}
-
-	version := "latest"
-	if v, ok := args["version"].(string); ok && v != "" {
-		version = v
-	}
-
-	snapshotHostpaths := true
-	if s, ok := args["snapshot_hostpaths"].(bool); ok {
-		snapshotHostpaths = s
-	}
-
-	// First, get upgrade summary to show what will be upgraded
-	summaryResult, err := client.Call(ctx, "app.upgrade_summary", appName, map[string]interface{}{
-		"app_version": version,
-	})
-	if err != nil {
-		if isNoUpgradeAvailable(err) {
-			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(ctx, client, appName))
-		}
-		return "", fmt.Errorf("failed to get upgrade summary: %w", err)
-	}
-
-	// Parse summary - can be either object or array depending on TrueNAS version/app
-	var summary interface{}
-	if err := json.Unmarshal(summaryResult, &summary); err != nil {
-		return "", fmt.Errorf("failed to parse upgrade summary: %w", err)
-	}
-	summary = normalizeUpgradeSummary(summary)
-
-	// Perform the upgrade - this returns a job ID since it's a long-running operation
-	upgradeOptions := map[string]interface{}{
-		"app_version":        version,
-		"snapshot_hostpaths": snapshotHostpaths,
-	}
-
-	result, err := client.Call(ctx, "app.upgrade", appName, upgradeOptions)
-	if err != nil {
-		if isNoUpgradeAvailable(err) {
-			return "", noUpgradeAvailableError(appName, version, queryAppQuietly(ctx, client, appName))
-		}
-		return "", fmt.Errorf("failed to upgrade app: %w", err)
-	}
-
-	// Parse the job ID (app.upgrade may return an array [job_id] or just job_id)
-	var jobID int
-	// First try to parse as an integer
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		// If that fails, try parsing as an array and extract the first element
-		var jobIDArray []int
-		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
-			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
-		}
-		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("app.upgrade returned empty job ID array")
-		}
-		jobID = jobIDArray[0]
-	}
-
-	// Create task to track upgrade progress. The task only completes once the
-	// app is seen RUNNING after the job finishes.
-	task, err := r.taskManager.CreateJobTask(ctx,
-		"upgrade_app",
-		args,
-		jobID,
-		1*time.Hour, // 1 hour TTL
-		tasks.WithAppHealthCheck(appName, healthTimeout),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to create task: %w", err)
-	}
-
-	response := map[string]interface{}{
-		"app_name":        appName,
-		"upgrade_summary": summary,
-		"task_id":         task.TaskID,
-		"task_status":     task.Status,
-		"poll_interval":   task.PollInterval,
-		"job_id":          jobID,
-		// What was asked for, not what happened: the upgrade job does not
-		// report which snapshots, if any, it took.
-		"snapshot_requested": snapshotHostpaths,
-		"snapshot_note":      snapshotNote(snapshotHostpaths),
-		"dry_run":            false,
-		"executed":           true,
-		"message": fmt.Sprintf("Upgrade started. Track progress with tasks_get using task_id: %s. "+
-			"The task completes only after the app is RUNNING (waits up to %ds after the job finishes).",
-			task.TaskID, int(healthTimeout/time.Second)),
-	}
-
-	formatted, err := json.MarshalIndent(response, "", "  ")
-	if err != nil {
-		return "", err
-	}
-
-	return string(formatted), nil
-}
-
-// handleUpgradeAppWithDryRun wraps the upgrade handler with dry-run support
-func (r *Registry) handleUpgradeAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &upgradeAppDryRun{}, r.handleUpgradeApp)
-}
-
-// upgradeAppDryRun implements dry-run preview for app upgrades
-type upgradeAppDryRun struct{}
-
-func (u *upgradeAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+// planUpgradeApp builds the upgrade_app plan used by both the dry-run
+// preview and the real call. The middleware write is a single app.upgrade;
+// the preview still describes the stop/snapshot/upgrade/start/verify (or
+// redeploy/verify) steps that call performs.
+func planUpgradeApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
@@ -4496,23 +4390,140 @@ func (u *upgradeAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Cl
 		warnings = append(warnings, "WARNING: the app is STOPPED and TrueNAS rejects upgrading a stopped app, so this upgrade will fail. Start the app first.")
 	}
 
-	dryRun, executed := true, false
-	result := &DryRunResult{
-		Tool:           "upgrade_app",
-		CurrentState:   currentState,
-		PlannedActions: actions,
-		EstimatedTime:  upgradeEstimatedTime(healthTimeout),
-		DryRun:         &dryRun,
-		Executed:       &executed,
-		Warnings:       warnings,
+	upgradeOptions := map[string]interface{}{
+		"app_version":        version,
+		"snapshot_hostpaths": snapshotHostpaths,
 	}
 
-	return result, nil
+	return &writePlan{
+		Tool:          "upgrade_app",
+		Method:        upgradeAppMethod,
+		CallParams:    []interface{}{appName, upgradeOptions},
+		JobMethod:     upgradeAppMethod,
+		ParamNames:    []string{"app_name", "options"},
+		CurrentState:  currentState,
+		Actions:       actions,
+		Warnings:      warnings,
+		EstimatedTime: upgradeEstimatedTime(healthTimeout),
+		TargetName:    appName,
+		Result: map[string]interface{}{
+			"summary":            summary,
+			"health_timeout":     healthTimeout,
+			"snapshot_hostpaths": snapshotHostpaths,
+		},
+	}, nil
+}
+
+func (r *Registry) handleUpgradeAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planUpgradeApp(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return r.executeUpgradeApp(ctx, client, args, plan)
+}
+
+// upgradeAppDryRun implements dry-run preview for app upgrades. Tests call
+// this directly; it uses the same plan as the handler.
+type upgradeAppDryRun struct{}
+
+func (u *upgradeAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+	plan, err := planUpgradeApp(ctx, client, args)
+	if err != nil {
+		return nil, err
+	}
+	return plan.dryRunResult()
+}
+
+func (r *Registry) executeUpgradeApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
+	if err != nil {
+		if isNoUpgradeAvailable(err) {
+			version := "latest"
+			if v, ok := args["version"].(string); ok && v != "" {
+				version = v
+			}
+			return "", noUpgradeAvailableError(plan.TargetName, version, queryAppQuietly(ctx, client, plan.TargetName))
+		}
+		return "", fmt.Errorf("failed to upgrade app: %w", err)
+	}
+
+	// Parse the job ID (app.upgrade may return an array [job_id] or just job_id)
+	var jobID int
+	// First try to parse as an integer
+	if err := json.Unmarshal(result, &jobID); err != nil {
+		// If that fails, try parsing as an array and extract the first element
+		var jobIDArray []int
+		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
+			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
+		}
+		if len(jobIDArray) == 0 {
+			return "", fmt.Errorf("app.upgrade returned empty job ID array")
+		}
+		jobID = jobIDArray[0]
+	}
+
+	healthTimeout, _ := plan.Result["health_timeout"].(time.Duration)
+	snapshotHostpaths, _ := plan.Result["snapshot_hostpaths"].(bool)
+	summary := plan.Result["summary"]
+
+	opts := []tasks.TaskOption{tasks.WithAppHealthCheck(plan.TargetName, healthTimeout)}
+	if plan.JobMethod != "" {
+		opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+	}
+
+	// Create task to track upgrade progress. The task only completes once the
+	// app is seen RUNNING after the job finishes.
+	task, err := r.taskManager.CreateJobTask(ctx,
+		"upgrade_app",
+		args,
+		jobID,
+		1*time.Hour, // 1 hour TTL
+		opts...,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
+	}
+
+	response := map[string]interface{}{
+		"app_name":        plan.TargetName,
+		"upgrade_summary": summary,
+		"task_id":         task.TaskID,
+		"task_status":     task.Status,
+		"poll_interval":   task.PollInterval,
+		"job_id":          jobID,
+		// What was asked for, not what happened: the upgrade job does not
+		// report which snapshots, if any, it took.
+		"snapshot_requested": snapshotHostpaths,
+		"snapshot_note":      snapshotNote(snapshotHostpaths),
+		"dry_run":            false,
+		"executed":           true,
+		"message": fmt.Sprintf("Upgrade started. Track progress with tasks_get using task_id: %s. "+
+			"The task completes only after the app is RUNNING (waits up to %ds after the job finishes).",
+			task.TaskID, int(healthTimeout/time.Second)),
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return string(formatted), nil
 }
 
 const startAppMethod = "app.start"
 const stopAppMethod = "app.stop"
 const bootEnvironmentDestroyMethod = "boot.environment.destroy"
+const upgradeAppMethod = "app.upgrade"
+const updateAppMethod = "app.update"
 
 func queryApp(ctx context.Context, client *truenas.Client, appName string) (map[string]interface{}, error) {
 	currentResult, err := client.Call(ctx, "app.query", []interface{}{
@@ -4767,74 +4778,10 @@ func handleGetAppConfig(ctx context.Context, client *truenas.Client, args map[st
 	return string(formatted), nil
 }
 
-// handleUpdateApp performs the actual app.update API call
-func (r *Registry) handleUpdateApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	appName, ok := args["app_name"].(string)
-	if !ok || appName == "" {
-		return "", fmt.Errorf("app_name is required")
-	}
-
-	values, ok := args["values"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("values is required and must be an object")
-	}
-
-	schema, err := fetchInstalledAppSchema(ctx, client, appName)
-	if err != nil {
-		return "", err
-	}
-	if _, missing, err := checkAppHostPathStorage(ctx, client, schema, values); err != nil {
-		return "", fmt.Errorf("storage validation failed: %v", err)
-	} else if len(missing) > 0 {
-		return "", datasetsMustExistError(missing, "update")
-	}
-
-	result, err := client.Call(ctx, "app.update", appName, map[string]interface{}{
-		"values": values,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to update app: %w", err)
-	}
-
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		var jobIDArray []int
-		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
-			return "", fmt.Errorf("failed to parse job ID: int error: %v, array error: %v", err, err2)
-		}
-		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("app.update returned empty job ID array")
-		}
-		jobID = jobIDArray[0]
-	}
-
-	task, err := r.taskManager.CreateJobTask(ctx, "update_app", args, jobID, 30*time.Minute)
-	if err != nil {
-		return "", fmt.Errorf("failed to create task: %w", err)
-	}
-
-	response := map[string]interface{}{
-		"app_name":      appName,
-		"task_id":       task.TaskID,
-		"task_status":   task.Status,
-		"poll_interval": task.PollInterval,
-		"job_id":        jobID,
-		"message":       fmt.Sprintf("App update initiated. Track progress with tasks_get using task_id: %s", task.TaskID),
-	}
-	formatted, err := json.MarshalIndent(response, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to format response: %w", err)
-	}
-	return string(formatted), nil
-}
-
-func (r *Registry) handleUpdateAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &updateAppDryRun{}, r.handleUpdateApp)
-}
-
-type updateAppDryRun struct{}
-
-func (u *updateAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
+// planUpdateApp builds the update_app plan used by both the dry-run
+// preview and the real call. Missing host-path datasets are a preview
+// warning; the real call still refuses until they exist.
+func planUpdateApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
 		return nil, fmt.Errorf("app_name is required")
@@ -4859,7 +4806,7 @@ func (u *updateAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Cli
 		return nil, fmt.Errorf("failed to get current config: %w", err)
 	}
 	var currentConfig map[string]interface{}
-	json.Unmarshal(currentResult, &currentConfig)
+	_ = json.Unmarshal(currentResult, &currentConfig)
 
 	warnings := []string{
 		"App containers will be restarted to apply configuration changes.",
@@ -4871,15 +4818,19 @@ func (u *updateAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Cli
 		}
 	}
 
-	return &DryRunResult{
-		Tool: "update_app",
+	return &writePlan{
+		Tool:       "update_app",
+		Method:     updateAppMethod,
+		CallParams: []interface{}{appName, map[string]interface{}{"values": values}},
+		JobMethod:  updateAppMethod,
+		ParamNames: []string{"app_name", "options"},
 		CurrentState: map[string]interface{}{
 			"app_name":         appName,
 			"current_config":   currentConfig,
 			"missing_datasets": missing,
 			"storage_paths":    datasetPaths,
 		},
-		PlannedActions: []PlannedAction{
+		Actions: []PlannedAction{
 			{
 				Step:        1,
 				Description: "Apply new configuration values to app",
@@ -4894,7 +4845,72 @@ func (u *updateAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Cli
 		},
 		Warnings:      warnings,
 		EstimatedTime: &EstimatedTime{MinSeconds: 10, MaxSeconds: 300, Note: "Depends on app restart time"},
+		TargetName:    appName,
+		Result:        map[string]interface{}{"missing": missing},
 	}, nil
+}
+
+func (r *Registry) handleUpdateAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planUpdateApp(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return r.executeUpdateApp(ctx, client, args, plan)
+}
+
+func (r *Registry) executeUpdateApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if missing, ok := plan.Result["missing"].([]string); ok && len(missing) > 0 {
+		return "", datasetsMustExistError(missing, "update")
+	}
+
+	result, err := callPlan(ctx, client, plan)
+	if err != nil {
+		return "", fmt.Errorf("failed to update app: %w", err)
+	}
+
+	var jobID int
+	if err := json.Unmarshal(result, &jobID); err != nil {
+		var jobIDArray []int
+		if err2 := json.Unmarshal(result, &jobIDArray); err2 != nil {
+			return "", fmt.Errorf("failed to parse job ID: int error: %v, array error: %v", err, err2)
+		}
+		if len(jobIDArray) == 0 {
+			return "", fmt.Errorf("app.update returned empty job ID array")
+		}
+		jobID = jobIDArray[0]
+	}
+
+	opts := []tasks.TaskOption{}
+	if plan.JobMethod != "" {
+		opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+	}
+	task, err := r.taskManager.CreateJobTask(ctx, "update_app", args, jobID, 30*time.Minute, opts...)
+	if err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
+	}
+
+	response := map[string]interface{}{
+		"app_name":      plan.TargetName,
+		"task_id":       task.TaskID,
+		"task_status":   task.Status,
+		"poll_interval": task.PollInterval,
+		"job_id":        jobID,
+		"message":       fmt.Sprintf("App update initiated. Track progress with tasks_get using task_id: %s", task.TaskID),
+	}
+	formatted, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to format response: %w", err)
+	}
+	return string(formatted), nil
 }
 
 // maxQueryJobsLimit is the largest query_jobs limit: one below the
