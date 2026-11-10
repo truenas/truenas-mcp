@@ -403,6 +403,7 @@ func TestIsSensitiveKeySegments(t *testing.T) {
 		"session", "session_id", "sessionToken", "cookie", "Set-Cookie", "authorization",
 		"Proxy-Authorization", "otp", "otp_code", "pin", "sim_pin", "PIN", "pinCode", "community",
 		"snmp_community", "unixhash", "smbhash", "pwhash", "password_hash", "keytab_file",
+		"auxiliary_parameters", "AUXILIARY_PARAMETERS",
 	}
 	for _, k := range sensitive {
 		if !IsSensitiveKey(k) {

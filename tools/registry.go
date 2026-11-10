@@ -6349,19 +6349,57 @@ func withoutKeys(args map[string]interface{}, keys ...string) map[string]interfa
 	return out
 }
 
-// applyUpdateBoundVersion returns the trimmed update.status new_version.version
-// the confirmation token should bind, or "" when there is no version to apply.
-func applyUpdateBoundVersion(status map[string]interface{}) string {
-	nv, _ := status["new_version"].(map[string]interface{})
+// applyUpdateBoundVersion returns the trimmed new_version.version from a
+// 25.10 update.status result, or "" when there is no version to apply.
+// The official shape (middlewared/api/v25_10_0/update.py, UpdateStatus, and
+// https://api.truenas.com/v25.10/api_methods_update.status.html) is:
+//
+//	{code, error, update_download_progress, status: {current_version, new_version: {version, ...} | null} | null}
+//
+// new_version is under status, not at the top level.
+func applyUpdateBoundVersion(result map[string]interface{}) string {
+	st, _ := result["status"].(map[string]interface{})
+	nv, _ := st["new_version"].(map[string]interface{})
 	v, _ := nv["version"].(string)
 	return strings.TrimSpace(v)
 }
 
 // applyUpdateBind returns the extra plan identity for apply_update, or nil
 // when there is no version so hashes stay {method, params}.
-func applyUpdateBind(status map[string]interface{}) interface{} {
-	if v := applyUpdateBoundVersion(status); v != "" {
+func applyUpdateBind(result map[string]interface{}) interface{} {
+	if v := applyUpdateBoundVersion(result); v != "" {
 		return map[string]interface{}{"new_version": v}
+	}
+	return nil
+}
+
+func applyUpdateStatusErrorReason(result map[string]interface{}) string {
+	errObj, _ := result["error"].(map[string]interface{})
+	if r, _ := errObj["reason"].(string); strings.TrimSpace(r) != "" {
+		return strings.TrimSpace(r)
+	}
+	if name, _ := errObj["errname"].(string); strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
+	}
+	return ""
+}
+
+// applyUpdateBlockReasons returns why apply_update cannot proceed against
+// this update.status result, or nil when an update is available.
+func applyUpdateBlockReasons(result map[string]interface{}) []string {
+	code, _ := result["code"].(string)
+	if code == "ERROR" {
+		reason := applyUpdateStatusErrorReason(result)
+		if reason == "" {
+			reason = "see error for details"
+		}
+		return []string{"update.status is ERROR: " + reason}
+	}
+	if _, ok := result["status"].(map[string]interface{}); !ok {
+		return []string{"update.status has no status details (status is null)"}
+	}
+	if applyUpdateBoundVersion(result) == "" {
+		return []string{"No update is available to apply (update.status has no new_version)"}
 	}
 	return nil
 }
@@ -6447,10 +6485,7 @@ func planApplyUpdate(ctx context.Context, client *truenas.Client, args map[strin
 		)
 	}
 
-	var blocked []string
-	if applyUpdateBoundVersion(status) == "" {
-		blocked = append(blocked, "No update is available to apply (update.status has no new_version)")
-	}
+	blocked := applyUpdateBlockReasons(status)
 
 	return &writePlan{
 		Tool:       "apply_update",

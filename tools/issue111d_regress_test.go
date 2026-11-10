@@ -466,7 +466,7 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 		"boot.environment.query":   bootEnvs,
 		"pool.scrub.query":         schedules,
 		"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
-		"update.status":            map[string]interface{}{"status": "AVAILABLE", "new_version": map[string]interface{}{"version": "25.10.1"}},
+		"update.status":            updateStatusAvailable("25.10.1"),
 	}, nil)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)

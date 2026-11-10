@@ -87,7 +87,7 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 				"schedule": map[string]interface{}{"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*"}},
 		},
 		"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
-		"update.status":            map[string]interface{}{"status": "AVAILABLE", "new_version": map[string]interface{}{"version": "25.10.1"}},
+		"update.status":            updateStatusAvailable("25.10.1"),
 		"core.get_jobs":            []interface{}{},
 	}, nil)
 	r := NewRegistry(client, nil)
