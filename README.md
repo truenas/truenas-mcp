@@ -562,7 +562,9 @@ explicit approval, and call again with the same arguments plus
 `"confirm": true`. If the preview itself fails, the call returns an error and
 nothing runs; resolve the problem before confirming. `"dry_run": true` still
 works without `confirm` (only on tools that declare `dry_run`, which all
-destructive tools do). `confirm` and `dry_run` must be JSON booleans.
+destructive tools do). `confirm` and `dry_run` must be JSON booleans
+(`true` or `false`); a string such as `"true"` or a number is rejected
+and nothing is executed.
 
 > **Breaking change:** clients or scripts that called these nine tools without
 > `confirm` now get a preview instead of the operation. Add `"confirm": true`
