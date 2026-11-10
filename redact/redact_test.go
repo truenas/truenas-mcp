@@ -673,8 +673,10 @@ func TestTextLongLinesLinear(t *testing.T) {
 	size, budget := 1<<20, 10*time.Second
 	if raceEnabled {
 		// The race detector slows this down about 15x; a quarter of the size
-		// would still take minutes if the work were quadratic. The budget is
-		// 180s because a 60s budget once elapsed at ~98s on a loaded runner.
+		// would still take minutes if the work were quadratic. The 180s
+		// budget is per case. The earlier ~98s figure was the duration of
+		// the whole test, not a single case; the slowest case under race
+		// is a few seconds.
 		size, budget = 1<<18, 180*time.Second
 	}
 	line := func(prefix, unit string) string {
@@ -838,7 +840,9 @@ func TestTextLongLinesLinear(t *testing.T) {
 // TestTextLargeBlob: a 5 MB text made of the shapes that are hard to scan
 // (quotes, escaped quotes, separators, carriage returns, sshpass clusters) is
 // redacted in a time that does not depend on how they nest, and a second
-// pass changes nothing.
+// pass changes nothing. Under the race detector the input is 1 MiB and the
+// 180s budget is per case (this test is a single case). The earlier ~98s
+// figure was the duration of the whole linearity test, not a case.
 func TestTextLargeBlob(t *testing.T) {
 	size, budget := 5<<20, 30*time.Second
 	if raceEnabled {

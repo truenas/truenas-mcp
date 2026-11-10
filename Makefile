@@ -31,9 +31,13 @@ clean:
 	rm -f $(BUILD_DIR)/$(BINARY_NAME)
 	rm -f $(BUILD_DIR)/$(BINARY_NAME)-*
 
+# RACE defaults to -race so `make test` fails on data races.
+# Contributors can run `make test RACE=` for a faster non-race pass.
+RACE ?= -race
+
 test:
 	@echo "Running tests..."
-	go test -v -race ./...
+	go test -v $(RACE) ./...
 
 # Pinned linter versions (Go 1.27 compatible). CI runs this same target.
 STATICCHECK_VERSION ?= v0.8.2

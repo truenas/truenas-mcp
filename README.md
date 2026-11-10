@@ -993,6 +993,9 @@ make lint
 # Run tests (includes the race detector)
 make test
 
+# Run tests without the race detector (faster)
+make test RACE=
+
 # Check dependencies for known vulnerabilities (version used in CI)
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
@@ -1002,7 +1005,7 @@ make clean
 
 The "Build and Package" workflow runs the linters (`make lint`, including
 staticcheck and errcheck), a single test step with the
-race detector and coverage (`go test -race -coverprofile=coverage.out -covermode=atomic ./...`), `govulncheck`
+race detector and coverage (`go test -race -coverprofile=coverage.out -covermode=atomic ./...`), a non-race `go test -count=1 ./redact` so the randomized and linear redaction tests run at full strength, `govulncheck`
 and builds for macOS (Apple Silicon), Linux and Windows on every pull request
 and on every push to `main`. The release workflow, which runs for version
 tags, runs the linters and tests again (with the race detector) and publishes those three platforms, with SLSA build provenance attestations for the release archives. A test in

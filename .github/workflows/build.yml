@@ -37,6 +37,11 @@ jobs:
     - name: Run tests with the race detector and coverage
       run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
+    # Non-race: several redact tests scale down under -race, so this
+    # restores the full-strength randomized and linear checks.
+    - name: Run full-strength redaction tests
+      run: go test -count=1 ./redact
+
     - name: Run govulncheck
       run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
