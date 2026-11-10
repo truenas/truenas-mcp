@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -166,7 +167,7 @@ func (h *StdioHandler) runTool(ctx context.Context, name string, args map[string
 
 	select {
 	case o := <-done:
-		return toolResult(o.result, o.err), nil
+		return h.callResult(o.result, o.err), nil
 	case <-ctx.Done():
 		return h.interrupted(ctx, name, true)
 	}
@@ -185,11 +186,72 @@ func (h *StdioHandler) interrupted(ctx context.Context, name string, started boo
 	return toolResult("", fmt.Errorf("tool %s did not finish within %s; it may still complete on TrueNAS, so check the system state before retrying", name, h.callTimeout)), nil
 }
 
-// toolResult builds the tools/call result. Every result and error is
+// callResult builds the tools/call result. Every result and error is
 // redacted before it reaches the client: TrueNAS returns secrets
 // (passwords, keys, tokens) in many query results. The redacted text is
-// then cut to maxToolOutputBytes so a secret cannot survive as a
-// fragment at the cut.
+// then cut to maxToolOutputBytes so a secret cannot survive as a fragment
+// at the cut. The one redaction exception is the top-level
+// confirmation_token of a destructive tool's reply, and only when the
+// registry confirms it issued that token (see redact.ToolOutputKeeping). A
+// *mcp.ReplyError is an error whose content is its JSON reply.
+func (h *StdioHandler) callResult(result string, err error) *sdk.CallToolResult {
+	var keep func(string) bool
+	if tokens, ok := h.registry.(mcp.ConfirmationTokens); ok {
+		keep = tokens.IsConfirmationToken
+	}
+	var reply *mcp.ReplyError
+	if errors.As(err, &reply) {
+		return keptTokenResult(reply.Reply, keep, true)
+	}
+	if err != nil {
+		return toolResult("", err)
+	}
+	return keptTokenResult(result, keep, false)
+}
+
+// keptTokenResult redacts s with the confirmation_token exemption and caps
+// it. The reply encodes its keys in sorted order, so confirmation_token
+// comes first and is never cut. Should the cut still remove any part of a
+// kept token, the call fails closed: the client gets an error without the
+// token instead of a reply it cannot use.
+func keptTokenResult(s string, keep func(string) bool, isError bool) *sdk.CallToolResult {
+	text := capToolOutput(redact.ToolOutputKeeping(s, confirmationTokenKey, keep))
+	if tok := keptToken(s, keep); tok != "" && !strings.Contains(text, tok) {
+		return &sdk.CallToolResult{
+			Content: []sdk.Content{&sdk.TextContent{Text: "Error: " + confirmationTooLargeMessage}},
+			IsError: true,
+		}
+	}
+	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: text}}, IsError: isError}
+}
+
+// confirmationTooLargeMessage replaces a confirmation reply whose token the
+// output cap would cut.
+const confirmationTooLargeMessage = "the confirmation reply was too large to return with its confirmation_token; nothing was executed. " +
+	"Call the tool with dry_run=true to see the preview, or narrow the request"
+
+// keptToken returns the top-level confirmation_token of s when keep accepts
+// it, else "".
+func keptToken(s string, keep func(string) bool) string {
+	if keep == nil {
+		return ""
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal([]byte(s), &top) != nil {
+		return ""
+	}
+	var tok string
+	if json.Unmarshal(top[confirmationTokenKey], &tok) != nil || tok == "" || !keep(tok) {
+		return ""
+	}
+	return tok
+}
+
+// confirmationTokenKey is the result field that carries a confirmation
+// token (tools/confirm_token.go).
+const confirmationTokenKey = "confirmation_token"
+
+// toolResult builds a tools/call result with no token exemption.
 func toolResult(result string, err error) *sdk.CallToolResult {
 	if err != nil {
 		return &sdk.CallToolResult{

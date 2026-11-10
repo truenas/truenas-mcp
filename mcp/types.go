@@ -26,3 +26,22 @@ type ToolRegistry interface {
 	ListTools() []Tool
 	CallTool(ctx context.Context, name string, args map[string]interface{}) (string, error)
 }
+
+// ReplyError is a tool error whose result content is Reply, a JSON object,
+// instead of the error text. A refused destructive call uses it to return
+// the reason together with a fresh preview (and, when the operation can
+// proceed, a fresh confirmation token). Error returns the reason only.
+type ReplyError struct {
+	Message string
+	Reply   string
+}
+
+func (e *ReplyError) Error() string { return e.Message }
+
+// ConfirmationTokens is implemented by registries that issue confirmation
+// tokens. IsConfirmationToken reports whether tok is a token the registry
+// issued that is still live; the server lets only such a value through
+// redaction, as the top-level confirmation_token of a tool result.
+type ConfirmationTokens interface {
+	IsConfirmationToken(tok string) bool
+}

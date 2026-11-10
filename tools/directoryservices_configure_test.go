@@ -265,7 +265,7 @@ func TestConfigureDirectoryServiceConsumesEveryAdvertisedField(t *testing.T) {
 		}
 	}
 
-	seenTop["confirm"], seenTop["dry_run"] = true, true // consumed by the safety layer and dry-run wrapper
+	seenTop["confirmation_token"], seenTop["dry_run"] = true, true // consumed by the safety layer and dry-run wrapper
 	for k := range props {
 		if !seenTop[k] {
 			t.Errorf("top-level schema property %s is never consumed in the examples", k)
@@ -314,7 +314,7 @@ func TestConfigureDirectoryServiceBuildsPayload(t *testing.T) {
 		{
 			name: "ldap with plain bind, optional fields and control args",
 			args: obj{
-				"service_type": "LDAP", "enable": true, "dry_run": true, "confirm": true,
+				"service_type": "LDAP", "enable": true, "dry_run": true, "confirmation_token": "x",
 				"credential":    obj{"credential_type": "LDAP_PLAIN", "binddn": "cn=a,dc=x", "bindpw": "pw"},
 				"configuration": obj{"server_urls": []interface{}{"ldaps://ldap.example.com"}, "basedn": "dc=example,dc=com", "starttls": false},
 				"timeout":       30.0, "enable_account_cache": false,
@@ -646,7 +646,7 @@ func TestConfigureDirectoryServiceExecutesWithConfirm(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"confirm": true}))
+	out, err := r.CallTool(t.Context(), "configure_directory_service", approve(t, r, "configure_directory_service", args))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +709,7 @@ func TestConfigureDirectoryServiceReportsMiddlewareError(t *testing.T) {
 	}
 	client, _ := newFakeClientFrom(t, fake)
 	r := NewRegistry(client, nil)
-	_, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(fullDSExamples()["IPA"], obj{"confirm": true}))
+	_, err := r.CallTool(t.Context(), "configure_directory_service", approve(t, r, "configure_directory_service", fullDSExamples()["IPA"]))
 	if err == nil || !strings.Contains(err.Error(), "failed to configure IPA") {
 		t.Errorf("err = %v", err)
 	}
@@ -796,7 +796,7 @@ func TestLeaveDirectoryServiceSchemaMatchesHandler(t *testing.T) {
 	}
 
 	// Behaviour: everything the schema offers reaches the payload, and only that.
-	payload, err := buildDirectoryServiceLeavePayload(leaveArgs(obj{"dry_run": true, "confirm": true}))
+	payload, err := buildDirectoryServiceLeavePayload(leaveArgs(obj{"dry_run": true, "confirmation_token": "x"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -960,7 +960,7 @@ func TestLeaveDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	results["directoryservices.leave"] = 77
 	r, fake, mgr := leaveFake(t, results)
 
-	out, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(obj{"confirm": true}))
+	out, err := r.CallTool(t.Context(), "leave_directory_service", approve(t, r, "leave_directory_service", leaveArgs(obj{})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1022,7 +1022,7 @@ func TestLeaveDirectoryServiceJobIDForms(t *testing.T) {
 			results := dsStatus("IPA", "HEALTHY")
 			results["directoryservices.leave"] = tc.result
 			r, _, _ := leaveFake(t, results)
-			out, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(obj{"confirm": true}))
+			out, err := r.CallTool(t.Context(), "leave_directory_service", approve(t, r, "leave_directory_service", leaveArgs(obj{})))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1052,7 +1052,7 @@ func TestLeaveDirectoryServiceReportsMiddlewareError(t *testing.T) {
 	}
 	client, _ := newFakeClientFrom(t, fake)
 	r := NewRegistry(client, nil)
-	_, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(obj{"confirm": true}))
+	_, err := r.CallTool(t.Context(), "leave_directory_service", approve(t, r, "leave_directory_service", leaveArgs(obj{})))
 	if err == nil || !strings.Contains(err.Error(), "failed to leave ACTIVEDIRECTORY") {
 		t.Errorf("err = %v", err)
 	}

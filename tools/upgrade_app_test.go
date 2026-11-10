@@ -102,11 +102,11 @@ func newUpgradeRegistry(t *testing.T, summary interface{}) (*Registry, *tasks.Ma
 
 func startUpgrade(t *testing.T, r *Registry, extra map[string]interface{}) map[string]interface{} {
 	t.Helper()
-	args := map[string]interface{}{"app_name": "plex", "confirm": true}
+	args := map[string]interface{}{"app_name": "plex"}
 	for k, v := range extra {
 		args[k] = v
 	}
-	out, err := r.CallTool(t.Context(), "upgrade_app", args)
+	out, err := r.CallTool(t.Context(), "upgrade_app", approve(t, r, "upgrade_app", args))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestUpgradeAppNullChangelog(t *testing.T) {
 	for name, changelog := range map[string]interface{}{"null": nil, "empty": "", "blank": " \n\t"} {
 		t.Run(name, func(t *testing.T) {
 			r, _, _ := newUpgradeRegistry(t, upgradeSummaryFixture(changelog))
-			out, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true})
+			out, err := r.CallTool(t.Context(), "upgrade_app", approve(t, r, "upgrade_app", map[string]interface{}{"app_name": "plex"}))
 			if err != nil {
 				t.Fatal(err)
 			}

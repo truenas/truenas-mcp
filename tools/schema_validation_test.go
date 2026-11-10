@@ -185,8 +185,8 @@ func TestEveryArgumentRejectsTheWrongType(t *testing.T) {
 				}
 				args := minimalArgs(tool)
 				args[key] = bad
-				if hasParam(tool, "confirm") && key != "confirm" {
-					args["confirm"] = true
+				if hasParam(tool, "confirmation_token") && key != "confirmation_token" {
+					args = approve(t, r, name, args)
 				}
 				_, err := r.CallTool(t.Context(), name, args)
 				checked++
@@ -240,8 +240,8 @@ func TestEveryEnumAndRangeEnforced(t *testing.T) {
 			for _, bad := range cases {
 				args := minimalArgs(tool)
 				args[key] = bad
-				if hasParam(tool, "confirm") {
-					args["confirm"] = true
+				if hasParam(tool, "confirmation_token") {
+					args = approve(t, r, name, args)
 				}
 				_, err := r.CallTool(t.Context(), name, args)
 				if err == nil || !strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "not-a-valid-choice") {
@@ -264,8 +264,8 @@ func TestEveryRequiredArgumentEnforced(t *testing.T) {
 		for _, key := range testRequired(tool.Definition.InputSchema["required"]) {
 			args := minimalArgs(tool)
 			delete(args, key)
-			if hasParam(tool, "confirm") {
-				args["confirm"] = true
+			if hasParam(tool, "confirmation_token") {
+				args = approve(t, r, name, args)
 			}
 			_, err := r.CallTool(t.Context(), name, args)
 			n++
@@ -501,8 +501,8 @@ func TestNullRequiredAndSafetyFlagsRefused(t *testing.T) {
 		for _, key := range testRequired(tool.Definition.InputSchema["required"]) {
 			args := minimalArgs(tool)
 			args[key] = nil
-			if hasParam(tool, "confirm") {
-				args["confirm"] = true
+			if hasParam(tool, "confirmation_token") {
+				args = approve(t, r, name, args)
 			}
 			_, err := r.CallTool(t.Context(), name, args)
 			if err == nil || !strings.Contains(err.Error(), key+" is required") || !strings.HasSuffix(err.Error(), "nothing was executed") {
@@ -510,7 +510,9 @@ func TestNullRequiredAndSafetyFlagsRefused(t *testing.T) {
 			}
 		}
 		for _, flag := range []string{"dry_run", "confirm"} {
-			if !hasParam(tool, flag) {
+			// Destructive tools no longer declare confirm but still accept
+			// the legacy flag, so a null one is refused there too.
+			if !hasParam(tool, flag) && !(flag == "confirm" && safetyOf(name).Access == Destructive) {
 				continue
 			}
 			args := minimalArgs(tool)

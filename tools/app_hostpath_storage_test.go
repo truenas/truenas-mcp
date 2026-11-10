@@ -203,6 +203,10 @@ func callHostPathTool(t *testing.T, r *Registry, tool string, values map[string]
 		args["catalog_app"] = "jellyfin"
 		args["train"] = "community"
 	}
+	if safetyOf(tool).Access == Destructive {
+		// update_app: the real handler, as after the user approved it.
+		args = approve(t, r, tool, args)
+	}
 	return r.CallTool(t.Context(), tool, args)
 }
 
@@ -660,7 +664,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 		r, fake := hostPathReviewFake(t, nil, nil)
 		values := cloneValues(validHostPathValues())
 		setStoragePath(values, "data", "/mnt/tank/apps/jellyfin/missing")
-		_, err := r.CallTool(t.Context(), "update_app", map[string]interface{}{"app_name": "jellyfin", "values": values})
+		_, err := r.CallTool(t.Context(), "update_app", approve(t, r, "update_app", map[string]interface{}{"app_name": "jellyfin", "values": values}))
 		if err == nil {
 			t.Fatal("update_app accepted a missing dataset")
 		}

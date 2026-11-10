@@ -2,7 +2,7 @@
 
 This document provides a comprehensive list of all available MCP tools for TrueNAS management.
 
-Tools are classified as read, write or destructive (`tools/safety.go`). Write and destructive tools are hidden and refused in `--read-only` mode (except `upgrade_app`, which stays available for `dry_run: true` previews only), and `--allow-tools` / `--deny-tools` restrict the exposed set. Destructive tools (marked below) require `confirm: true` to execute; without it they return a `confirmation_required` result with their dry-run preview. `confirm` and `dry_run` must be JSON booleans (`true` or `false`); a string such as `"true"` or a number is rejected and nothing is executed. Every other argument is checked against the tool's input schema before anything runs, too: unknown or missing required arguments, wrong JSON types (for example `"readonly": "true"`, `"create_ancestors": "false"` or `"quota": "10G"`), fractional integers, and values outside an enum or range (such as a negative `quota` or a `limit` of 0) are rejected with an error that names the argument without echoing its value; `null` on an optional argument means omitted (see [Argument validation](../README.md#safety-controls)). **Breaking change:** callers that used these nine tools without `confirm` now get the preview instead. See [Safety Controls](../README.md#safety-controls).
+Tools are classified as read, write or destructive (`tools/safety.go`). Write and destructive tools are hidden and refused in `--read-only` mode (except `upgrade_app`, which stays available for `dry_run: true` previews only), and `--allow-tools` / `--deny-tools` restrict the exposed set. The ten destructive tools (marked below) execute only with a `confirmation_token`: called without a valid one they change nothing and return a `confirmation_required` result with their dry-run preview and a single-use token, valid for 5 minutes and bound to the tool and the exact arguments; repeat the call with the same arguments plus `confirmation_token` to execute it. A preview that says the operation cannot proceed returns an error and issues no token. The token proves that a preview of these arguments happened, not that a human approved it. `dry_run` (and the old `confirm`, which no longer executes anything) must be JSON booleans (`true` or `false`); a string such as `"true"` or a number is rejected and nothing is executed. Every other argument is checked against the tool's input schema before anything runs, too: unknown or missing required arguments, wrong JSON types (for example `"readonly": "true"`, `"create_ancestors": "false"` or `"quota": "10G"`), fractional integers, and values outside an enum or range (such as a negative `quota` or a `limit` of 0) are rejected with an error that names the argument without echoing its value; `null` on an optional argument means omitted (see [Argument validation](../README.md#safety-controls)). **Breaking change:** `"confirm": true` no longer executes a destructive tool (it gets the preview, a token and an explanation), and `update_app` is now destructive. See [Safety Controls](../README.md#safety-controls).
 
 Every tool result and error sent to the MCP client is at most 100 KiB. Larger output is redacted first, then cut, with a notice telling the model to narrow the query with `limit`, `select`, or filters. Middleware error traces are not sent to the client; `--debug` logs them to stderr (see [Security](../README.md#security) and [Debug Logging](../README.md#debug-logging)).
 
@@ -175,7 +175,7 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
     - Step 8: Execute installation
 
 - **delete_app** - Remove installed applications (**destructive**)
-  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - IMPORTANT: Host-path datasets are NOT deleted (preserved for data safety)
   - Data remains in original locations for manual cleanup
   - Optional removal of container images
@@ -183,12 +183,12 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
   - Returns task ID for tracking deletion progress
 
 - **upgrade_app** - Upgrade an application to a newer version with optional snapshot backup (**destructive**: the app goes offline and migrations may be one-way). The task completes only once the app is RUNNING (`health_timeout_seconds`: integer 0-600, default 60; an app still starting at the deadline fails the task with a message that the upgrade itself succeeded). TrueNAS always stops the app and snapshots its ix-volumes; `snapshot_hostpaths` only requests snapshots of host paths and is not a confirmation that one was taken
-  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Supports dry-run mode to preview changes before execution
   - Returns a task ID for tracking long-running operations
 
-- **update_app** - Change an installed application's configuration
-  - Write operation (no confirm needed), but advertises `destructiveHint: true` because it replaces the configuration in place
+- **update_app** - Change an installed application's configuration (**destructive**: replaces the configuration in place and restarts the app)
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Applies the same host-path storage and dataset-exists checks as install_app (schema-positive: every storage entry must be present as `type: host_path` with a cleaned path under `/mnt/<pool>/`)
   - Every call must include the full storage section; omitted storage is refused. Apps that already use ix_volume storage cannot be updated through this tool without converting those entries to host_path
   - Supports dry-run mode
@@ -197,7 +197,7 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
   - Supports dry-run mode; returns a task ID for tracking
 
 - **stop_app** - Stop a running application (**destructive**: the service goes offline)
-  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Supports dry-run mode; returns a task ID for tracking
 
 ## Directory Services
@@ -229,7 +229,7 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
 
 ### Write Operations
 - **configure_directory_service** - Configure and join directory service (**destructive**: disabling or re-pointing a joined service cuts off domain users)
-  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Supports Active Directory, LDAP, and FreeIPA/IPA
   - Multiple credential types:
     - **Active Directory**: KERBEROS_USER (username/password) or KERBEROS_PRINCIPAL (principal/keytab)
@@ -256,7 +256,7 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
   - Use enable=false to disable without leaving domain
 
 - **leave_directory_service** - Disconnect from directory service (**destructive**)
-  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Removes TrueNAS from the domain
   - Deletes computer account from directory (if possible)
   - Removes DNS records
@@ -373,7 +373,7 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
   - Does not apply the update (use apply_update after download completes)
 
 - **apply_update** - Apply downloaded TrueNAS system update (**destructive**)
-  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Applies previously downloaded system update
   - Optional automatic reboot after update (default: false for safety)
   - Supports dry-run mode to preview update actions
@@ -388,7 +388,7 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
   - Useful for monitoring long-running update operations
 
 - **system_reboot** - Reboot the TrueNAS system (**destructive**)
-  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Supports dry-run mode showing hostname, version and uptime
   - Optional `delay` in seconds before rebooting, 0-86400 (default: immediately); a pending reboot cannot be cancelled through this server
   - Performs a clean system reboot
@@ -407,7 +407,7 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
   - Perfect for "what old boot environments can I clean up?"
 
 - **delete_boot_environment** - Delete a boot environment (**destructive**)
-  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Dry-run mode shows what will be deleted and space freed
   - Safety checks prevent deleting active/activated/protected
   - Recommends keeping 2-3 boot environments for recovery
@@ -454,7 +454,7 @@ Every tool result and error sent to the MCP client is at most 100 KiB. Larger ou
   - Use before backups or after hardware changes
 
 - **delete_scrub_schedule** - Remove scrub schedule (**destructive**)
-  - **Requires `confirm: true`** to execute; without it returns a preview and changes nothing
+  - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Dry-run shows what will be removed
   - Warns about loss of automatic scrubbing
   - Recommends manual scrub frequency

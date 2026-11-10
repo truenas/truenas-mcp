@@ -91,7 +91,8 @@ func TestUnknownArgumentRejectedBeforeAnyMiddlewareCall(t *testing.T) {
 }
 
 // TestEveryToolRejectsUnknownArguments covers all registered tools, with and
-// without the confirm/dry_run keys that gated tools declare.
+// without the confirmation_token/dry_run keys that gated tools declare and
+// the legacy confirm flag they still accept.
 func TestEveryToolRejectsUnknownArguments(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	seen := stubHandlers(r)
@@ -99,10 +100,13 @@ func TestEveryToolRejectsUnknownArguments(t *testing.T) {
 		variants := []map[string]interface{}{
 			{"padding": secretValue},
 			{"padding": secretValue, "confirm": true},
+			{"padding": secretValue, "confirmation_token": "x"},
 			{"padding": secretValue, "dry_run": true},
 		}
 		for _, args := range variants {
-			if (args["confirm"] != nil && !hasParam(tool, "confirm")) || (args["dry_run"] != nil && !hasParam(tool, "dry_run")) {
+			if (args["confirm"] != nil && safetyOf(name).Access != Destructive) ||
+				(args["confirmation_token"] != nil && !hasParam(tool, "confirmation_token")) ||
+				(args["dry_run"] != nil && !hasParam(tool, "dry_run")) {
 				// Those keys would be unknown too; still must be rejected,
 				// but then the error legitimately names them as well.
 				continue
@@ -139,16 +143,19 @@ func TestEveryDeclaredArgumentIsAccepted(t *testing.T) {
 		for _, key := range keys {
 			val := sampleDeclaredArg(tool, key)
 			all[key] = val
-			// confirm keeps destructive tools from stopping at the gate;
-			// either way validation must let the key through.
+			// A valid token keeps destructive tools from stopping at the
+			// gate; either way validation must let the key through.
 			args := minimalArgs(tool)
 			args[key] = val
-			if hasParam(tool, "confirm") {
-				args["confirm"] = true
+			if hasParam(tool, "confirmation_token") {
+				args = approve(t, r, name, args)
 			}
 			if _, err := r.CallTool(t.Context(), name, args); err != nil {
 				t.Errorf("%s rejected declared key %q: %v", name, key, err)
 			}
+		}
+		if hasParam(tool, "confirmation_token") {
+			all = approve(t, r, name, all)
 		}
 		if _, err := r.CallTool(t.Context(), name, all); err != nil {
 			t.Errorf("%s rejected all declared keys: %v", name, err)
@@ -169,7 +176,7 @@ func TestEveryDeclaredArgumentIsAccepted(t *testing.T) {
 	}
 }
 
-func TestGatedToolsStillAcceptConfirmAndDryRun(t *testing.T) {
+func TestGatedToolsAcceptTokenConfirmAndDryRun(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	seen := stubHandlers(r)
 	gated := 0
@@ -178,8 +185,8 @@ func TestGatedToolsStillAcceptConfirmAndDryRun(t *testing.T) {
 			continue
 		}
 		gated++
-		if !hasParam(tool, "confirm") {
-			t.Errorf("%s: gated tool does not declare confirm", name)
+		if !hasParam(tool, "confirmation_token") || hasParam(tool, "confirm") {
+			t.Errorf("%s: gated tool must declare confirmation_token and not confirm", name)
 		}
 		with := func(extra map[string]interface{}) map[string]interface{} {
 			args := minimalArgs(tool)
@@ -188,8 +195,13 @@ func TestGatedToolsStillAcceptConfirmAndDryRun(t *testing.T) {
 			}
 			return args
 		}
-		if _, err := r.CallTool(t.Context(), name, with(map[string]interface{}{"confirm": true})); err != nil {
-			t.Errorf("%s confirm=true: %v", name, err)
+		// The legacy confirm flag is accepted (not an unknown argument) but
+		// only previews.
+		if out, err := r.CallTool(t.Context(), name, with(map[string]interface{}{"confirm": true})); err != nil || !strings.Contains(out, "confirmation_required") {
+			t.Errorf("%s confirm=true: out=%s err=%v", name, out, err)
+		}
+		if _, err := r.CallTool(t.Context(), name, approve(t, r, name, with(nil))); err != nil {
+			t.Errorf("%s with a valid token: %v", name, err)
 		}
 		if hasParam(tool, "dry_run") {
 			out, err := r.CallTool(t.Context(), name, with(map[string]interface{}{"dry_run": true}))
@@ -329,7 +341,7 @@ func TestAdditionalPropertiesStayPermissive(t *testing.T) {
 			return "ok", nil
 		},
 	}
-	if _, err := r.CallTool(t.Context(), "test_open", map[string]interface{}{"anything": 1, "confirm": true}); err != nil || !ran {
+	if _, err := r.CallTool(t.Context(), "test_open", approve(t, r, "test_open", map[string]interface{}{"anything": 1})); err != nil || !ran {
 		t.Errorf("permissive tool: err=%v ran=%v", err, ran)
 	}
 }

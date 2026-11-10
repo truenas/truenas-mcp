@@ -98,7 +98,7 @@ func TestConfigureDirectoryServiceMasksNestedSecrets(t *testing.T) {
 
 	t.Run("confirm", func(t *testing.T) {
 		r, fake, mgr := dsFake(t)
-		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"confirm": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", approve(t, r, "configure_directory_service", args))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +178,7 @@ func TestDirectoryServiceDryRunThroughOutputRedactor(t *testing.T) {
 func TestConfigureDirectoryServiceBareDisable(t *testing.T) {
 	args := obj{"enable": false}
 
-	payload, err := buildDirectoryServiceUpdatePayload(withArgs(args, obj{"confirm": true, "dry_run": false, "timeout": 20.0}))
+	payload, err := buildDirectoryServiceUpdatePayload(withArgs(args, obj{"confirmation_token": "x", "dry_run": false, "timeout": 20.0}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestConfigureDirectoryServiceBareDisable(t *testing.T) {
 
 	t.Run("confirm sends exactly enable=false", func(t *testing.T) {
 		r, fake, mgr := dsFake(t)
-		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"confirm": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", approve(t, r, "configure_directory_service", args))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -464,7 +464,7 @@ func TestDirectoryServiceSchemaPinnedToMiddlewareModel(t *testing.T) {
 	props := propsOf(t, schema)
 
 	// Top level: every update field, plus only the tool's own dry_run/confirm.
-	wantTop := append(sorted(mw.Update.Fields), "confirm", "dry_run")
+	wantTop := append(sorted(mw.Update.Fields), "confirmation_token", "dry_run")
 	sort.Strings(wantTop)
 	if got := keysOf(props); !reflect.DeepEqual(got, wantTop) {
 		t.Errorf("schema properties = %v\nmiddleware fields = %v", got, wantTop)
@@ -581,7 +581,7 @@ func TestLeaveDirectoryServicePinnedToMiddlewareModel(t *testing.T) {
 	mw := loadMiddlewareFields(t).Leave
 	tool := NewRegistry(nil, nil).tools["leave_directory_service"]
 	props := propsOf(t, tool.Definition.InputSchema)
-	want := append(sorted(mw.Fields), "confirm", "dry_run")
+	want := append(sorted(mw.Fields), "confirmation_token", "dry_run")
 	sort.Strings(want)
 	if got := keysOf(props); !reflect.DeepEqual(got, want) {
 		t.Errorf("leave schema properties = %v, middleware %v", got, want)
@@ -658,7 +658,7 @@ func TestConfigureDirectoryServiceAttributeMapsVisibleSecretsMasked(t *testing.T
 		}
 
 		r, fake, mgr := dsFake(t)
-		out, err = r.CallTool(t.Context(), "configure_directory_service", withArgs(ldap, obj{"confirm": true}))
+		out, err = r.CallTool(t.Context(), "configure_directory_service", approve(t, r, "configure_directory_service", ldap))
 		if err != nil {
 			t.Fatal(err)
 		}
