@@ -350,7 +350,7 @@ func (r *Registry) registerTools() {
 	r.tools["run_scrub"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "run_scrub",
-			Description: "Manually start an immediate scrub on a pool. Returns task ID for progress tracking. **When to use**: Before critical backups, after hardware changes, when scheduled scrub was missed. Safe to run anytime but adds I/O load. Can be safely interrupted and resumed.",
+			Description: "Manually start an immediate scrub on a pool. Returns a task ID for progress tracking when a scrub starts. Only ONLINE or DEGRADED pools are accepted. If the last scrub finished less than (threshold-1) days ago (default threshold 7, so under 6 days), returns scrub_started: false and does not start a scrub. **When to use**: Before critical backups, after hardware changes, when scheduled scrub was missed. Safe to run anytime but adds I/O load. Can be safely interrupted and resumed.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -360,7 +360,7 @@ func (r *Registry) registerTools() {
 					},
 					"threshold": map[string]interface{}{
 						"type":        "integer",
-						"description": "Optional: Skip if scrubbed within N days (default: 7)",
+						"description": "Optional: skip if the last scrub finished less than (N-1)*24h ago, matching TrueNAS (default: 7; 0 or 1 never skips)",
 						"default":     7,
 					},
 					"dry_run": map[string]interface{}{
