@@ -666,7 +666,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["query_pools"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_pools",
-			Description: "Query storage pools with their status, capacity, and health information. Returns allow-listed pool fields, a compact topology (type, path, name, guid, status), and a trimmed scrub/resilver scan; it does not pass through the raw middleware record.",
+			Description: "Query storage pools with their status, capacity, and health information. Returns allow-listed pool fields, RAIDZ expansion progress, a compact topology (type, path, name, guid, status, disk, device, and trimmed read/write/checksum error stats), and a trimmed scrub/resilver scan; it does not pass through the raw middleware record.",
 			InputSchema: map[string]interface{}{
 				"type":       "object",
 				"properties": map[string]interface{}{},
@@ -2416,7 +2416,10 @@ func queryCount(ctx context.Context, client *truenas.Client, method string, filt
 }
 
 func handleQueryPools(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	result, err := client.Call(ctx, "pool.query", []interface{}{}, map[string]interface{}{"select": poolQuerySelect})
+	result, err := client.Call(ctx, "pool.query", []interface{}{}, map[string]interface{}{
+		"select": poolQuerySelect,
+		"extra":  map[string]interface{}{"is_upgraded": true},
+	})
 	if err != nil {
 		return "", err
 	}

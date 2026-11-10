@@ -10,19 +10,25 @@ var (
 		"id", "name", "guid", "path", "status", "status_code", "status_detail",
 		"healthy", "warning", "size", "allocated", "free", "freeing",
 		"fragmentation", "size_str", "allocated_str", "free_str", "is_upgraded",
-		"autotrim", "scan", "topology",
+		"autotrim", "scan", "topology", "expand",
 	}
 	poolQuerySelect = []interface{}{
 		"id", "name", "guid", "path", "status", "status_code", "status_detail",
 		"healthy", "warning", "size", "allocated", "free", "freeing",
 		"fragmentation", "size_str", "allocated_str", "free_str", "is_upgraded",
-		"autotrim", "scan", "topology",
+		"autotrim", "scan", "topology", "expand",
 	}
 	poolScanFields = []string{
 		"function", "state", "start_time", "end_time", "percentage", "errors",
 		"total_secs_left", "pause", "bytes_to_process", "bytes_processed", "bytes_issued",
 	}
-	poolTopologyFields = []string{"type", "path", "name", "guid", "status", "children"}
+	poolExpandFields = []string{
+		"state", "expanding_vdev", "start_time", "end_time",
+		"bytes_to_reflow", "bytes_reflowed", "waiting_for_resilver",
+		"total_secs_left", "percentage",
+	}
+	poolTopologyFields  = []string{"type", "path", "name", "guid", "status", "disk", "device", "stats", "children"}
+	poolVdevStatsFields = []string{"read_errors", "write_errors", "checksum_errors"}
 
 	smbShareFields = []string{
 		"id", "name", "path", "enabled", "comment", "purpose", "readonly", "browsable",
@@ -82,7 +88,7 @@ func pickAllowed(m map[string]interface{}, keys []string) map[string]interface{}
 func pickAllowedMap(v interface{}, keys []string) interface{} {
 	m, ok := v.(map[string]interface{})
 	if !ok {
-		return v
+		return nil
 	}
 	return pickAllowed(m, keys)
 }
@@ -99,17 +105,43 @@ func zfsPropValue(v interface{}) interface{} {
 	if val, ok := m["value"]; ok && val != nil {
 		return val
 	}
-	return v
+	return nil
+}
+
+func projectAllowedObject(v interface{}, keys []string) (interface{}, bool) {
+	if v == nil {
+		return nil, true
+	}
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	return pickAllowed(m, keys), true
 }
 
 func simplifyPool(pool map[string]interface{}) map[string]interface{} {
 	out := pickAllowed(pool, poolOutputFields)
 	if v, ok := out["autotrim"]; ok {
-		out["autotrim"] = zfsPropValue(v)
+		if trimmed := zfsPropValue(v); trimmed != nil {
+			out["autotrim"] = trimmed
+		} else {
+			delete(out, "autotrim")
+		}
 	}
 	if v, ok := out["scan"]; ok {
-		if scan, ok := v.(map[string]interface{}); ok {
-			out["scan"] = readableDatesMap(pickAllowed(scan, poolScanFields))
+		projected, keep := projectAllowedObject(v, poolScanFields)
+		if !keep {
+			delete(out, "scan")
+		} else if projected != nil {
+			out["scan"] = readableDatesMap(projected.(map[string]interface{}))
+		}
+	}
+	if v, ok := out["expand"]; ok {
+		projected, keep := projectAllowedObject(v, poolExpandFields)
+		if !keep {
+			delete(out, "expand")
+		} else if projected != nil {
+			out["expand"] = readableDatesMap(projected.(map[string]interface{}))
 		}
 	}
 	if v, ok := out["topology"]; ok {
@@ -150,6 +182,13 @@ func simplifyPoolVdev(m map[string]interface{}) map[string]interface{} {
 	out := pickAllowed(m, poolTopologyFields)
 	if kids, ok := out["children"]; ok {
 		out["children"] = simplifyPoolVdevs(kids)
+	}
+	if v, ok := out["stats"]; ok {
+		if stats := pickAllowedMap(v, poolVdevStatsFields); stats != nil {
+			out["stats"] = stats
+		} else {
+			delete(out, "stats")
+		}
 	}
 	return out
 }

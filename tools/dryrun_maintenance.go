@@ -239,7 +239,7 @@ func lookupAlert(ctx context.Context, client *truenas.Client, args map[string]in
 	}
 	for _, alert := range alerts {
 		if alert["uuid"] == uuid {
-			return uuid, alert, "", nil
+			return uuid, simplifyAlert(alert), "", nil
 		}
 	}
 	return uuid, current, fmt.Sprintf("alert %s is not in alert.list; it may be hidden by a NEVER policy. The call will still be sent.", uuid), nil

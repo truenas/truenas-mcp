@@ -66,12 +66,24 @@ func TestIssue117PassthroughToolsAllowListOutput(t *testing.T) {
 		"bytes_to_process": 1.0, "bytes_processed": 1.0, "bytes_issued": 1.0,
 	})
 	disk := withSecrets(map[string]interface{}{
-		"name": "sda", "type": "DISK", "path": "/dev/sda", "guid": "1", "status": "ONLINE",
-		"stats": map[string]interface{}{"bytes": 1.0},
+		"name": "sda", "type": "DISK",
+		"path":   "/dev/disk/by-partuuid/00000000-0000-0000-0000-00000000000a",
+		"guid":   "1",
+		"status": "FAULTED",
+		"disk":   "sda",
+		"device": "sda1",
+		"stats": withSecrets(map[string]interface{}{
+			"read_errors": 3.0, "write_errors": 1.0, "checksum_errors": 2.0,
+			"bytes": 1.0, "timestamp": 1.0,
+		}),
+		"unavail_disk": withSecrets(map[string]interface{}{"devname": "sda"}),
 	})
 	vdev := withSecrets(map[string]interface{}{
-		"type": "RAIDZ2", "status": "ONLINE", "path": nil, "guid": "2",
-		"stats":    map[string]interface{}{"bytes": 1.0},
+		"type": "RAIDZ2", "status": "DEGRADED", "path": nil, "guid": "2",
+		"stats": withSecrets(map[string]interface{}{
+			"read_errors": 3.0, "write_errors": 1.0, "checksum_errors": 2.0,
+			"bytes": 1.0,
+		}),
 		"children": []interface{}{disk},
 	})
 	fullPool := withSecrets(map[string]interface{}{
@@ -81,7 +93,15 @@ func TestIssue117PassthroughToolsAllowListOutput(t *testing.T) {
 		"status_detail": "healthy", "path": "/mnt/tank", "is_upgraded": true,
 		"fragmentation": "5%", "size_str": "1T", "allocated_str": "400G", "free_str": "600G",
 		"autotrim":         map[string]interface{}{"parsed": "off", "rawvalue": "off", "source": "DEFAULT", "value": "off"},
-		"dedup_table_size": 0.0, "expand": map[string]interface{}{"state": "FINISHED", "password": issue117Secret},
+		"dedup_table_size": 0.0,
+		"expand": withSecrets(map[string]interface{}{
+			"state": "FINISHED", "expanding_vdev": 0.0,
+			"start_time":      map[string]interface{}{"$date": 1.0},
+			"end_time":        map[string]interface{}{"$date": 1.0},
+			"bytes_to_reflow": 835584.0, "bytes_reflowed": 978944.0,
+			"waiting_for_resilver": 0.0, "total_secs_left": nil,
+			"percentage": 85.35564853556485,
+		}),
 		"scan":     poolScan,
 		"topology": map[string]interface{}{"data": []interface{}{vdev}},
 	})
@@ -160,7 +180,7 @@ func TestIssue117PassthroughToolsAllowListOutput(t *testing.T) {
 			"id", "name", "guid", "path", "status", "status_code", "status_detail",
 			"healthy", "warning", "size", "allocated", "free", "freeing",
 			"fragmentation", "size_str", "allocated_str", "free_str", "is_upgraded",
-			"autotrim", "scan", "topology",
+			"autotrim", "scan", "topology", "expand",
 		})
 		if pools[0]["name"] != "tank" || pools[0]["autotrim"] != "off" {
 			t.Errorf("query_pools name/autotrim = %v %v", pools[0]["name"], pools[0]["autotrim"])
@@ -176,15 +196,37 @@ func TestIssue117PassthroughToolsAllowListOutput(t *testing.T) {
 			t.Fatalf("topology = %v", pools[0]["topology"])
 		}
 		vdevOut, _ := data[0].(map[string]interface{})
-		assertKeysAllowed(t, "query_pools vdev", vdevOut, []string{"type", "path", "name", "guid", "status", "children"})
+		assertKeysAllowed(t, "query_pools vdev", vdevOut, []string{"type", "path", "name", "guid", "status", "disk", "device", "stats", "children"})
+		assertTrimmedVdevStats(t, "query_pools vdev stats", vdevOut)
 		kids, _ := vdevOut["children"].([]interface{})
 		if len(kids) != 1 {
 			t.Fatalf("vdev children = %v", vdevOut["children"])
 		}
-		assertKeysAllowed(t, "query_pools disk", kids[0].(map[string]interface{}), []string{"type", "path", "name", "guid", "status", "children"})
+		leaf, _ := kids[0].(map[string]interface{})
+		assertKeysAllowed(t, "query_pools disk", leaf, []string{"type", "path", "name", "guid", "status", "disk", "device", "stats", "children"})
+		if leaf["disk"] != "sda" || leaf["device"] != "sda1" {
+			t.Errorf("query_pools leaf disk/device = %v %v, want sda sda1", leaf["disk"], leaf["device"])
+		}
+		if _, ok := leaf["unavail_disk"]; ok {
+			t.Error("query_pools leaf should omit unavail_disk")
+		}
+		assertTrimmedVdevStats(t, "query_pools disk stats", leaf)
+		expand, _ := pools[0]["expand"].(map[string]interface{})
+		assertKeysAllowed(t, "query_pools expand", expand, []string{
+			"state", "expanding_vdev", "start_time", "end_time",
+			"bytes_to_reflow", "bytes_reflowed", "waiting_for_resilver",
+			"total_secs_left", "percentage",
+		})
+		if expand["state"] != "FINISHED" {
+			t.Errorf("query_pools expand.state = %v", expand["state"])
+		}
 		_, opts := parseQueryParams(t, methods["pool.query"])
-		if !selectContains(opts, "name") || !selectContains(opts, "scan") {
+		if !selectContains(opts, "name") || !selectContains(opts, "scan") || !selectContains(opts, "expand") {
 			t.Errorf("pool.query should request a select list, got %s", methods["pool.query"])
+		}
+		extra, _ := opts["extra"].(map[string]interface{})
+		if extra["is_upgraded"] != true {
+			t.Errorf("pool.query should send extra.is_upgraded, got %s", methods["pool.query"])
 		}
 	})
 
@@ -271,4 +313,102 @@ func TestIssue117PassthroughToolsAllowListOutput(t *testing.T) {
 			t.Errorf("check_updates = %s", out)
 		}
 	})
+}
+
+func assertTrimmedVdevStats(t *testing.T, label string, vdev map[string]interface{}) {
+	t.Helper()
+	stats, ok := vdev["stats"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("%s: stats missing or not an object: %v", label, vdev["stats"])
+	}
+	assertKeysAllowed(t, label, stats, []string{"read_errors", "write_errors", "checksum_errors"})
+	if stats["read_errors"] != 3.0 || stats["write_errors"] != 1.0 || stats["checksum_errors"] != 2.0 {
+		t.Errorf("%s = %v, want read_errors=3 write_errors=1 checksum_errors=2", label, stats)
+	}
+	if _, ok := stats["bytes"]; ok {
+		t.Errorf("%s still has planted key bytes: %v", label, stats)
+	}
+}
+
+func TestIssue117FailClosedProjection(t *testing.T) {
+	t.Run("pickAllowedMap non-object", func(t *testing.T) {
+		if got := pickAllowedMap("not-an-object", smbAuditFields); got != nil {
+			t.Errorf("pickAllowedMap(string) = %#v, want nil", got)
+		}
+		if got := pickAllowedMap([]interface{}{"x"}, smbAuditFields); got != nil {
+			t.Errorf("pickAllowedMap(list) = %#v, want nil", got)
+		}
+	})
+	t.Run("non-object scan", func(t *testing.T) {
+		out := simplifyPool(map[string]interface{}{"name": "tank", "scan": "not-an-object"})
+		if v, ok := out["scan"]; ok {
+			t.Errorf("non-object scan was kept as %#v", v)
+		}
+		kept := simplifyPool(map[string]interface{}{"name": "tank", "scan": nil})
+		if v, ok := kept["scan"]; !ok || v != nil {
+			t.Errorf("null scan = %#v, want a kept null", kept["scan"])
+		}
+	})
+	t.Run("zfsPropValue neither parsed nor value", func(t *testing.T) {
+		if got := zfsPropValue(map[string]interface{}{"rawvalue": "off", "source": "DEFAULT"}); got != nil {
+			t.Errorf("zfsPropValue(no parsed/value) = %#v, want nil", got)
+		}
+		out := simplifyPool(map[string]interface{}{
+			"name":     "tank",
+			"autotrim": map[string]interface{}{"rawvalue": "off", "source": "DEFAULT"},
+		})
+		if v, ok := out["autotrim"]; ok {
+			t.Errorf("autotrim without parsed/value was kept as %#v", v)
+		}
+	})
+}
+
+func TestIssue117AlertDryRunCurrentStateIsSimplified(t *testing.T) {
+	alert := withSecrets(map[string]interface{}{
+		"uuid": "00000000-0000-0000-0000-000000000001", "id": "00000000-0000-0000-0000-000000000001",
+		"source": "Test", "klass": "ExampleAlert", "level": "WARNING",
+		"formatted": "Example alert", "text": "Example alert", "dismissed": false,
+		"node": "nas", "one_shot": false, "args": map[string]interface{}{"pool": "tank"},
+		"datetime":        map[string]interface{}{"$date": 1700000000000.0},
+		"last_occurrence": map[string]interface{}{"$date": 1700000000000.0},
+		"mail":            map[string]interface{}{"password": issue117Secret},
+		"key":             "alert-dedup-key",
+	})
+	client, fake := newFakeClientWith(t, map[string]interface{}{
+		"alert.list":    []interface{}{alert},
+		"alert.dismiss": nil,
+		"alert.restore": nil,
+	}, nil)
+	r := NewRegistry(client, nil)
+
+	for _, tool := range []string{"dismiss_alert", "restore_alert"} {
+		t.Run(tool, func(t *testing.T) {
+			out, err := r.CallTool(t.Context(), tool, map[string]interface{}{
+				"uuid":    "00000000-0000-0000-0000-000000000001",
+				"dry_run": true,
+			})
+			if err != nil {
+				t.Fatalf("dry-run: %v\n%s", err, out)
+			}
+			assertNoSecretSentinel(t, out)
+			preview := decode(t, out)
+			state, _ := preview["current_state"].(map[string]interface{})
+			if state == nil {
+				t.Fatalf("current_state missing: %s", out)
+			}
+			assertKeysAllowed(t, tool+" current_state", state, alertOutputFields)
+			if _, ok := state["mail"]; ok {
+				t.Errorf("%s dry-run current_state still has mail: %s", tool, out)
+			}
+			if _, ok := state["key"]; ok {
+				t.Errorf("%s dry-run current_state still has key: %s", tool, out)
+			}
+			if state["uuid"] != "00000000-0000-0000-0000-000000000001" {
+				t.Errorf("current_state.uuid = %v", state["uuid"])
+			}
+			if n := len(fake.called(map[string]string{"dismiss_alert": "alert.dismiss", "restore_alert": "alert.restore"}[tool])); n != 0 {
+				t.Errorf("dry-run called the write method %d times", n)
+			}
+		})
+	}
 }
