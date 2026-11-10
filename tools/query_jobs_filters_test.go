@@ -120,12 +120,13 @@ func TestQueryJobsMethodFilterKeepsLimitCap(t *testing.T) {
 }
 
 // method is declared, so the unknown-argument check accepts it; the schema
-// default for state is all states.
+// default for state is all states. state, method and limit also accept
+// null (the default), which the handler documents.
 func TestQueryJobsSchema(t *testing.T) {
 	r := NewRegistry(nil, nil)
 	props := r.tools["query_jobs"].Definition.InputSchema["properties"].(map[string]interface{})
 	m, ok := props["method"].(map[string]interface{})
-	if !ok || m["type"] != "string" {
+	if types, _ := m["type"].([]string); !ok || len(types) != 2 || types[0] != "string" || types[1] != "null" {
 		t.Errorf("method not declared as a string: %v", props["method"])
 	}
 	if s := props["state"].(map[string]interface{}); s["default"] != "all" {

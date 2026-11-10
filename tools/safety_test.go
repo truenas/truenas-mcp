@@ -230,7 +230,7 @@ func TestAllowAndDenyLists(t *testing.T) {
 	if names := listed(r); len(names) != 2 || !names["query_pools"] || !names["create_dataset"] {
 		t.Errorf("allowlist exposed %v", names)
 	}
-	if _, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{}); err != nil {
+	if _, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{"name": "tank/x"}); err != nil {
 		t.Errorf("allowed tool refused: %v", err)
 	}
 	if _, err := r.CallTool(t.Context(), "query_apps", nil); err == nil || !strings.Contains(err.Error(), "--allow-tools") {
@@ -265,7 +265,7 @@ func TestDestructiveToolsRequireConfirm(t *testing.T) {
 		if safetyOf(name).Access != Destructive {
 			continue
 		}
-		args := map[string]interface{}{}
+		args := minimalArgs(r.tools[name])
 		if hasParam(r.tools[name], "app_name") {
 			args["app_name"] = "plex"
 		}
@@ -284,10 +284,15 @@ func TestDestructiveToolsRequireConfirm(t *testing.T) {
 			t.Errorf("%s: preview mutated the caller's arguments", name)
 		}
 
-		if _, err := r.CallTool(t.Context(), name, map[string]interface{}{"dry_run": true}); err != nil {
+		withFlag := func(flag string) map[string]interface{} {
+			a := minimalArgs(r.tools[name])
+			a[flag] = true
+			return a
+		}
+		if _, err := r.CallTool(t.Context(), name, withFlag("dry_run")); err != nil {
 			t.Errorf("%s dry run: %v", name, err)
 		}
-		if _, err := r.CallTool(t.Context(), name, map[string]interface{}{"confirm": true}); err != nil {
+		if _, err := r.CallTool(t.Context(), name, withFlag("confirm")); err != nil {
 			t.Errorf("%s with confirm: %v", name, err)
 		}
 		calls := seen[name]
@@ -296,7 +301,7 @@ func TestDestructiveToolsRequireConfirm(t *testing.T) {
 		}
 	}
 	// Write tools that are not destructive run without confirm.
-	if _, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{}); err != nil || len(seen["create_dataset"]) != 1 {
+	if _, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{"name": "tank/x"}); err != nil || len(seen["create_dataset"]) != 1 {
 		t.Errorf("create_dataset gated: %v", err)
 	}
 }

@@ -613,6 +613,31 @@ destructive tools do). `confirm` and `dry_run` must be JSON booleans
 (`true` or `false`); a string such as `"true"` or a number is rejected
 and nothing is executed.
 
+**Argument validation.** Before anything runs (including a dry run or the
+confirmation preview), every `tools/call` is checked against the tool's own
+input schema, as listed in `tools/list`:
+
+- an argument the schema does not declare is rejected (`unknown argument`);
+- a missing required argument is rejected;
+- a value of the wrong JSON type is rejected, not ignored: a string
+  `"true"`, a number or `null` for a boolean, a string `"10G"` for an integer
+  such as `quota`, a fraction such as `1.5` for an integer, and so on.
+  Integers are accepted as any whole JSON number (`5` or `5.0`);
+- a value outside the schema's `enum`, `minimum`/`maximum` or `pattern`
+  is rejected, and nested objects and array items are checked the same way.
+
+The error names the argument and what it must be, never the value, and ends
+with `nothing was executed`. Inside app `values` (which have no fixed
+schema), `host_path_config.acl_enable` must also be a JSON boolean.
+
+> **Breaking change:** a wrong-typed or out-of-range argument used to be
+> dropped silently and the call ran with the default (for example
+> `"readonly": "true"` created a read-write dataset, and
+> `"share_type": "bogus"` returned an empty list). Such calls now fail with
+> an error. `query_jobs` still accepts `null` for `state`, `method` and
+> `limit` (the default); on every other tool `null` is only accepted where
+> the schema allows it.
+
 > **Breaking change:** clients or scripts that called these nine tools without
 > `confirm` now get a preview instead of the operation. Add `"confirm": true`
 > to execute them.

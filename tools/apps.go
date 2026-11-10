@@ -1703,7 +1703,16 @@ func validateHostPathEntry(entry map[string]interface{}, loc string, pools map[s
 		}
 	}
 
-	aclEnable, _ := cfg["acl_enable"].(bool)
+	// acl_enable must be a real boolean: a string "true" would otherwise
+	// be read as false here while TrueNAS may treat it differently.
+	aclEnable := false
+	if v, present := cfg["acl_enable"]; present {
+		b, ok := v.(bool)
+		if !ok {
+			return "", fmt.Errorf("storage at %s: host_path_config.acl_enable must be a boolean (true or false)", loc)
+		}
+		aclEnable = b
+	}
 	if aclEnable {
 		if aclPath == "" {
 			return "", fmt.Errorf("storage at %s has host_path_config.acl_enable=true but no host_path_config.acl.path", loc)

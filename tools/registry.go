@@ -1810,19 +1810,20 @@ Returns task_id for tracking progress with tasks_get.
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
+					// No enum: state is case-insensitive, which an enum
+					// cannot express. The handler checks the value.
 					"state": map[string]interface{}{
-						"type":        "string",
-						"enum":        []string{"RUNNING", "WAITING", "SUCCESS", "FAILED", "ABORTED", "all"},
-						"description": "Filter by job state, case-insensitive (default: all states; all is reported as state_filter \"ALL\")",
+						"type":        []string{"string", "null"},
+						"description": "Filter by job state: RUNNING, WAITING, SUCCESS, FAILED, ABORTED or all, case-insensitive (default: all states; all is reported as state_filter \"ALL\"). null is the same as omitting it",
 						"default":     "all",
 					},
 					"method": map[string]interface{}{
-						"type":        "string",
+						"type":        []string{"string", "null"},
 						"description": "Optional: only return jobs whose method is exactly this name, e.g. app.upgrade or pool.scrub.scrub",
 					},
 					"limit": map[string]interface{}{
-						"type":        "integer",
-						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state and method filters) when more exist than were returned. Each job entry is at most 4 KiB. Must be an integer from 1 to 9999; other values are rejected with an error and nothing is queried.",
+						"type":        []string{"integer", "null"},
+						"description": "Maximum number of jobs to return (default: 50; null means the default). The response has has_more (and total, the number of jobs matching the state and method filters) when more exist than were returned. Each job entry is at most 4 KiB. Must be an integer from 1 to 9999; other values are rejected with an error and nothing is queried.",
 						"default":     50,
 						"minimum":     1,
 						"maximum":     maxQueryJobsLimit,
@@ -1984,6 +1985,12 @@ func (r *Registry) CallTool(ctx context.Context, name string, args map[string]in
 	// including the dry-run preview of a destructive tool.
 	if err := validateArgs(name, tool, args); err != nil {
 		return "", withMigrationHint(name, args, err)
+	}
+	// Then check the values of the declared arguments against the schema:
+	// types, enums, required arguments and ranges. A wrong-typed value
+	// must not be dropped in favour of a default.
+	if err := validateArgValues(name, tool, args); err != nil {
+		return "", err
 	}
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("tool %s was not run: %w", name, err)

@@ -22,15 +22,13 @@ func declaredKeys(tool Tool) []string {
 	return keys
 }
 
-// sampleDeclaredArg returns a value that is accepted for the named
-// argument when only the key (not a type) is being checked. confirm and
-// dry_run must be real booleans; a string would be rejected by the
-// safety-flag type check.
-func sampleDeclaredArg(key string) interface{} {
-	if key == "confirm" || key == "dry_run" {
-		return true
-	}
-	return "x"
+// sampleDeclaredArg returns a value for the named argument that the
+// tool's schema accepts, so tests that check names are not tripped up by
+// the value check.
+func sampleDeclaredArg(tool Tool, key string) interface{} {
+	props, _ := tool.Definition.InputSchema["properties"].(map[string]interface{})
+	sub, _ := props[key].(map[string]interface{})
+	return schemaSample(sub, true)
 }
 
 func TestUnknownArgumentRejected(t *testing.T) {
@@ -135,15 +133,16 @@ func TestEveryDeclaredArgumentIsAccepted(t *testing.T) {
 	seen := stubHandlers(r)
 	for name, tool := range r.tools {
 		keys := declaredKeys(tool)
-		all := map[string]interface{}{}
+		all := minimalArgs(tool)
 		for _, key := range keys {
-			val := sampleDeclaredArg(key)
+			val := sampleDeclaredArg(tool, key)
 			all[key] = val
 			// confirm keeps destructive tools from stopping at the gate;
 			// either way validation must let the key through.
-			args := map[string]interface{}{key: val, "confirm": hasParam(tool, "confirm")}
-			if !hasParam(tool, "confirm") {
-				delete(args, "confirm")
+			args := minimalArgs(tool)
+			args[key] = val
+			if hasParam(tool, "confirm") {
+				args["confirm"] = true
 			}
 			if _, err := r.CallTool(t.Context(), name, args); err != nil {
 				t.Errorf("%s rejected declared key %q: %v", name, key, err)
@@ -152,11 +151,15 @@ func TestEveryDeclaredArgumentIsAccepted(t *testing.T) {
 		if _, err := r.CallTool(t.Context(), name, all); err != nil {
 			t.Errorf("%s rejected all declared keys: %v", name, err)
 		}
-		if _, err := r.CallTool(t.Context(), name, nil); err != nil {
-			t.Errorf("%s rejected nil arguments: %v", name, err)
+		// With only the required arguments (none for most tools, so
+		// nil and empty arguments too) the call goes through.
+		if len(schemaRequired(tool.Definition.InputSchema["required"])) == 0 {
+			if _, err := r.CallTool(t.Context(), name, nil); err != nil {
+				t.Errorf("%s rejected nil arguments: %v", name, err)
+			}
 		}
-		if _, err := r.CallTool(t.Context(), name, map[string]interface{}{}); err != nil {
-			t.Errorf("%s rejected empty arguments: %v", name, err)
+		if _, err := r.CallTool(t.Context(), name, minimalArgs(tool)); err != nil {
+			t.Errorf("%s rejected its required arguments alone: %v", name, err)
 		}
 		if len(seen[name]) == 0 {
 			t.Errorf("%s: handler never ran", name)
@@ -176,23 +179,30 @@ func TestGatedToolsStillAcceptConfirmAndDryRun(t *testing.T) {
 		if !hasParam(tool, "confirm") {
 			t.Errorf("%s: gated tool does not declare confirm", name)
 		}
-		if _, err := r.CallTool(t.Context(), name, map[string]interface{}{"confirm": true}); err != nil {
+		with := func(extra map[string]interface{}) map[string]interface{} {
+			args := minimalArgs(tool)
+			for k, v := range extra {
+				args[k] = v
+			}
+			return args
+		}
+		if _, err := r.CallTool(t.Context(), name, with(map[string]interface{}{"confirm": true})); err != nil {
 			t.Errorf("%s confirm=true: %v", name, err)
 		}
 		if hasParam(tool, "dry_run") {
-			out, err := r.CallTool(t.Context(), name, map[string]interface{}{"dry_run": true})
+			out, err := r.CallTool(t.Context(), name, with(map[string]interface{}{"dry_run": true}))
 			if err != nil {
 				t.Errorf("%s dry_run=true: %v", name, err)
 			}
 			if strings.Contains(out, "confirmation_required") {
 				t.Errorf("%s: dry_run=true was held for confirmation: %s", name, out)
 			}
-			if _, err := r.CallTool(t.Context(), name, map[string]interface{}{"dry_run": true, "confirm": true}); err != nil {
+			if _, err := r.CallTool(t.Context(), name, with(map[string]interface{}{"dry_run": true, "confirm": true})); err != nil {
 				t.Errorf("%s dry_run+confirm: %v", name, err)
 			}
 		}
 		// Without confirm the call is still held for approval, not rejected.
-		out, err := r.CallTool(t.Context(), name, map[string]interface{}{})
+		out, err := r.CallTool(t.Context(), name, with(nil))
 		if err != nil || !strings.Contains(out, "confirmation_required") {
 			t.Errorf("%s without confirm: out=%s err=%v", name, out, err)
 		}
@@ -368,5 +378,59 @@ func TestUnknownArgsErrorKeepsDirectoryServiceMigrationHint(t *testing.T) {
 	_, err = r.CallTool(t.Context(), "query_pools", map[string]interface{}{"type": "x"})
 	if err == nil || strings.Contains(err.Error(), "no longer top-level") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// TestToolSchemasUseOnlySupportedKeywords keeps the validator honest: a
+// schema keyword it does not implement would otherwise be silently
+// ignored. Every pattern must compile, and every property must declare a
+// type.
+func TestToolSchemasUseOnlySupportedKeywords(t *testing.T) {
+	r := NewRegistry(nil, nil)
+	var walk func(path string, s map[string]interface{})
+	walk = func(path string, s map[string]interface{}) {
+		keys := make([]string, 0, len(s))
+		for k := range s {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if !supportedSchemaKeywords[k] {
+				t.Errorf("%s: unsupported schema keyword %q", path, k)
+			}
+		}
+		if _, ok := s["type"]; !ok {
+			t.Errorf("%s: no type", path)
+		}
+		if p, ok := s["pattern"].(string); ok {
+			if _, err := schemaPattern(p); err != nil {
+				t.Errorf("%s: pattern does not compile: %v", path, err)
+			}
+		}
+		if props, ok := s["properties"].(map[string]interface{}); ok {
+			for k, v := range props {
+				sub, ok := v.(map[string]interface{})
+				if !ok {
+					t.Errorf("%s.%s: property schema is not an object", path, k)
+					continue
+				}
+				walk(path+"."+k, sub)
+			}
+		}
+		if items, ok := s["items"].(map[string]interface{}); ok {
+			walk(path+"[]", items)
+		}
+		if ap, ok := s["additionalProperties"].(map[string]interface{}); ok {
+			walk(path+"{}", ap)
+		}
+		// Defaults must satisfy the schema they belong to.
+		if d, ok := s["default"]; ok {
+			if msg := schemaViolation(path, s, d, false); msg != "" {
+				t.Errorf("%s: default does not match the schema: %s", path, msg)
+			}
+		}
+	}
+	for name, tool := range r.tools {
+		walk(name, tool.Definition.InputSchema)
 	}
 }
