@@ -36,12 +36,16 @@ type writePlan struct {
 	TargetName string
 }
 
-func (p *writePlan) dryRunResult() *DryRunResult {
+func (p *writePlan) dryRunResult() (*DryRunResult, error) {
+	actions, err := p.plannedActions()
+	if err != nil {
+		return nil, err
+	}
 	dry, executed := true, false
-	return &DryRunResult{
+	result := &DryRunResult{
 		Tool:           p.Tool,
 		CurrentState:   p.CurrentState,
-		PlannedActions: p.plannedActions(),
+		PlannedActions: actions,
 		Warnings:       p.Warnings,
 		Blocked:        p.Blocked,
 		Requirements:   p.Requirements,
@@ -49,6 +53,18 @@ func (p *writePlan) dryRunResult() *DryRunResult {
 		DryRun:         &dry,
 		Executed:       &executed,
 	}
+	if len(p.Blocked) > 0 {
+		result.Status = "blocked"
+	}
+	return result, nil
+}
+
+func (p *writePlan) marshalDryRun() (string, error) {
+	result, err := p.dryRunResult()
+	if err != nil {
+		return "", err
+	}
+	return marshalJSON(result)
 }
 
 // blockedReply is nil when the plan can proceed. Otherwise it is an error
@@ -59,16 +75,20 @@ func (p *writePlan) blockedReply() error {
 		return nil
 	}
 	msg := strings.Join(p.Blocked, "; ")
-	body, err := marshalJSON(p.dryRunResult())
+	body, err := p.marshalDryRun()
 	if err != nil {
 		return fmt.Errorf("%s", msg)
 	}
 	return &mcp.ReplyError{Message: msg, Reply: body}
 }
 
-func (p *writePlan) plannedActions() []PlannedAction {
+func (p *writePlan) plannedActions() ([]PlannedAction, error) {
 	if p == nil || len(p.Blocked) > 0 {
-		return []PlannedAction{}
+		return []PlannedAction{}, p.paramNamesOK()
+	}
+	details, err := p.previewDetails()
+	if err != nil {
+		return nil, err
 	}
 	return []PlannedAction{
 		{
@@ -76,34 +96,48 @@ func (p *writePlan) plannedActions() []PlannedAction {
 			Description: p.Description,
 			Operation:   p.Operation,
 			Target:      p.Method,
-			Details:     p.previewDetails(),
+			Details:     details,
 		},
-	}
+	}, nil
 }
 
 // previewDetails is the preview view of the plan's CallParams. Named
 // fields come from ParamNames (or a single map argument) and are masked
 // with redact.Value. Positional values have no key for the redactor to
 // match, so a non-empty string is replaced with redact.Marker.
-func (p *writePlan) previewDetails() interface{} {
-	if p == nil {
+// paramNamesOK is nil when ParamNames is unused or has one name per
+// CallParams entry. A length mismatch must not be previewed: the old
+// param_N fallback skipped positional redaction and could show a secret.
+func (p *writePlan) paramNamesOK() error {
+	if p == nil || len(p.ParamNames) == 0 {
 		return nil
+	}
+	if len(p.ParamNames) != len(p.CallParams) {
+		return fmt.Errorf("ParamNames has %d entries, CallParams has %d", len(p.ParamNames), len(p.CallParams))
+	}
+	return nil
+}
+
+func (p *writePlan) previewDetails() (interface{}, error) {
+	if p == nil {
+		return nil, nil
+	}
+	if err := p.paramNamesOK(); err != nil {
+		return nil, err
 	}
 	if len(p.ParamNames) > 0 {
 		named := make(map[string]interface{}, len(p.ParamNames))
 		for i, name := range p.ParamNames {
-			if i < len(p.CallParams) {
-				named[name] = p.CallParams[i]
-			}
+			named[name] = p.CallParams[i]
 		}
-		return planPreviewDetails(named, nil)
+		return planPreviewDetails(named, nil), nil
 	}
 	if len(p.CallParams) == 1 {
 		if m, ok := p.CallParams[0].(map[string]interface{}); ok {
-			return planPreviewDetails(m, nil)
+			return planPreviewDetails(m, nil), nil
 		}
 	}
-	return planPreviewDetails(nil, p.CallParams)
+	return planPreviewDetails(nil, p.CallParams), nil
 }
 
 // planPreviewDetails is the preview view of a plan's parameters. Named

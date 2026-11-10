@@ -33,8 +33,10 @@ func TestConfirmationTokenBindsPlan(t *testing.T) {
 	}
 	if err := c.redeemWithPlan(tok, "stop_app", argsHash, changed); err == nil {
 		t.Fatal("expected a rejection when the planned params changed")
-	} else if !strings.Contains(err.Error(), "different planned operation") || !strings.Contains(err.Error(), "nothing was executed") {
+	} else if !strings.Contains(err.Error(), "different planned operation") {
 		t.Errorf("rejection should name the plan change, got %q", err)
+	} else if strings.Contains(err.Error(), "nothing was executed") {
+		t.Errorf("plan-mismatch reason should not include \"nothing was executed\" (the confirmation wrapper adds it): %q", err)
 	}
 
 	tok, err = c.issueWithPlan("stop_app", argsHash, preview)

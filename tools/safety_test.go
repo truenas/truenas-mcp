@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -159,12 +160,18 @@ func stubHandlers(r *Registry) map[string][]map[string]interface{} {
 	seen := map[string][]map[string]interface{}{}
 	for name, tool := range r.tools {
 		name := name
-		tool.Handler = func(_ context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
+		handler := func(_ context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
 			seen[name] = append(seen[name], args)
 			return `{"ok":true}`, nil
 		}
+		tool.Handler = handler
 		if tool.Plan != nil {
 			tool.Plan = stubToolPlan(name)
+		}
+		if tool.Execute != nil {
+			tool.Execute = func(ctx context.Context, client *truenas.Client, args map[string]interface{}, _ *writePlan) (string, error) {
+				return handler(ctx, client, args)
+			}
 		}
 		r.tools[name] = tool
 	}
@@ -479,6 +486,7 @@ func TestPreviewFailureDoesNotInviteConfirm(t *testing.T) {
 	tool.Handler = func(context.Context, *truenas.Client, map[string]interface{}) (string, error) {
 		return "", fmt.Errorf("app not found: plex")
 	}
+	tool.Plan = stubToolPlan("delete_app")
 	r.tools["delete_app"] = tool
 	_, err := r.CallTool(t.Context(), "delete_app", map[string]interface{}{"app_name": "plex"})
 	if err == nil || !strings.Contains(err.Error(), "Preview failed: app not found: plex. Resolve this before confirming") ||
@@ -659,14 +667,20 @@ func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
 	// the preview, with no planned action.
 	for id, want := range map[string]string{"running": "currently running", "protected": "keep flag is set"} {
 		out, err := r.CallTool(t.Context(), "delete_boot_environment", map[string]interface{}{"id": id, "dry_run": true})
-		if err != nil {
-			t.Fatalf("delete_boot_environment(%s) dry run: %v", id, err)
+		if err == nil {
+			t.Fatalf("delete_boot_environment(%s) blocked dry run returned no error:\n%s", id, out)
 		}
+		var reply *mcp.ReplyError
+		if !errors.As(err, &reply) {
+			t.Fatalf("delete_boot_environment(%s): want a ReplyError, got %T %v", id, err, err)
+		}
+		body := reply.Reply
 		var preview struct {
+			Status  string   `json:"status"`
 			Blocked []string `json:"blocked"`
 		}
-		if err := json.Unmarshal([]byte(out), &preview); err != nil {
-			t.Fatalf("delete_boot_environment(%s) preview is not JSON: %v\n%s", id, err, out)
+		if err := json.Unmarshal([]byte(body), &preview); err != nil {
+			t.Fatalf("delete_boot_environment(%s) preview is not JSON: %v\n%s", id, err, body)
 		}
 		found := false
 		for _, b := range preview.Blocked {
@@ -674,8 +688,8 @@ func TestDeleteBootEnvironmentDryRunAgainstFakeTrueNAS(t *testing.T) {
 				found = true
 			}
 		}
-		if !found || !strings.Contains(out, `"deletion_allowed": false`) || strings.Contains(out, "Delete boot environment") {
-			t.Errorf("delete_boot_environment(%s) preview:\n%s", id, out)
+		if preview.Status != "blocked" || !found || !strings.Contains(body, `"deletion_allowed": false`) || strings.Contains(body, "Delete boot environment") {
+			t.Errorf("delete_boot_environment(%s) preview:\n%s", id, body)
 		}
 	}
 	if calls := fake.called("boot.environment.destroy"); len(calls) != 0 {

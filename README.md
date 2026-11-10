@@ -670,7 +670,8 @@ invalidates every token). It is bound to the tool and to a SHA-256 hash of
 the canonical JSON of the arguments (keys sorted; `confirmation_token`,
 `dry_run` and the old `confirm` are left out; an optional argument sent as
 `null` counts as omitted). For tools that share a plan between preview and
-execute (`stop_app`, `delete_boot_environment`), the token is also bound to
+execute (`stop_app`, `delete_boot_environment`, `delete_app`,
+`delete_scrub_schedule`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
@@ -904,7 +905,11 @@ Returns:
 
 `stop_app` uses the same shared plan for its preview and the real `app.stop` call. A malformed app query or a non-string app state is a parse error, not a misleading "app not found" or a warning that prints the raw value. Stopping an already STOPPED app is not refused.
 
-`delete_boot_environment` also uses the shared plan. Preview `details` come from the same parameters as the real `boot.environment.destroy` call. A boot environment that is running, selected for the next reboot, or protected is listed in the plan's `blocked` field: an explicit dry run still returns that preview (with `deletion_allowed` false and no planned action), and a confirmed call is refused.
+`delete_boot_environment` also uses the shared plan. Preview `details` come from the same parameters as the real `boot.environment.destroy` call. A boot environment that is running, selected for the next reboot, or protected is listed in the plan's `blocked` field. An explicit dry run, a call without a token, and a confirmed call all return an error-shaped result with `"status": "blocked"` and the preview (with `deletion_allowed` false and no planned action); nothing is destroyed and no token is issued. `start_app` uses the same blocked dry-run shape when the app is RUNNING, DEPLOYING, or STOPPING.
+
+> **Breaking change:** an explicit `dry_run` of a blocked `delete_boot_environment` (the running, next-boot, or protected environment) now returns an error result with `"status": "blocked"` and the preview, instead of a successful preview. Clients that treated a blocked dry run as a normal result need to read the error result instead.
+
+`delete_app` and `delete_scrub_schedule` use the same shared plan for preview and the real call (`app.delete` and `pool.scrub.delete`). Preview `details` are derived from those parameters. Host-path datasets are not deleted with the app; the preview warns that data paths are preserved.
 
 **Benefits:**
 - See exactly what will change before committing
