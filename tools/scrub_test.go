@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/truenas/truenas-mcp/truenas"
 )
 
 func TestFormatCronSchedule(t *testing.T) {
@@ -915,5 +917,311 @@ func TestGetScrubStatusTimestampsUseNASTimezone(t *testing.T) {
 	}
 	if strings.Contains(out, "-08:00") || strings.Contains(out, "-07:00") {
 		t.Fatalf("response leaked Pacific host offset: %s", out)
+	}
+}
+
+func onlinePoolRecord() map[string]interface{} {
+	return map[string]interface{}{
+		"id": 1.0, "name": "tank", "size": 1.0e12, "status": "ONLINE",
+		"scan": map[string]interface{}{
+			"function": "SCRUB", "state": "FINISHED", "errors": 0.0,
+			"end_time": map[string]interface{}{"$date": float64(1794114002 * 1000)},
+		},
+	}
+}
+
+func offlinePoolRecord() map[string]interface{} {
+	return map[string]interface{}{
+		"id": 2.0, "name": "backup", "size": nil, "status": "OFFLINE",
+	}
+}
+
+func poolsWithOfflineNeighbor() map[string]interface{} {
+	return map[string]interface{}{
+		"system.info": map[string]interface{}{"hostname": "nas", "timezone": "America/New_York", "version": "25.10.0"},
+		"pool.query": []interface{}{
+			onlinePoolRecord(),
+			offlinePoolRecord(),
+		},
+		"pool.scrub.query": []interface{}{
+			map[string]interface{}{
+				"id": 1.0, "pool": 1.0, "pool_name": "tank", "enabled": true,
+				"threshold": 35.0,
+				"schedule": map[string]interface{}{
+					"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*",
+				},
+			},
+			// A schedule whose cron object is null must not panic query_scrub_schedules.
+			map[string]interface{}{
+				"id": 2.0, "pool": 2.0, "pool_name": "backup", "enabled": false,
+				"threshold": 35.0, "schedule": nil,
+			},
+		},
+		"core.get_jobs": []interface{}{},
+	}
+}
+
+// newFakeClientFilteringPools is newFakeClientWith plus a pool.query name
+// filter. The stock fake ignores filters and would always return the first
+// pool, so run_scrub("backup") would otherwise operate on "tank".
+func newFakeClientFilteringPools(t *testing.T, results map[string]interface{}) (*truenas.Client, *fakeMiddleware) {
+	t.Helper()
+	fake := &fakeMiddleware{results: results}
+	fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if method != "pool.query" {
+			return nil, nil, false
+		}
+		pools, ok := results["pool.query"].([]interface{})
+		if !ok {
+			return nil, nil, false
+		}
+		name := poolQueryNameFilter(params)
+		if name == "" {
+			return pools, nil, true
+		}
+		var matched []interface{}
+		for _, p := range pools {
+			m, _ := p.(map[string]interface{})
+			if m["name"] == name {
+				matched = append(matched, p)
+			}
+		}
+		return matched, nil, true
+	}
+	return newFakeClientFrom(t, fake)
+}
+
+func poolQueryNameFilter(params json.RawMessage) string {
+	var raw []interface{}
+	if err := json.Unmarshal(params, &raw); err != nil || len(raw) == 0 {
+		return ""
+	}
+	filters, ok := raw[0].([]interface{})
+	if !ok {
+		return ""
+	}
+	candidates := filters
+	if len(filters) == 3 {
+		if _, ok := filters[0].(string); ok {
+			candidates = []interface{}{filters}
+		}
+	}
+	for _, item := range candidates {
+		f, ok := item.([]interface{})
+		if !ok || len(f) != 3 {
+			continue
+		}
+		field, _ := f[0].(string)
+		op, _ := f[1].(string)
+		if field == "name" && op == "=" {
+			s, _ := f[2].(string)
+			return s
+		}
+	}
+	return ""
+}
+
+func findPoolByName(t *testing.T, resp map[string]interface{}, name string) map[string]interface{} {
+	t.Helper()
+	pools, ok := resp["pools"].([]interface{})
+	if !ok {
+		t.Fatalf("pools missing: %v", resp)
+	}
+	for _, p := range pools {
+		m, _ := p.(map[string]interface{})
+		if m["name"] == name {
+			return m
+		}
+	}
+	t.Fatalf("pool %q not in %v", name, pools)
+	return nil
+}
+
+func assertNotInternalError(t *testing.T, tool, out string, err error) {
+	t.Helper()
+	if err != nil && strings.Contains(err.Error(), "internal error") {
+		t.Fatalf("%s panicked: out=%s err=%v", tool, out, err)
+	}
+}
+
+// TestScrubToolsTolerateNullPoolSize is the regression for a pool.query
+// record with size=null (an OFFLINE / not-imported pool). One such pool
+// used to panic get_scrub_status for every pool, and run_scrub / dry-runs
+// on that pool.
+func TestScrubToolsTolerateNullPoolSize(t *testing.T) {
+	results := poolsWithOfflineNeighbor()
+	client, fake := newFakeClientFilteringPools(t, results)
+	r := NewRegistry(client, nil)
+
+	t.Run("get_scrub_status reports both pools", func(t *testing.T) {
+		out, err := r.CallTool("get_scrub_status", map[string]interface{}{})
+		assertNotInternalError(t, "get_scrub_status", out, err)
+		if err != nil {
+			t.Fatalf("get_scrub_status: %v", err)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatal(err)
+		}
+		tank := findPoolByName(t, resp, "tank")
+		if tank["status"] != "ONLINE" || tank["size_bytes"] != 1.0e12 || tank["size_human"] == "unknown" || tank["size_human"] == nil {
+			t.Errorf("healthy pool: %+v", tank)
+		}
+		backup := findPoolByName(t, resp, "backup")
+		if backup["status"] != "OFFLINE" {
+			t.Errorf("offline status = %v", backup["status"])
+		}
+		if backup["size_bytes"] != nil {
+			t.Errorf("offline size_bytes = %v, want null", backup["size_bytes"])
+		}
+		if backup["size_human"] != "unknown" {
+			t.Errorf("offline size_human = %v, want unknown", backup["size_human"])
+		}
+		cur, _ := tank["current_scrub"].(map[string]interface{})
+		if cur["running"] != false {
+			t.Errorf("tank current_scrub = %v, want not running", cur)
+		}
+	})
+
+	t.Run("get_scrub_status survives a null job id", func(t *testing.T) {
+		results := poolsWithOfflineNeighbor()
+		results["core.get_jobs"] = []interface{}{
+			map[string]interface{}{
+				"id": nil, "method": "pool.scrub.scrub", "state": "RUNNING",
+				"arguments":    []interface{}{"tank"},
+				"progress":     map[string]interface{}{"percent": 10.0, "description": "scrubbing"},
+				"time_started": map[string]interface{}{"$date": float64(1794114002 * 1000)},
+			},
+		}
+		client, _ := newFakeClientFilteringPools(t, results)
+		r := NewRegistry(client, nil)
+		out, err := r.CallTool("get_scrub_status", map[string]interface{}{})
+		assertNotInternalError(t, "get_scrub_status null job id", out, err)
+		if err != nil {
+			t.Fatalf("get_scrub_status: %v", err)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatal(err)
+		}
+		tank := findPoolByName(t, resp, "tank")
+		cur, _ := tank["current_scrub"].(map[string]interface{})
+		if cur["running"] != true {
+			t.Errorf("tank current_scrub = %v, want running", cur)
+		}
+		if _, ok := cur["job_id"]; ok {
+			t.Errorf("null job id should be omitted, got %v", cur["job_id"])
+		}
+		// The offline neighbor is still listed.
+		backup := findPoolByName(t, resp, "backup")
+		if backup["size_bytes"] != nil || backup["size_human"] != "unknown" {
+			t.Errorf("offline pool = %+v", backup)
+		}
+	})
+
+	t.Run("query_scrub_schedules survives a null schedule object", func(t *testing.T) {
+		out, err := r.CallTool("query_scrub_schedules", map[string]interface{}{})
+		assertNotInternalError(t, "query_scrub_schedules", out, err)
+		if err != nil {
+			t.Fatalf("query_scrub_schedules: %v", err)
+		}
+	})
+
+	t.Run("run_scrub refuses an offline pool", func(t *testing.T) {
+		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "backup"})
+		assertNotInternalError(t, "run_scrub", out, err)
+		if err == nil {
+			t.Fatalf("run_scrub on OFFLINE pool succeeded: %s", out)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "OFFLINE") || !strings.Contains(strings.ToLower(msg), "backup") {
+			t.Errorf("run_scrub error = %v, want OFFLINE and pool name", err)
+		}
+		if strings.Contains(out, `"scrub_started"`) && strings.Contains(out, "true") {
+			t.Errorf("run_scrub reported a started scrub: %s", out)
+		}
+		if calls := fake.called("pool.scrub.run"); len(calls) != 0 {
+			t.Errorf("pool.scrub.run was sent %d time(s)", len(calls))
+		}
+		if calls := fake.called("zpool.scrub.run"); len(calls) != 0 {
+			t.Errorf("zpool.scrub.run was sent %d time(s)", len(calls))
+		}
+	})
+
+	t.Run("run_scrub dry-run refuses an offline pool", func(t *testing.T) {
+		out, err := r.CallTool("run_scrub", map[string]interface{}{"pool": "backup", "dry_run": true})
+		assertNotInternalError(t, "run_scrub dry-run", out, err)
+		if err == nil {
+			t.Fatalf("run_scrub dry-run on OFFLINE pool succeeded: %s", out)
+		}
+		if !strings.Contains(err.Error(), "OFFLINE") {
+			t.Errorf("run_scrub dry-run error = %v, want OFFLINE", err)
+		}
+		if calls := fake.called("pool.scrub.run"); len(calls) != 0 {
+			t.Errorf("pool.scrub.run was sent from dry-run")
+		}
+	})
+
+	t.Run("create_scrub_schedule dry-run reports unknown size", func(t *testing.T) {
+		out, err := r.CallTool("create_scrub_schedule", map[string]interface{}{
+			"pool":     "backup",
+			"dry_run":  true,
+			"schedule": map[string]interface{}{"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*"},
+		})
+		assertNotInternalError(t, "create_scrub_schedule dry-run", out, err)
+		if err != nil {
+			t.Fatalf("create_scrub_schedule dry-run: %v", err)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatal(err)
+		}
+		cur, _ := resp["current_state"].(map[string]interface{})
+		if cur["pool_size"] != "unknown" {
+			t.Errorf("pool_size = %v, want unknown; body=%s", cur["pool_size"], out)
+		}
+		if et := resp["estimated_time"]; et != nil {
+			t.Errorf("estimated_time should be omitted when size is unknown: %v", et)
+		}
+		if calls := fake.called("pool.scrub.create"); len(calls) != 0 {
+			t.Errorf("pool.scrub.create was sent from dry-run")
+		}
+	})
+}
+
+func TestFloatField(t *testing.T) {
+	m := map[string]interface{}{"size": 1.0e12, "empty": nil, "text": "1"}
+	if v, ok := floatField(m, "size"); !ok || v != 1.0e12 {
+		t.Errorf("size = %v, %v", v, ok)
+	}
+	if _, ok := floatField(m, "empty"); ok {
+		t.Error("nil size should be missing")
+	}
+	if _, ok := floatField(m, "missing"); ok {
+		t.Error("missing key should be missing")
+	}
+	if _, ok := floatField(m, "text"); ok {
+		t.Error("string should be rejected")
+	}
+	if _, ok := floatField(nil, "size"); ok {
+		t.Error("nil map should be missing")
+	}
+}
+
+func TestPoolIsOffline(t *testing.T) {
+	if !poolIsOffline(offlinePoolRecord()) {
+		t.Error("OFFLINE pool not detected")
+	}
+	if poolIsOffline(onlinePoolRecord()) {
+		t.Error("ONLINE pool treated as offline")
+	}
+	if poolIsOffline(map[string]interface{}{"status": "DEGRADED", "size": 1.0e12}) {
+		t.Error("DEGRADED pool treated as offline")
+	}
+	if err := errIfPoolOffline(offlinePoolRecord(), "backup"); err == nil || !strings.Contains(err.Error(), "OFFLINE") || !strings.Contains(err.Error(), "nothing was started") {
+		t.Errorf("errIfPoolOffline = %v", err)
+	}
+	if err := errIfPoolOffline(onlinePoolRecord(), "tank"); err != nil {
+		t.Errorf("ONLINE refused: %v", err)
 	}
 }
