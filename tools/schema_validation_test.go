@@ -155,8 +155,9 @@ func wrongTypeValues(types []string) map[string]interface{} {
 
 // TestEveryArgumentRejectsTheWrongType is the regression for issue #105: a
 // declared argument with the wrong JSON type (a string "true" for a boolean,
-// "10G" for an integer quota, null, an object, ...) was dropped and the
-// call ran with the default. For every tool and every declared top-level
+// "10G" for an integer quota, an object, ...) was dropped and the call ran
+// with the default. null is a wrong type only for required arguments and
+// for dry_run and confirm; on any other argument it means omitted. For every tool and every declared top-level
 // argument, each wrong-typed value must be refused before the handler runs,
 // and the error must name the argument without echoing the value.
 func TestEveryArgumentRejectsTheWrongType(t *testing.T) {
@@ -172,7 +173,16 @@ func TestEveryArgumentRejectsTheWrongType(t *testing.T) {
 				t.Errorf("%s.%s declares no type", name, key)
 				continue
 			}
+			required := map[string]bool{}
+			for _, k := range testRequired(tool.Definition.InputSchema["required"]) {
+				required[k] = true
+			}
 			for label, bad := range wrongTypeValues(types) {
+				if bad == nil && !required[key] && key != "confirm" && key != "dry_run" {
+					// null on an optional argument means omitted; see
+					// TestNullOptionalArgumentsAreOmitted.
+					continue
+				}
 				args := minimalArgs(tool)
 				args[key] = bad
 				if hasParam(tool, "confirm") && key != "confirm" {
@@ -284,7 +294,6 @@ func TestWrongTypedArgumentsSendNothing(t *testing.T) {
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "readonly": "true"}, "readonly must be a boolean"},
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "create_ancestors": "false"}, "create_ancestors must be a boolean"},
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "create_ancestors": 0.0}, "create_ancestors must be a boolean"},
-		{"create_dataset", map[string]interface{}{"name": "tank/y", "create_ancestors": nil}, "create_ancestors must be a boolean"},
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "create_ancestors": "false", "dry_run": true}, "create_ancestors must be a boolean"},
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "quota": 1.5}, "quota must be an integer"},
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "compression": "lz4"}, "compression must be one of"},
@@ -386,6 +395,205 @@ func TestAppACLEnableMustBeBoolean(t *testing.T) {
 			if n := len(fake.called("app.create")) + len(fake.called("app.update")); n != 0 {
 				t.Errorf("%s acl_enable=%s: %d write call(s)", tool, label, n)
 			}
+		}
+	}
+}
+
+// TestNullOptionalArgumentsAreOmitted: null on an optional argument, at the
+// top level or inside a nested object (also in an array), is treated as if
+// the key were absent: the call is accepted and the handler does not see
+// the key. The caller's map is not modified.
+func TestNullOptionalArgumentsAreOmitted(t *testing.T) {
+	r := NewRegistry(nil, nil)
+	seen := stubHandlers(r)
+	for name, tool := range r.tools {
+		props, _ := tool.Definition.InputSchema["properties"].(map[string]interface{})
+		required := map[string]bool{}
+		for _, k := range testRequired(tool.Definition.InputSchema["required"]) {
+			required[k] = true
+		}
+		for key := range props {
+			if required[key] || key == "confirm" || key == "dry_run" {
+				continue
+			}
+			args := minimalArgs(tool)
+			args[key] = nil
+			before := len(seen[name])
+			if _, err := r.CallTool(t.Context(), name, args); err != nil {
+				t.Errorf("%s %s=null: %v", name, key, err)
+				continue
+			}
+			if _, still := args[key]; !still {
+				t.Errorf("%s: the caller's arguments were modified", name)
+			}
+			calls := seen[name][before:]
+			if len(calls) == 0 {
+				t.Errorf("%s %s=null: handler did not run", name, key)
+				continue
+			}
+			for _, c := range calls {
+				if _, present := c[key]; present {
+					t.Errorf("%s %s=null: handler saw the key", name, key)
+				}
+			}
+		}
+	}
+
+	// Nested: an optional field inside an object, and inside an array item.
+	nested := []struct {
+		tool string
+		args map[string]interface{}
+		get  func(map[string]interface{}) map[string]interface{}
+		key  string
+	}{
+		{"create_smb_share", map[string]interface{}{"name": "s", "path": "/mnt/tank/s", "audit": map[string]interface{}{"enable": nil, "watch_list": []interface{}{"g"}}},
+			func(a map[string]interface{}) map[string]interface{} { return a["audit"].(map[string]interface{}) }, "enable"},
+		{"configure_directory_service", map[string]interface{}{"enable": true, "service_type": "LDAP", "confirm": true,
+			"credential":    map[string]interface{}{"credential_type": "LDAP_ANONYMOUS", "binddn": nil},
+			"configuration": map[string]interface{}{"server_urls": []interface{}{"ldaps://ldap.example.com"}, "basedn": "dc=example,dc=com", "starttls": nil}},
+			func(a map[string]interface{}) map[string]interface{} {
+				return a["configuration"].(map[string]interface{})
+			}, "starttls"},
+		{"create_scrub_schedule", map[string]interface{}{"pool": "tank", "schedule": map[string]interface{}{"hour": "2", "dow": nil}},
+			func(a map[string]interface{}) map[string]interface{} { return a["schedule"].(map[string]interface{}) }, "dow"},
+	}
+	for _, tc := range nested {
+		before := len(seen[tc.tool])
+		if _, err := r.CallTool(t.Context(), tc.tool, tc.args); err != nil {
+			t.Errorf("%s nested null: %v", tc.tool, err)
+			continue
+		}
+		if _, still := tc.get(tc.args)[tc.key]; !still {
+			t.Errorf("%s: the caller's nested arguments were modified", tc.tool)
+		}
+		calls := seen[tc.tool][before:]
+		if len(calls) == 0 {
+			t.Errorf("%s nested null: handler did not run", tc.tool)
+			continue
+		}
+		if _, present := tc.get(calls[len(calls)-1])[tc.key]; present {
+			t.Errorf("%s: handler saw nested %s=null", tc.tool, tc.key)
+		}
+	}
+	// The credential's other null optional field was dropped too.
+	if calls := seen["configure_directory_service"]; len(calls) > 0 {
+		if _, present := calls[len(calls)-1]["credential"].(map[string]interface{})["binddn"]; present {
+			t.Error("configure_directory_service: handler saw credential.binddn=null")
+		}
+	}
+
+	// Inside array items: user_properties items require key and value, so
+	// a null there is refused as required, not dropped.
+	_, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{"name": "tank/y",
+		"user_properties": []interface{}{map[string]interface{}{"key": "org:a", "value": nil}}})
+	if err == nil || !strings.Contains(err.Error(), "user_properties[0].value is required") {
+		t.Errorf("null required item field: err = %v", err)
+	}
+}
+
+// TestNullRequiredAndSafetyFlagsRefused: null is not "omitted" for required
+// arguments (reported as required) or for dry_run and confirm (not a
+// boolean), at any level.
+func TestNullRequiredAndSafetyFlagsRefused(t *testing.T) {
+	r := NewRegistry(nil, nil)
+	seen := stubHandlers(r)
+	for name, tool := range r.tools {
+		for _, key := range testRequired(tool.Definition.InputSchema["required"]) {
+			args := minimalArgs(tool)
+			args[key] = nil
+			if hasParam(tool, "confirm") {
+				args["confirm"] = true
+			}
+			_, err := r.CallTool(t.Context(), name, args)
+			if err == nil || !strings.Contains(err.Error(), key+" is required") || !strings.HasSuffix(err.Error(), "nothing was executed") {
+				t.Errorf("%s %s=null: err = %v", name, key, err)
+			}
+		}
+		for _, flag := range []string{"dry_run", "confirm"} {
+			if !hasParam(tool, flag) {
+				continue
+			}
+			args := minimalArgs(tool)
+			args[flag] = nil
+			_, err := r.CallTool(t.Context(), name, args)
+			if err == nil || !strings.Contains(err.Error(), flag+" must be a JSON boolean") {
+				t.Errorf("%s %s=null: err = %v", name, flag, err)
+			}
+		}
+		if len(seen[name]) != 0 {
+			t.Errorf("%s: handler ran", name)
+		}
+	}
+	// Nested required field.
+	_, err := r.CallTool(t.Context(), "leave_directory_service", map[string]interface{}{"confirm": true,
+		"credential": map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "u", "password": nil}})
+	if err == nil || !strings.Contains(err.Error(), "credential.password is required") {
+		t.Errorf("nested required null: err = %v", err)
+	}
+}
+
+// TestListAlertsNullFiltersThroughCallTool: dismissed and include_dismissed
+// given as null behave as omitted (active alerts only), as the handler has
+// always documented.
+func TestListAlertsNullFiltersThroughCallTool(t *testing.T) {
+	client, fake := newFakeClientWith(t, map[string]interface{}{
+		"alert.list": []interface{}{
+			map[string]interface{}{"uuid": "a", "level": "WARNING", "dismissed": false, "formatted": "active"},
+			map[string]interface{}{"uuid": "b", "level": "WARNING", "dismissed": true, "formatted": "old"},
+		},
+	}, nil)
+	r := NewRegistry(client, nil)
+	out, err := r.CallTool(t.Context(), "list_alerts", map[string]interface{}{"dismissed": nil, "include_dismissed": nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "active") || strings.Contains(out, `"old"`) {
+		t.Errorf("null filters did not list active alerts only: %s", out)
+	}
+	if len(fake.called("alert.list")) != 1 {
+		t.Errorf("alert.list not called once")
+	}
+}
+
+// TestSizeAndCountArgumentsRejectNegatives: byte sizes, scrub thresholds
+// and result limits that the handlers cannot use are refused instead of
+// being silently ignored or replaced by the default.
+func TestSizeAndCountArgumentsRejectNegatives(t *testing.T) {
+	r := NewRegistry(nil, nil)
+	seen := stubHandlers(r)
+	for _, tc := range []struct {
+		tool string
+		args map[string]interface{}
+		want string
+	}{
+		{"create_dataset", map[string]interface{}{"name": "tank/y", "quota": -1.0}, "quota must be at least 0"},
+		{"create_dataset", map[string]interface{}{"name": "tank/y", "refquota": -1073741824.0}, "refquota must be at least 0"},
+		{"create_dataset", map[string]interface{}{"name": "tank/y", "type": "VOLUME", "volsize": 0.0}, "volsize must be at least 1"},
+		{"create_dataset", map[string]interface{}{"name": "tank/y", "type": "VOLUME", "volsize": -1.0}, "volsize must be at least 1"},
+		{"create_scrub_schedule", map[string]interface{}{"pool": "tank", "schedule": map[string]interface{}{}, "threshold": -1.0}, "threshold must be at least 0"},
+		{"run_scrub", map[string]interface{}{"pool": "tank", "threshold": -7.0}, "threshold must be at least 0"},
+		{"query_datasets", map[string]interface{}{"limit": 0.0}, "limit must be at least 1"},
+		{"query_snapshots", map[string]interface{}{"limit": -5.0}, "limit must be at least 1"},
+		{"query_boot_environments", map[string]interface{}{"limit": 0.0}, "limit must be at least 1"},
+		{"query_vms", map[string]interface{}{"limit": 0.0}, "limit must be at least 1"},
+		{"search_app_catalog", map[string]interface{}{"limit": 0.0}, "limit must be at least 1"},
+		{"tasks_list", map[string]interface{}{"limit": -1.0}, "limit must be at least 1"},
+	} {
+		_, err := r.CallTool(t.Context(), tc.tool, tc.args)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s %v: err = %v, want %q", tc.tool, tc.args, err, tc.want)
+		}
+		if len(seen[tc.tool]) != 0 {
+			t.Errorf("%s: handler ran", tc.tool)
+		}
+	}
+	// The lowest allowed values still pass.
+	for _, args := range []map[string]interface{}{
+		{"name": "tank/y", "quota": 0.0, "refquota": 0.0},
+		{"name": "tank/y", "type": "VOLUME", "volsize": 1.0},
+	} {
+		if _, err := r.CallTool(t.Context(), "create_dataset", args); err != nil {
+			t.Errorf("%v: %v", args, err)
 		}
 	}
 }

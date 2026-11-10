@@ -203,6 +203,7 @@ func (r *Registry) registerTools() {
 					"limit": map[string]interface{}{
 						"type":        "integer",
 						"description": "Optional: Maximum number of boot environments to return (default: 50 for manageable response size)",
+						"minimum":     1,
 					},
 				},
 			},
@@ -324,6 +325,7 @@ func (r *Registry) registerTools() {
 					"threshold": map[string]interface{}{
 						"type":        "integer",
 						"description": "Optional: Days between scrubs (default: 35)",
+						"minimum":     0,
 						"default":     35,
 					},
 					"description": map[string]interface{}{
@@ -361,6 +363,7 @@ func (r *Registry) registerTools() {
 					"threshold": map[string]interface{}{
 						"type":        "integer",
 						"description": "Optional: skip if the last scrub finished less than (N-1)*24h ago, matching TrueNAS (default: 7; 0 or 1 never skips)",
+						"minimum":     0,
 						"default":     7,
 					},
 					"dry_run": map[string]interface{}{
@@ -653,6 +656,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"limit": map[string]interface{}{
 						"type":        "integer",
 						"description": "Optional: Maximum number of datasets to return (default: 50, maximum: 1000)",
+						"minimum":     1,
 					},
 					"order_by": map[string]interface{}{
 						"type":        "string",
@@ -688,6 +692,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"limit": map[string]interface{}{
 						"type":        "integer",
 						"description": "Optional: Maximum number of snapshots to return (default: 50, maximum: 1000)",
+						"minimum":     1,
 					},
 					"order_by": map[string]interface{}{
 						"type":        "string",
@@ -752,6 +757,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"limit": map[string]interface{}{
 						"type":        "integer",
 						"description": "Optional: Maximum number of VMs to return (default: 50)",
+						"minimum":     1,
 					},
 					"order_by": map[string]interface{}{
 						"type":        "string",
@@ -785,6 +791,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"volsize": map[string]interface{}{
 						"type":        "integer",
 						"description": "Required for VOLUME type: size in bytes (e.g., 1099511627776 for 1TB)",
+						"minimum":     1,
 					},
 					"share_type": map[string]interface{}{
 						"type":        "string",
@@ -830,10 +837,12 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"quota": map[string]interface{}{
 						"type":        "integer",
 						"description": "Maximum space for dataset + children in bytes (e.g., 1099511627776 for 1TB)",
+						"minimum":     0,
 					},
 					"refquota": map[string]interface{}{
 						"type":        "integer",
 						"description": "Maximum space for dataset only (excluding children) in bytes",
+						"minimum":     0,
 					},
 					"create_ancestors": map[string]interface{}{
 						"type":        "boolean",
@@ -1472,6 +1481,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					"limit": map[string]interface{}{
 						"type":        "integer",
 						"description": "Maximum results to return (default: 20)",
+						"minimum":     1,
 						"default":     20,
 					},
 				},
@@ -1813,17 +1823,17 @@ Returns task_id for tracking progress with tasks_get.
 					// No enum: state is case-insensitive, which an enum
 					// cannot express. The handler checks the value.
 					"state": map[string]interface{}{
-						"type":        []string{"string", "null"},
-						"description": "Filter by job state: RUNNING, WAITING, SUCCESS, FAILED, ABORTED or all, case-insensitive (default: all states; all is reported as state_filter \"ALL\"). null is the same as omitting it",
+						"type":        "string",
+						"description": "Filter by job state: RUNNING, WAITING, SUCCESS, FAILED, ABORTED or all, case-insensitive (default: all states; all is reported as state_filter \"ALL\")",
 						"default":     "all",
 					},
 					"method": map[string]interface{}{
-						"type":        []string{"string", "null"},
+						"type":        "string",
 						"description": "Optional: only return jobs whose method is exactly this name, e.g. app.upgrade or pool.scrub.scrub",
 					},
 					"limit": map[string]interface{}{
-						"type":        []string{"integer", "null"},
-						"description": "Maximum number of jobs to return (default: 50; null means the default). The response has has_more (and total, the number of jobs matching the state and method filters) when more exist than were returned. Each job entry is at most 4 KiB. Must be an integer from 1 to 9999; other values are rejected with an error and nothing is queried.",
+						"type":        "integer",
+						"description": "Maximum number of jobs to return (default: 50). The response has has_more (and total, the number of jobs matching the state and method filters) when more exist than were returned. Each job entry is at most 4 KiB. Must be an integer from 1 to 9999; other values are rejected with an error and nothing is queried.",
 						"default":     50,
 						"minimum":     1,
 						"maximum":     maxQueryJobsLimit,
@@ -1895,6 +1905,7 @@ Returns task_id for tracking progress with tasks_get.
 					"limit": map[string]interface{}{
 						"type":        "integer",
 						"description": "Maximum number of tasks to return (default: 50)",
+						"minimum":     1,
 						"default":     50,
 					},
 				},
@@ -1989,6 +2000,9 @@ func (r *Registry) CallTool(ctx context.Context, name string, args map[string]in
 	// Then check the values of the declared arguments against the schema:
 	// types, enums, required arguments and ranges. A wrong-typed value
 	// must not be dropped in favour of a default.
+	// null on an optional argument means omitted. Drop it (in a copy)
+	// before validation, so the handler sees the default.
+	args = dropNullOptionals(tool.Definition.InputSchema, args)
 	if err := validateArgValues(name, tool, args); err != nil {
 		return "", err
 	}

@@ -163,32 +163,145 @@ const maxReportedEnumValues = 12
 var schemaPatterns sync.Map // string -> *regexp.Regexp
 
 func validateArgValues(name string, tool Tool, args map[string]interface{}) error {
-	msg := schemaViolation("", tool.Definition.InputSchema, args, true)
+	msg := schemaViolation(nil, tool.Definition.InputSchema, args, true)
 	if msg == "" {
 		return nil
 	}
 	return fmt.Errorf("invalid arguments for tool %s: %s; nothing was executed", name, msg)
 }
 
+// nullRefusedArgs are top-level arguments whose null is never treated as
+// omitted: a null dry_run or confirm is refused as not a boolean.
+var nullRefusedArgs = map[string]bool{"dry_run": true, "confirm": true}
+
+// dropNullOptionals treats null as omitted for optional arguments: it
+// returns args without every declared, non-required key whose value is
+// null, at the top level and inside nested objects (including objects in
+// arrays). Required keys keep their null, so validation reports them as
+// required; undeclared keys are kept, so they are still reported as
+// unknown or not allowed; dry_run and confirm are kept, so a null is
+// refused. args itself is never modified: a copy is made where anything
+// is dropped.
+func dropNullOptionals(schema map[string]interface{}, args map[string]interface{}) map[string]interface{} {
+	out, _ := dropNullsInObject(schema, args, true)
+	return out
+}
+
+func dropNullsInObject(schema map[string]interface{}, obj map[string]interface{}, top bool) (map[string]interface{}, bool) {
+	props, _ := schema["properties"].(map[string]interface{})
+	if len(obj) == 0 || len(props) == 0 {
+		return obj, false
+	}
+	required := map[string]bool{}
+	for _, k := range schemaRequired(schema["required"]) {
+		required[k] = true
+	}
+	var out map[string]interface{}
+	set := func(k string, v interface{}, drop bool) {
+		if out == nil {
+			out = make(map[string]interface{}, len(obj))
+			for k2, v2 := range obj {
+				out[k2] = v2
+			}
+		}
+		if drop {
+			delete(out, k)
+		} else {
+			out[k] = v
+		}
+	}
+	for k, v := range obj {
+		sub, declared := props[k].(map[string]interface{})
+		if !declared {
+			continue
+		}
+		if v == nil {
+			if !required[k] && !(top && nullRefusedArgs[k]) {
+				set(k, nil, true)
+			}
+			continue
+		}
+		if nv, changed := dropNullsInValue(sub, v); changed {
+			set(k, nv, false)
+		}
+	}
+	if out == nil {
+		return obj, false
+	}
+	return out, true
+}
+
+func dropNullsInValue(schema map[string]interface{}, v interface{}) (interface{}, bool) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		return dropNullsInObject(schema, val, false)
+	case []interface{}:
+		items, ok := schema["items"].(map[string]interface{})
+		if !ok {
+			return v, false
+		}
+		var out []interface{}
+		for i, item := range val {
+			if ni, changed := dropNullsInValue(items, item); changed {
+				if out == nil {
+					out = append([]interface{}(nil), val...)
+				}
+				out[i] = ni
+			}
+		}
+		if out == nil {
+			return v, false
+		}
+		return out, true
+	}
+	return v, false
+}
+
+// argPath is an argument path built lazily: its text is only produced
+// when an error is reported.
+type argPath struct {
+	parent *argPath
+	key    string // object key; used when index < 0
+	index  int
+}
+
+func (p *argPath) child(key string) *argPath { return &argPath{parent: p, key: key, index: -1} }
+func (p *argPath) item(i int) *argPath       { return &argPath{parent: p, index: i} }
+
+// String renders the path. A key that is not made of plain characters is
+// not echoed: it comes from the client and may be anything.
+func (p *argPath) String() string {
+	if p == nil {
+		return "arguments"
+	}
+	if p.index >= 0 {
+		return fmt.Sprintf("%s[%d]", p.parent.String(), p.index)
+	}
+	key := p.key
+	if !safeArgName.MatchString(key) || len(key) > maxArgNameLen {
+		key = "(field with invalid characters)"
+	}
+	if p.parent == nil {
+		return key
+	}
+	return p.parent.String() + "." + key
+}
+
 // schemaViolation returns a short description of the first way v does not
 // match schema, or "" when it matches. path is the argument path so far
-// ("" at the top level). Properties are visited in sorted order so the
+// (nil at the top level). Properties are visited in sorted order so the
 // message is deterministic.
-func schemaViolation(path string, schema map[string]interface{}, v interface{}, top bool) string {
+func schemaViolation(path *argPath, schema map[string]interface{}, v interface{}, top bool) string {
 	if schema == nil {
 		return ""
-	}
-	subject := path
-	if subject == "" {
-		subject = "arguments"
 	}
 	if t, ok := schema["type"]; ok {
 		if !top || v != nil {
 			if !matchesSchemaType(t, v) {
 				if r := boundedIntegerText(t, schema); r != "" {
-					return fmt.Sprintf("%s must be %s", subject, r)
+					return fmt.Sprintf("%s must be %s", path, r)
 				}
-				return fmt.Sprintf("%s must be %s", subject, describeSchemaType(t))
+				return fmt.Sprintf("%s must be %s", path, describeSchemaType(t))
 			}
 		}
 	}
@@ -197,7 +310,7 @@ func schemaViolation(path string, schema map[string]interface{}, v interface{}, 
 		v = map[string]interface{}{}
 	}
 	if enum, ok := schema["enum"].([]interface{}); ok && !inEnum(enum, v) {
-		return fmt.Sprintf("%s must be one of %s", subject, enumList(enum))
+		return fmt.Sprintf("%s must be one of %s", path, enumList(enum))
 	}
 	if enum, ok := schema["enum"].([]string); ok {
 		list := make([]interface{}, len(enum))
@@ -205,26 +318,26 @@ func schemaViolation(path string, schema map[string]interface{}, v interface{}, 
 			list[i] = e
 		}
 		if !inEnum(list, v) {
-			return fmt.Sprintf("%s must be one of %s", subject, enumList(list))
+			return fmt.Sprintf("%s must be one of %s", path, enumList(list))
 		}
 	}
 	if c, ok := schema["const"]; ok && !schemaEqual(c, v) {
-		return fmt.Sprintf("%s must be %s", subject, enumList([]interface{}{c}))
+		return fmt.Sprintf("%s must be %s", path, enumList([]interface{}{c}))
 	}
 
 	switch val := v.(type) {
 	case string:
 		n := utf8.RuneCountInString(val)
 		if min, ok := schemaNumber(schema["minLength"]); ok && float64(n) < min {
-			return fmt.Sprintf("%s must be at least %s characters long", subject, formatSchemaNumber(min))
+			return fmt.Sprintf("%s must be at least %s characters long", path, formatSchemaNumber(min))
 		}
 		if max, ok := schemaNumber(schema["maxLength"]); ok && float64(n) > max {
-			return fmt.Sprintf("%s must be at most %s characters long", subject, formatSchemaNumber(max))
+			return fmt.Sprintf("%s must be at most %s characters long", path, formatSchemaNumber(max))
 		}
 		if p, ok := schema["pattern"].(string); ok {
 			re, err := schemaPattern(p)
 			if err != nil || !re.MatchString(val) {
-				return fmt.Sprintf("%s does not match the required pattern %s", subject, p)
+				return fmt.Sprintf("%s does not match the required pattern %s", path, p)
 			}
 		}
 	case map[string]interface{}:
@@ -232,7 +345,7 @@ func schemaViolation(path string, schema map[string]interface{}, v interface{}, 
 	case []interface{}:
 		if items, ok := schema["items"].(map[string]interface{}); ok {
 			for i, item := range val {
-				if msg := schemaViolation(fmt.Sprintf("%s[%d]", subject, i), items, item, false); msg != "" {
+				if msg := schemaViolation(path.item(i), items, item, false); msg != "" {
 					return msg
 				}
 			}
@@ -243,23 +356,24 @@ func schemaViolation(path string, schema map[string]interface{}, v interface{}, 
 			max, hasMax := schemaNumber(schema["maximum"])
 			if (hasMin && f < min) || (hasMax && f > max) {
 				if r := boundedIntegerText(schema["type"], schema); r != "" {
-					return fmt.Sprintf("%s must be %s", subject, r)
+					return fmt.Sprintf("%s must be %s", path, r)
 				}
 				if hasMin && f < min {
-					return fmt.Sprintf("%s must be at least %s", subject, formatSchemaNumber(min))
+					return fmt.Sprintf("%s must be at least %s", path, formatSchemaNumber(min))
 				}
-				return fmt.Sprintf("%s must be at most %s", subject, formatSchemaNumber(max))
+				return fmt.Sprintf("%s must be at most %s", path, formatSchemaNumber(max))
 			}
 		}
 	}
 	return ""
 }
 
-func objectViolation(path string, schema map[string]interface{}, obj map[string]interface{}) string {
+func objectViolation(path *argPath, schema map[string]interface{}, obj map[string]interface{}) string {
 	props, _ := schema["properties"].(map[string]interface{})
 	for _, key := range schemaRequired(schema["required"]) {
-		if _, ok := obj[key]; !ok {
-			return fmt.Sprintf("%s is required", joinArgPath(path, key))
+		// A required argument given as null is reported as missing.
+		if v, ok := obj[key]; !ok || v == nil {
+			return fmt.Sprintf("%s is required", path.child(key))
 		}
 	}
 	keys := make([]string, 0, len(obj))
@@ -272,9 +386,9 @@ func objectViolation(path string, schema map[string]interface{}, obj map[string]
 		if !declared {
 			switch ap := schema["additionalProperties"].(type) {
 			case bool:
-				if !ap && path != "" {
+				if !ap && path != nil {
 					// Top-level unknown names are reported by validateArgs.
-					return fmt.Sprintf("%s is not an allowed field", joinArgPath(path, key))
+					return fmt.Sprintf("%s is not an allowed field", path.child(key))
 				}
 				continue
 			case map[string]interface{}:
@@ -283,23 +397,11 @@ func objectViolation(path string, schema map[string]interface{}, obj map[string]
 				continue
 			}
 		}
-		if msg := schemaViolation(joinArgPath(path, key), sub, obj[key], false); msg != "" {
+		if msg := schemaViolation(path.child(key), sub, obj[key], false); msg != "" {
 			return msg
 		}
 	}
 	return ""
-}
-
-// joinArgPath appends key to path. A key that is not made of plain
-// characters is not echoed: it comes from the client and may be anything.
-func joinArgPath(path, key string) string {
-	if !safeArgName.MatchString(key) || len(key) > maxArgNameLen {
-		key = "(field with invalid characters)"
-	}
-	if path == "" {
-		return key
-	}
-	return path + "." + key
 }
 
 func schemaRequired(v interface{}) []string {

@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"testing"
@@ -382,55 +384,274 @@ func TestUnknownArgsErrorKeepsDirectoryServiceMigrationHint(t *testing.T) {
 }
 
 // TestToolSchemasUseOnlySupportedKeywords keeps the validator honest: a
-// schema keyword it does not implement would otherwise be silently
-// ignored. Every pattern must compile, and every property must declare a
-// type.
+// schema keyword it does not implement, or a keyword whose value has a Go
+// type it does not read (minimum as a string, enum as a []int, ...), would
+// otherwise be silently ignored. Every pattern must compile, every property
+// must declare a type, and defaults must match their own schema.
 func TestToolSchemasUseOnlySupportedKeywords(t *testing.T) {
 	r := NewRegistry(nil, nil)
-	var walk func(path string, s map[string]interface{})
-	walk = func(path string, s map[string]interface{}) {
-		keys := make([]string, 0, len(s))
-		for k := range s {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			if !supportedSchemaKeywords[k] {
-				t.Errorf("%s: unsupported schema keyword %q", path, k)
-			}
-		}
-		if _, ok := s["type"]; !ok {
-			t.Errorf("%s: no type", path)
-		}
-		if p, ok := s["pattern"].(string); ok {
-			if _, err := schemaPattern(p); err != nil {
-				t.Errorf("%s: pattern does not compile: %v", path, err)
-			}
-		}
-		if props, ok := s["properties"].(map[string]interface{}); ok {
-			for k, v := range props {
-				sub, ok := v.(map[string]interface{})
-				if !ok {
-					t.Errorf("%s.%s: property schema is not an object", path, k)
-					continue
-				}
-				walk(path+"."+k, sub)
-			}
-		}
-		if items, ok := s["items"].(map[string]interface{}); ok {
-			walk(path+"[]", items)
-		}
-		if ap, ok := s["additionalProperties"].(map[string]interface{}); ok {
-			walk(path+"{}", ap)
-		}
-		// Defaults must satisfy the schema they belong to.
-		if d, ok := s["default"]; ok {
-			if msg := schemaViolation(path, s, d, false); msg != "" {
-				t.Errorf("%s: default does not match the schema: %s", path, msg)
-			}
-		}
-	}
 	for name, tool := range r.tools {
-		walk(name, tool.Definition.InputSchema)
+		for _, problem := range schemaKeywordProblems(name, tool.Definition.InputSchema) {
+			t.Error(problem)
+		}
 	}
+}
+
+// TestSchemaKeywordGuardCatchesBadKeywords checks that the guard above
+// really flags wrongly typed keyword values.
+func TestSchemaKeywordGuardCatchesBadKeywords(t *testing.T) {
+	for label, s := range map[string]map[string]interface{}{
+		"unknown keyword":             {"type": "string", "format": "uuid"},
+		"no type":                     {"description": "x"},
+		"unknown type name":           {"type": "int"},
+		"type of wrong Go type":       {"type": 1},
+		"minimum as string":           {"type": "integer", "minimum": "0"},
+		"maximum as int64":            {"type": "integer", "maximum": int64(5)},
+		"minimum on string":           {"type": "string", "minimum": 0},
+		"minimum above maximum":       {"type": "integer", "minimum": 5, "maximum": 1},
+		"enum as []int":               {"type": "integer", "enum": []int{1, 2}},
+		"enum of wrong type":          {"type": "string", "enum": []interface{}{"a", 1.0}},
+		"empty enum":                  {"type": "string", "enum": []string{}},
+		"string enum on integer":      {"type": "integer", "enum": []string{"1"}},
+		"const of wrong type":         {"type": "boolean", "const": "true"},
+		"maxLength fraction":          {"type": "string", "maxLength": 1.5},
+		"maxLength on integer":        {"type": "integer", "maxLength": 3},
+		"pattern not a string":        {"type": "string", "pattern": 1},
+		"pattern does not compile":    {"type": "string", "pattern": "("},
+		"required as string":          {"type": "object", "required": "a", "properties": map[string]interface{}{"a": map[string]interface{}{"type": "string"}}},
+		"required undeclared":         {"type": "object", "required": []string{"b"}, "properties": map[string]interface{}{"a": map[string]interface{}{"type": "string"}}},
+		"properties wrong Go type":    {"type": "object", "properties": map[string]map[string]interface{}{}},
+		"property not an object":      {"type": "object", "properties": map[string]interface{}{"a": "string"}},
+		"additionalProperties string": {"type": "object", "additionalProperties": "no"},
+		"items wrong Go type":         {"type": "array", "items": []interface{}{}},
+		"items on string":             {"type": "string", "items": map[string]interface{}{"type": "string"}},
+		"description not string":      {"type": "string", "description": 1},
+		"default of wrong type":       {"type": "integer", "default": "50"},
+	} {
+		if problems := schemaKeywordProblems(label, s); len(problems) == 0 {
+			t.Errorf("%s: not flagged", label)
+		}
+	}
+	good := map[string]interface{}{"type": "object", "required": []string{"a"}, "additionalProperties": false, "properties": map[string]interface{}{
+		"a": map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 10.0, "default": 5},
+		"b": map[string]interface{}{"type": "string", "enum": []string{"x"}, "pattern": "^x$", "maxLength": 3},
+		"c": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": []interface{}{"y"}}},
+	}}
+	if problems := schemaKeywordProblems("good", good); len(problems) != 0 {
+		t.Errorf("good schema flagged: %v", problems)
+	}
+}
+
+// schemaKeywordProblems lists every keyword in s (recursively) that the
+// validator would not enforce as written.
+func schemaKeywordProblems(path string, s map[string]interface{}) []string {
+	var problems []string
+	bad := func(format string, args ...interface{}) {
+		problems = append(problems, path+": "+fmt.Sprintf(format, args...))
+	}
+	keys := make([]string, 0, len(s))
+	for k := range s {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !supportedSchemaKeywords[k] {
+			bad("unsupported schema keyword %q", k)
+		}
+	}
+
+	knownTypes := map[string]bool{"string": true, "integer": true, "number": true, "boolean": true, "object": true, "array": true, "null": true}
+	var types []string
+	switch tv := s["type"].(type) {
+	case string:
+		types = []string{tv}
+	case []string:
+		types = tv
+	case nil:
+		bad("no type")
+	default:
+		bad("type has Go type %T, want string or []string", s["type"])
+	}
+	has := map[string]bool{}
+	for _, ty := range types {
+		if !knownTypes[ty] {
+			bad("unknown type %q", ty)
+		}
+		has[ty] = true
+	}
+	numeric := has["integer"] || has["number"]
+
+	// matches reports whether a constant is a valid value of the field.
+	matches := func(v interface{}) bool {
+		return len(types) > 0 && matchesSchemaType(types, v)
+	}
+
+	for _, kw := range []string{"minimum", "maximum"} {
+		v, ok := s[kw]
+		if !ok {
+			continue
+		}
+		switch n := v.(type) {
+		case float64:
+			if math.IsNaN(n) || math.IsInf(n, 0) {
+				bad("%s is not finite", kw)
+			}
+		case int:
+		default:
+			bad("%s has Go type %T, want float64 or int", kw, v)
+		}
+		if !numeric {
+			bad("%s on a non-numeric field", kw)
+		}
+	}
+	if min, ok := schemaNumber(s["minimum"]); ok {
+		if max, ok := schemaNumber(s["maximum"]); ok && min > max {
+			bad("minimum is above maximum")
+		}
+	}
+	for _, kw := range []string{"minLength", "maxLength"} {
+		v, ok := s[kw]
+		if !ok {
+			continue
+		}
+		switch n := v.(type) {
+		case int:
+			if n < 0 {
+				bad("%s is negative", kw)
+			}
+		case float64:
+			if n < 0 || n != math.Trunc(n) {
+				bad("%s is not a non-negative whole number", kw)
+			}
+		default:
+			bad("%s has Go type %T, want int or float64", kw, v)
+		}
+		if !has["string"] {
+			bad("%s on a non-string field", kw)
+		}
+	}
+	if v, ok := s["pattern"]; ok {
+		p, isStr := v.(string)
+		if !isStr {
+			bad("pattern has Go type %T, want string", v)
+		} else if _, err := schemaPattern(p); err != nil {
+			bad("pattern does not compile: %v", err)
+		}
+		if !has["string"] {
+			bad("pattern on a non-string field")
+		}
+	}
+	if v, ok := s["enum"]; ok {
+		var values []interface{}
+		switch e := v.(type) {
+		case []interface{}:
+			values = e
+		case []string:
+			for _, str := range e {
+				values = append(values, str)
+			}
+		default:
+			bad("enum has Go type %T, want []interface{} or []string", v)
+		}
+		if _, ok := v.([]string); ok && !has["string"] {
+			bad("[]string enum on a non-string field")
+		}
+		if len(values) == 0 {
+			bad("enum is empty")
+		}
+		for _, e := range values {
+			if !matches(e) {
+				bad("enum value of Go type %T does not match the field type", e)
+			}
+		}
+	}
+	if c, ok := s["const"]; ok && !matches(c) {
+		bad("const of Go type %T does not match the field type", c)
+	}
+	for _, kw := range []string{"description", "title"} {
+		if v, ok := s[kw]; ok {
+			if _, isStr := v.(string); !isStr {
+				bad("%s has Go type %T, want string", kw, v)
+			}
+		}
+	}
+	if v, ok := s["examples"]; ok {
+		if _, isList := v.([]interface{}); !isList {
+			bad("examples has Go type %T, want []interface{}", v)
+		}
+	}
+
+	props := map[string]interface{}{}
+	if v, ok := s["properties"]; ok {
+		m, isMap := v.(map[string]interface{})
+		if !isMap {
+			bad("properties has Go type %T, want map[string]interface{}", v)
+		}
+		if !has["object"] {
+			bad("properties on a non-object field")
+		}
+		props = m
+	}
+	if v, ok := s["required"]; ok {
+		var req []string
+		switch rv := v.(type) {
+		case []string:
+			req = rv
+		case []interface{}:
+			for _, x := range rv {
+				str, isStr := x.(string)
+				if !isStr {
+					bad("required entry has Go type %T, want string", x)
+				}
+				req = append(req, str)
+			}
+		default:
+			bad("required has Go type %T, want []string", v)
+		}
+		for _, k := range req {
+			if _, ok := props[k]; !ok {
+				bad("required %q is not declared in properties", k)
+			}
+		}
+	}
+	pk := make([]string, 0, len(props))
+	for k := range props {
+		pk = append(pk, k)
+	}
+	sort.Strings(pk)
+	for _, k := range pk {
+		sub, ok := props[k].(map[string]interface{})
+		if !ok {
+			bad("property %s has Go type %T, want map[string]interface{}", k, props[k])
+			continue
+		}
+		problems = append(problems, schemaKeywordProblems(path+"."+k, sub)...)
+	}
+	if v, ok := s["items"]; ok {
+		items, isMap := v.(map[string]interface{})
+		if !isMap {
+			bad("items has Go type %T, want map[string]interface{}", v)
+		} else {
+			problems = append(problems, schemaKeywordProblems(path+"[]", items)...)
+		}
+		if !has["array"] {
+			bad("items on a non-array field")
+		}
+	}
+	if v, ok := s["additionalProperties"]; ok {
+		switch ap := v.(type) {
+		case bool:
+		case map[string]interface{}:
+			problems = append(problems, schemaKeywordProblems(path+"{}", ap)...)
+		default:
+			bad("additionalProperties has Go type %T, want bool or map[string]interface{}", v)
+		}
+	}
+	// Defaults must satisfy the schema they belong to.
+	if d, ok := s["default"]; ok && len(problems) == 0 {
+		if msg := schemaViolation(nil, s, d, false); msg != "" {
+			bad("default does not match the schema: %s", msg)
+		}
+	}
+	return problems
 }
