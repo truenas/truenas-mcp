@@ -1960,6 +1960,12 @@ func (r *Registry) CallTool(name string, args map[string]interface{}) (result st
 	if err := r.checkPolicy(name); err != nil {
 		return "", err
 	}
+	// Reject a non-boolean dry_run or confirm before any policy that
+	// interprets those flags, any preview, or the handler. A string
+	// "true" must not fall through to a real write.
+	if err := validateSafetyBooleans(name, args); err != nil {
+		return "", err
+	}
 	if err := r.checkReadOnlyDryRun(name, args); err != nil {
 		return "", err
 	}

@@ -127,7 +127,12 @@ func TestReadOnlyRefusesRealUpgrade(t *testing.T) {
 				args[k] = v
 			}
 			out, err := r.CallTool("upgrade_app", args)
-			if err == nil || !strings.Contains(err.Error(), "read-only mode") || !strings.Contains(err.Error(), "NOT executed") {
+			if name == "dry_run string" {
+				// A non-boolean dry_run is rejected before the read-only check.
+				if err == nil || !strings.Contains(err.Error(), "dry_run must be a JSON boolean") || !strings.Contains(err.Error(), "nothing was executed") {
+					t.Fatalf("out=%q err=%v, want invalid dry_run", out, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "read-only mode") || !strings.Contains(err.Error(), "NOT executed") {
 				t.Fatalf("out=%q err=%v, want the read-only refusal", out, err)
 			}
 			// Refused before anything runs: not even the preview.
