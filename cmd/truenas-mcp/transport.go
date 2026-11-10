@@ -14,6 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/truenas/truenas-mcp/mcp"
+	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
@@ -224,11 +225,58 @@ func (c *lineConn) Write(_ context.Context, msg jsonrpc.Message) error {
 		}
 		return nil
 	}
+	if resp, ok := msg.(*jsonrpc.Response); ok {
+		redactResponseError(resp)
+	}
 	data, err := jsonrpc.EncodeMessage(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal response: %w", err)
 	}
 	return c.writeLine(data)
+}
+
+// redactResponseError applies redact.Text to a JSON-RPC error message, and
+// redacts error.data when it is present, so a client-supplied name that
+// looks like a secret (an unknown tool or method) never leaves unmasked.
+func redactResponseError(resp *jsonrpc.Response) {
+	if resp == nil || resp.Error == nil {
+		return
+	}
+	we, ok := resp.Error.(*jsonrpc.Error)
+	if !ok {
+		we = &jsonrpc.Error{Message: resp.Error.Error()}
+		var wrapped *jsonrpc.Error
+		if errors.As(resp.Error, &wrapped) {
+			we.Code = wrapped.Code
+			we.Data = wrapped.Data
+		}
+		resp.Error = we
+	}
+	we.Message = redact.Text(we.Message)
+	if len(we.Data) > 0 {
+		we.Data = redactErrorData(we.Data)
+	}
+}
+
+// redactErrorData redacts a JSON-RPC error.data value: a JSON string is
+// treated as free text, and any other JSON is redacted structurally.
+func redactErrorData(raw json.RawMessage) json.RawMessage {
+	raw = json.RawMessage(strings.TrimSpace(string(raw)))
+	if len(raw) == 0 {
+		return raw
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return json.RawMessage(redact.Text(string(raw)))
+		}
+		b, err := json.Marshal(redact.Text(s))
+		if err != nil {
+			return json.RawMessage(`"` + redact.Marker + `"`)
+		}
+		return b
+	}
+	return redact.JSON(raw)
 }
 
 // writeError sends an error reply for a line the SDK never sees. A nil id is
@@ -237,7 +285,7 @@ func (c *lineConn) writeError(id interface{}, code int, message string) error {
 	data, err := json.Marshal(map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      id,
-		"error":   map[string]interface{}{"code": code, "message": message},
+		"error":   map[string]interface{}{"code": code, "message": redact.Text(message)},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal response: %w", err)

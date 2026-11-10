@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/redact"
@@ -49,5 +54,91 @@ func TestToolsCallRedactsError(t *testing.T) {
 	text, isError := callText(t, secretRegistry{err: err})
 	if !isError || strings.Contains(text, "fake-bind-pw") || strings.Contains(text, "FAKEFAKE") || !strings.HasPrefix(text, "Error: API error") {
 		t.Errorf("error not redacted as expected:\n%s", text)
+	}
+}
+
+// TestStdioRedactsUnknownToolAndMethodNames covers JSON-RPC errors the SDK
+// builds itself: an unknown tool or method name is echoed in the error
+// message, so a name that looks like a secret must be redacted on the way
+// out. The reply stays a protocol error with the request id; the secret
+// never appears anywhere on stdout.
+func TestStdioRedactsUnknownToolAndMethodNames(t *testing.T) {
+	const secret = "s3cret"
+	var stdout syncBuffer
+	c, run := session(t, newTestHandler(fakeRegistry{}, false), func(w io.Writer) io.Writer {
+		return io.MultiWriter(w, &stdout)
+	})
+	c.initialize()
+
+	const toolID = float64(7)
+	toolReply := c.call(toolID, "tools/call", toolArgs("password="+secret, nil))
+	if errorCode(toolReply) != -32602 {
+		t.Errorf("unknown tool: %v; want -32602", toolReply)
+	}
+	if toolReply["id"] != toolID {
+		t.Errorf("unknown tool reply id = %v; want %v", toolReply["id"], toolID)
+	}
+
+	const methodID = float64(8)
+	methodReply := c.call(methodID, "password="+secret, nil)
+	if methodReply["error"] == nil {
+		t.Errorf("unknown method: %v; want an error", methodReply)
+	}
+	if methodReply["id"] != methodID {
+		t.Errorf("unknown method reply id = %v; want %v", methodReply["id"], methodID)
+	}
+
+	if err := run.wait(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	c.noMoreOutput()
+	out := stdout.String()
+	if strings.Contains(out, secret) {
+		t.Errorf("stdout leaked %q:\n%s", secret, out)
+	}
+	if !strings.Contains(out, redact.Marker) {
+		t.Errorf("stdout has no redaction marker:\n%s", out)
+	}
+}
+
+// TestWriteErrorRedactsMessage covers error replies the transport builds
+// itself (bad JSON, oversized lines): the message is redacted before it
+// is written, the JSON-RPC code and id are kept, and the secret never
+// appears on stdout.
+func TestWriteErrorRedactsMessage(t *testing.T) {
+	const secret = "s3cret"
+	var out bytes.Buffer
+	c := &lineConn{out: &out}
+	if err := c.writeError(float64(1), jsonrpc.CodeParseError, "Parse error: password="+secret); err != nil {
+		t.Fatalf("writeError: %v", err)
+	}
+	got := out.String()
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &m); err != nil {
+		t.Fatalf("reply is not JSON: %v\n%s", err, got)
+	}
+	if errorCode(m) != -32700 {
+		t.Errorf("writeError: %v; want -32700", m)
+	}
+	if m["id"] != float64(1) {
+		t.Errorf("writeError id = %v; want 1", m["id"])
+	}
+	if strings.Contains(got, secret) {
+		t.Errorf("stdout leaked %q:\n%s", secret, got)
+	}
+	if !strings.Contains(got, redact.Marker) {
+		t.Errorf("stdout has no redaction marker:\n%s", got)
+	}
+}
+
+func TestRedactErrorData(t *testing.T) {
+	const secret = "s3cret"
+	got := string(redactErrorData(json.RawMessage(`"password=` + secret + `"`)))
+	if strings.Contains(got, secret) || !strings.Contains(got, redact.Marker) {
+		t.Errorf("string data not redacted: %s", got)
+	}
+	got = string(redactErrorData(json.RawMessage(`{"password":"` + secret + `"}`)))
+	if strings.Contains(got, secret) || !strings.Contains(got, redact.Marker) {
+		t.Errorf("object data not redacted: %s", got)
 	}
 }

@@ -381,24 +381,34 @@ newline-delimited JSON-RPC 2.0 on stdin and stdout, with logs on stderr only.
   calls run at once; further calls wait for a slot.
 - **Cancellation and deadlines:** a `notifications/cancelled` for a running
   call, or the client closing stdin, cancels the call and the server stops
-  waiting for it; a cancelled call gets no reply. A tool call that has not
+  waiting for it; a cancelled call, and a call still in flight when stdin
+  closes, gets no reply. A cancelled or timed-out call keeps its
+  concurrency slot until its handler finishes, which can take a few
+  middleware calls of up to 120 seconds each. A tool call that has not
   finished after 10 minutes gets a tool error. The TrueNAS request a
   cancelled or timed-out tool already sent is not withdrawn, so the
   operation may still complete on the NAS: check the system state before
   retrying.
 - **Errors:** an unknown tool name, or `params` or `arguments` that are not
-  objects, are JSON-RPC errors (`-32602`). A tool hidden by
+  objects (including array params), are JSON-RPC errors (`-32602`) that
+  keep the request's id. A tool hidden by
   [Safety Controls](#safety-controls) is refused with a tool error
   (`isError`) that says why. Requests other than `ping` are rejected until
   the client has sent `initialize`, which must carry its `params`.
 - **Limits:** a message may be up to 64 MiB. A longer line, or one that is
   not JSON, gets an error reply (`-32600` or `-32700`, `"id": null`) and the
-  session goes on. JSON-RPC batches are not supported.
+  session goes on. JSON-RPC batches are not supported and get a `-32600`
+  error.
 
 > **Breaking change:** older releases had a hand-written transport that
 > always answered `protocolVersion` `2024-11-05`, served requests one at a
-> time and in order, answered unknown tools with a tool error, and accepted
-> `tools/list` and `tools/call` before `initialize`. Clients that follow the
+> time and in order, answered unknown tools with a tool error, accepted
+> `tools/list` and `tools/call` before `initialize`, and still answered
+> calls that were in flight when stdin closed. Array params now get
+> `-32602` with the request id; a batch gets `-32600`; calls still in
+> flight when stdin closes get no reply. A cancelled or timed-out call
+> keeps its concurrency slot until its handler finishes, which can take a
+> few middleware calls of up to 120 seconds each. Clients that follow the
 > MCP specification are not affected; tool names, schemas and output are
 > unchanged.
 
