@@ -16,12 +16,6 @@ import (
 	"github.com/truenas/truenas-mcp/truenas"
 )
 
-// StorageVolume represents a storage volume configuration for app installation
-type StorageVolume struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-}
-
 // ============================================================================
 // Section 1: Search and Catalog Handlers
 // ============================================================================
@@ -1031,59 +1025,6 @@ func validateAppName(name string) error {
 	return nil
 }
 
-// validateStorageVolumes validates storage volumes follow host-path requirements
-func validateStorageVolumes(volumes []StorageVolume) error {
-	if len(volumes) == 0 {
-		return fmt.Errorf("at least one storage volume required")
-	}
-
-	seen := make(map[string]bool)
-	paths := make(map[string]bool)
-
-	for _, vol := range volumes {
-		// Check for empty name or path
-		if vol.Name == "" {
-			return fmt.Errorf("volume name cannot be empty")
-		}
-		if vol.Path == "" {
-			return fmt.Errorf("volume path cannot be empty")
-		}
-
-		// Check for duplicate names
-		if seen[vol.Name] {
-			return fmt.Errorf("duplicate volume name: %s", vol.Name)
-		}
-		seen[vol.Name] = true
-
-		// Check for duplicate paths
-		if paths[vol.Path] {
-			return fmt.Errorf("duplicate volume path: %s", vol.Path)
-		}
-		paths[vol.Path] = true
-
-		// Validate path format
-		if !strings.HasPrefix(vol.Path, "/mnt/") {
-			return fmt.Errorf("volume path must start with /mnt/, got: %s", vol.Path)
-		}
-	}
-
-	return nil
-}
-
-// buildPersistenceConfig converts storage volumes to TrueNAS persistence config
-func buildPersistenceConfig(volumes []StorageVolume) map[string]interface{} {
-	persistence := make(map[string]interface{})
-
-	for _, vol := range volumes {
-		persistence[vol.Name] = map[string]interface{}{
-			"type":     "host-path", // ALWAYS host-path, NEVER ix-volume
-			"hostPath": vol.Path,
-		}
-	}
-
-	return persistence
-}
-
 // parseStoragePath extracts pool and dataset from /mnt/ path
 func parseStoragePath(path string) (pool string, dataset string, err error) {
 	if !strings.HasPrefix(path, "/mnt/") {
@@ -1102,122 +1043,6 @@ func parseStoragePath(path string) (pool string, dataset string, err error) {
 	dataset = strings.Join(parts, "/")
 
 	return pool, dataset, nil
-}
-
-// verifyDatasetsExist checks if datasets exist for all storage volumes
-func verifyDatasetsExist(ctx context.Context, client *truenas.Client, volumes []StorageVolume) ([]string, error) {
-	var missing []string
-
-	for _, vol := range volumes {
-		_, dataset, err := parseStoragePath(vol.Path)
-		if err != nil {
-			return nil, err
-		}
-
-		// Query dataset
-		result, err := client.Call(ctx, "pool.dataset.query",
-			[]interface{}{
-				[]interface{}{"name", "=", dataset},
-			},
-			map[string]interface{}{},
-		)
-
-		if err != nil {
-			// If query fails, consider it missing
-			missing = append(missing, dataset)
-			continue
-		}
-
-		var datasets []interface{}
-		if err := json.Unmarshal(result, &datasets); err != nil {
-			return nil, err
-		}
-
-		if len(datasets) == 0 {
-			missing = append(missing, dataset)
-		}
-	}
-
-	return missing, nil
-}
-
-// extractStorageVolumes extracts and parses storage volumes from args
-func extractStorageVolumes(args map[string]interface{}) ([]StorageVolume, error) {
-	volumesRaw, ok := args["storage_volumes"]
-	if !ok {
-		example := `[{"name": "config", "path": "/mnt/tank/apps/myapp/config"}]`
-		return nil, fmt.Errorf("storage_volumes is required.\nExpected: an array of volume objects\nExample: %s", example)
-	}
-
-	volumesArray, ok := volumesRaw.([]interface{})
-	if !ok {
-		example := `[{"name": "config", "path": "/mnt/tank/apps/myapp/config"}, {"name": "data", "path": "/mnt/tank/apps/myapp/data"}]`
-		return nil, fmt.Errorf("storage_volumes must be an array.\nExpected: an array of volume objects\nExample: %s", example)
-	}
-
-	if len(volumesArray) == 0 {
-		example := `[{"name": "config", "path": "/mnt/tank/apps/myapp/config"}]`
-		return nil, fmt.Errorf("at least one storage volume is required.\nExample: %s", example)
-	}
-
-	volumes := make([]StorageVolume, 0, len(volumesArray))
-	for i, volRaw := range volumesArray {
-		volMap, ok := volRaw.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("storage volume at index %d is not an object", i)
-		}
-
-		// Get name field
-		name, nameOk := volMap["name"].(string)
-		if !nameOk || name == "" {
-			// Build helpful error message showing what was provided
-			providedFields := make([]string, 0, len(volMap))
-			for k := range volMap {
-				providedFields = append(providedFields, fmt.Sprintf("'%s'", k))
-			}
-
-			example := `{"name": "config", "path": "/mnt/tank/apps/myapp/config"}`
-			if len(providedFields) > 0 {
-				return nil, fmt.Errorf("storage volume at index %d missing required 'name' field.\nProvided fields: %s\nRequired fields: 'name', 'path'\nExample: %s",
-					i, strings.Join(providedFields, ", "), example)
-			}
-			return nil, fmt.Errorf("storage volume at index %d missing required 'name' field.\nRequired fields: 'name', 'path'\nExample: %s", i, example)
-		}
-
-		// Get path field
-		path, pathOk := volMap["path"].(string)
-		if !pathOk || path == "" {
-			// Build helpful error message showing what was provided
-			providedFields := make([]string, 0, len(volMap))
-			for k := range volMap {
-				providedFields = append(providedFields, fmt.Sprintf("'%s'", k))
-			}
-
-			example := `{"name": "config", "path": "/mnt/tank/apps/myapp/config"}`
-			suggestions := "\nNote: Use 'path' (not 'host_path', 'mount_path', or other variants)"
-
-			// Check for common mistakes and provide specific guidance
-			if _, hasHostPath := volMap["host_path"]; hasHostPath {
-				suggestions += "\nFound 'host_path' - did you mean 'path'?"
-			}
-			if _, hasMountPath := volMap["mount_path"]; hasMountPath {
-				suggestions += "\nFound 'mount_path' - this is not needed. Only use 'name' and 'path'"
-			}
-			if _, hasType := volMap["type"]; hasType {
-				suggestions += "\nFound 'type' - this is not needed. TrueNAS MCP always uses host-path volumes"
-			}
-
-			return nil, fmt.Errorf("storage volume at index %d missing required 'path' field.\nProvided fields: %s\nRequired fields: 'name', 'path'%s\nExample: %s",
-				i, strings.Join(providedFields, ", "), suggestions, example)
-		}
-
-		volumes = append(volumes, StorageVolume{
-			Name: name,
-			Path: path,
-		})
-	}
-
-	return volumes, nil
 }
 
 // ============================================================================

@@ -1,0 +1,20 @@
+// Best-effort close and deadline on sockets, files, and the TrueNAS client.
+(*os.File).Close
+(io.Closer).Close
+(*tls.Conn).Close
+(*net.TCPListener).Close
+(*net.TCPConn).Close
+(*websocket.Conn).Close
+(*websocket.Conn).SetReadDeadline
+(*github.com/gorilla/websocket.Conn).Close
+(*github.com/gorilla/websocket.Conn).SetReadDeadline
+(*github.com/truenas/truenas-mcp/truenas.Client).Close
+
+// fmt.Sscanf returns the item count; callers inspect the parsed values.
+fmt.Sscanf
+
+// The poller treats a failed store write as best-effort bookkeeping; the
+// next tick retries. Changing that to abort a poll would be a behaviour
+// change outside this issue.
+(*github.com/truenas/truenas-mcp/tasks.TaskStore).Update
+(*github.com/truenas/truenas-mcp/tasks.TaskStore).Save

@@ -35,7 +35,15 @@ test:
 	@echo "Running tests..."
 	go test -v -race ./...
 
+# Pinned linter versions (Go 1.27 compatible). CI runs this same target.
+STATICCHECK_VERSION ?= v0.8.2
+ERRCHECK_VERSION ?= v1.30.0
+
 lint:
 	@echo "Running linters..."
 	go vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "Unformatted files (run gofmt -w):"; gofmt -l .; exit 1; }
+	# ST1005/ST1008 are style checks: one would change a user-facing error
+	# string, the other would churn test helpers that return (out, err, fake).
+	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -checks 'all,-ST1000,-ST1003,-ST1016,-ST1020,-ST1021,-ST1022,-ST1005,-ST1008' ./...
+	go run github.com/kisielk/errcheck@$(ERRCHECK_VERSION) -ignoretests -exclude .errcheck-excludes ./...
