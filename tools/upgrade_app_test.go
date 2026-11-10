@@ -432,7 +432,7 @@ func TestUpgradeAppHealthTimeoutIsConfigurableAndBounded(t *testing.T) {
 
 func TestUpgradeAppJobFailureStillFails(t *testing.T) {
 	r, mgr, f := newUpgradeFakeRegistryJob(t, map[string]interface{}{
-		"id": float64(upgradeJobID), "state": "FAILED", "error": strings.Repeat("boom ", 2000),
+		"id": float64(upgradeJobID), "method": "app.upgrade", "state": "FAILED", "error": strings.Repeat("boom ", 2000),
 	})
 	_ = f
 	id := startUpgrade(t, r, nil)["task_id"].(string)

@@ -19,8 +19,8 @@ func TestRefreshJobAppDoesNotMutateSharedJob(t *testing.T) {
 	if task.Job["app"].(map[string]interface{})["state"] != "RUNNING" || task.Job["app_source"] != "app.query" || task.Job["result_truncated"] != true {
 		t.Errorf("job not refreshed: %v", task.Job)
 	}
-	if task.Result == nil {
-		t.Error("task.Result not updated")
+	if task.Result != nil {
+		t.Error("task.Result set: the result is reported in the job summary only")
 	}
 
 	// No job summary: nothing to do. A failed read keeps the copy, labelled.

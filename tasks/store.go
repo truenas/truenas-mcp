@@ -1,13 +1,21 @@
 package tasks
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
 )
 
-// TaskStore provides thread-safe storage for tasks with TTL-based expiry.
+// TaskStore provides thread-safe storage for tasks.
+//
+// A working task is tracked until creation + TTL. If it is still working then,
+// it is marked failed ("tracking timed out") rather than dropped. A finished
+// task stays readable for the retention period after it finished, and is then
+// removed. At most maxFinished finished tasks are kept: past that, the ones
+// that finished first are removed early. Working tasks are never evicted.
 //
 // The store owns the tasks it holds: Add, Update and Save keep a private copy
 // and Get, List and GetActive hand out copies. Callers (the poller, tools
@@ -16,20 +24,89 @@ import (
 // pointer fields of a Task (Job, Result, Arguments, JobID) are shared between
 // copies and must be replaced, not modified in place.
 type TaskStore struct {
-	mu     sync.RWMutex
-	tasks  map[string]*Task
-	expiry map[string]time.Time
+	mu          sync.Mutex
+	tasks       map[string]*Task
+	expiry      map[string]time.Time // working: end of tracking; finished: end of retention
+	retention   time.Duration
+	maxFinished int               // finished tasks kept at most; the oldest finished are evicted
+	finishSeq   map[string]uint64 // order in which tasks finished
+	seq         uint64
 }
 
-// NewTaskStore creates a new task store
+// ErrTaskFinished is returned by Update and Save for a task that has already
+// reached a terminal state: a finished task is never changed again, so a
+// poller holding an older copy cannot revive or overwrite it.
+var ErrTaskFinished = errors.New("task already finished")
+
+// NewTaskStore creates a new task store with DefaultRetention.
 func NewTaskStore() *TaskStore {
 	return &TaskStore{
-		tasks:  make(map[string]*Task),
-		expiry: make(map[string]time.Time),
+		tasks:       make(map[string]*Task),
+		expiry:      make(map[string]time.Time),
+		retention:   DefaultRetention,
+		maxFinished: DefaultMaxFinished,
+		finishSeq:   make(map[string]uint64),
 	}
 }
 
-// Add stores a task and sets its expiry time
+// SetMaxFinished sets how many finished tasks are kept at most; n <= 0
+// restores DefaultMaxFinished.
+func (s *TaskStore) SetMaxFinished(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n <= 0 {
+		n = DefaultMaxFinished
+	}
+	s.maxFinished = n
+	s.evictFinishedLocked()
+}
+
+// finishedLocked records that taskID has just finished: its retention
+// period starts, and the oldest finished tasks beyond maxFinished are
+// removed. s.mu must be held.
+func (s *TaskStore) finishedLocked(taskID string, now time.Time) {
+	s.expiry[taskID] = now.Add(s.retention)
+	s.seq++
+	s.finishSeq[taskID] = s.seq
+	s.evictFinishedLocked()
+}
+
+// evictFinishedLocked removes the tasks that finished first until at most
+// maxFinished finished tasks remain. s.mu must be held.
+func (s *TaskStore) evictFinishedLocked() {
+	excess := len(s.finishSeq) - s.maxFinished
+	if excess <= 0 {
+		return
+	}
+	ids := make([]string, 0, len(s.finishSeq))
+	for id := range s.finishSeq {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return s.finishSeq[ids[i]] < s.finishSeq[ids[j]] })
+	for _, id := range ids[:excess] {
+		s.deleteLocked(id)
+	}
+}
+
+// deleteLocked removes a task. s.mu must be held.
+func (s *TaskStore) deleteLocked(taskID string) {
+	delete(s.tasks, taskID)
+	delete(s.expiry, taskID)
+	delete(s.finishSeq, taskID)
+}
+
+// SetRetention sets how long finished tasks stay readable; d <= 0 restores
+// DefaultRetention.
+func (s *TaskStore) SetRetention(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d <= 0 {
+		d = DefaultRetention
+	}
+	s.retention = d
+}
+
+// Add stores a task and sets the end of its tracking window.
 func (s *TaskStore) Add(task *Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -38,24 +115,57 @@ func (s *TaskStore) Add(task *Task) error {
 		return fmt.Errorf("task ID cannot be empty")
 	}
 
+	now := time.Now()
 	s.tasks[task.TaskID] = task.clone()
-	s.expiry[task.TaskID] = time.Now().Add(time.Duration(task.TTL) * time.Second)
+	if task.Status.Terminal() {
+		s.finishedLocked(task.TaskID, now)
+	} else {
+		s.expiry[task.TaskID] = now.Add(time.Duration(task.TTL) * time.Second)
+	}
 
 	return nil
 }
 
+// timeOutLocked marks a working task whose tracking window has ended as
+// failed, and starts its retention period. s.mu must be held.
+func (s *TaskStore) timeOutLocked(taskID string, now time.Time) {
+	task, ok := s.tasks[taskID]
+	if !ok || task.Status.Terminal() {
+		return
+	}
+	if expiry, ok := s.expiry[taskID]; !ok || !now.After(expiry) {
+		return
+	}
+	t := task.clone()
+	t.Status = TaskStatusFailed
+	t.StatusMessage = timedOutMessage(t)
+	t.LastUpdatedAt = now
+	s.tasks[taskID] = t
+	s.finishedLocked(taskID, now)
+	log.Printf("task %s (%s): %s", taskID, t.ToolName, t.StatusMessage)
+}
+
+// timeOutAllLocked applies timeOutLocked to every task. s.mu must be held.
+func (s *TaskStore) timeOutAllLocked(now time.Time) {
+	for taskID := range s.tasks {
+		s.timeOutLocked(taskID, now)
+	}
+}
+
 // Get retrieves a task by ID
 func (s *TaskStore) Get(taskID string) (*Task, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	task, exists := s.tasks[taskID]
 	if !exists {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
 
-	// Check if expired
-	if expiry, ok := s.expiry[taskID]; ok && time.Now().After(expiry) {
+	now := time.Now()
+	s.timeOutLocked(taskID, now)
+	task = s.tasks[taskID]
+	if expiry, ok := s.expiry[taskID]; ok && now.After(expiry) {
 		return nil, fmt.Errorf("task expired: %s", taskID)
 	}
 
@@ -63,30 +173,45 @@ func (s *TaskStore) Get(taskID string) (*Task, error) {
 }
 
 // Update stores task as the new state of an existing task and stamps
-// LastUpdatedAt (on task and on the stored copy).
+// LastUpdatedAt (on task and on the stored copy). A task that becomes
+// terminal starts its retention period. A task that is already terminal is
+// not changed (ErrTaskFinished).
 func (s *TaskStore) Update(task *Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.tasks[task.TaskID]; !exists {
+	stored, exists := s.tasks[task.TaskID]
+	if !exists {
 		return fmt.Errorf("task not found: %s", task.TaskID)
 	}
+	if stored.Status.Terminal() {
+		return ErrTaskFinished
+	}
 
-	task.LastUpdatedAt = time.Now()
+	now := time.Now()
+	task.LastUpdatedAt = now
 	s.tasks[task.TaskID] = task.clone()
+	if task.Status.Terminal() {
+		s.finishedLocked(task.TaskID, now)
+	}
 
 	return nil
 }
 
 // Save stores task as the new state of an existing task without changing
 // LastUpdatedAt. The poller uses it for internal bookkeeping (the job summary,
-// when the health wait began) that is not a status change.
+// when the health wait began, poll counters) that is not a status change. A
+// task that is already terminal is not changed (ErrTaskFinished).
 func (s *TaskStore) Save(task *Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.tasks[task.TaskID]; !exists {
+	stored, exists := s.tasks[task.TaskID]
+	if !exists {
 		return fmt.Errorf("task not found: %s", task.TaskID)
+	}
+	if stored.Status.Terminal() {
+		return ErrTaskFinished
 	}
 	s.tasks[task.TaskID] = task.clone()
 
@@ -95,12 +220,14 @@ func (s *TaskStore) Save(task *Task) error {
 
 // List returns tasks with pagination support
 func (s *TaskStore) List(cursor string, limit int) ([]*Task, string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// Collect all non-expired tasks
-	var validTasks []*Task
 	now := time.Now()
+	s.timeOutAllLocked(now)
+
+	// Collect all tasks still within their tracking or retention window
+	var validTasks []*Task
 	for taskID, task := range s.tasks {
 		if expiry, ok := s.expiry[taskID]; ok && now.After(expiry) {
 			continue // Skip expired
@@ -145,22 +272,17 @@ func (s *TaskStore) List(cursor string, limit int) ([]*Task, string, error) {
 	return result, nextCursor, nil
 }
 
-// GetActive returns all non-terminal tasks for polling
+// GetActive returns all non-terminal tasks for polling. Tasks whose tracking
+// window has ended are marked timed out first and are not returned.
 func (s *TaskStore) GetActive() []*Task {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.timeOutAllLocked(time.Now())
 
 	var active []*Task
-	now := time.Now()
-
-	for taskID, task := range s.tasks {
-		// Skip expired
-		if expiry, ok := s.expiry[taskID]; ok && now.After(expiry) {
-			continue
-		}
-
-		// Include only non-terminal states
-		if task.Status == TaskStatusWorking || task.Status == TaskStatusInputRequired {
+	for _, task := range s.tasks {
+		if !task.Status.Terminal() {
 			active = append(active, task.clone())
 		}
 	}
@@ -168,16 +290,17 @@ func (s *TaskStore) GetActive() []*Task {
 	return active
 }
 
-// CleanExpired removes expired tasks from storage
+// CleanExpired marks working tasks past their tracking window as timed out
+// and removes finished tasks whose retention period has ended.
 func (s *TaskStore) CleanExpired() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
+	s.timeOutAllLocked(now)
 	for taskID, expiry := range s.expiry {
 		if now.After(expiry) {
-			delete(s.tasks, taskID)
-			delete(s.expiry, taskID)
+			s.deleteLocked(taskID)
 		}
 	}
 }

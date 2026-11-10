@@ -462,7 +462,13 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 
 For long-running operations like app upgrades, system updates, and scrubs:
 
-- **tasks_list** - List all active and recent tasks
-- **tasks_get** - Get detailed status of a specific task by ID
+- **tasks_list** - List running tasks, and finished ones for 24 hours after they finish
+- **tasks_get** - Get the status of a specific task by ID
   - Automatic background polling of TrueNAS job status
   - Tasks update automatically without manual polling
+  - Each task shows `tool`, `job_id` and, once the job succeeded, a bounded `result` (redacted, then cut to at most 4 KiB; `result_truncated` and `result_size_bytes` when cut). Arguments are never returned
+  - The job's method and start time are checked on every poll, because job ids restart after a middleware restart or reboot. A job that is gone, or whose id now belongs to another job, fails the task with a message naming the tool to check the state with (`apply_update`: `system_info` and `update_status`)
+  - Repeated poll failures are reported in `statusMessage` and logged; the task keeps working
+  - A task still working when its `ttl` runs out fails with "tracking timed out"
+  - Finished tasks are kept for 24 hours, at most 500 (the ones that finished first are removed early)
+  - These are ordinary tools, not the MCP tasks extension

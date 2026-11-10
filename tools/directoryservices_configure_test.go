@@ -973,7 +973,7 @@ func TestLeaveDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	if !jsonEqual(t, calls[0].Params, []byte(wantParams)) {
 		t.Errorf("params = %s, want %s", calls[0].Params, wantParams)
 	}
-	onlyMethods(t, fake, "auth.login_ex", "directoryservices.status", "directoryservices.leave")
+	onlyMethods(t, fake, "auth.login_ex", "directoryservices.status", "directoryservices.leave", "core.get_jobs")
 
 	var reply struct {
 		Success       bool   `json:"success"`

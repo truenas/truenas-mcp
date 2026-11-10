@@ -365,7 +365,60 @@ func Text(s string) string {
 		}
 		return sub[1] + `\"` + Marker + `\"`
 	})
+	s = redactUnclosedQuoted(s)
 	return redactGluedTails(redactBarePairs(s))
+}
+
+// unclosedPairStart matches the key, separator and opening quote of a quoted
+// pair ("key": ", 'key': ', \"key\": \"). Group 1 is the key with its
+// quotes, group 2 the opening quote of the value.
+var unclosedPairStart = regexp.MustCompile(`(\\?["'][^"'\\\n]{1,64}\\?["'])\s*[:=]\s*(\\?["'])`)
+
+// redactUnclosedQuoted fails closed on a quoted value under a sensitive key
+// that has no closing quote, as when text was cut short in the middle of the
+// value: the value is taken to run to the end of the text and is replaced
+// with Marker. Closed values were already handled by quotedPair and
+// escapedPair.
+func redactUnclosedQuoted(s string) string {
+	pos := 0
+	for pos < len(s) {
+		m := unclosedPairStart.FindStringSubmatchIndex(s[pos:])
+		if m == nil {
+			return s
+		}
+		keyQuoted := s[pos+m[2] : pos+m[3]]
+		quote := s[pos+m[4] : pos+m[5]]
+		valStart := pos + m[1]
+		pos = valStart
+		key := strings.Trim(keyQuoted, `\"'`)
+		sens, meta := classifyKey(key)
+		if !sens || hasClosingQuote(s[valStart:], quote) {
+			continue
+		}
+		if rest := s[valStart:]; !isRedactable(rest) || meta.visible(rest) {
+			return s
+		}
+		return s[:valStart] + Marker
+	}
+	return s
+}
+
+// hasClosingQuote reports whether s (the text after an opening quote)
+// contains the closing quote: an unescaped q, or for an escaped opening
+// quote (\") the same escaped quote.
+func hasClosingQuote(s, q string) bool {
+	if len(q) == 2 {
+		return strings.Contains(s, q)
+	}
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case q[0]:
+			return true
+		}
+	}
+	return false
 }
 
 // redactBarePairs redacts the values of key=value / key: value pairs with a
