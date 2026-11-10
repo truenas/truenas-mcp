@@ -918,12 +918,54 @@ func TestAppHostPathClassifyAndSchemaNits(t *testing.T) {
 		mustAccept(t, hostPathFieldSchema(), values, []string{"tank/share.1"})
 	})
 
-	t.Run("webdav dotted directory at the pool with no dataset is refused", func(t *testing.T) {
+	t.Run("webdav dotted directory at the pool with no dataset is a missing-dataset error", func(t *testing.T) {
 		values := cloneValues(validHostPathValues())
 		values["storage"].(map[string]interface{})["shares"] = []interface{}{
 			map[string]interface{}{"name": "share1", "host_path": "/mnt/tank/share.1"},
 		}
-		mustRefuse(t, hostPathFieldSchema(), values, "not an existing dataset", nil)
+		mustRefuse(t, hostPathFieldSchema(), values, "create_dataset", nil)
+	})
+
+	t.Run("missing dataset directly under the pool uses the missing-dataset check", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["shares"] = []interface{}{
+			map[string]interface{}{"name": "share1", "host_path": "/mnt/tank/webdav"},
+		}
+
+		out, err, fake := callInstall(t, hostPathFieldSchema(), values, nil)
+		if err == nil {
+			t.Fatalf("real call accepted a missing pool-root dataset: %s", out)
+		}
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "create_dataset") || !strings.Contains(msg, "tank/webdav") || !strings.Contains(msg, "missing") {
+			t.Errorf("real call error %q, want the missing-dataset error with a create_dataset hint for tank/webdav", err)
+		}
+		if strings.Contains(msg, "not a file under a dataset") {
+			t.Errorf("real call used the hard classification error: %v", err)
+		}
+		creates, updates := writeCalls(fake)
+		if creates != 0 || updates != 0 {
+			t.Errorf("app.create=%d app.update=%d, want no write", creates, updates)
+		}
+
+		r, fake := hostPathReviewFake(t, hostPathFieldSchema(), nil)
+		out, err = r.CallTool(t.Context(), "install_app", map[string]interface{}{
+			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community",
+			"values": values, "dry_run": true,
+		})
+		if err != nil {
+			t.Fatalf("dry-run returned an error: %v (out=%s)", err, out)
+		}
+		low := strings.ToLower(out)
+		if !strings.Contains(low, "critical") || !strings.Contains(low, "create_dataset") || !strings.Contains(low, "tank/webdav") {
+			t.Errorf("dry-run output %q, want a CRITICAL missing-dataset warning for tank/webdav", out)
+		}
+		if strings.Contains(low, "not a file under a dataset") {
+			t.Errorf("dry-run used the hard classification error: %s", out)
+		}
+		if n := len(fake.called("app.create")); n != 0 {
+			t.Errorf("dry-run app.create called %d times, want 0", n)
+		}
 	})
 
 	t.Run("rsyncd dotted directory dataset is accepted when the parent is not a dataset", func(t *testing.T) {

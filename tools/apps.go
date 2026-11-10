@@ -1851,10 +1851,11 @@ func hostPathFileParent(p, loc string, pools map[string]bool) (string, error) {
 // resolveHostPathTarget classifies an ambiguous hostpath value. If the path
 // exists as a dataset, it is a directory. If it does not, and the parent is
 // a valid location under /mnt/<pool>/ whose dataset exists, it is a file.
-// If it is not a dataset and cannot be a file (for example it sits directly
-// under the pool), the path is refused. A typo for a missing subdirectory
-// whose parent dataset exists is accepted as a file; distinguishing that
-// from a real file would need a filesystem stat.
+// If it is not a dataset and the parent is not a valid file location
+// (for example the path sits directly under the pool), the path itself is
+// returned so the missing-dataset check can report it. A typo for a missing
+// subdirectory whose parent dataset exists is accepted as a file;
+// distinguishing that from a real file would need a filesystem stat.
 func resolveHostPathTarget(client *truenas.Client, p, loc string, pools map[string]bool) (string, error) {
 	exists, err := hostPathDatasetExists(client, p)
 	if err != nil {
@@ -1865,7 +1866,10 @@ func resolveHostPathTarget(client *truenas.Client, p, loc string, pools map[stri
 	}
 	parent, err := hostPathFileParent(p, loc, pools)
 	if err != nil {
-		return "", fmt.Errorf("invalid path %q at %s: not an existing dataset, and not a file under a dataset below the pool", p, loc)
+		// A file can never sit directly under the pool. Keep the path so
+		// the later dataset check can report it as missing (the real call
+		// gives the create_dataset hint; dry-run warns).
+		return p, nil
 	}
 	parentExists, err := hostPathDatasetExists(client, parent)
 	if err != nil {
