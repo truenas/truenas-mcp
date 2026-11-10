@@ -145,7 +145,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 - **install_app** - Install applications from the catalog with guided storage setup
   - Multi-step wizard guides through app installation process
   - ALWAYS uses host-path volumes (NEVER ix-volumes)
-  - Fetches the app schema and requires every storage entry to be present as `type: host_path` with a cleaned path under `/mnt/<pool>/` (at least one component below an existing pool)
+  - Fetches the app schema and requires every storage entry to be present as `type: host_path` with a cleaned path under `/mnt/<pool>/` (at least one component below an existing pool). When `host_path_config.acl_enable` is true, the mounted `acl.path` is the path that is validated and checked for an existing dataset. Fields whose schema type is `hostpath`, `hostpathdirectory`, or `hostpathfile` are also checked. Paths under `/mnt/<pool>/.system` or `/mnt/<pool>/ix-applications` are refused.
   - Enforces structured dataset layout: /mnt/<pool>/apps/<appname>/<volume>
   - Validates app instance names (lowercase, alphanumeric, hyphens)
   - Verifies datasets exist before installation
@@ -177,6 +177,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 - **update_app** - Change an installed application's configuration
   - Write operation (no confirm needed), but advertises `destructiveHint: true` because it replaces the configuration in place
   - Applies the same host-path storage and dataset-exists checks as install_app (schema-positive: every storage entry must be present as `type: host_path` with a cleaned path under `/mnt/<pool>/`)
+  - Every call must include the full storage section; omitted storage is refused. Apps that already use ix_volume storage cannot be updated through this tool without converting those entries to host_path
   - Supports dry-run mode
 
 - **start_app** - Start a stopped application

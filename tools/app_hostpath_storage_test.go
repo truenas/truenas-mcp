@@ -312,3 +312,391 @@ func TestAppHostPathStorageEnforced(t *testing.T) {
 		}
 	})
 }
+
+func hostPathACLConfig(path, aclPath string) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "host_path",
+		"host_path_config": map[string]interface{}{
+			"path":       path,
+			"acl_enable": true,
+			"acl": map[string]interface{}{
+				"path":    aclPath,
+				"entries": []interface{}{},
+				"options": map[string]interface{}{"force": true},
+			},
+		},
+	}
+}
+
+func hostPathFieldSchema() map[string]interface{} {
+	schema := hostPathTestSchema()
+	questions, _ := schema["questions"].([]interface{})
+	storageQ := questions[0].(map[string]interface{})
+	storageSchema := storageQ["schema"].(map[string]interface{})
+	attrs, _ := storageSchema["attrs"].([]interface{})
+	attrs = append(attrs, map[string]interface{}{
+		"variable": "shares",
+		"schema": map[string]interface{}{
+			"type":    "list",
+			"default": []interface{}{},
+			"items": []interface{}{
+				map[string]interface{}{
+					"schema": map[string]interface{}{
+						"type": "dict",
+						"attrs": []interface{}{
+							map[string]interface{}{
+								"variable": "share_entry",
+								"schema": map[string]interface{}{
+									"type": "dict",
+									"attrs": []interface{}{
+										map[string]interface{}{
+											"variable": "host_path",
+											"schema":   map[string]interface{}{"type": "hostpath"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	storageSchema["attrs"] = attrs
+	questions = append(questions,
+		map[string]interface{}{
+			"variable": "rsyncd",
+			"schema": map[string]interface{}{
+				"type": "dict",
+				"attrs": []interface{}{
+					map[string]interface{}{
+						"variable": "rsync_modules",
+						"schema": map[string]interface{}{
+							"type":    "list",
+							"default": []interface{}{},
+							"items": []interface{}{
+								map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type": "dict",
+										"attrs": []interface{}{
+											map[string]interface{}{
+												"variable": "module",
+												"schema": map[string]interface{}{
+													"type": "dict",
+													"attrs": []interface{}{
+														map[string]interface{}{
+															"variable": "host_path",
+															"schema":   map[string]interface{}{"type": "hostpath"},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		map[string]interface{}{
+			"variable": "network",
+			"schema": map[string]interface{}{
+				"type": "dict",
+				"attrs": []interface{}{
+					map[string]interface{}{
+						"variable": "nginx",
+						"schema": map[string]interface{}{
+							"type": "dict",
+							"attrs": []interface{}{
+								map[string]interface{}{
+									"variable": "custom_confs",
+									"schema": map[string]interface{}{
+										"type":    "list",
+										"default": []interface{}{},
+										"items": []interface{}{
+											map[string]interface{}{"schema": map[string]interface{}{"type": "hostpathfile"}},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	)
+	schema["questions"] = questions
+	return schema
+}
+
+func hostPathReviewFake(t *testing.T, schema map[string]interface{}, versions map[string]interface{}) (*Registry, *fakeMiddleware) {
+	t.Helper()
+	if schema == nil {
+		schema = hostPathFieldSchema()
+	}
+	if versions == nil {
+		versions = map[string]interface{}{
+			"1.2.0": map[string]interface{}{"schema": schema},
+		}
+	}
+	details := map[string]interface{}{
+		"name":           "jellyfin",
+		"latest_version": "1.2.0",
+		"versions":       versions,
+	}
+	existing := map[string]bool{
+		"tank/apps/jellyfin/config": true,
+		"tank/apps/jellyfin/data":   true,
+	}
+	fake := &fakeMiddleware{
+		results: map[string]interface{}{
+			"catalog.get_app_details": details,
+			"pool.query":              []interface{}{map[string]interface{}{"name": "tank", "status": "ONLINE"}},
+			"app.query":               []interface{}{hostPathInstalledApp()},
+			"app.config":              map[string]interface{}{},
+			"app.create":              101,
+			"app.update":              102,
+		},
+		handle: func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+			if method != "pool.dataset.query" {
+				return nil, nil, false
+			}
+			var args []interface{}
+			if err := json.Unmarshal(params, &args); err != nil || len(args) == 0 {
+				return []interface{}{}, nil, true
+			}
+			filters, _ := args[0].([]interface{})
+			name := ""
+			if len(filters) > 0 {
+				if f, ok := filters[0].([]interface{}); ok && len(f) >= 3 {
+					if s, ok := f[2].(string); ok {
+						name = s
+					}
+				}
+			}
+			if existing[name] {
+				return []interface{}{map[string]interface{}{"name": name}}, nil, true
+			}
+			return []interface{}{}, nil, true
+		},
+	}
+	client, _ := newFakeClientFrom(t, fake)
+	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
+	t.Cleanup(mgr.Shutdown)
+	return NewRegistry(client, mgr), fake
+}
+
+// TestAppHostPathReviewFollowups covers the review follow-ups for acl.path,
+// hostpath-typed fields outside storage dicts, reserved datasets, and related nits.
+func TestAppHostPathReviewFollowups(t *testing.T) {
+	mustRefuse := func(t *testing.T, tool string, values map[string]interface{}, want string, extra func(*Registry, *fakeMiddleware, map[string]interface{})) {
+		t.Helper()
+		r, fake := hostPathReviewFake(t, nil, nil)
+		if extra != nil {
+			extra(r, fake, values)
+		}
+		args := map[string]interface{}{"app_name": "jellyfin", "values": values}
+		if tool == "install_app" {
+			args["catalog_app"] = "jellyfin"
+			args["train"] = "community"
+		}
+		out, err := r.CallTool(tool, args)
+		if err == nil {
+			t.Fatalf("%s accepted: %s", tool, out)
+		}
+		if want != "" && !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Errorf("%s error %q, want it to mention %q", tool, err, want)
+		}
+		creates, updates := writeCalls(fake)
+		if creates != 0 || updates != 0 {
+			t.Errorf("%s app.create=%d app.update=%d, want no write", tool, creates, updates)
+		}
+	}
+
+	t.Run("acl.path /etc is rejected even with force true", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["config"] = hostPathACLConfig(
+			"/mnt/tank/apps/jellyfin/config", "/etc")
+		mustRefuse(t, "install_app", values, "invalid path", nil)
+		mustRefuse(t, "update_app", values, "invalid path", nil)
+	})
+
+	t.Run("acl.path at the pool root is rejected", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["config"] = hostPathACLConfig(
+			"/mnt/tank/apps/jellyfin/config", "/mnt/tank")
+		mustRefuse(t, "install_app", values, "invalid path", nil)
+		mustRefuse(t, "update_app", values, "invalid path", nil)
+	})
+
+	t.Run("dataset check uses the mounted acl.path", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["config"] = hostPathACLConfig(
+			"/mnt/tank/apps/jellyfin/config", "/mnt/tank/apps/jellyfin/missing")
+		mustRefuse(t, "install_app", values, "create_dataset", nil)
+	})
+
+	t.Run("webdav share_entry.host_path /etc is rejected", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["shares"] = []interface{}{
+			map[string]interface{}{"share_entry": map[string]interface{}{"host_path": "/etc"}},
+		}
+		mustRefuse(t, "install_app", values, "invalid path", nil)
+	})
+
+	t.Run("rsyncd module.host_path /etc is rejected", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["rsyncd"] = map[string]interface{}{
+			"rsync_modules": []interface{}{
+				map[string]interface{}{"module": map[string]interface{}{"host_path": "/etc"}},
+			},
+		}
+		mustRefuse(t, "install_app", values, "invalid path", nil)
+	})
+
+	t.Run("nextcloud custom_confs /etc is rejected", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["network"] = map[string]interface{}{
+			"nginx": map[string]interface{}{"custom_confs": []interface{}{"/etc"}},
+		}
+		mustRefuse(t, "install_app", values, "invalid path", nil)
+	})
+
+	t.Run("reserved .system and ix-applications paths are rejected", func(t *testing.T) {
+		for _, p := range []string{"/mnt/tank/.system", "/mnt/tank/ix-applications", "/mnt/tank/.system/foo"} {
+			values := cloneValues(validHostPathValues())
+			setStoragePath(values, "config", p)
+			mustRefuse(t, "install_app", values, "invalid path", nil)
+		}
+	})
+
+	t.Run("unknown storage type nfs is rejected", func(t *testing.T) {
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["extra"] = map[string]interface{}{
+			"type": "nfs",
+			"nfs_config": map[string]interface{}{
+				"server": "files.example.invalid",
+				"path":   "/export/media",
+			},
+		}
+		mustRefuse(t, "install_app", values, "host_path", nil)
+	})
+
+	t.Run("install dry-run uses the requested version schema", func(t *testing.T) {
+		oldSchema := hostPathTestSchema()
+		// 1.0.0 also requires a media volume that latest does not.
+		qs := oldSchema["questions"].([]interface{})
+		st := qs[0].(map[string]interface{})["schema"].(map[string]interface{})
+		attrs := st["attrs"].([]interface{})
+		entry := attrs[0].(map[string]interface{})["schema"]
+		st["attrs"] = append(attrs, map[string]interface{}{"variable": "media", "schema": entry})
+		versions := map[string]interface{}{
+			"1.0.0": map[string]interface{}{"schema": oldSchema},
+			"1.2.0": map[string]interface{}{"schema": hostPathTestSchema()},
+		}
+		r, fake := hostPathReviewFake(t, nil, versions)
+		args := map[string]interface{}{
+			"app_name":    "jellyfin",
+			"catalog_app": "jellyfin",
+			"train":       "community",
+			"version":     "1.0.0",
+			"values":      validHostPathValues(),
+			"dry_run":     true,
+		}
+		out, err := r.CallTool("install_app", args)
+		if err == nil {
+			t.Fatalf("dry-run used latest schema and accepted a 1.0.0 config missing media: %s", out)
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "media") && !strings.Contains(strings.ToLower(err.Error()), "host_path") {
+			t.Errorf("error %q, want it to mention the missing 1.0.0 media volume", err)
+		}
+		if n := len(fake.called("app.create")); n != 0 {
+			t.Errorf("app.create called %d times", n)
+		}
+	})
+
+	t.Run("acl_enable with a valid acl.path is accepted", func(t *testing.T) {
+		r, fake := hostPathReviewFake(t, nil, nil)
+		values := cloneValues(validHostPathValues())
+		values["storage"].(map[string]interface{})["config"] = hostPathACLConfig(
+			"/mnt/tank/apps/jellyfin/config", "/mnt/tank/apps/jellyfin/data")
+		out, err := r.CallTool("install_app", map[string]interface{}{
+			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": values,
+		})
+		if err != nil {
+			t.Fatalf("valid acl.path was refused: %v (out=%s)", err, out)
+		}
+		if n := len(fake.called("app.create")); n != 1 {
+			t.Errorf("app.create called %d times, want 1", n)
+		}
+	})
+
+	t.Run("dataset lookup RPC error is a lookup failure", func(t *testing.T) {
+		r, fake := hostPathReviewFake(t, nil, nil)
+		orig := fake.handle
+		fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+			if method == "pool.dataset.query" {
+				return nil, map[string]interface{}{"code": -32001, "message": "middleware timeout"}, true
+			}
+			if orig != nil {
+				return orig(method, params)
+			}
+			return nil, nil, false
+		}
+		_, err := r.CallTool("install_app", map[string]interface{}{
+			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": validHostPathValues(),
+		})
+		if err == nil {
+			t.Fatal("install_app accepted a values set when dataset lookup failed")
+		}
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "look up") && !strings.Contains(msg, "lookup") {
+			t.Errorf("error %q, want a lookup failure, not a missing-dataset message", err)
+		}
+		if strings.Contains(msg, "missing:") {
+			t.Errorf("error %q reports Missing, want a lookup failure", err)
+		}
+		if n := len(fake.called("app.create")); n != 0 {
+			t.Errorf("app.create called %d times", n)
+		}
+	})
+
+	t.Run("update_app missing-dataset message says update", func(t *testing.T) {
+		r, fake := hostPathReviewFake(t, nil, nil)
+		values := cloneValues(validHostPathValues())
+		setStoragePath(values, "data", "/mnt/tank/apps/jellyfin/missing")
+		_, err := r.CallTool("update_app", map[string]interface{}{"app_name": "jellyfin", "values": values})
+		if err == nil {
+			t.Fatal("update_app accepted a missing dataset")
+		}
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "update") {
+			t.Errorf("error %q, want it to say update", err)
+		}
+		if strings.Contains(msg, "installation") {
+			t.Errorf("error %q still says installation", err)
+		}
+		if n := len(fake.called("app.update")); n != 0 {
+			t.Errorf("app.update called %d times", n)
+		}
+	})
+
+	t.Run("unknown install version is an error", func(t *testing.T) {
+		r, fake := hostPathReviewFake(t, nil, nil)
+		_, err := r.CallTool("install_app", map[string]interface{}{
+			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community",
+			"version": "9.9.9", "values": validHostPathValues(),
+		})
+		if err == nil {
+			t.Fatal("install_app accepted a version that is not in the catalog")
+		}
+		if !strings.Contains(err.Error(), "9.9.9") {
+			t.Errorf("error %q, want the missing version", err)
+		}
+		if n := len(fake.called("app.create")); n != 0 {
+			t.Errorf("app.create called %d times", n)
+		}
+	})
+}
