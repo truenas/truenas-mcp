@@ -6,6 +6,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/truenas/truenas-mcp/redact"
 )
 
 func parseQueryParams(t *testing.T, params json.RawMessage) (filters []interface{}, options map[string]interface{}) {
@@ -341,7 +343,11 @@ func TestDatasetChildrenCountFromNames(t *testing.T) {
 	}
 }
 
-func TestQueryPoolsAndSharesRequestSelect(t *testing.T) {
+// TestQueryPoolsAndSharesReturnCompleteRecords checks that query_pools and
+// query_shares do not narrow middleware records with a select list, so the
+// fields returned on main stay present. A "secret" sentinel on an SMB share
+// must be masked in the tool result. query_vms still requests a select list.
+func TestQueryPoolsAndSharesReturnCompleteRecords(t *testing.T) {
 	var methods = map[string]json.RawMessage{}
 	fullPool := map[string]interface{}{
 		"id": 1.0, "name": "tank", "status": "ONLINE", "size": 1.0e12,
@@ -455,6 +461,21 @@ func TestQueryPoolsAndSharesRequestSelect(t *testing.T) {
 		if _, ok := smb[key]; !ok {
 			t.Errorf("query_shares SMB missing %s (present on main): %s", key, out)
 		}
+	}
+	// CallTool returns the handler text; the server redacts it with
+	// redact.ToolOutput before the model sees it. The secret sentinel must
+	// not survive that step.
+	masked := redact.ToolOutput(out)
+	var maskedShares map[string]interface{}
+	if err := json.Unmarshal([]byte(masked), &maskedShares); err != nil {
+		t.Fatalf("masked query_shares: %v (%s)", err, masked)
+	}
+	maskedSMB, _ := maskedShares["smb_shares"].([]interface{})[0].(map[string]interface{})
+	if maskedSMB["secret"] != redact.Marker {
+		t.Errorf("query_shares SMB secret = %v, want %s", maskedSMB["secret"], redact.Marker)
+	}
+	if strings.Contains(masked, "ignore") {
+		t.Errorf("query_shares leaked the secret sentinel: %s", masked)
 	}
 	for key := range fullNFS {
 		if _, ok := nfs[key]; !ok {
