@@ -47,6 +47,11 @@ type writePlan struct {
 	// the middleware call still sends as a symbolic value (for example
 	// "latest" resolved to a concrete upgrade_version).
 	Bind interface{}
+	// ConfirmSummary is the headline and key facts a human needs to
+	// approve the call. It is shown in the elicitation message and as
+	// confirm_summary on the dry-run preview. It is not hashed into the
+	// confirmation token.
+	ConfirmSummary *ConfirmSummary
 }
 
 func (p *writePlan) dryRunResult() (*DryRunResult, error) {
@@ -63,6 +68,7 @@ func (p *writePlan) dryRunResult() (*DryRunResult, error) {
 		Blocked:        p.Blocked,
 		Requirements:   p.Requirements,
 		EstimatedTime:  p.EstimatedTime,
+		ConfirmSummary: p.ConfirmSummary.forDisplay(),
 		DryRun:         &dry,
 		Executed:       &executed,
 	}

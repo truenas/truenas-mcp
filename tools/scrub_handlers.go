@@ -752,6 +752,11 @@ func planDeleteScrubSchedule(ctx context.Context, client *truenas.Client, args m
 			"Consider creating new schedule instead if adjusting timing",
 		},
 		TargetName: poolName,
+		ConfirmSummary: newConfirmSummary("Delete a scrub schedule",
+			confirmFact("id", id),
+			confirmFact("pool", poolName),
+			confirmFact("enabled", schedule["enabled"]),
+		),
 	}, nil
 }
 

@@ -145,10 +145,13 @@ const stubPlanMethod = "stub.plan"
 
 func stubToolPlan(name string) func(context.Context, *truenas.Client, map[string]interface{}) (*writePlan, error) {
 	return func(_ context.Context, _ *truenas.Client, args map[string]interface{}) (*writePlan, error) {
+		callArgs := withoutKeys(args, "confirm", "confirmation_token", "dry_run")
 		return &writePlan{
-			Tool:       name,
-			Method:     stubPlanMethod,
-			CallParams: []interface{}{withoutKeys(args, "confirm", "confirmation_token", "dry_run")},
+			Tool:           name,
+			Method:         stubPlanMethod,
+			CallParams:     []interface{}{callArgs},
+			TargetName:     identityTarget(callArgs),
+			ConfirmSummary: newConfirmSummary("Confirm "+name, confirmFact("tool", name)),
 		}, nil
 	}
 }

@@ -1062,6 +1062,11 @@ func planDeleteApp(ctx context.Context, client *truenas.Client, args map[string]
 		Warnings:      warnings,
 		EstimatedTime: &EstimatedTime{MinSeconds: 10, MaxSeconds: 60, Note: "Time depends on app shutdown gracefully"},
 		TargetName:    appName,
+		ConfirmSummary: newConfirmSummary("Delete an application",
+			confirmFact("app", appName),
+			confirmFact("state", state),
+			confirmBoolFact("remove_images", removeImages),
+		),
 	}, nil
 }
 
