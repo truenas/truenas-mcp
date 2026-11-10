@@ -1422,7 +1422,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	r.tools["update_app"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "update_app",
-			Description: "Update an installed app's configuration. Job-based; use tasks_get with returned task_id to track progress. Use get_app_config first to retrieve current config, then pass modified values. Supports dry_run to preview changes. This is a write operation that modifies the system.",
+			Description: "Update an installed app's configuration. Job-based; use tasks_get with returned task_id to track progress. Use get_app_config first to retrieve current config, then pass modified values. Every call must include the full storage section: omitted storage is refused, and apps that already use ix_volume storage cannot be updated through this tool without converting those entries to host_path. Supports dry_run to preview changes. This is a write operation that modifies the system.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1432,7 +1432,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 					},
 					"values": map[string]interface{}{
 						"type":        "object",
-						"description": "Updated configuration values. Use get_app_config to retrieve current values first. Storage must use host_path (not ix_volume).",
+						"description": "Updated configuration values. Use get_app_config to retrieve current values first. Every call must include the full storage section as host_path (not ix_volume); this tool cannot update ix_volume apps without converting their storage.",
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -4706,8 +4706,14 @@ func (r *Registry) handleUpdateApp(client *truenas.Client, args map[string]inter
 		return "", fmt.Errorf("values is required and must be an object")
 	}
 
-	if err := enforceHostPathStorage(values); err != nil {
+	schema, err := fetchInstalledAppSchema(client, appName)
+	if err != nil {
+		return "", err
+	}
+	if _, missing, err := checkAppHostPathStorage(client, schema, values); err != nil {
 		return "", fmt.Errorf("storage validation failed: %v", err)
+	} else if len(missing) > 0 {
+		return "", datasetsMustExistError(missing, "update")
 	}
 
 	result, err := client.Call("app.update", appName, map[string]interface{}{
@@ -4766,7 +4772,12 @@ func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 		return nil, fmt.Errorf("values is required and must be an object")
 	}
 
-	if err := enforceHostPathStorage(values); err != nil {
+	schema, err := fetchInstalledAppSchema(client, appName)
+	if err != nil {
+		return nil, err
+	}
+	datasetPaths, missing, err := checkAppHostPathStorage(client, schema, values)
+	if err != nil {
 		return nil, fmt.Errorf("storage validation failed: %v", err)
 	}
 
@@ -4777,11 +4788,23 @@ func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 	var currentConfig map[string]interface{}
 	json.Unmarshal(currentResult, &currentConfig)
 
+	warnings := []string{
+		"App containers will be restarted to apply configuration changes.",
+	}
+	if len(missing) > 0 {
+		warnings = append(warnings, "CRITICAL: The following datasets must exist before updating. Use create_dataset tool:")
+		for _, ds := range missing {
+			warnings = append(warnings, fmt.Sprintf("  - %s", ds))
+		}
+	}
+
 	return &DryRunResult{
 		Tool: "update_app",
 		CurrentState: map[string]interface{}{
-			"app_name":       appName,
-			"current_config": currentConfig,
+			"app_name":         appName,
+			"current_config":   currentConfig,
+			"missing_datasets": missing,
+			"storage_paths":    datasetPaths,
 		},
 		PlannedActions: []PlannedAction{
 			{
@@ -4790,14 +4813,13 @@ func (u *updateAppDryRun) ExecuteDryRun(client *truenas.Client, args map[string]
 				Operation:   "update",
 				Target:      "app.update",
 				Details: map[string]interface{}{
-					"app_name":   appName,
-					"new_values": values,
+					"app_name":      appName,
+					"new_values":    values,
+					"storage_paths": datasetPaths,
 				},
 			},
 		},
-		Warnings: []string{
-			"App containers will be restarted to apply configuration changes.",
-		},
+		Warnings:      warnings,
 		EstimatedTime: &EstimatedTime{MinSeconds: 10, MaxSeconds: 300, Note: "Depends on app restart time"},
 	}, nil
 }
