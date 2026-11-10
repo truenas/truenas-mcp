@@ -672,7 +672,8 @@ the canonical JSON of the arguments (keys sorted; `confirmation_token`,
 `null` counts as omitted). For tools that share a plan between preview and
 execute (`stop_app`, `delete_boot_environment`, `delete_app`,
 `delete_scrub_schedule`, `upgrade_app`, `update_app`, `system_reboot`,
-`apply_update`), the token is also bound to
+`apply_update`, `configure_directory_service`, `leave_directory_service`),
+the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
@@ -758,9 +759,11 @@ schema), `host_path_config.acl_enable` must also be a JSON boolean.
 > quota, and `"share_type": "bogus"` returned an empty list); they now fail
 > with an error. Missing required arguments were already refused; only the
 > error text changes (destructive tools called with `{}` used to answer
-> `Preview failed: ... is required`). `system_reboot` and `apply_update`,
-> which have no required arguments, still return a confirmation preview for
-> `{}`.
+> `Preview failed: ... is required`). `system_reboot`,
+> which has no required arguments, still returns a confirmation preview for
+> `{}`. `apply_update` also has no required arguments, but when
+> `update.status` has no `new_version` the preview is blocked rather than a
+> confirmation preview.
 
 **Tool annotations.** Every tool in `tools/list` carries MCP
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
@@ -914,7 +917,11 @@ Returns:
 
 `upgrade_app` and `update_app` use the same shared plan for preview and the real call (`app.upgrade` and `app.update`). The upgrade preview still describes the stop, snapshot, upgrade, start and verify steps (or redeploy and verify for a custom app or image-only update) that a single `app.upgrade` performs; those middleware parameters are what the confirmed call sends. An `update_app` dry run now includes `"dry_run": true, "executed": false` like the other plan-backed previews. Missing host-path datasets stay a preview warning; the real call still refuses until they exist. When `upgrade_app` is called with `version` omitted or `"latest"`, the confirmation token is also bound to the catalog version `app.upgrade_summary` resolved in the preview (`upgrade_version`). If a newer release is published between preview and confirm, the token is refused and nothing is upgraded; the `app.upgrade` call still sends `"latest"`. Preview `details` and `current_state` on these plans (and on any plan that uses custom preview actions) are masked the same way as other plan previews.
 
-`system_reboot` and `apply_update` use the same shared plan for preview and the real call (`system.reboot` and `update.run`). A reboot delay of 0 is omitted from the middleware payload, as before. Their dry runs now include `"dry_run": true, "executed": false` like the other plan-backed previews.
+`system_reboot` and `apply_update` use the same shared plan for preview and the real call (`system.reboot` and `update.run`). A reboot delay of 0 is omitted from the middleware payload, as before. Their dry runs now include `"dry_run": true, "executed": false` like the other plan-backed previews. A confirmed call re-reads `system.info` (and, for `apply_update`, `update.status`) before writing, and fails closed if those reads fail. The confirmation token for `apply_update` is also bound to `update.status`'s `status.new_version.version` (the 25.10 `UpdateStatus` shape: `new_version` is nested under `status`, not at the top level). If that version changes between preview and confirm, the token is refused and `update.run` is not sent; the `update.run` payload is unchanged (`{"reboot": ...}` only). When `update.status` reports `code: "ERROR"` or a null `status`, the preview is blocked with that reason.
+
+> **Breaking change:** an explicit `dry_run` or a call without a token of `apply_update` when `update.status` has no `new_version` (or reports `code: "ERROR"` or a null `status`) now returns an error result with `"status": "blocked"` and the preview, instead of a successful preview. Clients that treated that case as a normal result need to read the error result instead. A confirmed call is also refused; nothing is applied.
+
+`configure_directory_service` and `leave_directory_service` use the same shared plan for preview and the real call (`directoryservices.update` and `directoryservices.leave`). The middleware payloads are unchanged. Credentials such as bind passwords, and LDAP `auxiliary_parameters` (free text that can contain secrets such as `ldap_default_authtok`), are masked in the preview and are never written back in the result or stored task arguments. A confirmed `configure_directory_service` now also reads `directoryservices.status` (as the preview already did) and fails closed if that read fails. Their dry runs now include `"dry_run": true, "executed": false` like the other plan-backed previews.
 
 **Benefits:**
 - See exactly what will change before committing

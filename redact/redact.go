@@ -58,6 +58,9 @@ var passPrefixes = []string{
 // bare name "key" (API key records, encryption key entries).
 var sensitiveExactKeys = map[string]bool{
 	"key": true, "unixhash": true, "smbhash": true, "pwhash": true, "nthash": true,
+	// LDAP/SSSD free-text extra parameters can carry bind secrets
+	// (ldap_default_authtok, etc.). The whole field is redacted.
+	"auxiliaryparameters": true,
 }
 
 // publicKeyNames are exact normalised names of public key fields, which are

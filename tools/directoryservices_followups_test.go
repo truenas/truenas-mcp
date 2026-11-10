@@ -684,3 +684,147 @@ func TestConfigureDirectoryServiceAttributeMapsVisibleSecretsMasked(t *testing.T
 		checkText(t, "raw task arguments", string(stored))
 	})
 }
+
+// LDAP auxiliary_parameters is free text and can carry a bind secret
+// (for example ldap_default_authtok). The whole field is redacted on
+// every surface the model or a log can see; the middleware still gets
+// the real value.
+const auxParamSecret = "aux-bind-111g"
+
+func ldapWithAuxiliarySecret() obj {
+	args := fullDSExamples()["LDAP"]
+	conf := args["configuration"].(obj)
+	conf["auxiliary_parameters"] = "ldap_default_authtok = " + auxParamSecret
+	return args
+}
+
+func assertNoAuxSecret(t *testing.T, what, text string) {
+	t.Helper()
+	if strings.Contains(text, auxParamSecret) {
+		t.Errorf("%s leaked auxiliary_parameters secret %q:\n%s", what, auxParamSecret, text)
+	}
+}
+
+func TestConfigureDirectoryServiceMasksAuxiliaryParameters(t *testing.T) {
+	if !redact.IsSensitiveKey("auxiliary_parameters") {
+		t.Error("auxiliary_parameters must be a sensitive key so the whole field is redacted in previews, errors and debug logs")
+	}
+
+	args := ldapWithAuxiliarySecret()
+	payload, err := buildDirectoryServiceUpdatePayload(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAux := "ldap_default_authtok = " + auxParamSecret
+	conf := payload["configuration"].(map[string]interface{})
+	if conf["auxiliary_parameters"] != wantAux {
+		t.Fatalf("payload auxiliary_parameters = %v, want the real value for the middleware", conf["auxiliary_parameters"])
+	}
+
+	t.Run("mask helper", func(t *testing.T) {
+		masked := maskDirectoryServicePayload(payload)
+		b, _ := json.Marshal(masked)
+		assertNoAuxSecret(t, "masked payload", string(b))
+		got := masked["configuration"].(map[string]interface{})["auxiliary_parameters"]
+		if got != redact.Marker {
+			t.Errorf("auxiliary_parameters = %v, want %s", got, redact.Marker)
+		}
+		if payload["configuration"].(map[string]interface{})["auxiliary_parameters"] != wantAux {
+			t.Error("masking modified the payload that is sent to TrueNAS")
+		}
+	})
+
+	t.Run("preview", func(t *testing.T) {
+		for _, extra := range []obj{{"dry_run": true}, {}} {
+			r, fake, _ := dsFake(t)
+			out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, extra))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNoAuxSecret(t, "preview", out)
+			assertNoAuxSecret(t, "redacted preview", redact.ToolOutput(out))
+			if !strings.Contains(out, `"auxiliary_parameters": "`+redact.Marker+`"`) && !strings.Contains(out, `"auxiliary_parameters":"`+redact.Marker+`"`) {
+				t.Errorf("preview does not show auxiliary_parameters as masked:\n%s", out)
+			}
+			if len(fake.called("directoryservices.update")) != 0 {
+				t.Error("preview called directoryservices.update")
+			}
+		}
+	})
+
+	t.Run("args-mismatch rejection", func(t *testing.T) {
+		r, fake, _ := dsFake(t)
+		tok := previewToken(t, r, "configure_directory_service", args)
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{
+			"force":              true,
+			"confirmation_token": tok,
+		}))
+		if err == nil {
+			t.Fatalf("expected a mismatch rejection, got %s", out)
+		}
+		assertNoAuxSecret(t, "rejection error", err.Error())
+		assertNoAuxSecret(t, "redacted rejection error", redact.Text(err.Error()))
+		if out != "" {
+			assertNoAuxSecret(t, "rejection body", out)
+			assertNoAuxSecret(t, "redacted rejection body", redact.ToolOutput(out))
+		}
+		if n := len(fake.called("directoryservices.update")); n != 0 {
+			t.Errorf("mismatch rejection called directoryservices.update %d times", n)
+		}
+	})
+
+	t.Run("echoed middleware error", func(t *testing.T) {
+		r, fake, _ := dsFake(t)
+		fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+			if method == "directoryservices.update" {
+				return nil, map[string]interface{}{
+					"code":    -32001,
+					"message": "Method call error",
+					"data":    map[string]interface{}{"reason": string(params)},
+				}, true
+			}
+			return nil, nil, false
+		}
+		out, err := r.CallTool(t.Context(), "configure_directory_service", approve(t, r, "configure_directory_service", args))
+		if err == nil {
+			t.Fatalf("expected a middleware error, got %s", out)
+		}
+		// The tools layer may see the raw echo; the server redacts it before
+		// it is returned to the client or written to a debug log.
+		assertNoAuxSecret(t, "redacted echoed error", redact.Text(err.Error()))
+		if out != "" {
+			assertNoAuxSecret(t, "redacted echoed body", redact.ToolOutput(out))
+		}
+	})
+
+	t.Run("stored task args and debug logs", func(t *testing.T) {
+		r, fake, mgr := dsFake(t)
+		out, err := r.CallTool(t.Context(), "configure_directory_service", approve(t, r, "configure_directory_service", args))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNoAuxSecret(t, "response", out)
+		assertNoAuxSecret(t, "redacted response", redact.ToolOutput(out))
+		calls := fake.called("directoryservices.update")
+		if len(calls) != 1 || !strings.Contains(string(calls[0].Params), auxParamSecret) {
+			t.Fatalf("middleware must still receive the real auxiliary_parameters, got %v", calls)
+		}
+		var reply struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal([]byte(out), &reply); err != nil {
+			t.Fatal(err)
+		}
+		task, err := mgr.Get(reply.TaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, _ := json.Marshal(task.Arguments)
+		assertNoAuxSecret(t, "task arguments", string(stored))
+		assertNoAuxSecret(t, "redacted task arguments", redact.ToolOutput(string(stored)))
+
+		raw, _ := json.Marshal(payload)
+		assertNoAuxSecret(t, "debug log text", redact.Text(`directoryservices.update `+string(raw)))
+		assertNoAuxSecret(t, "debug log json", string(redact.JSON(raw)))
+	})
+}

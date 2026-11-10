@@ -177,7 +177,9 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 
 	t.Run("already downloaded reports the real version", func(t *testing.T) {
 		client, _ := newFakeClientWith(t, map[string]interface{}{
-			"update.status": map[string]interface{}{"update_download_progress": map[string]interface{}{"percent": float64(100), "version": "25.10.1"}},
+			"update.status": updateStatusResult("NORMAL", updateStatusDetails(updateStatusNewVersion("25.10.1")), nil, map[string]interface{}{
+				"percent": float64(100), "version": "25.10.1", "description": "Update downloaded.",
+			}),
 		}, nil)
 		out, err := NewRegistry(client, nil).handleDownloadUpdate(context.Background(), client, ignoredArgs())
 		if err != nil {
@@ -200,7 +202,7 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 	})
 
 	t.Run("started download", func(t *testing.T) {
-		client, fake := newFakeClientWith(t, map[string]interface{}{"update.status": map[string]interface{}{}, "update.download": 7}, nil)
+		client, fake := newFakeClientWith(t, map[string]interface{}{"update.status": updateStatusAvailable("25.10.1"), "update.download": 7}, nil)
 		mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second})
 		out, err := NewRegistry(client, mgr).handleDownloadUpdate(context.Background(), client, ignoredArgs())
 		if err != nil {
@@ -239,7 +241,9 @@ func TestDownloadUpdateDoesNotEchoIgnoredArguments(t *testing.T) {
 
 	t.Run("no ignored arguments, no warning", func(t *testing.T) {
 		client, _ := newFakeClientWith(t, map[string]interface{}{
-			"update.status": map[string]interface{}{"update_download_progress": map[string]interface{}{"percent": float64(100), "version": "25.10.1"}},
+			"update.status": updateStatusResult("NORMAL", updateStatusDetails(updateStatusNewVersion("25.10.1")), nil, map[string]interface{}{
+				"percent": float64(100), "version": "25.10.1", "description": "Update downloaded.",
+			}),
 		}, nil)
 		out, err := NewRegistry(client, nil).handleDownloadUpdate(context.Background(), client, map[string]interface{}{})
 		if err != nil || strings.Contains(out, "warning") {

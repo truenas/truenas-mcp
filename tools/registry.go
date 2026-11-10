@@ -600,6 +600,8 @@ idmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed t
 			},
 		},
 		Handler: r.handleConfigureDirectoryServiceWithDryRun,
+		Plan:    planConfigureDirectoryService,
+		Execute: r.executeConfigureDirectoryService,
 	}
 
 	r.tools["leave_directory_service"] = Tool{
@@ -648,6 +650,8 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: r.handleLeaveDirectoryServiceWithDryRun,
+		Plan:    planLeaveDirectoryService,
+		Execute: r.executeLeaveDirectoryService,
 	}
 
 	// Storage pools query
@@ -6345,6 +6349,61 @@ func withoutKeys(args map[string]interface{}, keys ...string) map[string]interfa
 	return out
 }
 
+// applyUpdateBoundVersion returns the trimmed new_version.version from a
+// 25.10 update.status result, or "" when there is no version to apply.
+// The official shape (middlewared/api/v25_10_0/update.py, UpdateStatus, and
+// https://api.truenas.com/v25.10/api_methods_update.status.html) is:
+//
+//	{code, error, update_download_progress, status: {current_version, new_version: {version, ...} | null} | null}
+//
+// new_version is under status, not at the top level.
+func applyUpdateBoundVersion(result map[string]interface{}) string {
+	st, _ := result["status"].(map[string]interface{})
+	nv, _ := st["new_version"].(map[string]interface{})
+	v, _ := nv["version"].(string)
+	return strings.TrimSpace(v)
+}
+
+// applyUpdateBind returns the extra plan identity for apply_update, or nil
+// when there is no version so hashes stay {method, params}.
+func applyUpdateBind(result map[string]interface{}) interface{} {
+	if v := applyUpdateBoundVersion(result); v != "" {
+		return map[string]interface{}{"new_version": v}
+	}
+	return nil
+}
+
+func applyUpdateStatusErrorReason(result map[string]interface{}) string {
+	errObj, _ := result["error"].(map[string]interface{})
+	if r, _ := errObj["reason"].(string); strings.TrimSpace(r) != "" {
+		return strings.TrimSpace(r)
+	}
+	if name, _ := errObj["errname"].(string); strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
+	}
+	return ""
+}
+
+// applyUpdateBlockReasons returns why apply_update cannot proceed against
+// this update.status result, or nil when an update is available.
+func applyUpdateBlockReasons(result map[string]interface{}) []string {
+	code, _ := result["code"].(string)
+	if code == "ERROR" {
+		reason := applyUpdateStatusErrorReason(result)
+		if reason == "" {
+			reason = "see error for details"
+		}
+		return []string{"update.status is ERROR: " + reason}
+	}
+	if _, ok := result["status"].(map[string]interface{}); !ok {
+		return []string{"update.status has no status details (status is null)"}
+	}
+	if applyUpdateBoundVersion(result) == "" {
+		return []string{"No update is available to apply (update.status has no new_version)"}
+	}
+	return nil
+}
+
 // planApplyUpdate builds the apply_update plan used by both the dry-run
 // preview and the real call. The middleware write is a single update.run;
 // the preview still describes the stop/update/verify (and optional reboot)
@@ -6426,6 +6485,8 @@ func planApplyUpdate(ctx context.Context, client *truenas.Client, args map[strin
 		)
 	}
 
+	blocked := applyUpdateBlockReasons(status)
+
 	return &writePlan{
 		Tool:       "apply_update",
 		Method:     updateRunMethod,
@@ -6438,6 +6499,8 @@ func planApplyUpdate(ctx context.Context, client *truenas.Client, args map[strin
 		},
 		Actions:  actions,
 		Warnings: warnings,
+		Blocked:  blocked,
+		Bind:     applyUpdateBind(status),
 		EstimatedTime: &EstimatedTime{
 			MinSeconds: 180,
 			MaxSeconds: 900,
