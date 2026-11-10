@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/truenas/truenas-mcp/truenas"
@@ -222,27 +223,48 @@ func validateShareName(name string) error {
 	return nil
 }
 
-// validateSharePath validates the share path
-func validateSharePath(path string) error {
-	if path == "" {
+// validateSharePath validates the share path. After the existing empty,
+// EXTERNAL, /mnt/ prefix, and consecutive-slash checks, the path is
+// cleaned; any remaining ".." segment is rejected. The pool is the first
+// component after /mnt/ on the original path, so /mnt/tank/../other
+// cannot be re-read as pool "other". The cleaned path must be
+// /mnt/<pool> or /mnt/<pool>/....
+func validateSharePath(p string) error {
+	if p == "" {
 		return fmt.Errorf("path cannot be empty")
 	}
 
 	// Special case for external DFS shares
-	if path == "EXTERNAL" {
+	if p == "EXTERNAL" {
 		return nil
 	}
 
 	// Path must start with /mnt/
-	if !strings.HasPrefix(path, "/mnt/") {
-		return fmt.Errorf("path must start with /mnt/ (got: %s)", path)
+	if !strings.HasPrefix(p, "/mnt/") {
+		return fmt.Errorf("path must start with /mnt/ (got: %s)", p)
 	}
 
 	// Basic validation that it looks like a valid path
-	if strings.Contains(path, "//") {
+	if strings.Contains(p, "//") {
 		return fmt.Errorf("path cannot contain consecutive slashes")
 	}
 
+	cleaned := path.Clean(p)
+	for _, seg := range strings.Split(cleaned, "/") {
+		if seg == ".." {
+			return fmt.Errorf("path cannot contain '..' segments")
+		}
+	}
+
+	rest := strings.TrimPrefix(p, "/mnt/")
+	pool, _, _ := strings.Cut(rest, "/")
+	if pool == "" || pool == "." || pool == ".." {
+		return fmt.Errorf("path must be under /mnt/<pool>")
+	}
+	prefix := "/mnt/" + pool
+	if cleaned != prefix && !strings.HasPrefix(cleaned, prefix+"/") {
+		return fmt.Errorf("path must stay under /mnt/%s", pool)
+	}
 	return nil
 }
 
