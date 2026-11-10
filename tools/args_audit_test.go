@@ -95,7 +95,27 @@ func loadToolSource(t *testing.T) *toolSource {
 	if reg == nil {
 		t.Fatal("Registry.registerTools not found")
 	}
-	ast.Inspect(reg.Body, func(n ast.Node) bool {
+	src.collectHandlers(t, reg, map[string]bool{})
+	return src
+}
+
+// collectHandlers records Handler values from r.tools["name"] = Tool{...}
+// assignments in fd, and follows r.registerX() calls so a split of
+// registerTools into per-domain methods is still visible to the audit.
+func (s *toolSource) collectHandlers(t *testing.T, fd *ast.FuncDecl, seen map[string]bool) {
+	t.Helper()
+	if fd == nil || fd.Body == nil || seen[fd.Name.Name] {
+		return
+	}
+	seen[fd.Name.Name] = true
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "r" && len(call.Args) == 0 {
+					s.collectHandlers(t, s.methods["Registry"][sel.Sel.Name], seen)
+				}
+			}
+		}
 		as, ok := n.(*ast.AssignStmt)
 		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
 			return true
@@ -124,16 +144,15 @@ func loadToolSource(t *testing.T) *toolSource {
 			}
 			switch h := kv.Value.(type) {
 			case *ast.Ident:
-				src.handlers[name] = h.Name
+				s.handlers[name] = h.Name
 			case *ast.SelectorExpr:
-				src.handlers[name] = h.Sel.Name
+				s.handlers[name] = h.Sel.Name
 			default:
 				t.Errorf("tool %s: Handler is not a plain function or method value; teach the audit about it", name)
 			}
 		}
 		return true
 	})
-	return src
 }
 
 func receiverTypeName(e ast.Expr) string {
