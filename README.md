@@ -174,8 +174,8 @@ as the `command` in your MCP client configuration. Compare the zip's SHA-256
 2. Go to **System Settings → API Keys**
 3. Click **Add** to create a new API key
 4. Give it a name (e.g., "Claude Desktop MCP")
-5. Make sure it has appropriate permissions (admin recommended)
-6. **Copy the API key** - you'll need it for configuration
+5. The key inherits its owner's privileges. Give that user the narrowest TrueNAS role that covers the tools you will enable, not a full administrator account by default. For a `--read-only` deployment, assign the [Read-Only Administrator](https://www.truenas.com/docs/scale/25.10/scaletutorials/credentials/adminroles/) privilege (`READONLY_ADMIN`) so TrueNAS itself rejects writes, not only this binary. Otherwise use the narrowest built-in or custom privilege that covers the write and destructive tools you enable (for example Sharing Administrator if you only expose share tools). See [Using Administrator Logins](https://www.truenas.com/docs/scale/25.10/scaletutorials/credentials/adminroles/) and [Managing API Keys](https://www.truenas.com/docs/scale/25.10/scaletutorials/toptoolbar/managingapikeys/).
+6. **Copy the API key** - you'll need it for configuration. Prefer `TRUENAS_API_KEY` or `--api-key-file`; see [Flags](#flags)
 7. Note the **user that owns the key** (e.g. `truenas_admin`) - it is required as `--api-user` / `TRUENAS_API_USER`
 
 ### Step 3: Configure Your MCP Client
@@ -199,18 +199,20 @@ vi ~/.config/Claude/claude_desktop_config.json
 %APPDATA%\Claude\claude_desktop_config.json
 ```
 
-Add the TrueNAS MCP server configuration:
+Add the TrueNAS MCP server configuration. Put the API key in the client's
+`env` block (`TRUENAS_API_KEY`), not in `args`. A key passed with `--api-key`
+is visible in the process list.
 
 ```json
 {
   "mcpServers": {
     "truenas": {
       "command": "truenas-mcp",
-      "args": [
-        "--truenas-url", "truenas.local",
-        "--api-key", "your-api-key-here",
-        "--api-user", "your-api-user"
-      ]
+      "env": {
+        "TRUENAS_URL": "truenas.local",
+        "TRUENAS_API_KEY": "your-api-key-here",
+        "TRUENAS_API_USER": "your-api-user"
+      }
     }
   }
 }
@@ -218,16 +220,7 @@ Add the TrueNAS MCP server configuration:
 
 **Configuration options:**
 
-**Option 1: Hostname (automatically uses wss://):**
-```json
-"args": [
-  "--truenas-url", "192.168.0.31",
-  "--api-key", "your-api-key-here",
-  "--api-user", "your-api-user"
-]
-```
-
-**Option 2: Using environment variables:**
+**Option 1: Environment variables (recommended):**
 ```json
 {
   "mcpServers": {
@@ -242,6 +235,28 @@ Add the TrueNAS MCP server configuration:
   }
 }
 ```
+
+**Option 2: Hostname as a flag, key still in the environment:**
+```json
+{
+  "command": "truenas-mcp",
+  "args": [
+    "--truenas-url", "192.168.0.31",
+    "--api-user", "your-api-user"
+  ],
+  "env": {
+    "TRUENAS_API_KEY": "your-api-key-here"
+  }
+}
+```
+
+**Option 3: Key from a file:** set `TRUENAS_API_KEY_FILE` (or pass
+`--api-key-file`) to a file that contains the key. On Unix the file must
+not be readable by group or others (mode `0600`). One trailing newline is
+trimmed. Do not also set `TRUENAS_API_KEY` or `--api-key`.
+
+`--api-key` in `args` is still accepted, but the key is visible in the
+process list; prefer `TRUENAS_API_KEY` or `--api-key-file`.
 
 **TLS with a self-signed certificate:** TrueNAS ships with a self-signed
 certificate by default, and certificate verification is on by default. Either
@@ -270,9 +285,13 @@ To export the certificate: TrueNAS UI → System Settings → Certificates, or
 
 Claude Code uses the `claude mcp` command to configure MCP servers:
 
-**Add TrueNAS MCP server:**
+**Add TrueNAS MCP server** (the key is stored in the server's environment, not as a process argument):
 ```bash
-claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key-here --api-user your-api-user
+claude mcp add truenas \
+  --env TRUENAS_URL=192.168.0.31 \
+  --env TRUENAS_API_KEY=your-api-key-here \
+  --env TRUENAS_API_USER=your-api-user \
+  -- truenas-mcp
 ```
 
 **Verify the configuration:**
@@ -287,7 +306,11 @@ claude mcp get truenas
 claude mcp remove truenas
 
 # Re-add with updated configuration
-claude mcp add truenas -- truenas-mcp --truenas-url 192.168.0.31 --api-key new-api-key --api-user your-api-user
+claude mcp add truenas \
+  --env TRUENAS_URL=192.168.0.31 \
+  --env TRUENAS_API_KEY=new-api-key \
+  --env TRUENAS_API_USER=your-api-user \
+  -- truenas-mcp
 ```
 
 ### Step 4: Restart Your MCP Client
@@ -312,11 +335,12 @@ You should now be able to ask TrueNAS questions:
 
 - `--truenas-url` - TrueNAS hostname (required, or use `TRUENAS_URL` env var)
   - Examples: `truenas.local`, `192.168.0.31` or `fd00::10` (automatically uses `wss://<host>:443/api/current`), a host with a port such as `truenas.local:8443` or `[2001:db8::10]:8443`, or a full `wss://host[:port]/api/current` URL
-  - Credentials go in `--api-key` and `--api-user`; a URL containing `user:password@` is refused
+  - Credentials go in `TRUENAS_API_KEY` (or `--api-key-file` / `--api-key`) and `--api-user`; a URL containing `user:password@` is refused
   - A bare host cannot include a path; use a full `wss://` URL for that
   - A `wss://` URL ending in the legacy `/websocket` (or `/websocket/`) path is rewritten to `/api/current` with a one-time warning; the legacy endpoint is deprecated and planned for removal in TrueNAS 28
   - ⚠️ **Note**: `ws://` (unencrypted) is **not allowed** - TrueNAS will revoke API keys used over unencrypted connections
-- `--api-key` - TrueNAS API key for authentication (required, or use `TRUENAS_API_KEY` env var)
+- `--api-key` - TrueNAS API key for authentication (or use `TRUENAS_API_KEY`). The key is visible in the process list; prefer the environment variable or `--api-key-file`
+- `--api-key-file` - Path to a file containing the API key (or use `TRUENAS_API_KEY_FILE`). The file is read at startup, one trailing newline is trimmed, and on Unix a file readable by group or others is refused (use mode `0600`). The file contents are never logged. Provide only one of `--api-key` / `TRUENAS_API_KEY` or `--api-key-file` / `TRUENAS_API_KEY_FILE`; a flag wins over the environment
 - `--api-user` - The user that owns the API key, sent to `auth.login_ex` (required, or use `TRUENAS_API_USER`), e.g. `truenas_admin`. There is no default; the server exits at startup if it is missing
 - `--tls-ca` - Path to a PEM certificate to trust, e.g. the TrueNAS self-signed certificate (or use `TRUENAS_TLS_CA` env var)
 - `--insecure` - Disable TLS certificate verification entirely (or set `TRUENAS_INSECURE=1`) - **unsafe**: allows man-in-the-middle attacks; prefer `--tls-ca`
@@ -342,18 +366,24 @@ replaced with `[REDACTED]`, so debug logs are safe to share in bug reports.
 ### Examples
 
 ```bash
-# Basic usage
-./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --api-user your-api-user
-
-# Using environment variables
+# Recommended: environment variables (the key is not visible in the process list)
 export TRUENAS_URL=192.168.0.31
 export TRUENAS_API_KEY=your-api-key
 export TRUENAS_API_USER=your-api-user
 ./truenas-mcp
 
+# Or read the key from a mode 0600 file
+export TRUENAS_URL=192.168.0.31
+export TRUENAS_API_KEY_FILE=/path/to/truenas-api-key
+export TRUENAS_API_USER=your-api-user
+./truenas-mcp
+
+# --api-key works, but the key is visible in the process list
+./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --api-user your-api-user
+
 # With debug logging (full request/response bodies, credentials redacted)
-./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --api-user your-api-user --debug
-# or: TRUENAS_MCP_DEBUG=1 ./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --api-user your-api-user
+./truenas-mcp --debug
+# or: TRUENAS_MCP_DEBUG=1 ./truenas-mcp
 ```
 
 ## Connection Details
@@ -467,14 +497,18 @@ and the TrueNAS certificate is verified as usual (`--tls-ca` / `--insecure`
 behave the same with or without a proxy).
 
 ```bash
+export TRUENAS_URL=truenas.tailnet-name.ts.net
+export TRUENAS_API_KEY=your-api-key
+export TRUENAS_API_USER=your-api-user
+
 # Through a SOCKS5 proxy, e.g. userspace Tailscale
-ALL_PROXY=socks5h://localhost:1055 ./truenas-mcp --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
+ALL_PROXY=socks5h://localhost:1055 ./truenas-mcp
 
 # Through an HTTP proxy, bypassing it for the local network
-HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.0.2.0/24 ./truenas-mcp --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
+HTTPS_PROXY=http://localhost:1056 NO_PROXY=192.0.2.0/24 ./truenas-mcp
 
-# Or set it explicitly, overriding the environment
-./truenas-mcp --proxy socks5h://localhost:1055 --truenas-url truenas.tailnet-name.ts.net --api-key your-api-key --api-user your-api-user
+# Or set the proxy explicitly, overriding the environment
+./truenas-mcp --proxy socks5h://localhost:1055
 ```
 
 Desktop MCP clients usually do not inherit your shell environment, so set the
@@ -503,7 +537,7 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - Verify TrueNAS is accessible from your machine
 - Check firewall allows port 443 (wss), or the port you configured
 - `HTTP 404` / "TrueNAS 25.04 or later required": the server predates the JSON-RPC API; upgrade TrueNAS
-- Verify API key is valid and has admin permissions
+- Verify the API key is valid and its owner has the privileges required for the tools you enable (see [Using Administrator Logins](https://www.truenas.com/docs/scale/25.10/scaletutorials/credentials/adminroles/))
 - "connecting via proxy ... proxy unreachable": the proxy named in the message (and the variable it came from) is not listening; check it, or bypass it with `NO_PROXY` or `--proxy none`
 - "connecting via proxy ... the proxy is reachable but could not connect to the TrueNAS host ...": the SOCKS5 proxy answered but could not open a connection to TrueNAS (the SOCKS5 reply, such as "general failure" or "host unreachable", is shown at the end); check the TrueNAS host and port, that the system is up, and that the proxy's network (for example your tailnet or VPN) can route to it
 - "request too large for the TrueNAS API": TrueNAS accepts at most 64 KiB per API message, so a larger request (for example a very long value in a tool argument) is refused before it is sent and nothing runs; reduce the size of the input. If TrueNAS itself closes the connection for an oversized message (WebSocket close code 1009), the error says so and the next request reconnects
@@ -529,7 +563,7 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - **TLS/SSL**: Only supports wss:// (encrypted) - ws:// is rejected for security
 - **Certificate verification**: On by default; pin a self-signed certificate with `--tls-ca`, or opt out explicitly with `--insecure`
 - **Network**: Client-only (no listening ports, all connections outbound)
-- **API Key Storage**: Recommend using environment variables instead of command-line args
+- **API Key Storage**: Prefer `TRUENAS_API_KEY` in the client's `env` block, or `--api-key-file` / `TRUENAS_API_KEY_FILE` pointing at a mode `0600` file. `--api-key` is supported but visible in the process list
 - **Log Safety**: Credentials are redacted from all log output and error messages; full request/response bodies are only logged in debug mode (see [Debug Logging](#debug-logging))
 - **Tool Output Redaction**: Secrets are always removed from tool results and error messages before they reach the MCP client (and the model), with no opt-out. Values under credential-bearing names (`password`, `DB_PASS`, `adminPwd`, `bindpw`, `secret`, `token`, `api_key`, `private_key`, `passphrase`, `credential`, `pin`, `otp`, `cookie`, `authorization`, password hashes, a key named `key` or ending in `_key`, ...) are replaced with `[REDACTED]`; the key is kept so the model knows the field exists, and a whole object or list under such a name is replaced. `{name, value}` environment entries and `NAME=VALUE` strings are redacted by name. Free text, including strings inside JSON results such as job errors, is also scrubbed of PEM private key blocks, `key=value`/`"key": "value"` pairs, Bearer tokens and passwords in URLs. This is a safety net, not a substitute for restricting the API key's permissions
 - **Tool Output Size**: Tool results and errors sent to the MCP client are capped at 100 KiB. A larger value is redacted first, then cut on a rune boundary, and a notice is appended saying the output was truncated and to narrow the query with `limit`, `select`, or filters. Redacting first prevents a secret from surviving as a fragment at the cut. Middleware error traces (Python tracebacks) are never sent to the client; with `--debug` they are logged to stderr, still redacted
@@ -552,9 +586,9 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 ### Security Best Practices
 
 1. **Always use secure WebSocket (wss://)** - enforced by default, ws:// is rejected
-2. **Generate dedicated API key** for MCP use only
-3. **Use environment variables** for API keys in Claude Desktop config
-4. **Restrict API key permissions** to minimum required
+2. **Generate a dedicated API key** for MCP use only, owned by a user whose privilege is no broader than the tools you enable
+3. **Use environment variables or `--api-key-file`** for API keys; do not pass `--api-key` on the command line (it is visible in the process list)
+4. **Restrict the API key's privileges** to the minimum required: [Read-Only Administrator](https://www.truenas.com/docs/scale/25.10/scaletutorials/credentials/adminroles/) (`READONLY_ADMIN`) for `--read-only` deployments, so TrueNAS itself rejects writes, otherwise the narrowest role that covers the enabled write tools
 5. **Rotate API keys periodically**
 6. **Start in `--read-only` mode** and enable write tools only where you need them (see [Safety Controls](#safety-controls))
 

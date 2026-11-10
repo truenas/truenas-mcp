@@ -2,11 +2,11 @@
   "mcpServers": {
     "truenas": {
       "command": "/usr/local/bin/truenas-mcp",
-      "args": [
-        "--truenas-url", "192.168.0.31",
-        "--api-key", "your-api-key-here",
-        "--api-user", "your-api-user"
-      ]
+      "env": {
+        "TRUENAS_URL": "192.168.0.31",
+        "TRUENAS_API_KEY": "your-api-key-here",
+        "TRUENAS_API_USER": "your-api-user"
+      }
     }
   }
 }

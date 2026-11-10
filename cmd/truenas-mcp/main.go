@@ -23,7 +23,8 @@ import (
 var (
 	truenasURL = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.local' or 'wss://10.0.0.1/api/current')")
 	apiUser    = flag.String("api-user", "", "User that owns the API key, sent to auth.login_ex (required; env TRUENAS_API_USER)")
-	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication")
+	apiKey     = flag.String("api-key", "", "TrueNAS API key for middleware authentication (env TRUENAS_API_KEY; visible in the process list)")
+	apiKeyFile = flag.String("api-key-file", "", "Path to a file containing the TrueNAS API key (env TRUENAS_API_KEY_FILE)")
 	insecure   = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks; prefer --tls-ca)")
 	tlsCA      = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
 	proxyURL   = flag.String("proxy", "", "Proxy for the TrueNAS connection: http://, socks5:// or socks5h://host:port, or none to ignore proxy env vars (env TRUENAS_PROXY; overrides HTTPS_PROXY and ALL_PROXY)")
@@ -74,7 +75,7 @@ func checkRequired(truenasURL, apiKey, apiUser string) error {
 		missing = append(missing, "--truenas-url (TRUENAS_URL)")
 	}
 	if apiKey == "" {
-		missing = append(missing, "--api-key (TRUENAS_API_KEY)")
+		missing = append(missing, "--api-key (TRUENAS_API_KEY, or --api-key-file / TRUENAS_API_KEY_FILE)")
 	}
 	if apiUser == "" {
 		missing = append(missing, "--api-user (TRUENAS_API_USER, the user that owns the API key)")
@@ -140,12 +141,14 @@ func main() {
 	if *truenasURL == "" {
 		*truenasURL = os.Getenv("TRUENAS_URL")
 	}
-	if *apiKey == "" {
-		*apiKey = os.Getenv("TRUENAS_API_KEY")
-	}
 	if *apiUser == "" {
 		*apiUser = os.Getenv("TRUENAS_API_USER")
 	}
+	key, err := resolveAPIKey(*apiKey, *apiKeyFile, os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	*apiKey = key
 
 	if err := checkRequired(*truenasURL, *apiKey, *apiUser); err != nil {
 		log.Fatal(err)
