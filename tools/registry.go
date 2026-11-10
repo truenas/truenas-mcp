@@ -1539,8 +1539,10 @@ TrueNAS removes its computer account from the domain using the credential you pr
 	// Get app catalog details
 	r.tools["get_app_catalog_details"] = Tool{
 		Definition: mcp.Tool{
-			Name:        "get_app_catalog_details",
-			Description: "Get detailed information about a specific app from the catalog including README, screenshots, version info, and storage volume hints. Use this after searching to understand an app's requirements before installation.",
+			Name: "get_app_catalog_details",
+			Description: `Get detailed information about a specific app from the catalog, including README, screenshots, version info, storage volume hints, and the app schema (groups and questions, with each question's defaults). When the schema defines run-as user/group or resource limits, those defaults are included in a defaults object; they are omitted when the schema has none.
+
+Before calling install_app: review every schema group, call query_pools and ask the user which pool to use if more than one is available (use the only pool if there is just one), create datasets with create_dataset, and set every storage volume to type host_path under /mnt/<pool>/.... Use the schema's own defaults for run-as and resources when they are present. This result describes the app and its schema; it does not issue client-specific instructions.`,
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1582,7 +1584,7 @@ Every app requires configuration across multiple groups (currently 6, but may va
 2. Review schema.groups array (iterate through ALL groups, don't assume count)
 3. Check schema.group_count to know how many groups to configure
 4. Review schema.questions_by_group (shows questions for each group)
-5. Review wizard_guidance for common patterns
+5. Use the schema's own defaults for run-as and resources when they are present; omit them when the schema has none
 
 **STEP 2: Understand Common Patterns**
 
@@ -1596,7 +1598,7 @@ All apps follow these patterns:
 • **User/Group** (Group 2):
   - Variable: run_as
   - Structure: {user: <uid>, group: <gid>}
-  - Default: {user: 568, group: 568} (apps user/group)
+  - Defaults: take user and group from the app schema when present; omit them when the schema has none
 
 • **Network** (Group 3):
   - Variable: network
@@ -1618,8 +1620,8 @@ All apps follow these patterns:
 
 • **Resources** (Group 6):
   - Variable: resources
-  - Structure: {limits: {cpus: 2, memory: 4096}, gpus: {...}}
-  - Defaults: 2 CPUs, 4096 MB RAM
+  - Structure: {limits: {cpus: <schema default>, memory: <schema default>}, gpus: {...}}
+  - Defaults: take CPU and memory limits from the app schema when present; omit them when the schema has none
 
 **STEP 3: Plan Storage (CRITICAL - Do This First)**
 
@@ -1671,8 +1673,8 @@ Go through each group and build configuration:
 **Group 2 - User/Group:**
 {
   "run_as": {
-    "user": 568,
-    "group": 568
+    "user":  // from the app schema default, when present
+    "group": // from the app schema default, when present
   }
 }
 
@@ -1721,8 +1723,8 @@ Go through each group and build configuration:
 {
   "resources": {
     "limits": {
-      "cpus": 2,
-      "memory": 4096
+      "cpus":   // from the app schema default, when present
+      "memory": // from the app schema default, when present
     },
     "gpus": {}
   }

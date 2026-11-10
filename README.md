@@ -971,6 +971,10 @@ A dry run of `refresh_directory_cache` now returns an error when no directory se
 
 > **Behaviour change:** `refresh_directory_cache` no longer reports `cache_refreshed: true` when the `directoryservices.cache_refresh` job is only submitted. Clients should treat `status: "submitted"` like the other directory-service tools and poll the task.
 
+`get_app_catalog_details` returns the app schema (groups and questions, including each question's defaults) and, when the schema defines them, a `defaults` object with run-as user/group and resource limits taken from `catalog.get_app_details`. Those defaults are omitted when the schema has none. Workflow guidance for installation (review schema groups, query pools, create datasets, use `host_path`, use schema defaults when present) lives in the `get_app_catalog_details` and `install_app` tool descriptions, worded so any MCP client can follow it.
+
+> **Behaviour change:** `get_app_catalog_details` no longer includes a `wizard_guidance` object with client-specific instructions (for example a named tool of one MCP client) or fixed run-as and resource defaults. Clients that read `wizard_guidance` should use the schema and the `defaults` field (when present) instead, and follow the tool descriptions for the install workflow.
+
 **Benefits:**
 - See exactly what will change before committing
 - Understand prerequisites and warnings

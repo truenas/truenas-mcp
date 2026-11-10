@@ -74,7 +74,7 @@ This document provides example natural language queries you can use with TrueNAS
 - "Show me details about Nextcloud"
 - "What storage does Jellyfin need?"
 - "Install Plex on my system"
-  - *This will trigger a multi-step guided wizard that:*
+  - *A typical install follows the workflow in the tool descriptions:*
     - *Searches catalog for the app*
     - *Gets app details and storage requirements*
     - *Queries available pools*
