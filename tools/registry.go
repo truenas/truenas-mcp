@@ -40,6 +40,11 @@ type Registry struct {
 type Tool struct {
 	Definition mcp.Tool
 	Handler    func(context.Context, *truenas.Client, map[string]interface{}) (string, error)
+	// Plan, when set, is the shared preview/execute plan. Destructive
+	// tools with a Plan issue and redeem confirmation tokens bound to
+	// that plan (issueWithPlan/redeemWithPlan) so a token cannot be
+	// used for a different planned operation.
+	Plan func(context.Context, *truenas.Client, map[string]interface{}) (*writePlan, error)
 }
 
 func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
@@ -237,6 +242,7 @@ func (r *Registry) registerTools() {
 			},
 		},
 		Handler: r.handleDeleteBootEnvironmentWithDryRun,
+		Plan:    planDeleteBootEnvironment,
 	}
 
 	r.tools["get_current_boot_environment"] = Tool{
@@ -1388,6 +1394,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: r.handleStartAppWithDryRun,
+		Plan:    planStartApp,
 	}
 
 	// Stop app
@@ -1412,6 +1419,7 @@ TrueNAS removes its computer account from the domain using the credential you pr
 			},
 		},
 		Handler: r.handleStopAppWithDryRun,
+		Plan:    planStopApp,
 	}
 
 	// Get app config
@@ -4493,16 +4501,10 @@ func (u *upgradeAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Cl
 }
 
 const startAppMethod = "app.start"
+const stopAppMethod = "app.stop"
+const bootEnvironmentDestroyMethod = "boot.environment.destroy"
 
-// planStartApp builds the start_app plan used by both the dry-run preview and
-// the real call. A RUNNING app is refused, and so are DEPLOYING and STOPPING
-// (retry when the app settles). CRASHED stays startable.
-func planStartApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
-	appName, ok := args["app_name"].(string)
-	if !ok || appName == "" {
-		return nil, fmt.Errorf("app_name is required")
-	}
-
+func queryApp(ctx context.Context, client *truenas.Client, appName string) (map[string]interface{}, error) {
 	currentResult, err := client.Call(ctx, "app.query", []interface{}{
 		[]interface{}{"name", "=", appName},
 	})
@@ -4517,8 +4519,24 @@ func planStartApp(ctx context.Context, client *truenas.Client, args map[string]i
 	if len(apps) == 0 {
 		return nil, fmt.Errorf("app not found: %s", appName)
 	}
+	return apps[0], nil
+}
 
-	stateVal := apps[0]["state"]
+// planStartApp builds the start_app plan used by both the dry-run preview and
+// the real call. A RUNNING app is refused, and so are DEPLOYING and STOPPING
+// (retry when the app settles). CRASHED stays startable.
+func planStartApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return nil, fmt.Errorf("app_name is required")
+	}
+
+	app, err := queryApp(ctx, client, appName)
+	if err != nil {
+		return nil, err
+	}
+
+	stateVal := app["state"]
 	state, ok := stateVal.(string)
 	if !ok || state == "" {
 		return nil, fmt.Errorf("failed to parse app state: expected a string")
@@ -4544,9 +4562,7 @@ func planStartApp(ctx context.Context, client *truenas.Client, args map[string]i
 		JobMethod:   startAppMethod,
 		Description: fmt.Sprintf("Start application %q", appName),
 		Operation:   "start",
-		PreviewDetails: map[string]interface{}{
-			"app_name": appName,
-		},
+		ParamNames:  []string{"app_name"},
 		CurrentState: map[string]interface{}{
 			"app_name": appName,
 			"state":    state,
@@ -4617,13 +4633,62 @@ func (r *Registry) executeStartApp(ctx context.Context, client *truenas.Client, 
 	return string(formatted), nil
 }
 
-func (r *Registry) handleStopApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+func planStopApp(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	appName, ok := args["app_name"].(string)
 	if !ok || appName == "" {
-		return "", fmt.Errorf("app_name is required")
+		return nil, fmt.Errorf("app_name is required")
 	}
 
-	result, err := client.Call(ctx, "app.stop", appName)
+	app, err := queryApp(ctx, client, appName)
+	if err != nil {
+		return nil, err
+	}
+
+	stateVal := app["state"]
+	state, ok := stateVal.(string)
+	if !ok || state == "" {
+		return nil, fmt.Errorf("failed to parse app state: expected a string")
+	}
+
+	return &writePlan{
+		Tool:        "stop_app",
+		Method:      stopAppMethod,
+		CallParams:  []interface{}{appName},
+		JobMethod:   stopAppMethod,
+		Description: "Stop application containers",
+		Operation:   "stop",
+		ParamNames:  []string{"app_name"},
+		CurrentState: map[string]interface{}{
+			"app_name": appName,
+			"state":    state,
+		},
+		Warnings: []string{
+			fmt.Sprintf("App '%s' (currently %s) will become unavailable after stopping.", appName, state),
+		},
+		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 60, Note: "Depends on app shutdown time"},
+		TargetName:    appName,
+	}, nil
+}
+
+func (r *Registry) handleStopAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planStopApp(ctx, client, args)
+	if err != nil {
+		return "", err
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return marshalJSON(plan.dryRunResult())
+	}
+	return r.executeStopApp(ctx, client, args, plan)
+}
+
+func (r *Registry) executeStopApp(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
 	if err != nil {
 		return "", fmt.Errorf("failed to stop app: %w", err)
 	}
@@ -4635,18 +4700,22 @@ func (r *Registry) handleStopApp(ctx context.Context, client *truenas.Client, ar
 			return "", fmt.Errorf("failed to parse job ID as int or array: int error: %v, array error: %v", err, err2)
 		}
 		if len(jobIDArray) == 0 {
-			return "", fmt.Errorf("app.stop returned empty job ID array")
+			return "", fmt.Errorf("%s returned empty job ID array", plan.Method)
 		}
 		jobID = jobIDArray[0]
 	}
 
-	task, err := r.taskManager.CreateJobTask(ctx, "stop_app", args, jobID, 5*time.Minute)
+	opts := []tasks.TaskOption{}
+	if plan.JobMethod != "" {
+		opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
+	}
+	task, err := r.taskManager.CreateJobTask(ctx, "stop_app", args, jobID, 5*time.Minute, opts...)
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
 
 	response := map[string]interface{}{
-		"app_name":      appName,
+		"app_name":      plan.TargetName,
 		"task_id":       task.TaskID,
 		"task_status":   task.Status,
 		"poll_interval": task.PollInterval,
@@ -4658,54 +4727,6 @@ func (r *Registry) handleStopApp(ctx context.Context, client *truenas.Client, ar
 		return "", fmt.Errorf("failed to format response: %w", err)
 	}
 	return string(formatted), nil
-}
-
-func (r *Registry) handleStopAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &stopAppDryRun{}, r.handleStopApp)
-}
-
-type stopAppDryRun struct{}
-
-func (s *stopAppDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	appName, ok := args["app_name"].(string)
-	if !ok || appName == "" {
-		return nil, fmt.Errorf("app_name is required")
-	}
-
-	currentResult, err := client.Call(ctx, "app.query", []interface{}{
-		[]interface{}{"name", "=", appName},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query app: %w", err)
-	}
-
-	var apps []map[string]interface{}
-	if err := json.Unmarshal(currentResult, &apps); err != nil || len(apps) == 0 {
-		return nil, fmt.Errorf("app not found: %s", appName)
-	}
-
-	currentState := apps[0]["state"]
-
-	return &DryRunResult{
-		Tool: "stop_app",
-		CurrentState: map[string]interface{}{
-			"app_name": appName,
-			"state":    currentState,
-		},
-		PlannedActions: []PlannedAction{
-			{
-				Step:        1,
-				Description: "Stop application containers",
-				Operation:   "stop",
-				Target:      "app.stop",
-				Details:     map[string]interface{}{"app_name": appName},
-			},
-		},
-		Warnings: []string{
-			fmt.Sprintf("App '%s' (currently %v) will become unavailable after stopping.", appName, currentState),
-		},
-		EstimatedTime: &EstimatedTime{MinSeconds: 5, MaxSeconds: 60, Note: "Depends on app shutdown time"},
-	}, nil
 }
 
 // handleGetAppConfig retrieves the user-specified config for an app
@@ -6614,24 +6635,22 @@ func handleQueryBootEnvironments(ctx context.Context, client *truenas.Client, ar
 	return string(formatted), nil
 }
 
-func handleDeleteBootEnvironment(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+func planDeleteBootEnvironment(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	id, ok := args["id"].(string)
 	if !ok || id == "" {
-		return "", fmt.Errorf("id parameter is required")
+		return nil, fmt.Errorf("id parameter is required")
 	}
 
-	// Query all boot environments and find the one to delete
 	result, err := client.Call(ctx, "boot.environment.query", []interface{}{})
 	if err != nil {
-		return "", fmt.Errorf("failed to query boot environments: %w", err)
+		return nil, fmt.Errorf("failed to query boot environments: %w", err)
 	}
 
 	var bootEnvs []map[string]interface{}
 	if err := json.Unmarshal(result, &bootEnvs); err != nil {
-		return "", fmt.Errorf("failed to parse boot environments: %w", err)
+		return nil, fmt.Errorf("failed to parse boot environments: %w", err)
 	}
 
-	// Find the boot environment by ID
 	var env map[string]interface{}
 	for _, be := range bootEnvs {
 		if beID, ok := be["id"].(string); ok && beID == id {
@@ -6639,54 +6658,100 @@ func handleDeleteBootEnvironment(ctx context.Context, client *truenas.Client, ar
 			break
 		}
 	}
-
 	if env == nil {
-		return "", fmt.Errorf("boot environment '%s' not found", id)
+		return nil, fmt.Errorf("boot environment '%s' not found", id)
 	}
 
-	// Check safety conditions
 	active, _ := env["active"].(bool)
 	activated, _ := env["activated"].(bool)
 	keep, _ := env["keep"].(bool)
-
-	if active {
-		return "", fmt.Errorf("cannot delete active boot environment '%s' (currently running)", id)
-	}
-	if activated {
-		return "", fmt.Errorf("cannot delete activated boot environment '%s' (will boot on next restart)", id)
-	}
-	if keep {
-		return "", fmt.Errorf("cannot delete protected boot environment '%s' (keep flag is set)", id)
-	}
-
-	// Get size before deletion
 	usedBytes, _ := env["used_bytes"].(float64)
 	sizeBytes := int64(usedBytes)
 
-	// Perform deletion
-	// TrueNAS API expects parameters as a map
-	params := map[string]interface{}{
-		"id": id,
+	var blocked []string
+	if active {
+		blocked = append(blocked, fmt.Sprintf("cannot delete active boot environment '%s' (currently running)", id))
 	}
-	_, err = client.Call(ctx, "boot.environment.destroy", params)
+	if activated {
+		blocked = append(blocked, fmt.Sprintf("cannot delete activated boot environment '%s' (will boot on next restart)", id))
+	}
+	if keep {
+		blocked = append(blocked, fmt.Sprintf("cannot delete protected boot environment '%s' (keep flag is set)", id))
+	}
+
+	var warnings []string
+	if len(blocked) == 0 {
+		warnings = append(warnings, "PERMANENT: This operation cannot be undone")
+		warnings = append(warnings, fmt.Sprintf("SPACE: Will free approximately %s", formatBytes(sizeBytes)))
+		warnings = append(warnings, "RECOMMENDATION: Keep at least 2-3 boot environments for system recovery")
+	}
+
+	return &writePlan{
+		Tool:        "delete_boot_environment",
+		Method:      bootEnvironmentDestroyMethod,
+		CallParams:  []interface{}{map[string]interface{}{"id": id}},
+		Description: fmt.Sprintf("Delete boot environment '%s'", id),
+		Operation:   "delete",
+		CurrentState: map[string]interface{}{
+			"boot_environment": simplifyBootEnvironment(env),
+			"deletion_allowed": len(blocked) == 0,
+			"size_bytes":       sizeBytes,
+		},
+		Warnings:   warnings,
+		Blocked:    blocked,
+		TargetName: id,
+	}, nil
+}
+
+func (r *Registry) handleDeleteBootEnvironmentWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planDeleteBootEnvironment(ctx, client, args)
 	if err != nil {
+		return "", err
+	}
+	// A dry run of a blocked delete still returns the structured preview
+	// (deletion_allowed false, blocked reasons, no planned action) rather
+	// than an error, matching the previous dry-run behaviour.
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return marshalJSON(plan.dryRunResult())
+	}
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	return executeDeleteBootEnvironment(ctx, client, plan)
+}
+
+func executeDeleteBootEnvironment(ctx context.Context, client *truenas.Client, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	if _, err := callPlan(ctx, client, plan); err != nil {
 		return "", fmt.Errorf("failed to delete boot environment: %w", err)
+	}
+
+	var sizeBytes int64
+	if state, ok := plan.CurrentState.(map[string]interface{}); ok {
+		switch v := state["size_bytes"].(type) {
+		case int64:
+			sizeBytes = v
+		case float64:
+			sizeBytes = int64(v)
+		case int:
+			sizeBytes = int64(v)
+		}
 	}
 
 	response := map[string]interface{}{
 		"status":      "deleted",
-		"id":          id,
+		"id":          plan.TargetName,
 		"space_freed": formatBytes(sizeBytes),
 		"space_bytes": sizeBytes,
-		"message":     fmt.Sprintf("Boot environment '%s' deleted successfully", id),
+		"message":     fmt.Sprintf("Boot environment '%s' deleted successfully", plan.TargetName),
 		"reminder":    "Keep at least 2-3 boot environments for system recovery",
 	}
-
 	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}
-
 	return string(formatted), nil
 }
 
@@ -6819,97 +6884,4 @@ func formatBytes(bytes int64) string {
 
 	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
 	return fmt.Sprintf("%.2f %s", float64(bytes)/float64(div), units[exp])
-}
-
-// Dry-run handler for delete boot environment
-
-type deleteBootEnvironmentDryRun struct{}
-
-func (d *deleteBootEnvironmentDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	id, ok := args["id"].(string)
-	if !ok || id == "" {
-		return nil, fmt.Errorf("id parameter is required")
-	}
-
-	// Query all boot environments and find the one to delete
-	result, err := client.Call(ctx, "boot.environment.query", []interface{}{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query boot environments: %w", err)
-	}
-
-	var bootEnvs []map[string]interface{}
-	if err := json.Unmarshal(result, &bootEnvs); err != nil {
-		return nil, fmt.Errorf("failed to parse boot environments: %w", err)
-	}
-
-	// Find the boot environment by ID
-	var env map[string]interface{}
-	for _, be := range bootEnvs {
-		if beID, ok := be["id"].(string); ok && beID == id {
-			env = be
-			break
-		}
-	}
-
-	if env == nil {
-		return nil, fmt.Errorf("boot environment '%s' not found", id)
-	}
-
-	simplified := simplifyBootEnvironment(env)
-
-	// Check safety conditions
-	active, _ := env["active"].(bool)
-	activated, _ := env["activated"].(bool)
-	keep, _ := env["keep"].(bool)
-	usedBytes, _ := env["used_bytes"].(float64)
-	sizeBytes := int64(usedBytes)
-
-	deletionAllowed := !active && !activated && !keep
-
-	// Build warnings
-	warnings := []string{}
-
-	if !deletionAllowed {
-		if active {
-			warnings = append(warnings, fmt.Sprintf("BLOCKED: Cannot delete active boot environment '%s' (currently running)", id))
-		}
-		if activated {
-			warnings = append(warnings, fmt.Sprintf("BLOCKED: Cannot delete activated boot environment '%s' (will boot on next restart)", id))
-		}
-		if keep {
-			warnings = append(warnings, fmt.Sprintf("BLOCKED: Cannot delete protected boot environment '%s' (keep flag is set)", id))
-		}
-	} else {
-		warnings = append(warnings, "PERMANENT: This operation cannot be undone")
-		warnings = append(warnings, fmt.Sprintf("SPACE: Will free approximately %s", formatBytes(sizeBytes)))
-		warnings = append(warnings, "RECOMMENDATION: Keep at least 2-3 boot environments for system recovery")
-	}
-
-	// Build planned actions
-	actions := []PlannedAction{}
-	if deletionAllowed {
-		actions = append(actions, PlannedAction{
-			Step:        1,
-			Description: fmt.Sprintf("Delete boot environment '%s'", id),
-			Operation:   "delete",
-			Target:      id,
-			Details: map[string]interface{}{
-				"size_to_free": formatBytes(sizeBytes),
-			},
-		})
-	}
-
-	return &DryRunResult{
-		Tool: "delete_boot_environment",
-		CurrentState: map[string]interface{}{
-			"boot_environment": simplified,
-			"deletion_allowed": deletionAllowed,
-		},
-		PlannedActions: actions,
-		Warnings:       warnings,
-	}, nil
-}
-
-func (r *Registry) handleDeleteBootEnvironmentWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &deleteBootEnvironmentDryRun{}, handleDeleteBootEnvironment)
 }

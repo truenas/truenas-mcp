@@ -290,11 +290,25 @@ func TestReadOnlyIssuesNoTokens(t *testing.T) {
 func approve(t *testing.T, r *Registry, name string, args map[string]interface{}) map[string]interface{} {
 	t.Helper()
 	a := withoutKeys(args, "confirm", "confirmation_token")
-	h, err := confirmationArgsHash(dropNullOptionals(r.tools[name].Definition.InputSchema, a))
+	tool := r.tools[name]
+	h, err := confirmationArgsHash(dropNullOptionals(tool.Definition.InputSchema, a))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := r.confirmTokens.issue(name, h)
+	var tok string
+	if tool.Plan != nil {
+		plan, err := tool.Plan(t.Context(), r.client, a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ph, err := plan.planHash()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tok, err = r.confirmTokens.issueWithPlan(name, h, ph)
+	} else {
+		tok, err = r.confirmTokens.issue(name, h)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

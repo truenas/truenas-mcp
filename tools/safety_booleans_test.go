@@ -71,6 +71,7 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 // write to the middleware.
 func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 	client, fake := newFakeClientWith(t, map[string]interface{}{
+		"app.query": []interface{}{appEntry("plex", "RUNNING")},
 		"boot.environment.query": []interface{}{
 			map[string]interface{}{"id": "25.04.1", "active": false, "activated": false, "keep": false},
 		},
