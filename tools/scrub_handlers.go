@@ -157,11 +157,12 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 			continue
 		}
 
+		sizeBytes, sizeHuman := poolSizeFields(pool)
 		status := map[string]interface{}{
 			"name":       poolName,
 			"id":         int(poolID),
-			"size_bytes": pool["size"],
-			"size_human": formatBytes(int64(pool["size"].(float64))),
+			"size_bytes": sizeBytes,
+			"size_human": sizeHuman,
 			"status":     pool["status"],
 		}
 
@@ -207,13 +208,16 @@ func handleGetScrubStatus(client *truenas.Client, args map[string]interface{}) (
 					startedSec, _ := timeStarted["$date"].(float64)
 					started := time.Unix(int64(startedSec/1000), 0)
 
-					status["current_scrub"] = map[string]interface{}{
+					cur := map[string]interface{}{
 						"running":     true,
-						"job_id":      int(job["id"].(float64)),
 						"progress":    percent,
 						"description": description,
 						"started":     formatInLocation(started, loc),
 					}
+					if id, ok := floatField(job, "id"); ok {
+						cur["job_id"] = int(id)
+					}
+					status["current_scrub"] = cur
 					break
 				}
 			}
@@ -389,6 +393,9 @@ func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interf
 	if err != nil {
 		return "", err
 	}
+	if err := errIfPoolOffline(poolInfo, poolName); err != nil {
+		return "", err
+	}
 
 	// Check if scrub already running
 	jobsResult, err := client.Call("core.get_jobs", []interface{}{
@@ -438,17 +445,17 @@ func (r *Registry) handleRunScrub(client *truenas.Client, args map[string]interf
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
 
-	estimatedHours := estimateScrubDuration(int64(poolInfo["size"].(float64)))
-
 	response := map[string]interface{}{
-		"pool":                     poolName,
-		"scrub_started":            true,
-		"job_id":                   jobID,
-		"task_id":                  task.TaskID,
-		"task_status":              task.Status,
-		"estimated_duration_hours": estimatedHours,
-		"poll_interval":            30,
-		"message":                  fmt.Sprintf("Scrub started on pool '%s'. Track progress: (1) tasks_get with task_id: %s, or (2) get_scrub_status", poolName, task.TaskID),
+		"pool":          poolName,
+		"scrub_started": true,
+		"job_id":        jobID,
+		"task_id":       task.TaskID,
+		"task_status":   task.Status,
+		"poll_interval": 30,
+		"message":       fmt.Sprintf("Scrub started on pool '%s'. Track progress: (1) tasks_get with task_id: %s, or (2) get_scrub_status", poolName, task.TaskID),
+	}
+	if size, ok := poolSizeBytes(poolInfo); ok {
+		response["estimated_duration_hours"] = estimateScrubDuration(size)
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -600,7 +607,12 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 	}
 	firstRun := calculateNextRun(scheduleObj, time.Now(), loc)
 	scrubEstimate, scrubEstimateNote, hasScrubEstimate := estimateNextScrub(scheduleObj, time.Now(), loc, enabled, threshold, lastFinishedScrubEnd(poolInfo), scrubScanRunning(poolInfo))
-	estimatedHours := estimateScrubDuration(int64(poolInfo["size"].(float64)))
+	sizeBytes, hasSize := poolSizeBytes(poolInfo)
+	_, sizeHuman := poolSizeFields(poolInfo)
+	var estimatedHours int
+	if hasSize {
+		estimatedHours = estimateScrubDuration(sizeBytes)
+	}
 
 	warnings := []string{}
 	if existingSchedule != nil {
@@ -615,7 +627,11 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 				warnings = append(warnings, scrubEstimateNote)
 			}
 		}
-		warnings = append(warnings, fmt.Sprintf("Scrub may take %d-%d hours based on pool size", estimatedHours, estimatedHours*3))
+		if hasSize {
+			warnings = append(warnings, fmt.Sprintf("Scrub may take %d-%d hours based on pool size", estimatedHours, estimatedHours*3))
+		} else {
+			warnings = append(warnings, "Pool size is unknown; duration cannot be estimated")
+		}
 		warnings = append(warnings, "Ensure system is powered on at scheduled time")
 
 		// Check if schedule is during reasonable hours
@@ -659,23 +675,26 @@ func (c *createScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 		warnings = append(warnings, nextRunTimezoneNote)
 	}
 
-	return &DryRunResult{
+	result := &DryRunResult{
 		Tool: "create_scrub_schedule",
 		CurrentState: map[string]interface{}{
 			"pool":              poolName,
 			"pool_id":           poolInfo["id"],
-			"pool_size":         formatBytes(int64(poolInfo["size"].(float64))),
+			"pool_size":         sizeHuman,
 			"existing_schedule": existingSchedule,
 			"last_scrub":        lastScrubDate,
 		},
 		PlannedActions: actions,
 		Warnings:       warnings,
-		EstimatedTime: &EstimatedTime{
+	}
+	if hasSize {
+		result.EstimatedTime = &EstimatedTime{
 			MinSeconds: estimatedHours * 3600,
 			MaxSeconds: estimatedHours * 3 * 3600,
-			Note:       fmt.Sprintf("Scrub duration: %d-%d hours for %s pools", estimatedHours, estimatedHours*3, formatBytes(int64(poolInfo["size"].(float64)))),
-		},
-	}, nil
+			Note:       fmt.Sprintf("Scrub duration: %d-%d hours for %s pools", estimatedHours, estimatedHours*3, sizeHuman),
+		}
+	}
+	return result, nil
 }
 
 type runScrubDryRun struct{}
@@ -696,9 +715,13 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 	if err != nil {
 		return nil, err
 	}
+	if err := errIfPoolOffline(poolInfo, poolName); err != nil {
+		return nil, err
+	}
 
 	status, _ := poolInfo["status"].(string)
-	sizeBytes := int64(poolInfo["size"].(float64))
+	sizeBytes, hasSize := poolSizeBytes(poolInfo)
+	_, sizeHuman := poolSizeFields(poolInfo)
 
 	// Check running scrub
 	jobsResult, err := client.Call("core.get_jobs", []interface{}{
@@ -758,9 +781,12 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 		}
 	}
 
-	estimatedHours := estimateScrubDuration(sizeBytes)
-	minSeconds := estimatedHours * 3600
-	maxSeconds := estimatedHours * 3 * 3600
+	var estimatedHours, minSeconds, maxSeconds int
+	if hasSize {
+		estimatedHours = estimateScrubDuration(sizeBytes)
+		minSeconds = estimatedHours * 3600
+		maxSeconds = estimatedHours * 3 * 3600
+	}
 
 	warnings := []string{}
 	if scrubRunning {
@@ -782,15 +808,18 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 
 	actions := []PlannedAction{}
 	if !scrubRunning {
+		details := map[string]interface{}{
+			"pool_size": sizeHuman,
+		}
+		if hasSize {
+			details["estimated_duration_hours"] = estimatedHours
+		}
 		actions = append(actions, PlannedAction{
 			Step:        1,
 			Description: fmt.Sprintf("Start manual scrub of pool '%s'", poolName),
 			Operation:   "scrub",
 			Target:      poolName,
-			Details: map[string]interface{}{
-				"pool_size":                formatBytes(sizeBytes),
-				"estimated_duration_hours": estimatedHours,
-			},
+			Details:     details,
 		})
 	}
 
@@ -801,12 +830,12 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 		},
 	}
 
-	return &DryRunResult{
+	result := &DryRunResult{
 		Tool: "run_scrub",
 		CurrentState: map[string]interface{}{
 			"pool":          poolName,
 			"pool_id":       poolInfo["id"],
-			"size":          formatBytes(sizeBytes),
+			"size":          sizeHuman,
 			"status":        status,
 			"last_scrub":    lastScrub,
 			"scrub_running": scrubRunning,
@@ -814,12 +843,15 @@ func (r *runScrubDryRun) ExecuteDryRun(client *truenas.Client, args map[string]i
 		PlannedActions: actions,
 		Warnings:       warnings,
 		Requirements:   requirements,
-		EstimatedTime: &EstimatedTime{
+	}
+	if hasSize {
+		result.EstimatedTime = &EstimatedTime{
 			MinSeconds: minSeconds,
 			MaxSeconds: maxSeconds,
 			Note:       "Duration varies by pool size, data amount, and system load",
-		},
-	}, nil
+		}
+	}
+	return result, nil
 }
 
 type deleteScrubScheduleDryRun struct{}
@@ -890,7 +922,7 @@ func (d *deleteScrubScheduleDryRun) ExecuteDryRun(client *truenas.Client, args m
 // Helper functions for scrub management
 
 func simplifyScrubSchedule(schedule map[string]interface{}, loc *time.Location, lastScrubEnd *time.Time, scrubRunning bool) map[string]interface{} {
-	scheduleObj := schedule["schedule"].(map[string]interface{})
+	scheduleObj, _ := mapField(schedule, "schedule")
 	enabled, _ := schedule["enabled"].(bool)
 	threshold := 0
 	switch t := schedule["threshold"].(type) {
@@ -1172,6 +1204,69 @@ func calculateNextRun(schedule map[string]interface{}, fromTime time.Time, loc *
 		next = time.Date(y, m, d+1, hourInt, minuteInt, 0, 0, loc)
 	}
 	return next.Format(time.RFC3339)
+}
+
+// floatField returns the JSON number at key. Middleware data is decoded
+// into map[string]interface{}, so numbers are float64; a missing key or
+// a null / non-number value reports ok=false.
+func floatField(m map[string]interface{}, key string) (float64, bool) {
+	if m == nil {
+		return 0, false
+	}
+	v, ok := m[key].(float64)
+	return v, ok
+}
+
+// mapField returns the JSON object at key, if any.
+func mapField(m map[string]interface{}, key string) (map[string]interface{}, bool) {
+	if m == nil {
+		return nil, false
+	}
+	v, ok := m[key].(map[string]interface{})
+	return v, ok
+}
+
+// poolSizeBytes returns the pool's size in bytes when middleware provided
+// a number. Size is null for a configured but not-imported (OFFLINE) pool.
+func poolSizeBytes(pool map[string]interface{}) (int64, bool) {
+	v, ok := floatField(pool, "size")
+	if !ok {
+		return 0, false
+	}
+	return int64(v), true
+}
+
+// poolSizeFields returns size_bytes (a number or nil) and size_human
+// ("unknown" when size is not a number) for tool output.
+func poolSizeFields(pool map[string]interface{}) (interface{}, string) {
+	v, ok := poolSizeBytes(pool)
+	if !ok {
+		return nil, "unknown"
+	}
+	return float64(v), formatBytes(v)
+}
+
+// poolIsOffline reports whether a pool.query record is not imported
+// (status OFFLINE: exported, missing disks, or failed import). Size is
+// typically null in that case. Other status checks (for example allowing
+// only ONLINE/DEGRADED, or refusing a resilver) can be added next to this
+// when run_scrub's start path is updated for TrueNAS 26+.
+func poolIsOffline(pool map[string]interface{}) bool {
+	status, _ := pool["status"].(string)
+	return status == "OFFLINE"
+}
+
+// errIfPoolOffline refuses run_scrub (and its dry run) when the pool is
+// not imported. TrueNAS will not start a scrub on an OFFLINE pool, and a
+// later unchecked size assertion would panic after a start was attempted.
+func errIfPoolOffline(pool map[string]interface{}, poolName string) error {
+	if !poolIsOffline(pool) {
+		return nil
+	}
+	if name, _ := pool["name"].(string); name != "" {
+		poolName = name
+	}
+	return fmt.Errorf("cannot run a scrub on pool %q: the pool is OFFLINE (not imported); nothing was started", poolName)
 }
 
 func getPoolByName(client *truenas.Client, poolName string) (map[string]interface{}, error) {
