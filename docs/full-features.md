@@ -93,10 +93,12 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Filter by category (media, productivity, database, etc.)
   - Returns app information with versions and installation status
 - **get_app_catalog_details** - Get detailed information about a specific app
-  - Returns README documentation and setup instructions
-  - Shows version info, categories, and maintainers
+  - Returns README documentation, version info, categories, and maintainers
+  - Returns the app schema (groups and questions, including each question's defaults)
+  - When the schema defines run-as user/group or resource limits, those defaults are included in a `defaults` object; they are omitted when the schema has none
   - Provides storage volume hints (detected from README)
   - Recommends dataset layout: /mnt/<pool>/apps/<appname>/<volume>
+  - Tool descriptions (this tool and `install_app`) carry the install workflow, worded so any MCP client can follow it
 
 ## Capacity Planning and Analysis
 
@@ -162,7 +164,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 ### Application Management
 - **install_app** - Install applications from the catalog with guided storage setup
   - When `train` is omitted, the catalog train that has the app is looked up (stable is preferred if several do), as with get_app_catalog_details. If the lookup itself fails, the stable train is assumed and the response includes a `train_note` saying so
-  - Multi-step wizard guides through app installation process
+  - Tool descriptions guide the install workflow (review schema groups, query pools, create datasets, use host_path, use schema defaults when present)
   - ALWAYS uses host-path volumes (NEVER ix-volumes)
   - Fetches the app schema and requires every storage entry to be present as `type: host_path` with a cleaned path under `/mnt/<pool>/` (at least one component below an existing pool). `host_path_config.acl_enable` must be a JSON boolean; when it is true, the mounted `acl.path` is the path that is validated and checked for an existing dataset. Fields whose schema type is `hostpath`, `hostpathdirectory`, or `hostpathfile` are also checked. `hostpathfile` is checked as a file against its parent dataset; `hostpathdirectory` is checked as a directory. Catalog type `hostpath` is used for both directories (webdav and rsyncd shares) and files (for example Nextcloud `custom_confs`): the path is treated as a directory if it exists as a dataset, and as a file if it does not and its parent is a dataset below the pool. A hostpath that is not an existing dataset and sits directly under the pool is reported as a missing dataset (a create_dataset hint on the real call, or a CRITICAL warning on dry-run), not as a classification error. An app schema with no questions list, an empty list, items that cannot be parsed, a question with no schema map, or an attrs entry that is not a map is refused, including on dry runs. Off-schema storage-like types must be the exact string `host_path`; an unrecognized type is also refused when the object carries a volume config key. Paths under `/mnt/<pool>/.system` or `/mnt/<pool>/ix-applications` are refused.
   - Enforces structured dataset layout: /mnt/<pool>/apps/<appname>/<volume>
@@ -170,15 +172,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Verifies datasets exist before installation
   - Supports dry-run mode to preview installation
   - Returns task ID for tracking installation progress
-  - Includes comprehensive wizard guidance:
-    - Step 1: Search and select app from catalog
-    - Step 2: Understand app storage requirements
-    - Step 3: Plan storage layout with pool selection
-    - Step 4: Create missing datasets
-    - Step 5: Validate app instance name
-    - Step 6: Build storage configuration
-    - Step 7: Preview with dry-run
-    - Step 8: Execute installation
+  - The `install_app` and `get_app_catalog_details` tool descriptions describe the install workflow (search, review the schema, plan storage, create datasets, dry-run, then install). Run-as and resource defaults come from the app schema, not from fixed values in the tool result.
 
 - **delete_app** - Remove installed applications (**destructive**)
   - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing

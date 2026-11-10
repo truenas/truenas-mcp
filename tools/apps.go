@@ -194,7 +194,7 @@ func handleGetAppCatalogDetails(ctx context.Context, client *truenas.Client, arg
 		storageHints = parseAppREADMEForStorageHints(readme)
 	}
 
-	// Extract full schema for wizard guidance
+	// Extract the latest version's schema (defaults are taken from it).
 	schema := extractAppSchema(appDetails)
 
 	// Format output
@@ -317,10 +317,12 @@ func formatAppDetails(details map[string]interface{}, train string, trains []str
 		}
 	}
 
-	// Add schema with wizard guidance
+	// Add the schema and any run-as / resource defaults taken from it.
 	if schema != nil {
 		output["schema"] = formatSchemaForWizard(schema)
-		output["wizard_guidance"] = generateWizardGuidance(schema)
+		if defaults := extractSchemaDefaults(schema); defaults != nil {
+			output["defaults"] = defaults
+		}
 	}
 
 	// Add README if available (truncated for readability)
@@ -492,44 +494,100 @@ func summarizeQuestion(question map[string]interface{}) map[string]interface{} {
 	return summarized
 }
 
-// generateWizardGuidance creates step-by-step instructions based on schema
-func generateWizardGuidance(schema map[string]interface{}) map[string]interface{} {
+// extractSchemaDefaults returns run-as user/group and resource-limit
+// defaults from the app schema in catalog.get_app_details. Keys use the
+// schema's own variable names (run_as or runAs). Fields and the whole
+// object are omitted when the schema has no such default.
+func extractSchemaDefaults(schema map[string]interface{}) map[string]interface{} {
 	if schema == nil {
 		return nil
 	}
-
-	guidance := map[string]interface{}{
-		"workflow": "section-by-section configuration",
-		"steps": []string{
-			"1. Review schema groups",
-			"2. Query available pools (query_pools) and present options to user",
-			"3. Create datasets for storage paths using create_dataset",
-			"4. Configure storage (type='host_path', path=/mnt/<pool>/apps/<appname>/<purpose>)",
-			"5. Configure network (ports and certificates)",
-			"6. Configure user/group IDs (default: 568:568)",
-			"7. Configure resources (CPU/memory, use defaults)",
-			"8. Configure app-specific settings (timezone, env vars)",
-			"9. Assemble complete values object from all groups",
-			"10. Execute installation with values parameter",
-		},
-		"common_patterns": map[string]interface{}{
-			"timezone":       "Use system timezone or user preference",
-			"run_as":         "Default: user=568, group=568 (apps user)",
-			"storage_type":   "ALWAYS use 'host_path', NEVER 'ix_volume'",
-			"storage_paths":  "Use query_pools to get available pools, then create datasets before installation",
-			"port_bind_mode": "published (external access) or exposed (internal only)",
-			"resources":      "Default: 2 CPUs, 4096 MB RAM",
-		},
-		"storage_workflow": map[string]interface{}{
-			"step1": "Call query_pools to get available storage pools",
-			"step2": "If multiple pools: use AskUserQuestion to let user choose. If one pool: use it automatically",
-			"step3": "Create dataset at /mnt/<pool>/apps/<appname>/<purpose> using create_dataset",
-			"step4": "Configure storage with type='host_path' and path to created dataset",
-			"note":  "NEVER ask user to type pool name - always query and present options",
-		},
+	out := map[string]interface{}{}
+	if q, name := schemaQuestionByVariable(schema, "run_as", "runAs"); q != nil {
+		runAs := map[string]interface{}{}
+		if v, ok := schemaAttrDefault(q, "user"); ok {
+			runAs["user"] = v
+		}
+		if v, ok := schemaAttrDefault(q, "group"); ok {
+			runAs["group"] = v
+		}
+		if len(runAs) > 0 {
+			out[name] = runAs
+		}
 	}
+	if q, _ := schemaQuestionByVariable(schema, "resources"); q != nil {
+		resources := map[string]interface{}{}
+		if v, ok := schemaAttrDefault(q, "cpus"); ok {
+			resources["cpus"] = v
+		}
+		if v, ok := schemaAttrDefault(q, "memory"); ok {
+			resources["memory"] = v
+		}
+		if len(resources) > 0 {
+			out["resources"] = resources
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
-	return guidance
+func schemaQuestionByVariable(schema map[string]interface{}, names ...string) (map[string]interface{}, string) {
+	questions, ok := schema["questions"].([]interface{})
+	if !ok {
+		return nil, ""
+	}
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	for _, q := range questions {
+		qm, ok := q.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := qm["variable"].(string)
+		if want[name] {
+			return qm, name
+		}
+	}
+	return nil, ""
+}
+
+// schemaAttrDefault walks a question's nested schema.attrs (the 25.10
+// questions.yaml shape) and returns the default for variable.
+func schemaAttrDefault(question map[string]interface{}, variable string) (interface{}, bool) {
+	return findSchemaAttrDefault(question, variable)
+}
+
+func findSchemaAttrDefault(node map[string]interface{}, variable string) (interface{}, bool) {
+	if node == nil {
+		return nil, false
+	}
+	schemaMap, _ := node["schema"].(map[string]interface{})
+	if name, _ := node["variable"].(string); name == variable && schemaMap != nil {
+		if d, ok := schemaMap["default"]; ok && d != nil {
+			return d, true
+		}
+	}
+	if schemaMap == nil {
+		return nil, false
+	}
+	attrs, ok := schemaMap["attrs"].([]interface{})
+	if !ok {
+		return nil, false
+	}
+	for _, a := range attrs {
+		am, ok := a.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if d, ok := findSchemaAttrDefault(am, variable); ok {
+			return d, true
+		}
+	}
+	return nil, false
 }
 
 // ============================================================================
