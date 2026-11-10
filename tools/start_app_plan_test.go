@@ -319,7 +319,11 @@ func TestWritePlanPreviewIsDerivedFromCallParams(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := json.Marshal(tc.plan.previewDetails())
+			details, err := tc.plan.previewDetails()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := json.Marshal(details)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -895,7 +895,7 @@ func (r *Registry) handleDeleteAppWithDryRun(ctx context.Context, client *truena
 		return "", err
 	}
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		return marshalJSON(plan.dryRunResult())
+		return plan.marshalDryRun()
 	}
 	return r.executeDeleteApp(ctx, client, args, plan)
 }

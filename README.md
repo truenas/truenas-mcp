@@ -907,6 +907,8 @@ Returns:
 
 `delete_boot_environment` also uses the shared plan. Preview `details` come from the same parameters as the real `boot.environment.destroy` call. A boot environment that is running, selected for the next reboot, or protected is listed in the plan's `blocked` field. An explicit dry run, a call without a token, and a confirmed call all return an error-shaped result with `"status": "blocked"` and the preview (with `deletion_allowed` false and no planned action); nothing is destroyed and no token is issued. `start_app` uses the same blocked dry-run shape when the app is RUNNING, DEPLOYING, or STOPPING.
 
+> **Breaking change:** an explicit `dry_run` of a blocked `delete_boot_environment` (the running, next-boot, or protected environment) now returns an error result with `"status": "blocked"` and the preview, instead of a successful preview. Clients that treated a blocked dry run as a normal result need to read the error result instead.
+
 `delete_app` and `delete_scrub_schedule` use the same shared plan for preview and the real call (`app.delete` and `pool.scrub.delete`). Preview `details` are derived from those parameters. Host-path datasets are not deleted with the app; the preview warns that data paths are preserved.
 
 **Benefits:**

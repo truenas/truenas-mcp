@@ -99,6 +99,9 @@ func (p *writePlan) planHash() ([sha256.Size]byte, error) {
 	if p == nil {
 		return [sha256.Size]byte{}, nil
 	}
+	if err := p.paramNamesOK(); err != nil {
+		return [sha256.Size]byte{}, err
+	}
 	return confirmationPlanHash(p.Method, p.CallParams)
 }
 

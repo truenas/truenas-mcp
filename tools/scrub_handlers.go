@@ -523,7 +523,7 @@ func (r *Registry) handleDeleteScrubScheduleWithDryRun(ctx context.Context, clie
 		return "", err
 	}
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		return marshalJSON(plan.dryRunResult())
+		return plan.marshalDryRun()
 	}
 	return executeDeleteScrubSchedule(ctx, client, args, plan)
 }

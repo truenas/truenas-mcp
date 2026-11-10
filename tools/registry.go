@@ -4593,7 +4593,7 @@ func (r *Registry) handleStartAppWithDryRun(ctx context.Context, client *truenas
 		return "", err
 	}
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		return marshalJSON(plan.dryRunResult())
+		return plan.marshalDryRun()
 	}
 	return r.executeStartApp(ctx, client, args, plan)
 }
@@ -4689,7 +4689,7 @@ func (r *Registry) handleStopAppWithDryRun(ctx context.Context, client *truenas.
 		return "", err
 	}
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		return marshalJSON(plan.dryRunResult())
+		return plan.marshalDryRun()
 	}
 	return r.executeStopApp(ctx, client, args, plan)
 }
@@ -6722,7 +6722,7 @@ func (r *Registry) handleDeleteBootEnvironmentWithDryRun(ctx context.Context, cl
 		return "", err
 	}
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
-		return marshalJSON(plan.dryRunResult())
+		return plan.marshalDryRun()
 	}
 	return executeDeleteBootEnvironment(ctx, client, args, plan)
 }

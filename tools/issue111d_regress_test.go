@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +38,9 @@ func TestPlanBackedDestructiveToolsRegisterAPlan(t *testing.T) {
 		if tool.Plan == nil {
 			t.Errorf("%s must register a Plan so confirmation tokens stay bound to the planned operation", name)
 		}
+		if tool.Execute == nil {
+			t.Errorf("%s must register Execute so a confirmed call runs the verified plan and does not fall back to the handler", name)
+		}
 	}
 }
 
@@ -62,19 +67,17 @@ func TestStopAppExecuteUsesHashedPlanWithoutRebuild(t *testing.T) {
 	}
 }
 
-// A ParamNames list shorter than CallParams must not drop the extra params
-// from the preview.
+// A ParamNames list shorter than CallParams fails the preview (it must
+// not drop params or fall back to param_N).
 func TestWritePlanShortParamNamesDoNotDropCallParams(t *testing.T) {
 	p := &writePlan{
 		ParamNames: []string{"a"},
 		CallParams: []interface{}{"x", "y"},
 	}
-	raw, err := json.Marshal(p.previewDetails())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(raw), `"x"`) || !strings.Contains(string(raw), `"y"`) {
-		t.Errorf("preview dropped a CallParams entry: %s", raw)
+	details, err := p.previewDetails()
+	if err == nil {
+		raw, _ := json.Marshal(details)
+		t.Fatalf("mismatched ParamNames must fail the preview, got %s", raw)
 	}
 }
 
@@ -324,5 +327,158 @@ func TestDeleteScrubSchedulePlanMatchesExecutedPayload(t *testing.T) {
 	}
 	if !strings.Contains(got, `"deleted": true`) {
 		t.Errorf("execute should report deleted, got %s", got)
+	}
+}
+
+// A ParamNames list whose length does not match CallParams must fail the
+// preview. The param_N fallback would skip positional redaction and can
+// show a secret in clear.
+func TestWritePlanMismatchedParamNamesFailsPreview(t *testing.T) {
+	p := &writePlan{
+		ParamNames: []string{"name"},
+		CallParams: []interface{}{"a", "s3cret"},
+	}
+	details, err := p.previewDetails()
+	if err == nil {
+		raw, _ := json.Marshal(details)
+		t.Fatalf("mismatched ParamNames must fail the preview, got %s", raw)
+	}
+	if details != nil {
+		raw, _ := json.Marshal(details)
+		if strings.Contains(string(raw), "s3cret") || strings.Contains(string(raw), "param_") {
+			t.Errorf("failed preview still leaked a secret: %s", raw)
+		}
+	}
+	if _, err := p.dryRunResult(); err == nil {
+		t.Error("dryRunResult must also fail when ParamNames and CallParams differ in length")
+	}
+	if _, err := p.planHash(); err == nil {
+		t.Error("planHash must also fail when ParamNames and CallParams differ in length")
+	}
+}
+
+// A plan-backed destructive tool with Plan set but Execute nil must not
+// silently fall back to the handler (which would rebuild the plan).
+func TestCallDestructiveRefusesPlanWithoutExecute(t *testing.T) {
+	r, fake := stopAppRegistry(t, "RUNNING")
+	tok := previewToken(t, r, "stop_app", map[string]interface{}{"app_name": "plex"})
+	tool := r.tools["stop_app"]
+	tool.Execute = nil
+	r.tools["stop_app"] = tool
+	out, err := r.CallTool(t.Context(), "stop_app", map[string]interface{}{
+		"app_name": "plex", "confirmation_token": tok,
+	})
+	if err == nil {
+		t.Fatalf("expected an error when Execute is missing, got %s", out)
+	}
+	if !strings.Contains(err.Error(), "Execute") && !strings.Contains(err.Error(), "execute") {
+		t.Errorf("error should say Execute is missing, got %q", err)
+	}
+	if !strings.Contains(err.Error(), "was NOT executed") || !strings.Contains(err.Error(), "nothing was executed") {
+		t.Errorf("error should say the tool was not executed, got %q", err)
+	}
+	if n := len(fake.called("app.stop")); n != 0 {
+		t.Errorf("missing Execute still called app.stop %d times", n)
+	}
+}
+
+// An explicit dry_run of a blocked delete_boot_environment is documented
+// as a breaking change: it now returns an error with status "blocked".
+func TestREADMENotesBlockedDeleteBootEnvironmentDryRunIsBreakingChange(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, note := range readmeBreakingChangeNotes(string(data)) {
+		if strings.Contains(note, "delete_boot_environment") && strings.Contains(note, "dry_run") && strings.Contains(note, "blocked") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error(`README.md must have a "> **Breaking change:**" note that an explicit dry_run of a blocked delete_boot_environment now returns an error result with status "blocked"`)
+	}
+}
+
+// readmeBreakingChangeNotes returns each README blockquote that begins
+// with "> **Breaking change:". Only consecutive blockquote lines belong
+// to a note, so later prose is not treated as part of the last note.
+func readmeBreakingChangeNotes(text string) []string {
+	var notes []string
+	var cur []string
+	in := false
+	flush := func() {
+		if len(cur) > 0 {
+			notes = append(notes, strings.Join(cur, "\n"))
+			cur = nil
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "> **Breaking change:") {
+			if in {
+				flush()
+			}
+			cur = []string{line}
+			in = true
+			continue
+		}
+		if in {
+			if strings.HasPrefix(line, ">") {
+				cur = append(cur, line)
+				continue
+			}
+			flush()
+			in = false
+		}
+	}
+	if in {
+		flush()
+	}
+	return notes
+}
+
+// Every registered Plan that uses ParamNames must have one name per
+// CallParams entry, so a length mismatch cannot reach a preview.
+func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
+	bootEnvs := []interface{}{
+		map[string]interface{}{"id": "25.04.1", "active": false, "activated": false, "keep": false, "used_bytes": 1048576.0},
+	}
+	schedules := []interface{}{
+		map[string]interface{}{
+			"id": 1.0, "pool_name": "tank", "enabled": true, "threshold": 35.0,
+			"schedule": map[string]interface{}{"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*"},
+		},
+	}
+	client, _ := newFakeClientWith(t, map[string]interface{}{
+		"app.query":              []interface{}{appEntry("plex", "STOPPED")},
+		"boot.environment.query": bootEnvs,
+		"pool.scrub.query":       schedules,
+	}, nil)
+	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
+	t.Cleanup(mgr.Shutdown)
+	r := NewRegistry(client, mgr)
+
+	checked := 0
+	for name, tool := range r.tools {
+		if tool.Plan == nil {
+			continue
+		}
+		checked++
+		args := toolArgsForSafetyFlagTest(name)
+		plan, err := tool.Plan(t.Context(), client, args)
+		if err != nil {
+			t.Errorf("%s Plan: %v", name, err)
+			continue
+		}
+		if err := plan.paramNamesOK(); err != nil {
+			t.Errorf("%s: %v (ParamNames=%q CallParams len %d)", name, err, plan.ParamNames, len(plan.CallParams))
+		}
+		if _, err := plan.previewDetails(); err != nil {
+			t.Errorf("%s previewDetails: %v", name, err)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no registered tools have a Plan")
 	}
 }

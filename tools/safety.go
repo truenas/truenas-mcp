@@ -369,7 +369,10 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 				return "", err
 			}
 			callArgs := withoutKeys(args, "confirmation_token", "dry_run")
-			if tool.Execute != nil {
+			if tool.Plan != nil {
+				if tool.Execute == nil {
+					return "", fmt.Errorf("%s was NOT executed: it has a plan but no Execute path; nothing was executed", name)
+				}
 				return tool.Execute(ctx, r.client, callArgs, plan)
 			}
 			return tool.Handler(ctx, r.client, callArgs)
