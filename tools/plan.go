@@ -42,6 +42,11 @@ type writePlan struct {
 	// Result is execute-only data produced while planning. It is not
 	// shown in the preview.
 	Result map[string]interface{}
+	// Bind, when set, is extra plan identity hashed with Method and
+	// CallParams. Use it for resolved state the preview showed but that
+	// the middleware call still sends as a symbolic value (for example
+	// "latest" resolved to a concrete upgrade_version).
+	Bind interface{}
 }
 
 func (p *writePlan) dryRunResult() (*DryRunResult, error) {
@@ -52,7 +57,7 @@ func (p *writePlan) dryRunResult() (*DryRunResult, error) {
 	dry, executed := true, false
 	result := &DryRunResult{
 		Tool:           p.Tool,
-		CurrentState:   p.CurrentState,
+		CurrentState:   redact.Value(p.CurrentState),
 		PlannedActions: actions,
 		Warnings:       p.Warnings,
 		Blocked:        p.Blocked,
@@ -98,7 +103,12 @@ func (p *writePlan) plannedActions() ([]PlannedAction, error) {
 		return nil, err
 	}
 	if p.Actions != nil {
-		return p.Actions, nil
+		out := make([]PlannedAction, len(p.Actions))
+		copy(out, p.Actions)
+		for i := range out {
+			out[i].Details = redact.Value(out[i].Details)
+		}
+		return out, nil
 	}
 	details, err := p.previewDetails()
 	if err != nil {

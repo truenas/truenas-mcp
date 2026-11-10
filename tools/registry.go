@@ -150,6 +150,8 @@ func (r *Registry) registerTools() {
 			},
 		},
 		Handler: r.handleApplyUpdateWithDryRun,
+		Plan:    planApplyUpdate,
+		Execute: r.executeApplyUpdate,
 	}
 
 	r.tools["update_status"] = Tool{
@@ -187,6 +189,8 @@ func (r *Registry) registerTools() {
 			},
 		},
 		Handler: handleSystemRebootWithDryRun,
+		Plan:    planSystemReboot,
+		Execute: executeSystemReboot,
 	}
 
 	// Boot environment management tools
@@ -4411,6 +4415,7 @@ func planUpgradeApp(ctx context.Context, client *truenas.Client, args map[string
 			"health_timeout":     healthTimeout,
 			"snapshot_hostpaths": snapshotHostpaths,
 		},
+		Bind: upgradeBind(summary),
 	}, nil
 }
 
@@ -4524,6 +4529,7 @@ const stopAppMethod = "app.stop"
 const bootEnvironmentDestroyMethod = "boot.environment.destroy"
 const upgradeAppMethod = "app.upgrade"
 const updateAppMethod = "app.update"
+const updateRunMethod = "update.run"
 
 func queryApp(ctx context.Context, client *truenas.Client, appName string) (map[string]interface{}, error) {
 	currentResult, err := client.Call(ctx, "app.query", []interface{}{
@@ -6339,77 +6345,16 @@ func withoutKeys(args map[string]interface{}, keys ...string) map[string]interfa
 	return out
 }
 
-// handleApplyUpdate applies a downloaded TrueNAS system update
-func (r *Registry) handleApplyUpdate(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+// planApplyUpdate builds the apply_update plan used by both the dry-run
+// preview and the real call. The middleware write is a single update.run;
+// the preview still describes the stop/update/verify (and optional reboot)
+// steps that call performs.
+func planApplyUpdate(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	reboot := false
 	if r, ok := args["reboot"].(bool); ok {
 		reboot = r
 	}
 
-	// Build update options
-	updateOptions := map[string]interface{}{
-		"reboot": reboot,
-	}
-
-	// Start the update
-	result, err := client.Call(ctx, "update.run", updateOptions)
-	if err != nil {
-		return "", fmt.Errorf("failed to start update: %w", err)
-	}
-
-	// update.run returns a job ID
-	var jobID int
-	if err := json.Unmarshal(result, &jobID); err != nil {
-		return "", fmt.Errorf("failed to parse job ID: %w", err)
-	}
-
-	// Create job-based task to track update progress
-	task, err := r.taskManager.CreateJobTask(ctx,
-		"apply_update",
-		args,
-		jobID,
-		2*time.Hour, // 2 hour TTL
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to create task: %w", err)
-	}
-
-	response := map[string]interface{}{
-		"reboot":        reboot,
-		"task_id":       task.TaskID,
-		"task_status":   task.Status,
-		"poll_interval": task.PollInterval,
-		"job_id":        jobID,
-		"message":       fmt.Sprintf("Update started. Track progress with tasks_get using task_id: %s", task.TaskID),
-	}
-
-	if reboot {
-		response["warning"] = "System will reboot after update completes. Connection will be lost."
-	}
-
-	formatted, err := json.MarshalIndent(response, "", "  ")
-	if err != nil {
-		return "", err
-	}
-
-	return string(formatted), nil
-}
-
-// handleApplyUpdateWithDryRun wraps the apply handler with dry-run support
-func (r *Registry) handleApplyUpdateWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	return ExecuteWithDryRun(ctx, client, args, &applyUpdateDryRun{}, r.handleApplyUpdate)
-}
-
-// applyUpdateDryRun implements dry-run preview for update application
-type applyUpdateDryRun struct{}
-
-func (a *applyUpdateDryRun) ExecuteDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*DryRunResult, error) {
-	reboot := false
-	if r, ok := args["reboot"].(bool); ok {
-		reboot = r
-	}
-
-	// Get current system info
 	sysInfoResult, err := client.Call(ctx, "system.info")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get system info: %w", err)
@@ -6425,7 +6370,6 @@ func (a *applyUpdateDryRun) ExecuteDryRun(ctx context.Context, client *truenas.C
 		return nil, fmt.Errorf("system.info returned no usable version")
 	}
 
-	// Check update status to get target version
 	statusResult, err := client.Call(ctx, "update.status")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get update status: %w", err)
@@ -6467,72 +6411,100 @@ func (a *applyUpdateDryRun) ExecuteDryRun(ctx context.Context, client *truenas.C
 		})
 	}
 
-	result := &DryRunResult{
-		Tool: "apply_update",
+	warnings := []string{
+		"CRITICAL: This operation will update the TrueNAS system software.",
+		"Services may be interrupted during the update process.",
+	}
+	if reboot {
+		warnings = append(warnings,
+			"REBOOT ENABLED: System will automatically reboot after update completes.",
+			"All connections will be lost during reboot.",
+		)
+	} else {
+		warnings = append(warnings,
+			"Manual reboot required after update to complete the process.",
+		)
+	}
+
+	return &writePlan{
+		Tool:       "apply_update",
+		Method:     updateRunMethod,
+		CallParams: []interface{}{map[string]interface{}{"reboot": reboot}},
+		JobMethod:  updateRunMethod,
+		ParamNames: []string{"options"},
 		CurrentState: map[string]interface{}{
 			"current_version": currentVersion,
 			"update_status":   status,
 		},
-		PlannedActions: actions,
+		Actions:  actions,
+		Warnings: warnings,
 		EstimatedTime: &EstimatedTime{
 			MinSeconds: 180,
 			MaxSeconds: 900,
 			Note:       "Time varies based on system configuration. Add 60-120s for reboot if enabled.",
 		},
-		Warnings: []string{
-			"CRITICAL: This operation will update the TrueNAS system software.",
-			"Services may be interrupted during the update process.",
-		},
-	}
-
-	if reboot {
-		result.Warnings = append(result.Warnings,
-			"REBOOT ENABLED: System will automatically reboot after update completes.",
-			"All connections will be lost during reboot.",
-		)
-	} else {
-		result.Warnings = append(result.Warnings,
-			"Manual reboot required after update to complete the process.",
-		)
-	}
-
-	return result, nil
+		Result: map[string]interface{}{"reboot": reboot},
+	}, nil
 }
 
-// handleSystemReboot reboots the TrueNAS system
-func handleSystemReboot(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
-	// Call system.reboot with reason parameter
-	reason := "System reboot requested via MCP"
-	params := []interface{}{reason}
-	delay, err := rebootDelay(args)
+func (r *Registry) handleApplyUpdateWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	plan, err := planApplyUpdate(ctx, client, args)
 	if err != nil {
 		return "", err
 	}
-	if delay > 0 {
-		params = append(params, map[string]interface{}{"delay": delay})
+	if err := plan.blockedReply(); err != nil {
+		return "", err
 	}
-	result, err := client.Call(ctx, "system.reboot", params...)
+	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		return plan.marshalDryRun()
+	}
+	return r.executeApplyUpdate(ctx, client, args, plan)
+}
+
+func (r *Registry) executeApplyUpdate(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
+	if err := plan.blockedReply(); err != nil {
+		return "", err
+	}
+	result, err := callPlan(ctx, client, plan)
 	if err != nil {
-		return "", fmt.Errorf("failed to initiate system reboot: %w", err)
+		return "", fmt.Errorf("failed to start update: %w", err)
 	}
 
-	// system.reboot typically returns nothing or a simple acknowledgment
-	var response map[string]interface{}
-	if len(result) > 0 {
-		_ = json.Unmarshal(result, &response)
+	var jobID int
+	if err := json.Unmarshal(result, &jobID); err != nil {
+		return "", fmt.Errorf("failed to parse job ID: %w", err)
 	}
 
-	returnMsg := map[string]interface{}{
-		"status":  "reboot_initiated",
-		"message": "System reboot initiated. All connections will be lost.",
-		"warning": "TrueNAS system is rebooting. Wait approximately 2-3 minutes before reconnecting.",
+	opts := []tasks.TaskOption{}
+	if plan.JobMethod != "" {
+		opts = append(opts, tasks.WithExpectedMethod(plan.JobMethod))
 	}
-	if delay > 0 {
-		returnMsg["delay_seconds"] = delay
-		returnMsg["message"] = fmt.Sprintf("System reboot scheduled in %d seconds. All connections will be lost.", delay)
+	task, err := r.taskManager.CreateJobTask(ctx,
+		"apply_update",
+		args,
+		jobID,
+		2*time.Hour, // 2 hour TTL
+		opts...,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
 	}
 
-	formatted, err := json.MarshalIndent(returnMsg, "", "  ")
+	reboot, _ := plan.Result["reboot"].(bool)
+	response := map[string]interface{}{
+		"reboot":        reboot,
+		"task_id":       task.TaskID,
+		"task_status":   task.Status,
+		"poll_interval": task.PollInterval,
+		"job_id":        jobID,
+		"message":       fmt.Sprintf("Update started. Track progress with tasks_get using task_id: %s", task.TaskID),
+	}
+
+	if reboot {
+		response["warning"] = "System will reboot after update completes. Connection will be lost."
+	}
+
+	formatted, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return "", err
 	}

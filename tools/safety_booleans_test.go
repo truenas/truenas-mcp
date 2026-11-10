@@ -86,6 +86,7 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 			map[string]interface{}{"id": 1.0, "pool_name": "tank", "enabled": true, "threshold": 35.0,
 				"schedule": map[string]interface{}{"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*"}},
 		},
+		"update.status": map[string]interface{}{"status": "AVAILABLE"},
 		"core.get_jobs": []interface{}{},
 	}, nil)
 	r := NewRegistry(client, nil)

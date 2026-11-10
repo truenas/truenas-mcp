@@ -671,7 +671,8 @@ the canonical JSON of the arguments (keys sorted; `confirmation_token`,
 `dry_run` and the old `confirm` are left out; an optional argument sent as
 `null` counts as omitted). For tools that share a plan between preview and
 execute (`stop_app`, `delete_boot_environment`, `delete_app`,
-`delete_scrub_schedule`, `upgrade_app`, `update_app`), the token is also bound to
+`delete_scrub_schedule`, `upgrade_app`, `update_app`, `system_reboot`,
+`apply_update`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
@@ -911,7 +912,9 @@ Returns:
 
 `delete_app` and `delete_scrub_schedule` use the same shared plan for preview and the real call (`app.delete` and `pool.scrub.delete`). Preview `details` are derived from those parameters. Host-path datasets are not deleted with the app; the preview warns that data paths are preserved.
 
-`upgrade_app` and `update_app` use the same shared plan for preview and the real call (`app.upgrade` and `app.update`). The upgrade preview still describes the stop, snapshot, upgrade, start and verify steps (or redeploy and verify for a custom app or image-only update) that a single `app.upgrade` performs; those middleware parameters are what the confirmed call sends. An `update_app` dry run now includes `"dry_run": true, "executed": false` like the other plan-backed previews. Missing host-path datasets stay a preview warning; the real call still refuses until they exist.
+`upgrade_app` and `update_app` use the same shared plan for preview and the real call (`app.upgrade` and `app.update`). The upgrade preview still describes the stop, snapshot, upgrade, start and verify steps (or redeploy and verify for a custom app or image-only update) that a single `app.upgrade` performs; those middleware parameters are what the confirmed call sends. An `update_app` dry run now includes `"dry_run": true, "executed": false` like the other plan-backed previews. Missing host-path datasets stay a preview warning; the real call still refuses until they exist. When `upgrade_app` is called with `version` omitted or `"latest"`, the confirmation token is also bound to the catalog version `app.upgrade_summary` resolved in the preview (`upgrade_version`). If a newer release is published between preview and confirm, the token is refused and nothing is upgraded; the `app.upgrade` call still sends `"latest"`. Preview `details` and `current_state` on these plans (and on any plan that uses custom preview actions) are masked the same way as other plan previews.
+
+`system_reboot` and `apply_update` use the same shared plan for preview and the real call (`system.reboot` and `update.run`). A reboot delay of 0 is omitted from the middleware payload, as before. Their dry runs now include `"dry_run": true, "executed": false` like the other plan-backed previews.
 
 **Benefits:**
 - See exactly what will change before committing
