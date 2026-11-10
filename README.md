@@ -990,11 +990,8 @@ Go 1.27.3 or later is required (see [Building](#building)).
 # Run linters (go vet, gofmt, staticcheck v0.8.2, and errcheck v1.30.0)
 make lint
 
-# Run tests
+# Run tests (includes the race detector)
 make test
-
-# Run tests with the race detector (recommended before sending a change)
-go test -race ./...
 
 # Check dependencies for known vulnerabilities (version used in CI)
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
@@ -1004,10 +1001,10 @@ make clean
 ```
 
 The "Build and Package" workflow runs the linters (`make lint`, including
-staticcheck and errcheck), the tests (also with the
-race detector), `govulncheck`
+staticcheck and errcheck), a single test step with the
+race detector and coverage (`go test -race -coverprofile=coverage.out -covermode=atomic ./...`), `govulncheck`
 and builds for macOS (Apple Silicon), Linux and Windows on every pull request
 and on every push to `main`. The release workflow, which runs for version
-tags, runs the linters and tests again and publishes those three platforms. A test in
+tags, runs the linters and tests again (with the race detector) and publishes those three platforms, with SLSA build provenance attestations for the release archives. A test in
 `cmd/truenas-mcp` checks that the flags documented in this README match the
 flags the binary registers, and that the Go version above matches `go.mod`.
