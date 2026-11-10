@@ -986,7 +986,7 @@ A dry run of `refresh_directory_cache` now returns an error when no directory se
 Go 1.27.3 or later is required (see [Building](#building)).
 
 ```bash
-# Run linters (go vet, and a gofmt check)
+# Run linters (go vet, gofmt, staticcheck v0.8.2, and errcheck v1.30.0)
 make lint
 
 # Run tests
@@ -1002,7 +1002,8 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 make clean
 ```
 
-The "Build and Package" workflow runs the linters, the tests (also with the
+The "Build and Package" workflow runs the linters (`make lint`, including
+staticcheck and errcheck), the tests (also with the
 race detector), `govulncheck`
 and builds for macOS (Apple Silicon), Linux and Windows on every pull request
 and on every push to `main`. The release workflow, which runs for version

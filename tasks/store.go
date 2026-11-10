@@ -157,14 +157,13 @@ func (s *TaskStore) Get(taskID string) (*Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	task, exists := s.tasks[taskID]
-	if !exists {
+	if _, exists := s.tasks[taskID]; !exists {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
 
 	now := time.Now()
 	s.timeOutLocked(taskID, now)
-	task = s.tasks[taskID]
+	task := s.tasks[taskID]
 	if expiry, ok := s.expiry[taskID]; ok && now.After(expiry) {
 		return nil, fmt.Errorf("task expired: %s", taskID)
 	}

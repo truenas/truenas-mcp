@@ -297,13 +297,13 @@ func approve(t *testing.T, r *Registry, name string, args map[string]interface{}
 	}
 	var tok string
 	if tool.Plan != nil {
-		plan, err := tool.Plan(t.Context(), r.client, a)
-		if err != nil {
-			t.Fatal(err)
+		plan, planErr := tool.Plan(t.Context(), r.client, a)
+		if planErr != nil {
+			t.Fatal(planErr)
 		}
-		ph, err := plan.planHash()
-		if err != nil {
-			t.Fatal(err)
+		ph, hashErr := plan.planHash()
+		if hashErr != nil {
+			t.Fatal(hashErr)
 		}
 		tok, err = r.confirmTokens.issueWithPlan(name, h, ph)
 	} else {
