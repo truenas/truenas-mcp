@@ -47,8 +47,10 @@ func TestUpgradeHealthTimeoutValidation(t *testing.T) {
 
 // An invalid value is refused before anything reaches the middleware, for the
 // real call and the dry run alike; the boundaries 600 / 601 behave as stated.
+// null through CallTool means omitted (the 60s default), like every
+// optional argument.
 func TestUpgradeAppRejectsBadHealthTimeoutBeforeUpgrade(t *testing.T) {
-	for name, v := range map[string]interface{}{"601": 601.0, "string": "30", "bool": true, "null": nil, "fraction": 1.5, "negative": -1.0} {
+	for name, v := range map[string]interface{}{"601": 601.0, "string": "30", "bool": true, "fraction": 1.5, "negative": -1.0} {
 		for _, dry := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s dry_run=%v", name, dry), func(t *testing.T) {
 				r, _, f := newUpgradeRegistry(t, upgradeSummaryFixture("x"))
@@ -66,6 +68,10 @@ func TestUpgradeAppRejectsBadHealthTimeoutBeforeUpgrade(t *testing.T) {
 	}
 
 	r, _, _ := newUpgradeRegistry(t, upgradeSummaryFixture("x"))
+	if resp := startUpgrade(t, r, map[string]interface{}{"health_timeout_seconds": nil}); !strings.Contains(resp["message"].(string), fmt.Sprintf("up to %ds", defaultUpgradeHealthTimeoutSeconds)) {
+		t.Errorf("null did not mean the default: %v", resp["message"])
+	}
+	r, _, _ = newUpgradeRegistry(t, upgradeSummaryFixture("x"))
 	resp := startUpgrade(t, r, map[string]interface{}{"health_timeout_seconds": 600})
 	if !strings.Contains(resp["message"].(string), "up to 600s") {
 		t.Errorf("600 not honoured: %v", resp["message"])
