@@ -419,6 +419,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Lists next scheduled scrub times
   - Combines schedule and runtime info in one view
   - Perfect for "when was tank last scrubbed?"
+  - A pool that is configured but not imported (`OFFLINE`, size unavailable) is still listed, with `size_bytes: null` and `size_human: "unknown"`, and does not fail the report for other pools
 
 - **create_scrub_schedule** - Schedule automatic scrubs
   - Weekly, monthly, or custom cron schedules
@@ -430,7 +431,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 - **run_scrub** - Manually start a scrub
   - Returns task ID for progress tracking
   - Safety checks prevent double-scrubbing
-  - Dry-run shows estimated duration and impact
+  - Refuses an `OFFLINE` (not imported) pool and does not report a started scrub
+  - Dry-run shows estimated duration and impact, or the same OFFLINE refusal
   - Integrates with task manager for monitoring
   - Use before backups or after hardware changes
 
