@@ -109,7 +109,7 @@ make build
 make build-all
 ```
 
-Binaries report their version with `--version`. `make` takes the version from `git describe`; override it with `make build VERSION=1.2.3`. Without `make`, `go build -o truenas-mcp ./cmd/truenas-mcp` produces the same binary; its version is the module version Go records from the git checkout (or from `go install ...@vX.Y.Z`), or `dev` when none is available. `make clean` removes the binaries.
+Binaries report their version with `--version`. `make` takes the version from `git describe`; override it with `make build VERSION=1.2.3`. The `build` and `build-all` targets set `CGO_ENABLED=0`, so the Linux binary is statically linked. Without `make`, `CGO_ENABLED=0 go build -o truenas-mcp ./cmd/truenas-mcp` produces the same binary; omit `CGO_ENABLED=0` and a Linux build may be dynamically linked if a C compiler is present. The binary's version is the module version Go records from the git checkout (or from `go install ...@vX.Y.Z`), or `dev` when none is available. `make clean` removes the binaries.
 
 ## Installation
 
@@ -1007,7 +1007,10 @@ The "Build and Package" workflow runs the linters (`make lint`, including
 staticcheck and errcheck), a single test step with the
 race detector and coverage (`go test -race -coverprofile=coverage.out -covermode=atomic ./...`), a non-race `go test -count=1 ./redact` so the randomized and linear redaction tests run at full strength, `govulncheck`
 and builds for macOS (Apple Silicon), Linux and Windows on every pull request
-and on every push to `main`. The release workflow, which runs for version
+and on every push to `main`. Those binary builds, and the release workflow's
+builds, set `CGO_ENABLED=0`. After the Linux binary is built, CI runs `file`
+and `ldd` and fails if it is not statically linked. Test steps leave cgo
+enabled, because the race detector requires it. The release workflow, which runs for version
 tags, runs the linters and tests again (with the race detector) and publishes those three platforms, with SLSA build provenance attestations for the release archives. A test in
 `cmd/truenas-mcp` checks that the flags documented in this README match the
 flags the binary registers, and that the Go version above matches `go.mod`.

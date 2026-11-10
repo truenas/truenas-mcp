@@ -47,13 +47,13 @@ jobs:
       run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
 
     - name: Build for macOS ARM64
-      run: GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-darwin-arm64 ./cmd/truenas-mcp
+      run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-darwin-arm64 ./cmd/truenas-mcp
 
     - name: Build for Windows AMD64
-      run: GOOS=windows GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-windows-amd64.exe ./cmd/truenas-mcp
+      run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-windows-amd64.exe ./cmd/truenas-mcp
 
     - name: Build for Linux AMD64
-      run: GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-linux-amd64 ./cmd/truenas-mcp
+      run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-linux-amd64 ./cmd/truenas-mcp
 
     - name: Package binaries
       run: |
