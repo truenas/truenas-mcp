@@ -101,26 +101,19 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 			"payload":      payload,
 			"note":         "This is a preview. No SMB share has been created.",
 			"next_step":    "Remove dry_run parameter or set to false to execute",
-			"network_path": fmt.Sprintf("\\\\truenas\\%s", name),
+			"network_path": fmt.Sprintf("\\\\%s\\%s", nasHostname(client), name),
 		}
 
 		// Add security warnings
 		warnings := []string{}
-		if browsable, ok := payload["browsable"].(bool); ok && browsable {
-			if hostsallow, ok := payload["hostsallow"]; !ok || hostsallow == nil {
-				warnings = append(warnings, "Share will be visible and accessible from any network host (browsable=true, no hostsallow restrictions)")
-			}
+		if smbShareBrowsable(payload) && !smbHasHostsallow(payload) {
+			warnings = append(warnings, "Share will be visible and accessible from any network host (browsable=true, no hostsallow restrictions)")
 		}
 		if readonly, ok := payload["readonly"].(bool); ok && !readonly {
 			warnings = append(warnings, "Share allows read-write access")
 		}
 
-		// Add directory service warnings if applicable
-		ctx := context.Background()
-		if tnClient, err := GetTrueNASClient(); err == nil {
-			dirWarnings := checkDirectoryServiceForShareWarnings(ctx, tnClient)
-			warnings = append(warnings, dirWarnings...)
-		}
+		warnings = append(warnings, checkDirectoryServiceForShareWarnings(context.Background(), client)...)
 
 		if len(warnings) > 0 {
 			preview["security_warnings"] = warnings
@@ -162,7 +155,7 @@ func handleCreateSMBShare(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Add connection information
-	response["network_path"] = fmt.Sprintf("\\\\truenas\\%s", name)
+	response["network_path"] = fmt.Sprintf("\\\\%s\\%s", nasHostname(client), name)
 	response["note"] = "Share is now accessible over the network. You may need to configure permissions."
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -227,4 +220,44 @@ func validateSharePath(path string) error {
 	}
 
 	return nil
+}
+
+// smbShareBrowsable reports whether the share will be browsable. TrueNAS
+// defaults browsable to true, so an omitted value is treated as true.
+func smbShareBrowsable(payload map[string]interface{}) bool {
+	if v, ok := payload["browsable"].(bool); ok {
+		return v
+	}
+	return true
+}
+
+// smbHasHostsallow reports whether payload.options.hostsallow has any entries.
+func smbHasHostsallow(payload map[string]interface{}) bool {
+	opts, _ := payload["options"].(map[string]interface{})
+	list, _ := opts["hostsallow"].([]interface{})
+	return len(list) > 0
+}
+
+// nasHostname returns system.info hostname for share paths and mount
+// examples. If it is missing or unusable, "truenas" is used as a label
+// rather than inventing a host.
+func nasHostname(client *truenas.Client) string {
+	const fallback = "truenas"
+	if client == nil {
+		return fallback
+	}
+	result, err := client.Call("system.info")
+	if err != nil {
+		return fallback
+	}
+	var info map[string]interface{}
+	if err := json.Unmarshal(result, &info); err != nil {
+		return fallback
+	}
+	host, _ := info["hostname"].(string)
+	host = strings.TrimSpace(host)
+	if host == "" || strings.ContainsAny(host, `\/ "`) {
+		return fallback
+	}
+	return host
 }

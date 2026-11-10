@@ -131,6 +131,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Audit logging for compliance
   - Security warnings for public shares
   - Dry-run mode to preview with security analysis
+  - The "any network host" warning looks at `options.hostsallow` and treats an omitted `browsable` as true (the TrueNAS default)
+  - `network_path` uses the NAS hostname from `system.info` (both in the dry-run preview and in the result)
 
 - **create_nfs_share** - Create NFS shares for Unix/Linux file sharing
   - Interactive wizard walks through NFS configuration
@@ -140,6 +142,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Security level selection (SYS, Kerberos)
   - Security warnings for unrestricted access
   - Dry-run mode to preview with mount examples
+  - Root-mapping warning: `maproot_user=root` (or `maproot_group` of `root`/`wheel`) means `no_root_squash`; otherwise the export uses `root_squash` (or `all_squash` when `mapall_*` is set)
+  - `mount_example` uses the NAS hostname from `system.info` (preview and result)
 
 ### Application Management
 - **install_app** - Install applications from the catalog with guided storage setup
@@ -264,7 +268,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Reports ongoing operations (JOINING/LEAVING)
 
 - **create_smb_share** and **create_nfs_share** - Directory service awareness
-  - Dry-run mode shows warnings when directory service is enabled
+  - Dry-run mode shows warnings when a directory service is enabled (the share handlers pass their TrueNAS client; middleware types such as `ACTIVEDIRECTORY` are recognised)
   - Reminds users that domain accounts will be used for permissions
   - Warns if directory service is FAULTED (authentication may not work)
   - Helps prevent configuration mistakes
