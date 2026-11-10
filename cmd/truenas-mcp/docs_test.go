@@ -122,6 +122,18 @@ func TestGoVersionMentionsMatchGoMod(t *testing.T) {
 	}
 }
 
+// TestSDKVersionMentionMatchesGoMod keeps the Go MCP SDK version the README
+// names in step with go.mod.
+func TestSDKVersionMentionMatchesGoMod(t *testing.T) {
+	m := regexp.MustCompile(`(?m)^\s*github\.com/modelcontextprotocol/go-sdk (v\S+)`).FindStringSubmatch(repoFile(t, "go.mod"))
+	if m == nil {
+		t.Fatal("go.mod does not require github.com/modelcontextprotocol/go-sdk")
+	}
+	if !strings.Contains(repoFile(t, "README.md"), "Go MCP SDK](https://github.com/modelcontextprotocol/go-sdk) ("+m[1]+")") {
+		t.Errorf("README.md does not name the Go MCP SDK version %s from go.mod", m[1])
+	}
+}
+
 // headingAnchors returns the GitHub anchors of the headings in a markdown
 // document: lower case, punctuation removed, spaces replaced by hyphens, and
 // -1, -2, ... appended to repeated headings.

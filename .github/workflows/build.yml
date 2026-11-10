@@ -37,6 +37,9 @@ jobs:
     - name: Run tests
       run: make test
 
+    - name: Run tests with the race detector
+      run: go test -race ./...
+
     - name: Run govulncheck
       run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 

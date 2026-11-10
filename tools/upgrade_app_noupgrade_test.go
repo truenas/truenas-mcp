@@ -64,7 +64,7 @@ func TestUpgradeAppNoUpgradeAvailablePreview(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, fake := noUpgradeRegistry(t, "app.upgrade_summary")
-			out, err := r.CallTool("upgrade_app", args)
+			out, err := r.CallTool(t.Context(), "upgrade_app", args)
 			assertNoUpgradeError(t, err, out, `no upgrade available for app "plex" (installed version 2.0.0_1.2.0)`, "nothing was changed")
 			if n := len(fake.called("app.upgrade")); n != 0 {
 				t.Errorf("preview called app.upgrade %d times", n)
@@ -77,7 +77,7 @@ func TestUpgradeAppNoUpgradeAvailableExecute(t *testing.T) {
 	for _, failing := range []string{"app.upgrade_summary", "app.upgrade"} {
 		t.Run(failing, func(t *testing.T) {
 			r, fake := noUpgradeRegistry(t, failing)
-			out, err := r.CallTool("upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true})
+			out, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex", "confirm": true})
 			assertNoUpgradeError(t, err, out, `no upgrade available for app "plex"`, "(installed version 2.0.0_1.2.0)")
 			if failing == "app.upgrade_summary" {
 				if n := len(fake.called("app.upgrade")); n != 0 {
@@ -90,7 +90,7 @@ func TestUpgradeAppNoUpgradeAvailableExecute(t *testing.T) {
 
 func TestUpgradeAppNoUpgradeToRequestedVersion(t *testing.T) {
 	r, _ := noUpgradeRegistry(t, "app.upgrade_summary")
-	out, err := r.CallTool("upgrade_app", map[string]interface{}{"app_name": "plex", "version": "9.9.9", "dry_run": true})
+	out, err := r.CallTool(t.Context(), "upgrade_app", map[string]interface{}{"app_name": "plex", "version": "9.9.9", "dry_run": true})
 	assertNoUpgradeError(t, err, out, `no upgrade to version "9.9.9" is available for app "plex" (installed version 2.0.0_1.2.0)`)
 }
 

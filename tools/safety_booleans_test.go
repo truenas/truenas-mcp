@@ -105,7 +105,7 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 				call[k] = v
 			}
 			call["dry_run"] = bad.v
-			out, err := r.CallTool(name, call)
+			out, err := r.CallTool(t.Context(), name, call)
 			assertInvalidBooleanArg(t, name, "dry_run", bad.name, out, err)
 		}
 		if safetyOf(name).Access == Destructive {
@@ -116,10 +116,10 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 				}
 				call["confirm"] = true
 				call["dry_run"] = bad.v
-				out, err := r.CallTool(name, call)
+				out, err := r.CallTool(t.Context(), name, call)
 				assertInvalidBooleanArg(t, name, "dry_run", "confirm=true plus "+bad.name, out, err)
 			}
-			out, err := r.CallTool(name, mergeArgs(base, map[string]interface{}{"confirm": "true"}))
+			out, err := r.CallTool(t.Context(), name, mergeArgs(base, map[string]interface{}{"confirm": "true"}))
 			assertInvalidBooleanArg(t, name, "confirm", `string "true"`, out, err)
 		}
 	}

@@ -196,13 +196,14 @@ func hostPathRegistry(t *testing.T) (*Registry, *fakeMiddleware) {
 	return NewRegistry(client, mgr), fake
 }
 
-func callHostPathTool(r *Registry, tool string, values map[string]interface{}) (string, error) {
+func callHostPathTool(t *testing.T, r *Registry, tool string, values map[string]interface{}) (string, error) {
+	t.Helper()
 	args := map[string]interface{}{"app_name": "jellyfin", "values": values}
 	if tool == "install_app" {
 		args["catalog_app"] = "jellyfin"
 		args["train"] = "community"
 	}
-	return r.CallTool(tool, args)
+	return r.CallTool(t.Context(), tool, args)
 }
 
 func writeCalls(fake *fakeMiddleware) (creates, updates int) {
@@ -229,7 +230,7 @@ func TestAppHostPathStorageEnforced(t *testing.T) {
 				r, fake := hostPathRegistry(t)
 				values := cloneValues(validHostPathValues())
 				setStoragePath(values, "config", tc.path)
-				out, err := callHostPathTool(r, tool, values)
+				out, err := callHostPathTool(t, r, tool, values)
 				if err == nil {
 					t.Fatalf("accepted %s: %s", tc.path, out)
 				}
@@ -247,7 +248,7 @@ func TestAppHostPathStorageEnforced(t *testing.T) {
 			r, fake := hostPathRegistry(t)
 			values := cloneValues(validHostPathValues())
 			delete(values["storage"].(map[string]interface{}), "config")
-			out, err := callHostPathTool(r, tool, values)
+			out, err := callHostPathTool(t, r, tool, values)
 			if err == nil {
 				t.Fatalf("omitted storage.config was accepted: %s", out)
 			}
@@ -271,7 +272,7 @@ func TestAppHostPathStorageEnforced(t *testing.T) {
 					"path":   "/export/media",
 				},
 			}
-			out, err := callHostPathTool(r, tool, values)
+			out, err := callHostPathTool(t, r, tool, values)
 			if err == nil {
 				t.Fatalf("nfs storage was accepted: %s", out)
 			}
@@ -288,7 +289,7 @@ func TestAppHostPathStorageEnforced(t *testing.T) {
 
 	t.Run("accepted host_path under existing datasets", func(t *testing.T) {
 		r, fake := hostPathRegistry(t)
-		out, err := callHostPathTool(r, "install_app", validHostPathValues())
+		out, err := callHostPathTool(t, r, "install_app", validHostPathValues())
 		if err != nil {
 			t.Fatalf("install_app: %v", err)
 		}
@@ -300,7 +301,7 @@ func TestAppHostPathStorageEnforced(t *testing.T) {
 		}
 
 		r, fake = hostPathRegistry(t)
-		out, err = callHostPathTool(r, "update_app", validHostPathValues())
+		out, err = callHostPathTool(t, r, "update_app", validHostPathValues())
 		if err != nil {
 			t.Fatalf("update_app: %v", err)
 		}
@@ -494,7 +495,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 			args["catalog_app"] = "jellyfin"
 			args["train"] = "community"
 		}
-		out, err := r.CallTool(tool, args)
+		out, err := r.CallTool(t.Context(), tool, args)
 		if err == nil {
 			t.Fatalf("%s accepted: %s", tool, out)
 		}
@@ -597,7 +598,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 			"values":      validHostPathValues(),
 			"dry_run":     true,
 		}
-		out, err := r.CallTool("install_app", args)
+		out, err := r.CallTool(t.Context(), "install_app", args)
 		if err == nil {
 			t.Fatalf("dry-run used latest schema and accepted a 1.0.0 config missing media: %s", out)
 		}
@@ -614,7 +615,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 		values := cloneValues(validHostPathValues())
 		values["storage"].(map[string]interface{})["config"] = hostPathACLConfig(
 			"/mnt/tank/apps/jellyfin/config", "/mnt/tank/apps/jellyfin/data")
-		out, err := r.CallTool("install_app", map[string]interface{}{
+		out, err := r.CallTool(t.Context(), "install_app", map[string]interface{}{
 			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": values,
 		})
 		if err != nil {
@@ -637,7 +638,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 			}
 			return nil, nil, false
 		}
-		_, err := r.CallTool("install_app", map[string]interface{}{
+		_, err := r.CallTool(t.Context(), "install_app", map[string]interface{}{
 			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community", "values": validHostPathValues(),
 		})
 		if err == nil {
@@ -659,7 +660,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 		r, fake := hostPathReviewFake(t, nil, nil)
 		values := cloneValues(validHostPathValues())
 		setStoragePath(values, "data", "/mnt/tank/apps/jellyfin/missing")
-		_, err := r.CallTool("update_app", map[string]interface{}{"app_name": "jellyfin", "values": values})
+		_, err := r.CallTool(t.Context(), "update_app", map[string]interface{}{"app_name": "jellyfin", "values": values})
 		if err == nil {
 			t.Fatal("update_app accepted a missing dataset")
 		}
@@ -677,7 +678,7 @@ func TestAppHostPathReviewFollowups(t *testing.T) {
 
 	t.Run("unknown install version is an error", func(t *testing.T) {
 		r, fake := hostPathReviewFake(t, nil, nil)
-		_, err := r.CallTool("install_app", map[string]interface{}{
+		_, err := r.CallTool(t.Context(), "install_app", map[string]interface{}{
 			"app_name": "jellyfin", "catalog_app": "jellyfin", "train": "community",
 			"version": "9.9.9", "values": validHostPathValues(),
 		})

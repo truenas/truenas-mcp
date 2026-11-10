@@ -493,7 +493,7 @@ func TestConfigureDirectoryServiceValidation(t *testing.T) {
 		for k, v := range extra {
 			args[k] = v
 		}
-		if _, err := r.CallTool("configure_directory_service", args); err == nil || !strings.Contains(err.Error(), "domain is required") {
+		if _, err := r.CallTool(t.Context(), "configure_directory_service", args); err == nil || !strings.Contains(err.Error(), "domain is required") {
 			t.Errorf("CallTool(%v) error = %v", extra, err)
 		}
 	}
@@ -582,7 +582,7 @@ func TestConfigureDirectoryServiceDryRunShowsExactPayload(t *testing.T) {
 	t.Run("explicit dry_run", func(t *testing.T) {
 		r, fake, _ := dsFake(t)
 		call := withArgs(args, obj{"dry_run": true})
-		out, err := r.CallTool("configure_directory_service", call)
+		out, err := r.CallTool(t.Context(), "configure_directory_service", call)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -593,7 +593,7 @@ func TestConfigureDirectoryServiceDryRunShowsExactPayload(t *testing.T) {
 	})
 	t.Run("without confirm", func(t *testing.T) {
 		r, fake, _ := dsFake(t)
-		out, err := r.CallTool("configure_directory_service", withArgs(args, nil))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, nil))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -604,7 +604,7 @@ func TestConfigureDirectoryServiceDryRunShowsExactPayload(t *testing.T) {
 	})
 	t.Run("confirm with dry_run still previews only", func(t *testing.T) {
 		r, fake, _ := dsFake(t)
-		out, err := r.CallTool("configure_directory_service", withArgs(args, obj{"confirm": true, "dry_run": true}))
+		out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"confirm": true, "dry_run": true}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -646,7 +646,7 @@ func TestConfigureDirectoryServiceExecutesWithConfirm(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := r.CallTool("configure_directory_service", withArgs(args, obj{"confirm": true}))
+	out, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"confirm": true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +709,7 @@ func TestConfigureDirectoryServiceReportsMiddlewareError(t *testing.T) {
 	}
 	client, _ := newFakeClientFrom(t, fake)
 	r := NewRegistry(client, nil)
-	_, err := r.CallTool("configure_directory_service", withArgs(fullDSExamples()["IPA"], obj{"confirm": true}))
+	_, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(fullDSExamples()["IPA"], obj{"confirm": true}))
 	if err == nil || !strings.Contains(err.Error(), "failed to configure IPA") {
 		t.Errorf("err = %v", err)
 	}
@@ -851,7 +851,7 @@ func TestLeaveDirectoryServiceValidation(t *testing.T) {
 	// Invalid arguments are reported before any middleware call, in every mode.
 	r, fake, _ := leaveFake(t, dsStatus("ACTIVEDIRECTORY", "HEALTHY"))
 	for _, extra := range []obj{{}, {"dry_run": true}, {"confirm": true}} {
-		if _, err := r.CallTool("leave_directory_service", withArgs(obj{"credential": obj{"credential_type": "KERBEROS_USER", "username": "a"}}, extra)); err == nil ||
+		if _, err := r.CallTool(t.Context(), "leave_directory_service", withArgs(obj{"credential": obj{"credential_type": "KERBEROS_USER", "username": "a"}}, extra)); err == nil ||
 			!strings.Contains(err.Error(), "password is required") {
 			t.Errorf("%v: err = %v", extra, err)
 		}
@@ -865,7 +865,7 @@ func TestLeaveDirectoryServiceDryRunPastPreChecks(t *testing.T) {
 	for _, dsType := range []string{"ACTIVEDIRECTORY", "IPA"} {
 		t.Run(dsType, func(t *testing.T) {
 			r, fake, _ := leaveFake(t, dsStatus(dsType, "HEALTHY"))
-			out, err := r.CallTool("leave_directory_service", leaveArgs(obj{"dry_run": true}))
+			out, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(obj{"dry_run": true}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -922,7 +922,7 @@ func TestLeaveDirectoryServiceDryRunPastPreChecks(t *testing.T) {
 
 	// Without confirm, the preview is the same and nothing is sent.
 	r, fake, _ := leaveFake(t, dsStatus("ACTIVEDIRECTORY", "HEALTHY"))
-	out, err := r.CallTool("leave_directory_service", leaveArgs(nil))
+	out, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(nil))
 	if err != nil || !strings.Contains(out, "confirmation_required") || !strings.Contains(out, `"method": "directoryservices.leave"`) {
 		t.Errorf("unconfirmed call: err=%v\n%s", err, out)
 	}
@@ -946,7 +946,7 @@ func TestLeaveDirectoryServicePreChecks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r, fake, _ := leaveFake(t, tc.status)
 			for _, extra := range []obj{{"dry_run": true}, {"confirm": true}} {
-				if _, err := r.CallTool("leave_directory_service", leaveArgs(extra)); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				if _, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(extra)); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Errorf("%v: err = %v, want %q", extra, err, tc.wantErr)
 				}
 			}
@@ -960,7 +960,7 @@ func TestLeaveDirectoryServiceExecutesWithConfirm(t *testing.T) {
 	results["directoryservices.leave"] = 77
 	r, fake, mgr := leaveFake(t, results)
 
-	out, err := r.CallTool("leave_directory_service", leaveArgs(obj{"confirm": true}))
+	out, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(obj{"confirm": true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1022,7 +1022,7 @@ func TestLeaveDirectoryServiceJobIDForms(t *testing.T) {
 			results := dsStatus("IPA", "HEALTHY")
 			results["directoryservices.leave"] = tc.result
 			r, _, _ := leaveFake(t, results)
-			out, err := r.CallTool("leave_directory_service", leaveArgs(obj{"confirm": true}))
+			out, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(obj{"confirm": true}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1052,7 +1052,7 @@ func TestLeaveDirectoryServiceReportsMiddlewareError(t *testing.T) {
 	}
 	client, _ := newFakeClientFrom(t, fake)
 	r := NewRegistry(client, nil)
-	_, err := r.CallTool("leave_directory_service", leaveArgs(obj{"confirm": true}))
+	_, err := r.CallTool(t.Context(), "leave_directory_service", leaveArgs(obj{"confirm": true}))
 	if err == nil || !strings.Contains(err.Error(), "failed to leave ACTIVEDIRECTORY") {
 		t.Errorf("err = %v", err)
 	}

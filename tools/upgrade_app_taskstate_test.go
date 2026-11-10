@@ -43,7 +43,7 @@ func TestUpgradeTaskJobAppIsRefreshedOnCompletion(t *testing.T) {
 
 	id := startUpgrade(t, r, nil)["task_id"].(string)
 	mgr.PollNow()
-	out, err := r.CallTool("tasks_get", map[string]interface{}{"task_id": id})
+	out, err := r.CallTool(t.Context(), "tasks_get", map[string]interface{}{"task_id": id})
 	if err != nil {
 		t.Fatal(err)
 	}

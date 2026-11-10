@@ -92,13 +92,15 @@ func handleCreateNFSShare(client *truenas.Client, args map[string]interface{}) (
 
 	// Check if this is a dry run
 	if dryRun, ok := args["dry_run"].(bool); ok && dryRun {
+		host, hostNote := lookupNASHostname(client)
 		// Return preview of what would be created
 		preview := map[string]interface{}{
-			"dry_run":   true,
-			"operation": "sharing.nfs.create",
-			"payload":   payload,
-			"note":      "This is a preview. No NFS share has been created.",
-			"next_step": "Remove dry_run parameter or set to false to execute",
+			"dry_run":       true,
+			"operation":     "sharing.nfs.create",
+			"payload":       payload,
+			"note":          "This is a preview. No NFS share has been created.",
+			"next_step":     "Remove dry_run parameter or set to false to execute",
+			"mount_example": fmt.Sprintf("mount -t nfs %s:%s /mnt/point", host, path),
 		}
 
 		// Add security warnings
@@ -111,19 +113,15 @@ func handleCreateNFSShare(client *truenas.Client, args map[string]interface{}) (
 		if ro, ok := payload["ro"].(bool); !ok || !ro {
 			warnings = append(warnings, "Share allows read-write access")
 		}
-		if maprootUser, ok := payload["maproot_user"]; !ok || maprootUser == nil {
-			warnings = append(warnings, "No maproot_user configured - root clients will have root access (security risk)")
-		}
+		warnings = append(warnings, nfsRootMappingWarning(payload))
 
-		// Add directory service warnings if applicable
-		ctx := context.Background()
-		if tnClient, err := GetTrueNASClient(); err == nil {
-			dirWarnings := checkDirectoryServiceForShareWarnings(ctx, tnClient)
-			warnings = append(warnings, dirWarnings...)
-		}
+		warnings = append(warnings, checkDirectoryServiceForShareWarnings(context.Background(), client)...)
 
 		if len(warnings) > 0 {
 			preview["security_warnings"] = warnings
+		}
+		if hostNote != "" {
+			preview["hostname_note"] = hostNote
 		}
 
 		formatted, err := json.MarshalIndent(preview, "", "  ")
@@ -161,7 +159,11 @@ func handleCreateNFSShare(client *truenas.Client, args map[string]interface{}) (
 	}
 
 	// Add mount instructions
-	response["mount_example"] = fmt.Sprintf("mount -t nfs truenas:%s /mnt/point", path)
+	host, hostNote := lookupNASHostname(client)
+	response["mount_example"] = fmt.Sprintf("mount -t nfs %s:%s /mnt/point", host, path)
+	if hostNote != "" {
+		response["hostname_note"] = hostNote
+	}
 	response["note"] = "NFS share is now accessible. Ensure NFS service is running and firewall allows NFS traffic."
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -210,4 +212,65 @@ func validateNFSHost(host string) error {
 	}
 
 	return nil
+}
+
+// nfsRootIDName reports whether name is treated as uid/gid 0. Middleware
+// only emits no_root_squash when both maproot_user and maproot_group
+// resolve to id 0 (exports.mako on 25.10 and 27.0). "root" and the
+// group "wheel" are the local names for those ids.
+func nfsRootIDName(name string, group bool) bool {
+	if strings.EqualFold(name, "root") {
+		return true
+	}
+	return group && strings.EqualFold(name, "wheel")
+}
+
+// nfsMappedAccount describes a user and/or group for export-mapping text.
+// root/wheel are shown as uid 0 / gid 0 to match the export options.
+func nfsMappedAccount(user, group string) string {
+	var parts []string
+	if user != "" {
+		if nfsRootIDName(user, false) {
+			parts = append(parts, "uid 0")
+		} else {
+			parts = append(parts, user)
+		}
+	}
+	if group != "" {
+		if nfsRootIDName(group, true) {
+			parts = append(parts, "gid 0")
+		} else {
+			parts = append(parts, group)
+		}
+	}
+	return strings.Join(parts, " / ")
+}
+
+// nfsRootMappingWarning describes how the export will map root clients.
+// no_root_squash is used only when maproot_user and maproot_group both
+// resolve to id 0. Otherwise the export keeps root_squash and sets
+// anonuid/anongid for any maproot names. mapall_* adds all_squash.
+func nfsRootMappingWarning(payload map[string]interface{}) string {
+	mapallUser, _ := payload["mapall_user"].(string)
+	mapallGroup, _ := payload["mapall_group"].(string)
+	if mapallUser != "" || mapallGroup != "" {
+		msg := fmt.Sprintf("All client users are mapped to %s (all_squash)", nfsMappedAccount(mapallUser, mapallGroup))
+		if nfsRootIDName(mapallUser, false) {
+			msg += ", so every client has root file access"
+		}
+		return msg
+	}
+	maprootUser, _ := payload["maproot_user"].(string)
+	maprootGroup, _ := payload["maproot_group"].(string)
+	if nfsRootIDName(maprootUser, false) && nfsRootIDName(maprootGroup, true) {
+		return "maproot maps root clients to local root (no_root_squash); root clients will have root access"
+	}
+	if maprootUser == "" && maprootGroup == "" {
+		return "Root clients are squashed to nobody (root_squash)"
+	}
+	msg := fmt.Sprintf("Root clients are mapped to %s (root_squash)", nfsMappedAccount(maprootUser, maprootGroup))
+	if nfsRootIDName(maprootUser, false) {
+		msg += ", so they keep root file access"
+	}
+	return msg
 }

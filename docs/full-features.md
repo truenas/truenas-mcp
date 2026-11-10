@@ -19,11 +19,14 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
 
 ### Storage Management
 - **query_pools** - Query storage pools with status and capacity
+  - Returns the same pool records as main, including topology, with `size`, `allocated`, and `free` as integers
 - **query_datasets** - Query datasets with intelligent filtering and sorting
   - Returns simplified, human-readable dataset information (~15 fields instead of 40+)
-  - Filter by pool name, encryption status
+  - Filter by pool name (exact `pool` match, so `tank` does not include `tank2`), encryption status
+  - Asks the middleware for only the properties this tool uses (including `dedup` and encryption properties so `encrypted_only` works), without nested `children` trees (`retrieve_children: false`). An unfiltered call still sends a `type in [FILESYSTEM, VOLUME]` filter so middleware walks every dataset; `children_count` is derived from dataset names
   - Sort by space usage (default), available space, or name
-  - Limit results for manageable responses (default: 50, configurable)
+  - Limit results for manageable responses (default: 50, maximum: 1000). A requested limit above 1000 is capped, and the response note says so
+  - `total_datasets` is the count after `encrypted_only`, before `limit`
   - Shows capacity (used/available), compression ratios, encryption status, usage breakdown
   - Perfect for questions like "what datasets use the most space?" or "show me encrypted datasets"
 
@@ -35,13 +38,16 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - `used_bytes`/`used` (space unique to the snapshot) and `referenced_bytes`/`referenced` (data it refers to), raw and human-readable
   - Filter by dataset name, pool name, or holds presence (on 27.0 the middleware reports only its own `truenas` hold)
   - Sort by snapshot name (default, newest first), dataset, or creation time (`created`: newest first by `created_timestamp`, then `created_date`, then name)
-  - Limit results for manageable responses (default: 50, configurable)
+  - Limit results for manageable responses (default: 50, maximum: 1000). A requested limit above 1000 is capped, and the response note says so
+  - An unfiltered query pushes `limit` and `order_by` to the middleware when sorting by `name` or `dataset`; if the page is full, a `count` query supplies `total_snapshots`. If that count query fails, `total_snapshots` is omitted and a note says the total is unknown
   - Perfect for questions like "what recent snapshots exist?" or "show snapshots with holds"
 
 - **query_shares** - Query SMB and NFS share configurations
+  - Returns the same SMB and NFS share records as main (no field select), including SMB `options` (`hostsallow`/`hostsdeny`), `access_based_share_enumeration`, `audit`, and `locked`, and NFS `security`, `expose_snapshots`, `locked`, and `aliases`
 
 ### Virtualization
 - **query_vms** - Query virtual machines with intelligent filtering and sorting
+  - Requests only the VM fields this tool uses
   - Returns simplified VM information with resource allocation, status, and device summary
   - Filter by VM name (partial match), state (RUNNING/STOPPED), or autostart setting
   - Sort by name (default, alphabetical), memory usage, or status (running first)
@@ -132,6 +138,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Audit logging for compliance
   - Security warnings for public shares
   - Dry-run mode to preview with security analysis
+  - The "any network host" warning looks at `options.hostsallow` and treats an omitted `browsable` as true (the TrueNAS default)
+  - `network_path` uses the short hostname from `system.info` (preview and result), which is not the HA virtual hostname. If that lookup fails, the path uses the shell-safe placeholder `NAS_HOSTNAME` and a `hostname_note` marks it as a placeholder
 
 - **create_nfs_share** - Create NFS shares for Unix/Linux file sharing
   - Interactive wizard walks through NFS configuration
@@ -141,6 +149,8 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Security level selection (SYS, Kerberos)
   - Security warnings for unrestricted access
   - Dry-run mode to preview with mount examples
+  - Root-mapping warning: `no_root_squash` only when both `maproot_user` and `maproot_group` are `root`/`wheel`. A single root mapping keeps `root_squash` and sets `anonuid`/`anongid`. If the mapped user is uid 0, the warning says that means root file access. Other maproot names (for example `alice`) are reported as mapped to that account, not to nobody. `mapall_*` is described as `all_squash` to the named account, and mapall to uid 0 is called out as root file access for every client
+  - `mount_example` uses the short hostname from `system.info` (preview and result), which is not the HA virtual hostname. If that lookup fails, the example uses the shell-safe placeholder `NAS_HOSTNAME` and a `hostname_note` marks it as a placeholder
 
 ### Application Management
 - **install_app** - Install applications from the catalog with guided storage setup
@@ -268,7 +278,7 @@ Tools are classified as read, write or destructive (`tools/safety.go`). Write an
   - Reports ongoing operations (JOINING/LEAVING)
 
 - **create_smb_share** and **create_nfs_share** - Directory service awareness
-  - Dry-run mode shows warnings when directory service is enabled
+  - Dry-run mode shows warnings when a directory service is enabled (the share handlers pass their TrueNAS client; middleware types such as `ACTIVEDIRECTORY`, `LDAP`, and `IPA` are recognised, including an enabled notice for IPA)
   - Reminds users that domain accounts will be used for permissions
   - Warns if directory service is FAULTED (authentication may not work)
   - Helps prevent configuration mistakes
