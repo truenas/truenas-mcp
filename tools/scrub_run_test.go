@@ -459,3 +459,32 @@ func TestRunScrubJobLookupAndStart(t *testing.T) {
 		}
 	})
 }
+
+func TestLastScrubWithinThresholdBoundary(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	edge := 6 * 24 * time.Hour // (7-1)*24h
+	at := func(age time.Duration) *time.Time { e := now.Add(-age); return &e }
+	cases := []struct {
+		name      string
+		age       time.Duration
+		threshold int
+		want      bool
+	}{
+		{"exactly (threshold-1)*24h is due", edge, 7, false},
+		{"one nanosecond under skips", edge - time.Nanosecond, 7, true},
+		{"one second under skips", edge - time.Second, 7, true},
+		{"past the edge is due", edge + time.Second, 7, false},
+		{"threshold 1 never skips", 0, 1, false},
+		{"threshold 0 never skips", 0, 0, false},
+		{"threshold 2 edge is due", 24 * time.Hour, 2, false},
+		{"threshold 2 under skips", 24*time.Hour - time.Second, 2, true},
+	}
+	for _, tc := range cases {
+		if got := lastScrubWithinThresholdAt(at(tc.age), tc.threshold, now); got != tc.want {
+			t.Errorf("%s: within = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if lastScrubWithinThresholdAt(nil, 7, now) {
+		t.Error("missing end time must be due")
+	}
+}

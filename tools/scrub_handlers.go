@@ -1353,10 +1353,14 @@ func scrubJobPoolName(job map[string]interface{}) (string, bool) {
 // (or a missing end time) means a start is due. threshold <= 0 disables
 // the check, matching the tool's "0 means do not skip" behaviour.
 func lastScrubWithinThreshold(end *time.Time, threshold int) bool {
+	return lastScrubWithinThresholdAt(end, threshold, time.Now())
+}
+
+func lastScrubWithinThresholdAt(end *time.Time, threshold int, now time.Time) bool {
 	if threshold <= 1 || end == nil {
 		return false
 	}
-	return time.Since(*end) < time.Duration(threshold-1)*24*time.Hour
+	return now.Sub(*end) < time.Duration(threshold-1)*24*time.Hour
 }
 
 // startScrubJob starts a scrub with pool.scrub.scrub, which is present
