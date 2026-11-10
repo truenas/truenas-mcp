@@ -89,6 +89,14 @@ func WithAppHealthCheck(appName string, timeout time.Duration) TaskOption {
 	}
 }
 
+// WithExpectedMethod sets the job method the tool's start call creates,
+// so identity checks use the same source as the write plan.
+func WithExpectedMethod(method string) TaskOption {
+	return func(t *Task) {
+		t.expectedMethod = method
+	}
+}
+
 // PollNow polls every active task once, outside the background schedule.
 func (m *Manager) PollNow() {
 	m.poller.pollAllTasks(m.ctx)

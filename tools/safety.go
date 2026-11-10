@@ -428,20 +428,35 @@ func (r *Registry) confirmationRequired(ctx context.Context, name string, tool T
 	return body, nil
 }
 
-// blockedReasons returns the warnings of a dry-run preview that say the
-// operation cannot proceed (they start with "BLOCKED:", as in
-// delete_boot_environment on the running boot environment).
+// blockedReasons returns the reasons a dry-run preview says the operation
+// cannot proceed. It prefers the plan's blocked list, and also honours
+// warnings that start with "BLOCKED:" (as in delete_boot_environment on
+// the running boot environment) for tools not yet on the plan.
 func blockedReasons(preview string) []string {
 	var p struct {
+		Blocked  []interface{} `json:"blocked"`
 		Warnings []interface{} `json:"warnings"`
 	}
 	if err := json.Unmarshal([]byte(preview), &p); err != nil {
 		return nil
 	}
 	var reasons []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		reasons = append(reasons, s)
+	}
+	for _, b := range p.Blocked {
+		if s, ok := b.(string); ok {
+			add(strings.TrimSpace(s))
+		}
+	}
 	for _, w := range p.Warnings {
 		if s, ok := w.(string); ok && strings.HasPrefix(s, "BLOCKED:") {
-			reasons = append(reasons, strings.TrimSpace(strings.TrimPrefix(s, "BLOCKED:")))
+			add(strings.TrimSpace(strings.TrimPrefix(s, "BLOCKED:")))
 		}
 	}
 	return reasons

@@ -46,6 +46,19 @@ func methodMatches(toolName, method string) bool {
 	return !ok || method == want
 }
 
+// methodMatches reports whether a job with this method can be the one
+// this task started. If WithExpectedMethod was set, that value is used;
+// otherwise the tool-name table is used.
+func (t *Task) methodMatches(method string) bool {
+	if t != nil && t.expectedMethod != "" {
+		return method == t.expectedMethod
+	}
+	if t == nil {
+		return false
+	}
+	return methodMatches(t.ToolName, method)
+}
+
 func checkTool(toolName string) string {
 	if c, ok := checkTools[toolName]; ok {
 		return c
