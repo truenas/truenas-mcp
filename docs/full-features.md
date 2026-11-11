@@ -127,7 +127,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Utilization percentages for each pool
   - Optional `pool_name` is an exact pool match (`tank` does not include `tank2`)
   - Per-dataset breakdown uses the same `pool` filter, `retrieve_children: false`, and property list as `query_datasets`, and reads top-level `used` / `available` (the same parser as `query_datasets`)
-  - Returns the top 50 datasets by used space plus `total_datasets`; a `datasets_note` says so when the list is limited
+  - Returns the top 50 datasets by used space (name breaks ties) plus `total_datasets`; a `datasets_note` says so when the list is limited. The full-row query asks TrueNAS for only those 50 rows (`order_by` used descending, then name, with `limit`); `total_datasets` and `children_count` come from a separate compact name listing of the pool, so they cover every dataset
   - Dataset query or parse errors are reported on the pool as `datasets_error`; the `datasets` key is still present
   - Capacity status warnings (healthy/warning/critical)
   - Note: Historical pool capacity trends not available in TrueNAS API (limitation documented)
