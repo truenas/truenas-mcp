@@ -393,7 +393,7 @@ func TestCallDestructiveRefusesPlanWithoutExecute(t *testing.T) {
 // An explicit dry_run of a blocked delete_boot_environment is documented
 // as a breaking change: it now returns an error with status "blocked".
 func TestREADMENotesBlockedDeleteBootEnvironmentDryRunIsBreakingChange(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(repoRoot(t), "README.md"))
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "safety.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestREADMENotesBlockedDeleteBootEnvironmentDryRunIsBreakingChange(t *testin
 		}
 	}
 	if !found {
-		t.Error(`README.md must have a "> **Breaking change:**" note that an explicit dry_run of a blocked delete_boot_environment now returns an error result with status "blocked"`)
+		t.Error(`docs/safety.md must have a "> **Breaking change:**" note that an explicit dry_run of a blocked delete_boot_environment now returns an error result with status "blocked"`)
 	}
 }
 
