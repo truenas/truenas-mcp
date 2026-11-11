@@ -169,9 +169,15 @@ func TestGetPoolCapacityDetailsBoundsTopN(t *testing.T) {
 	}
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("tank/ds%02d", i)
+		used := float64(i)
+		if i == 0 {
+			// Put the largest used value on an early name so a missing
+			// sort cannot hide behind "last in is largest".
+			used = float64(n + 100)
+		}
 		rows = append(rows, map[string]interface{}{
 			"name": name, "type": "FILESYSTEM", "pool": "tank",
-			"used": prop(float64(i + 1)), "available": prop(1),
+			"used": prop(used), "available": prop(1),
 		})
 	}
 	fake := &fakeMiddleware{
@@ -210,10 +216,29 @@ func TestGetPoolCapacityDetailsBoundsTopN(t *testing.T) {
 		t.Fatal("no datasets returned")
 	}
 	first, _ := list[0].(map[string]interface{})
-	// Largest used is tank/ds59 (used=60).
-	wantName := fmt.Sprintf("tank/ds%02d", n-1)
-	if first["name"] != wantName || first["used_bytes"] != float64(n) {
-		t.Errorf("first dataset = %v, want %s used_bytes=%d (largest by used); body=%s", first, wantName, n, out)
+	if first["name"] != "tank/ds00" || first["used_bytes"] != float64(n+100) {
+		t.Errorf("first dataset = %v, want tank/ds00 used_bytes=%d (largest by used, early name); body=%s", first, n+100, out)
+	}
+	if len(list) < 2 {
+		t.Fatal("want at least two datasets so a missing sort is visible")
+	}
+	second, _ := list[1].(map[string]interface{})
+	// Next-largest is the last inserted name (used=n-1).
+	wantSecond := fmt.Sprintf("tank/ds%02d", n-1)
+	if second["name"] != wantSecond || second["used_bytes"] != float64(n-1) {
+		t.Errorf("second dataset = %v, want %s used_bytes=%d; body=%s", second, wantSecond, n-1, out)
+	}
+}
+
+func TestSortDatasetsUsedTiesBreakByName(t *testing.T) {
+	datasets := []map[string]interface{}{
+		{"name": "tank/b", "used_bytes": 100.0},
+		{"name": "tank/a", "used_bytes": 100.0},
+		{"name": "tank/c", "used_bytes": 50.0},
+	}
+	sortDatasets(datasets, "used")
+	if datasets[0]["name"] != "tank/a" || datasets[1]["name"] != "tank/b" || datasets[2]["name"] != "tank/c" {
+		t.Fatalf("sortDatasets used ties = %v, want tank/a, tank/b, tank/c (used desc, name asc on ties)", datasets)
 	}
 }
 

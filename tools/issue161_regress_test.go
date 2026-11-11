@@ -373,3 +373,85 @@ func TestDeleteAppPlanHashIgnoresStoragePaths(t *testing.T) {
 		t.Errorf("plan hash is not method+params+bind only")
 	}
 }
+
+func TestDeleteAppPreviewUsesACLPathWhenACLEnableIsSet(t *testing.T) {
+	cfg := map[string]interface{}{
+		"storage": map[string]interface{}{
+			"config": map[string]interface{}{
+				"type": "host_path",
+				"host_path_config": map[string]interface{}{
+					"path":       "/mnt/tank/apps/plex/config",
+					"acl_enable": true,
+					"acl": map[string]interface{}{
+						"path": "/mnt/tank/apps/plex/acl-data",
+					},
+				},
+			},
+		},
+	}
+	r, fake := deleteAppPreviewRegistry(t, cfg, nil, nil)
+	out := deleteAppDryRun(t, r)
+	assertAppConfigCalled(t, fake, "plex")
+	state, _ := deleteAppPreviewState(t, out)
+	got := storagePathsOf(t, state)
+	if len(got) != 1 || got[0] != "/mnt/tank/apps/plex/acl-data" {
+		t.Fatalf("storage_paths = %v, want only the acl.path (apps bind-mount acl.path when acl_enable is set)\n%s", got, out)
+	}
+	for _, path := range got {
+		if path == "/mnt/tank/apps/plex/config" {
+			t.Fatalf("storage_paths used host_path_config.path while acl_enable is set: %v", got)
+		}
+	}
+}
+
+func TestDeleteAppPreviewListsBareHostPathAndComposeBindMounts(t *testing.T) {
+	cfg := map[string]interface{}{
+		"storage": map[string]interface{}{
+			"config": map[string]interface{}{
+				"type": "host_path",
+				"path": "/mnt/tank/apps/plex/bare",
+			},
+			"legacy": map[string]interface{}{
+				"type":     "hostPath",
+				"hostPath": "/mnt/tank/apps/plex/legacy",
+			},
+		},
+		"services": map[string]interface{}{
+			"plex": map[string]interface{}{
+				"volumes": []interface{}{
+					map[string]interface{}{
+						"type":   "bind",
+						"source": "/mnt/tank/media",
+						"target": "/data",
+					},
+					"/mnt/tank/transcode:/transcode:ro",
+					"namedvol:/data",
+				},
+			},
+		},
+	}
+	r, fake := deleteAppPreviewRegistry(t, cfg, nil, nil)
+	out := deleteAppDryRun(t, r)
+	assertAppConfigCalled(t, fake, "plex")
+	state, _ := deleteAppPreviewState(t, out)
+	got := storagePathsOf(t, state)
+	want := []string{
+		"/mnt/tank/apps/plex/bare",
+		"/mnt/tank/apps/plex/legacy",
+		"/mnt/tank/media",
+		"/mnt/tank/transcode",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("storage_paths = %v, want %v\n%s", got, want, out)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("storage_paths = %v, want %v (sorted host paths from bare hostpath and compose bind mounts)\n%s", got, want, out)
+		}
+	}
+	for _, path := range got {
+		if path == "namedvol" || path == "namedvol:/data" {
+			t.Errorf("storage_paths included a named volume: %v", got)
+		}
+	}
+}

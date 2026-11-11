@@ -1088,10 +1088,12 @@ func queryAppConfig(ctx context.Context, client *truenas.Client, appName string)
 	return config, nil
 }
 
-// deleteAppHostPathStoragePaths collects host_path_config.path values from
-// a 25.10 values object (storage.<slot> and additional_storage lists).
-// Entries with type ix_volume are skipped: their dataset_name is not a
-// host path. Paths are sorted and de-duplicated for a stable preview.
+// deleteAppHostPathStoragePaths collects host paths from a 25.10 values
+// object (storage slots, additional_storage, bare host_path entries, and
+// compose bind mounts). When acl_enable is set, acl.path is used because
+// that is what the apps library mounts. Entries with type ix_volume are
+// skipped: their dataset_name is not a host path. Paths are sorted and
+// de-duplicated for a stable preview.
 func deleteAppHostPathStoragePaths(values map[string]interface{}) []string {
 	paths := []string{}
 	collectDeleteAppHostPaths(values, &paths)
@@ -1111,13 +1113,8 @@ func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 	if obj == nil {
 		return
 	}
-	typ, _ := obj["type"].(string)
-	if typ != "ix_volume" {
-		if cfg, ok := obj["host_path_config"].(map[string]interface{}); ok {
-			if path, ok := cfg["path"].(string); ok && path != "" {
-				*paths = append(*paths, path)
-			}
-		}
+	if p := deleteAppHostPathFromMap(obj); p != "" {
+		*paths = append(*paths, p)
 	}
 	for _, value := range obj {
 		if nested, ok := value.(map[string]interface{}); ok {
@@ -1127,10 +1124,69 @@ func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 			for _, item := range array {
 				if itemObj, ok := item.(map[string]interface{}); ok {
 					collectDeleteAppHostPaths(itemObj, paths)
+				} else if s, ok := item.(string); ok {
+					if p := composeBindSource(s); p != "" {
+						*paths = append(*paths, p)
+					}
 				}
 			}
 		}
 	}
+}
+
+// deleteAppHostPathFromMap returns the host path a storage or compose
+// volume entry actually mounts, or "" if this map is not such an entry.
+// When host_path_config.acl_enable is set, the apps library bind-mounts
+// acl.path and ignores host_path_config.path.
+func deleteAppHostPathFromMap(obj map[string]interface{}) string {
+	typ, _ := obj["type"].(string)
+	if typ == "ix_volume" {
+		return ""
+	}
+	if cfg, ok := obj["host_path_config"].(map[string]interface{}); ok {
+		if aclEnable, _ := cfg["acl_enable"].(bool); aclEnable {
+			if acl, ok := cfg["acl"].(map[string]interface{}); ok {
+				if p, ok := acl["path"].(string); ok && p != "" {
+					return p
+				}
+			}
+		}
+		if p, ok := cfg["path"].(string); ok && p != "" {
+			return p
+		}
+	}
+	switch typ {
+	case "host_path", "hostPath", "hostpath":
+		for _, key := range []string{"path", "hostPath", "host_path"} {
+			if p, ok := obj[key].(string); ok && p != "" {
+				return p
+			}
+		}
+	case "bind":
+		if p, ok := obj["source"].(string); ok && strings.HasPrefix(p, "/") {
+			return p
+		}
+	}
+	if typ == "" {
+		if p, ok := obj["source"].(string); ok && strings.HasPrefix(p, "/") && obj["target"] != nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// composeBindSource extracts the host source from a Compose short-form
+// bind mount ("/mnt/tank/data:/data" or "/mnt/tank/data:/data:ro"). Named
+// volumes are ignored.
+func composeBindSource(s string) string {
+	if !strings.HasPrefix(s, "/") {
+		return ""
+	}
+	i := strings.Index(s, ":")
+	if i <= 0 {
+		return ""
+	}
+	return s[:i]
 }
 
 func (r *Registry) handleDeleteAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
@@ -1613,7 +1669,7 @@ func fillStorageFromCurrent(values, current map[string]interface{}) (map[string]
 // slotConfigKeys are the per-type config objects that are deep-filled from
 // the current slot when type and location are unchanged. Other nested
 // objects are not merged.
-var slotConfigKeys = []string{"host_path_config", "nfs_config", "cifs_config"}
+var slotConfigKeys = []string{"host_path_config", "nfs_config", "cifs_config", "ix_volume_config"}
 
 func fillSameLocationProvidedSlots(newStorage, currentStorage map[string]interface{}) {
 	if newStorage == nil || currentStorage == nil {
@@ -1667,9 +1723,23 @@ func fillSameLocationSlot(provided, current map[string]interface{}) {
 		if !pok || !cok {
 			continue
 		}
-		for ck, cv := range currentCfg {
-			if _, ok := providedCfg[ck]; !ok {
-				providedCfg[ck] = cloneJSON(cv)
+		fillMissingMapKeys(providedCfg, currentCfg)
+	}
+}
+
+// fillMissingMapKeys copies keys present on current but omitted from
+// provided, including nested maps such as host_path_config.acl.
+func fillMissingMapKeys(provided, current map[string]interface{}) {
+	if provided == nil || current == nil {
+		return
+	}
+	for key, val := range current {
+		if existing, ok := provided[key]; !ok {
+			provided[key] = cloneJSON(val)
+			continue
+		} else if nest, ok := existing.(map[string]interface{}); ok {
+			if curNest, ok := val.(map[string]interface{}); ok {
+				fillMissingMapKeys(nest, curNest)
 			}
 		}
 	}
@@ -1933,7 +2003,7 @@ func storageChangeBlockedError(changes []storageLocationChange) error {
 		if i > 0 {
 			b.WriteString("; ")
 		}
-		b.WriteString(fmt.Sprintf("changing the type or path of storage slot %s from %s to %s is blocked because data is not migrated", ch.slot, ch.oldLoc, ch.newLoc))
+		b.WriteString(fmt.Sprintf("changing the type or location of storage slot %s from %s to %s is blocked because data is not migrated", ch.slot, ch.oldLoc, ch.newLoc))
 	}
 	b.WriteString("; pass allow_storage_change: true to proceed")
 	return fmt.Errorf("%s", b.String())
@@ -1955,7 +2025,7 @@ func asStorageEntry(raw interface{}, loc string) (map[string]interface{}, error)
 // current config, including same-location slot top-level keys and
 // host_path_config/nfs_config/cifs_config fields; leave identical existing
 // entries (including ix_volume) alone; require host_path for new entries
-// and for type or path changes that are not a same-type NFS/CIFS location
+// and for type or location changes that are not a same-type NFS/CIFS location
 // change; and require allow_storage_change when an existing slot's type or
 // location changes. read_only and ACL-only changes are warned, not blocked.
 func prepareUpdateAppStorage(ctx context.Context, client *truenas.Client, schema, values, current map[string]interface{}, allowStorageChange bool) (map[string]interface{}, []string, []string, []string, error) {

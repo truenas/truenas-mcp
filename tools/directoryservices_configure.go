@@ -14,7 +14,7 @@ import (
 // (TrueNAS 25.10 and later). The field names, required fields and allowed
 // values follow the middleware's DirectoryServicesUpdateArgs model
 // (api/v25_10_0/directory_services.py, unchanged through v27_0_0). The
-// configure_directory_service tool's input schema (registry.go) uses the
+// configure_directory_service tool's input schema (directoryservices.go) uses the
 // same names, so the arguments a client sends are the payload fields.
 
 type dsFieldKind int

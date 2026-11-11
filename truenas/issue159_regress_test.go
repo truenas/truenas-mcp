@@ -10,10 +10,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// oversizedResponseBytes is one byte over the client's response read
-// limit, so a fake reply of this size trips SetReadLimit.
-const oversizedResponseBytes = maxResponseBytes + 1
-
 func checkOversizedResponseError(t *testing.T, name string, err error) {
 	t.Helper()
 	if err == nil {
@@ -49,8 +45,10 @@ func TestOversizedResponseIsExplained(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) {
 		f.holdMethod = "system.info"
 		f.oversizeResultFor = "pool.dataset.query"
-		f.oversizeResultBytes = oversizedResponseBytes
+		// Leave oversizeResultBytes unset so the fake default is one
+		// byte over maxResponseBytes (not a hardcoded 10 MiB+1).
 	})
+	defer close(f.release)
 	c := insecureClient(t, f, Options{})
 	if err := c.Authenticate(context.Background()); err != nil {
 		t.Fatal(err)

@@ -70,7 +70,14 @@ func funcName(v interface{}) string {
 // a mechanical split cannot change which function a tool calls.
 func TestToolBindingsMatchGolden(t *testing.T) {
 	got := toolBindingsCanonicalJSON(t)
-	want, err := os.ReadFile(filepath.Join("testdata", "tool_bindings.json"))
+	path := filepath.Join("testdata", "tool_bindings.json")
+	if *updateGoldens {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

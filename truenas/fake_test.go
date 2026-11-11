@@ -37,7 +37,7 @@ type fakeTrueNAS struct {
 	maxMessage  int    // close with 1009 on a frame larger than this, as TrueNAS does (0 = no limit)
 	infoVersion string // system.info version field; default 25.10.0
 	// oversizeResultFor, when set, makes that method's result larger than
-	// the client's response read limit (oversizeResultBytes, or 10 MiB+1).
+	// the client's response read limit (oversizeResultBytes, or maxResponseBytes+1).
 	oversizeResultFor   string
 	oversizeResultBytes int
 
@@ -192,7 +192,7 @@ func (f *fakeTrueNAS) serve(w http.ResponseWriter, r *http.Request) {
 		if f.oversizeResultFor != "" && req.Method == f.oversizeResultFor {
 			n := f.oversizeResultBytes
 			if n <= 0 {
-				n = 10*1024*1024 + 1
+				n = maxResponseBytes + 1
 			}
 			reply["result"] = strings.Repeat("x", n)
 		}

@@ -3,10 +3,15 @@ package tools
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// updateGoldens regenerates testdata/tools_list.json and
+// testdata/tool_bindings.json: go test ./tools -update
+var updateGoldens = flag.Bool("update", false, "update testdata goldens (tools_list.json, tool_bindings.json)")
 
 // listToolsCanonicalJSON is the full tools/list payload: every tool's
 // name, description, input schema and annotations, in ListTools order.
@@ -24,7 +29,14 @@ func listToolsCanonicalJSON(t *testing.T) []byte {
 // annotations or order.
 func TestListToolsMatchesGolden(t *testing.T) {
 	got := listToolsCanonicalJSON(t)
-	want, err := os.ReadFile(filepath.Join("testdata", "tools_list.json"))
+	path := filepath.Join("testdata", "tools_list.json")
+	if *updateGoldens {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
