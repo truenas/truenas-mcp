@@ -95,9 +95,10 @@ func TestBuildAndReleaseBinariesDisableCgo(t *testing.T) {
 }
 
 type workflowStep struct {
-	Name string `yaml:"name"`
-	Run  string `yaml:"run"`
-	Uses string `yaml:"uses"`
+	Name string            `yaml:"name"`
+	Run  string            `yaml:"run"`
+	Uses string            `yaml:"uses"`
+	Env  map[string]string `yaml:"env"`
 }
 
 type workflowDoc struct {
@@ -380,4 +381,45 @@ jobs:
       uses: softprops/action-gh-release@v3
 `
 	assertLinuxStaticCheckStepOrder(t, "fixture", src)
+}
+
+const govulncheckCmd = "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./..."
+
+// TestBuildAndReleaseWorkflowsRunGovulncheck requires both build.yml and
+// release.yml to run the same pinned govulncheck command with
+// GOTOOLCHAIN=local, after setup-go, so pull requests and pushes to main
+// catch advisories before a release tag is cut.
+func TestBuildAndReleaseWorkflowsRunGovulncheck(t *testing.T) {
+	for _, rel := range []string{".github/workflows/build.yml", ".github/workflows/release.yml"} {
+		src := issue114Read(t, rel)
+		var doc workflowDoc
+		if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
+			t.Fatalf("%s is not valid YAML: %v", rel, err)
+		}
+		found := false
+		for jobName, job := range doc.Jobs {
+			setupIdx, vulnIdx := -1, -1
+			for i, step := range job.Steps {
+				if strings.Contains(step.Uses, "setup-go") {
+					setupIdx = i
+				}
+				if strings.TrimSpace(step.Run) == govulncheckCmd {
+					vulnIdx = i
+					if step.Env["GOTOOLCHAIN"] != "local" {
+						t.Errorf("%s job %s step %q must set GOTOOLCHAIN=local, got %q", rel, jobName, step.Name, step.Env["GOTOOLCHAIN"])
+					}
+				}
+			}
+			if vulnIdx < 0 {
+				continue
+			}
+			found = true
+			if setupIdx < 0 || setupIdx > vulnIdx {
+				t.Errorf("%s job %s: govulncheck (step %d) must run after setup-go (step %d)", rel, jobName, vulnIdx, setupIdx)
+			}
+		}
+		if !found {
+			t.Errorf("%s has no %q step", rel, govulncheckCmd)
+		}
+	}
 }

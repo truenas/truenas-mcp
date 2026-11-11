@@ -122,6 +122,44 @@ func TestGoVersionMentionsMatchGoMod(t *testing.T) {
 	}
 }
 
+// TestGoToolchainAtLeast1274 requires the go.mod pin to be at least
+// 1.27.4, the first 1.27 release that fixes GO-2026-6859 in net/http.
+func TestGoToolchainAtLeast1274(t *testing.T) {
+	m := regexp.MustCompile(`(?m)^go (\d+\.\d+(?:\.\d+)?)\s*$`).FindStringSubmatch(repoFile(t, "go.mod"))
+	if m == nil {
+		t.Fatal("go.mod has no go directive")
+	}
+	if cmpDotVersion(m[1], "1.27.4") < 0 {
+		t.Errorf("go.mod pins go %s; need at least 1.27.4 (GO-2026-6859)", m[1])
+	}
+}
+
+// cmpDotVersion compares dotted numeric versions (for example 1.27.3 and
+// 1.27.4). Missing trailing components are treated as zero.
+func cmpDotVersion(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		var ai, bi int
+		if i < len(as) {
+			ai, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bi, _ = strconv.Atoi(bs[i])
+		}
+		if ai != bi {
+			if ai < bi {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
 // TestSDKVersionMentionMatchesGoMod keeps the Go MCP SDK version docs/safety.md
 // names in step with go.mod.
 func TestSDKVersionMentionMatchesGoMod(t *testing.T) {

@@ -34,7 +34,7 @@ sudo install truenas-mcp-linux-amd64 /usr/local/bin/truenas-mcp
 
 On Windows, unzip `truenas-mcp-windows-amd64.zip` and use the full path to the `.exe` as the `command` in your client config. Each release has a `checksums.txt` to verify the download.
 
-To build it yourself (needed on Intel Macs), you need Go 1.27.3 or later:
+To build it yourself (needed on Intel Macs), you need Go 1.27.4 or later:
 
 ```bash
 git clone https://github.com/truenas/truenas-mcp.git
