@@ -182,7 +182,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 - **delete_app** - Remove installed applications (**destructive**)
   - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - IMPORTANT: Host-path datasets are NOT deleted (preserved for data safety)
-  - The preview lists host-path locations from `app.config` (`storage.*.host_path_config.path`); `ix_volume` slots are omitted
+  - The preview lists host-path locations from `app.config` (storage slots, including `additional_storage` and bare host-path entries, and Compose service `volumes` bind mounts); `ix_volume` slots and non-volume arrays such as `command` are omitted
   - Data remains in original locations for manual cleanup
   - Optional removal of container images
   - Supports dry-run mode to preview deletion

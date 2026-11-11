@@ -1090,10 +1090,10 @@ func queryAppConfig(ctx context.Context, client *truenas.Client, appName string)
 
 // deleteAppHostPathStoragePaths collects host paths from a 25.10 values
 // object (storage slots, additional_storage, bare host_path entries, and
-// compose bind mounts). When acl_enable is set, acl.path is used because
-// that is what the apps library mounts. Entries with type ix_volume are
-// skipped: their dataset_name is not a host path. Paths are sorted and
-// de-duplicated for a stable preview.
+// compose service volumes bind mounts). When acl_enable is set, acl.path
+// is used because that is what the apps library mounts. Entries with type
+// ix_volume are skipped: their dataset_name is not a host path. Paths are
+// sorted and de-duplicated for a stable preview.
 func deleteAppHostPathStoragePaths(values map[string]interface{}) []string {
 	paths := []string{}
 	collectDeleteAppHostPaths(values, &paths)
@@ -1109,6 +1109,12 @@ func deleteAppHostPathStoragePaths(values map[string]interface{}) []string {
 	return out
 }
 
+// collectDeleteAppHostPaths walks a values object for host paths. Compose
+// bind mounts are read only from service volumes arrays: short-syntax
+// strings ("/host:/container") and long-syntax entries (type bind with a
+// source, or an untyped entry with an absolute source and a target).
+// Command or entrypoint arguments, and maps under other keys such as
+// labels, are not listed as preserved paths.
 func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 	if obj == nil {
 		return
@@ -1116,17 +1122,24 @@ func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 	if p := deleteAppHostPathFromMap(obj); p != "" {
 		*paths = append(*paths, p)
 	}
-	for _, value := range obj {
+	for key, value := range obj {
 		if nested, ok := value.(map[string]interface{}); ok {
 			collectDeleteAppHostPaths(nested, paths)
 		}
 		if array, ok := value.([]interface{}); ok {
 			for _, item := range array {
 				if itemObj, ok := item.(map[string]interface{}); ok {
+					if key == "volumes" {
+						if p := composeVolumeHostPath(itemObj); p != "" {
+							*paths = append(*paths, p)
+						}
+					}
 					collectDeleteAppHostPaths(itemObj, paths)
-				} else if s, ok := item.(string); ok {
-					if p := composeBindSource(s); p != "" {
-						*paths = append(*paths, p)
+				} else if key == "volumes" {
+					if s, ok := item.(string); ok {
+						if p := composeBindSource(s); p != "" {
+							*paths = append(*paths, p)
+						}
 					}
 				}
 			}
@@ -1134,10 +1147,11 @@ func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 	}
 }
 
-// deleteAppHostPathFromMap returns the host path a storage or compose
-// volume entry actually mounts, or "" if this map is not such an entry.
-// When host_path_config.acl_enable is set, the apps library bind-mounts
-// acl.path and ignores host_path_config.path.
+// deleteAppHostPathFromMap returns the host path a storage entry actually
+// mounts, or "" if this map is not such an entry. When
+// host_path_config.acl_enable is set, the apps library bind-mounts
+// acl.path and ignores host_path_config.path. Compose bind mounts are
+// collected only from service volumes arrays, not here.
 func deleteAppHostPathFromMap(obj map[string]interface{}) string {
 	typ, _ := obj["type"].(string)
 	if typ == "ix_volume" {
@@ -1162,15 +1176,22 @@ func deleteAppHostPathFromMap(obj map[string]interface{}) string {
 				return p
 			}
 		}
-	case "bind":
-		if p, ok := obj["source"].(string); ok && strings.HasPrefix(p, "/") {
-			return p
-		}
 	}
-	if typ == "" {
-		if p, ok := obj["source"].(string); ok && strings.HasPrefix(p, "/") && obj["target"] != nil {
-			return p
-		}
+	return ""
+}
+
+// composeVolumeHostPath extracts the host source from a Compose long-form
+// volumes entry: type bind with an absolute source, or an untyped entry
+// with an absolute source and a target. Named volumes and other types
+// are ignored.
+func composeVolumeHostPath(obj map[string]interface{}) string {
+	typ, _ := obj["type"].(string)
+	p, ok := obj["source"].(string)
+	if !ok || !strings.HasPrefix(p, "/") {
+		return ""
+	}
+	if typ == "bind" || (typ == "" && obj["target"] != nil) {
+		return p
 	}
 	return ""
 }
