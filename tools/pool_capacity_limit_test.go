@@ -9,7 +9,7 @@ import (
 
 // TestGetPoolCapacityDetailsLimitsFullRowQuery checks that
 // get_pool_capacity_details asks the middleware for only the top
-// datasets (order_by used desc, name asc, limit) and gets totals and
+// datasets (order_by used desc, limit) and gets totals and
 // children_count from a compact name listing instead of full rows.
 func TestGetPoolCapacityDetailsLimitsFullRowQuery(t *testing.T) {
 	prop := func(v float64) map[string]interface{} {
@@ -27,7 +27,8 @@ func TestGetPoolCapacityDetailsLimitsFullRowQuery(t *testing.T) {
 	rows := []interface{}{row("tank", 1e9), row("tank/p", 1e8)}
 	// Insert children in reverse name order. The first `distinct` children
 	// have distinct used values; the rest all tie at 7 and straddle the
-	// limit, so only a server-side name tie-break picks the lowest names.
+	// limit. order_by is a single key, so which tied rows make the page
+	// follows collection order; the client then orders them by name.
 	for i := children - 1; i >= 0; i-- {
 		used := 7.0
 		if i < distinct {
@@ -78,8 +79,8 @@ func TestGetPoolCapacityDetailsLimitsFullRowQuery(t *testing.T) {
 			t.Errorf("full-row call %d: limit = %v, want %d; options=%v", i, c.options["limit"], defaultQueryLimit, c.options)
 		}
 		order, _ := c.options["order_by"].([]interface{})
-		if len(order) < 2 || order[0] != "-used.parsed" || order[1] != "name" {
-			t.Errorf("full-row call %d: order_by = %v, want [-used.parsed name]; options=%v", i, c.options["order_by"], c.options)
+		if len(order) != 1 || order[0] != "-used.parsed" {
+			t.Errorf("full-row call %d: order_by = %v, want [-used.parsed]; options=%v", i, c.options["order_by"], c.options)
 		}
 	}
 	if heavy != 1 {
@@ -98,7 +99,9 @@ func TestGetPoolCapacityDetailsLimitsFullRowQuery(t *testing.T) {
 		t.Errorf("dataset_count = %v, want %d; body=%s", tank["dataset_count"], defaultQueryLimit, out)
 	}
 
-	// Expected top-N: used desc, name asc on ties.
+	// Expected top-N: used desc. The tied rows on the page are the first
+	// ones in collection order (highest names, inserted in reverse),
+	// shown name asc.
 	want := []string{"tank", "tank/p"}
 	for i := 0; i < distinct; i++ {
 		want = append(want, fmt.Sprintf("tank/p/c%03d", i))
@@ -107,8 +110,9 @@ func TestGetPoolCapacityDetailsLimitsFullRowQuery(t *testing.T) {
 	for i := distinct; i < children; i++ {
 		tied = append(tied, fmt.Sprintf("tank/p/c%03d", i))
 	}
+	tied = tied[len(tied)-(defaultQueryLimit-len(want)):]
 	sort.Strings(tied)
-	want = append(want, tied[:defaultQueryLimit-len(want)]...)
+	want = append(want, tied...)
 
 	list, _ := tank["datasets"].([]interface{})
 	got := make([]string, 0, len(list))
