@@ -1109,11 +1109,12 @@ func deleteAppHostPathStoragePaths(values map[string]interface{}) []string {
 	return out
 }
 
-// collectDeleteAppHostPaths walks a values object for host paths. Short-syntax
-// Compose bind mounts ("/host:/container") are read only from service volumes
-// arrays, so command or entrypoint arguments that happen to start with '/' and
-// contain ':' are not listed as preserved paths. Long-syntax volumes entries
-// (type bind with a source) are still collected via deleteAppHostPathFromMap.
+// collectDeleteAppHostPaths walks a values object for host paths. Compose
+// bind mounts are read only from service volumes arrays: short-syntax
+// strings ("/host:/container") and long-syntax entries (type bind with a
+// source, or an untyped entry with an absolute source and a target).
+// Command or entrypoint arguments, and maps under other keys such as
+// labels, are not listed as preserved paths.
 func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 	if obj == nil {
 		return
@@ -1128,6 +1129,11 @@ func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 		if array, ok := value.([]interface{}); ok {
 			for _, item := range array {
 				if itemObj, ok := item.(map[string]interface{}); ok {
+					if key == "volumes" {
+						if p := composeVolumeHostPath(itemObj); p != "" {
+							*paths = append(*paths, p)
+						}
+					}
 					collectDeleteAppHostPaths(itemObj, paths)
 				} else if key == "volumes" {
 					if s, ok := item.(string); ok {
@@ -1141,10 +1147,11 @@ func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 	}
 }
 
-// deleteAppHostPathFromMap returns the host path a storage or compose
-// volume entry actually mounts, or "" if this map is not such an entry.
-// When host_path_config.acl_enable is set, the apps library bind-mounts
-// acl.path and ignores host_path_config.path.
+// deleteAppHostPathFromMap returns the host path a storage entry actually
+// mounts, or "" if this map is not such an entry. When
+// host_path_config.acl_enable is set, the apps library bind-mounts
+// acl.path and ignores host_path_config.path. Compose bind mounts are
+// collected only from service volumes arrays, not here.
 func deleteAppHostPathFromMap(obj map[string]interface{}) string {
 	typ, _ := obj["type"].(string)
 	if typ == "ix_volume" {
@@ -1169,15 +1176,22 @@ func deleteAppHostPathFromMap(obj map[string]interface{}) string {
 				return p
 			}
 		}
-	case "bind":
-		if p, ok := obj["source"].(string); ok && strings.HasPrefix(p, "/") {
-			return p
-		}
 	}
-	if typ == "" {
-		if p, ok := obj["source"].(string); ok && strings.HasPrefix(p, "/") && obj["target"] != nil {
-			return p
-		}
+	return ""
+}
+
+// composeVolumeHostPath extracts the host source from a Compose long-form
+// volumes entry: type bind with an absolute source, or an untyped entry
+// with an absolute source and a target. Named volumes and other types
+// are ignored.
+func composeVolumeHostPath(obj map[string]interface{}) string {
+	typ, _ := obj["type"].(string)
+	p, ok := obj["source"].(string)
+	if !ok || !strings.HasPrefix(p, "/") {
+		return ""
+	}
+	if typ == "bind" || (typ == "" && obj["target"] != nil) {
+		return p
 	}
 	return ""
 }

@@ -497,3 +497,47 @@ func TestDeleteAppPreviewIgnoresComposeCommandArrayLookalikes(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteAppPreviewIgnoresLongSyntaxBindOutsideVolumes(t *testing.T) {
+	// Long-syntax bind-mount detection (type bind, or an absolute source
+	// plus target) must only look at service volumes arrays. A map under
+	// a custom x- key or labels with source /x and target /y is not a
+	// mount and must not appear in storage_paths.
+	cfg := map[string]interface{}{
+		"services": map[string]interface{}{
+			"app": map[string]interface{}{
+				"labels": map[string]interface{}{
+					"source": "/x",
+					"target": "/y",
+				},
+				"x-extra": map[string]interface{}{
+					"type":   "bind",
+					"source": "/x",
+					"target": "/y",
+				},
+				"volumes": []interface{}{
+					map[string]interface{}{
+						"type":   "bind",
+						"source": "/mnt/tank/media",
+						"target": "/media",
+					},
+				},
+			},
+		},
+	}
+	r, fake := deleteAppPreviewRegistry(t, cfg, nil, nil)
+	out := deleteAppDryRun(t, r)
+	assertAppConfigCalled(t, fake, "plex")
+	state, warnings := deleteAppPreviewState(t, out)
+	got := storagePathsOf(t, state)
+	want := []string{"/mnt/tank/media"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("storage_paths = %v, want %v (volumes long-syntax bind only)\n%s", got, want, out)
+	}
+	joined := strings.Join(append(append([]string{}, got...), warnings...), "\n")
+	for _, lookalike := range []string{"/x", "/y"} {
+		if strings.Contains(joined, lookalike) {
+			t.Errorf("preview listed a non-volumes map %q as a preserved path:\n%s", lookalike, out)
+		}
+	}
+}
