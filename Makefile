@@ -1,4 +1,4 @@
-.PHONY: build build-all clean test lint
+.PHONY: build build-all clean test lint integration
 
 BINARY_NAME=truenas-mcp
 BUILD_DIR=.
@@ -51,3 +51,10 @@ lint:
 	# string, the other would churn test helpers that return (out, err, fake).
 	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -checks 'all,-ST1000,-ST1003,-ST1016,-ST1020,-ST1021,-ST1022,-ST1005,-ST1008' ./...
 	go run github.com/kisielk/errcheck@$(ERRCHECK_VERSION) -ignoretests -exclude .errcheck-excludes ./...
+
+# Opt-in live TrueNAS suite. Not run by `make test` or CI.
+# Requires TRUENAS_URL, TRUENAS_API_KEY, and TRUENAS_API_USER.
+# See docs/integration.md.
+INTEGRATION_TIMEOUT ?= 30m
+integration:
+	go test -tags integration -count=1 -timeout $(INTEGRATION_TIMEOUT) ./tools/ -run 'TestIntegration'
