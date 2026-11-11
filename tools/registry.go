@@ -5648,13 +5648,34 @@ func handleGetPoolCapacityDetails(ctx context.Context, client *truenas.Client, a
 		poolAnalysis["status"] = pool["status"]
 		poolAnalysis["healthy"] = pool["healthy"]
 
-		// Get datasets for this pool
-		var datasets []map[string]interface{}
+		// Same dataset query as query_datasets: exact pool match,
+		// retrieve_children=false, and only the properties simplifyDataset
+		// reads. Errors are reported on the pool instead of dropping datasets.
+		poolAnalysis["datasets"] = []map[string]interface{}{}
+		name, _ := pool["name"].(string)
 		datasetResult, err := client.Call(ctx, "pool.dataset.query",
-			[]interface{}{[]interface{}{"name", "^", pool["name"]}})
-		if err == nil {
-			if err := json.Unmarshal(datasetResult, &datasets); err == nil {
-				poolAnalysis["datasets"] = analyzeDatasetCapacity(datasets)
+			[]interface{}{datasetTypeFilter, []interface{}{"pool", "=", name}},
+			map[string]interface{}{
+				"extra": map[string]interface{}{
+					"retrieve_children": false,
+					"properties":        datasetQueryProperties,
+				},
+			},
+		)
+		if err != nil {
+			poolAnalysis["datasets_error"] = fmt.Sprintf("failed to query datasets: %v", err)
+		} else {
+			var datasets []map[string]interface{}
+			if err := json.Unmarshal(datasetResult, &datasets); err != nil {
+				poolAnalysis["datasets_error"] = fmt.Sprintf("failed to parse datasets: %v", err)
+			} else {
+				top, total := analyzeDatasetCapacity(datasets)
+				poolAnalysis["datasets"] = top
+				poolAnalysis["dataset_count"] = len(top)
+				poolAnalysis["total_datasets"] = total
+				if len(top) < total {
+					poolAnalysis["datasets_note"] = fmt.Sprintf("Showing %d of %d datasets (largest by used space)", len(top), total)
+				}
 			}
 		}
 
@@ -5949,60 +5970,36 @@ func calculatePoolCapacity(pool map[string]interface{}) map[string]interface{} {
 	return capacity
 }
 
-func analyzeDatasetCapacity(datasets []map[string]interface{}) []map[string]interface{} {
-	analysis := make([]map[string]interface{}, 0, len(datasets))
-
+// analyzeDatasetCapacity summarises datasets for get_pool_capacity_details
+// using the same parser as query_datasets (top-level used/available, not a
+// nested properties object). It returns the top defaultQueryLimit datasets
+// by used space and the total count before the limit.
+func analyzeDatasetCapacity(datasets []map[string]interface{}) (top []map[string]interface{}, total int) {
+	names := make([]string, 0, len(datasets))
 	for _, ds := range datasets {
-		dsAnalysis := map[string]interface{}{
-			"name": ds["name"],
-			"type": ds["type"],
+		if n, ok := ds["name"].(string); ok {
+			names = append(names, n)
 		}
-
-		// Get properties
-		if props, ok := ds["properties"].(map[string]interface{}); ok {
-			// Extract used space
-			if used, ok := props["used"].(map[string]interface{}); ok {
-				if usedVal, ok := used["rawvalue"].(string); ok {
-					dsAnalysis["used_bytes"] = usedVal
-				}
-				if usedParsed, ok := used["parsed"].(float64); ok {
-					dsAnalysis["used_bytes_numeric"] = int64(usedParsed)
-				}
-			}
-
-			// Extract available space
-			if available, ok := props["available"].(map[string]interface{}); ok {
-				if availVal, ok := available["rawvalue"].(string); ok {
-					dsAnalysis["available_bytes"] = availVal
-				}
-				if availParsed, ok := available["parsed"].(float64); ok {
-					dsAnalysis["available_bytes_numeric"] = int64(availParsed)
-				}
-			}
-
-			// Extract referenced space
-			if referenced, ok := props["referenced"].(map[string]interface{}); ok {
-				if refVal, ok := referenced["rawvalue"].(string); ok {
-					dsAnalysis["referenced_bytes"] = refVal
-				}
-			}
-
-			// Calculate utilization if we have both used and available
-			if usedNum, usedOk := dsAnalysis["used_bytes_numeric"].(int64); usedOk {
-				if availNum, availOk := dsAnalysis["available_bytes_numeric"].(int64); availOk {
-					total := usedNum + availNum
-					if total > 0 {
-						utilPct := (float64(usedNum) / float64(total)) * 100
-						dsAnalysis["utilization_pct"] = fmt.Sprintf("%.2f", utilPct)
-					}
-				}
-			}
-		}
-
-		analysis = append(analysis, dsAnalysis)
 	}
-
-	return analysis
+	simplified := make([]map[string]interface{}, 0, len(datasets))
+	for _, ds := range datasets {
+		summary := simplifyDataset(ds)
+		if name, ok := summary["name"].(string); ok {
+			summary["children_count"] = datasetChildrenCount(name, names)
+		}
+		used, usedOK := summary["used_bytes"].(float64)
+		avail, availOK := summary["available_bytes"].(float64)
+		if usedOK && availOK && used+avail > 0 {
+			summary["utilization_pct"] = (used / (used + avail)) * 100
+		}
+		simplified = append(simplified, summary)
+	}
+	sortDatasets(simplified, "used")
+	total = len(simplified)
+	if len(simplified) > defaultQueryLimit {
+		simplified = simplified[:defaultQueryLimit]
+	}
+	return simplified, total
 }
 
 // System Update Handlers
