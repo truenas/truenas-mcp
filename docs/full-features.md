@@ -28,7 +28,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Returns simplified, human-readable dataset information (~15 fields instead of 40+)
   - Filter by pool name (exact `pool` match, so `tank` does not include `tank2`), encryption status
   - Asks the middleware for only the properties this tool uses (including `dedup` and encryption properties so `encrypted_only` works), without nested `children` trees (`retrieve_children: false`) and without user properties. An unfiltered call still sends a `type in [FILESYSTEM, VOLUME]` filter so middleware walks every dataset
-  - A compact name listing (name and encryption only) supplies `children_count` and `total_datasets`. The full-property query then sends `limit` and a server-side `order_by` (`-properties.used.parsed` by default, `-properties.available.parsed`, or `name`) so a large system does not return every dataset in one response
+  - A compact name listing (name and encryption only) supplies `children_count` and `total_datasets`. The full-property query then sends `limit` and a server-side `order_by` (`-used.parsed` by default, `-available.parsed`, or `name`) so a large system does not return every dataset in one response
   - Sort by space usage (default), available space, or name
   - Limit results for manageable responses (default: 50, maximum: 1000). A requested limit above 1000 is capped, and the response note says so
   - `total_datasets` is the count after `encrypted_only`, before `limit`

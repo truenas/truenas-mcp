@@ -109,7 +109,7 @@ func TestQuerySnapshotsFilteredQueriesCarryServerLimit(t *testing.T) {
 					return float64(len(snaps)), nil, true
 				}
 				listCalls = append(listCalls, options)
-				return applySnapshotQueryPage(snaps, options), nil, true
+				return applyQueryPage(snaps, options), nil, true
 			}}
 			client, _ := newFakeClientFrom(t, fake)
 			if _, err := handleQuerySnapshots(context.Background(), client, tc.args); err != nil {
@@ -189,7 +189,7 @@ func TestQuerySnapshotsCreatedOrderDoesNotUseLexicalCreatetxg(t *testing.T) {
 		if raw, ok := options["order_by"].([]interface{}); ok && len(raw) > 0 {
 			listOrder, _ = raw[0].(string)
 		}
-		return applySnapshotQueryPage(snaps, options), nil, true
+		return applyQueryPage(snaps, options), nil, true
 	}}
 	client, _ := newFakeClientFrom(t, fake)
 	out, err := handleQuerySnapshots(context.Background(), client, map[string]interface{}{
@@ -242,7 +242,7 @@ func TestQuerySnapshotsHoldsOnlyPagesUpToBudget(t *testing.T) {
 			return float64(len(snaps)), nil, true
 		}
 		listCalls = append(listCalls, options)
-		page := applySnapshotQueryPage(snaps, options)
+		page := applyQueryPage(snaps, options)
 		if rows, ok := page.([]interface{}); ok {
 			scanned += len(rows)
 		}
@@ -286,7 +286,30 @@ func TestQuerySnapshotsHoldsOnlyPagesUpToBudget(t *testing.T) {
 	}
 }
 
+func testDatasetsLargestLast() []interface{} {
+	// Same shape as sampleDatasets (top-level used/available, no
+	// properties object) but insertion order is not size order: the
+	// largest used and most available rows are last, so a no-op
+	// order_by plus limit would return the small rows first.
+	prop := func(n float64) map[string]interface{} {
+		return map[string]interface{}{"parsed": n, "value": "x"}
+	}
+	ds := func(name string, used, avail float64, enc bool) map[string]interface{} {
+		return map[string]interface{}{
+			"name": name, "type": "FILESYSTEM", "pool": "tank", "encrypted": enc,
+			"locked": false, "key_loaded": enc,
+			"mountpoint": "/mnt/" + name, "used": prop(used), "available": prop(avail),
+		}
+	}
+	return []interface{}{
+		ds("tank/data/sub", 50, 100, false),
+		ds("tank/data", 200, 400, true),
+		ds("tank", 300, 900, false),
+	}
+}
+
 func TestQueryDatasetsPushesServerLimit(t *testing.T) {
+	rows := testDatasetsLargestLast()
 	var heavy []map[string]interface{}
 	fake := &fakeMiddleware{handle: func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
 		if method != "pool.dataset.query" {
@@ -294,7 +317,7 @@ func TestQueryDatasetsPushesServerLimit(t *testing.T) {
 		}
 		_, options := parseQueryParams(t, params)
 		if options["count"] == true {
-			return float64(len(sampleDatasets())), nil, true
+			return float64(len(rows)), nil, true
 		}
 		// The full-property query (not the name listing) must carry limit.
 		extra, _ := options["extra"].(map[string]interface{})
@@ -302,49 +325,81 @@ func TestQueryDatasetsPushesServerLimit(t *testing.T) {
 		if len(props) > 1 {
 			heavy = append(heavy, options)
 		}
-		return datasetQueryLikeMiddleware(t, params, sampleDatasets()), nil, true
+		return datasetQueryLikeMiddleware(t, params, rows), nil, true
 	}}
 	r := queryFilterRegistry(t, fake)
-	out, err := r.CallTool(t.Context(), "query_datasets", map[string]interface{}{
-		"pool":     "tank",
-		"limit":    2.0,
-		"order_by": "used",
-	})
-	if err != nil {
-		t.Fatal(err)
+
+	cases := []struct {
+		orderBy  string
+		wantKey  string
+		wantName [2]string
+	}{
+		{"used", "-used.parsed", [2]string{"tank", "tank/data"}},
+		{"available", "-available.parsed", [2]string{"tank", "tank/data"}},
 	}
-	if len(heavy) == 0 {
-		t.Fatal("no full-property dataset query was sent")
-	}
-	for i, options := range heavy {
-		limit, ok := options["limit"].(float64)
-		if !ok || limit != 2 {
-			t.Errorf("heavy call %d: limit = %v, want 2; options=%v", i, options["limit"], options)
-		}
-		order, _ := options["order_by"].([]interface{})
-		if len(order) == 0 || order[0] != "-properties.used.parsed" {
-			t.Errorf("heavy call %d: order_by = %v, want [-properties.used.parsed]; options=%v", i, options["order_by"], options)
-		}
-	}
-	resp := decode(t, out)
-	if resp["total_datasets"] != 3.0 {
-		t.Errorf("total_datasets = %v, want 3; body=%s", resp["total_datasets"], out)
-	}
-	if resp["dataset_count"] != 2.0 {
-		t.Errorf("dataset_count = %v, want 2; body=%s", resp["dataset_count"], out)
-	}
-	// children_count must still reflect the full tree, not only the page.
-	if data, ok := findDataset(resp, "tank"); !ok {
-		t.Errorf("missing tank on the used-desc page; body=%s", out)
-	} else if data["children_count"] != 1.0 {
-		t.Errorf("tank children_count = %v, want 1 (from the full name list); body=%s", data["children_count"], out)
+	for _, tc := range cases {
+		t.Run(tc.orderBy, func(t *testing.T) {
+			heavy = nil
+			out, err := r.CallTool(t.Context(), "query_datasets", map[string]interface{}{
+				"pool":     "tank",
+				"limit":    2.0,
+				"order_by": tc.orderBy,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(heavy) == 0 {
+				t.Fatal("no full-property dataset query was sent")
+			}
+			for i, options := range heavy {
+				limit, ok := options["limit"].(float64)
+				if !ok || limit != 2 {
+					t.Errorf("heavy call %d: limit = %v, want 2; options=%v", i, options["limit"], options)
+				}
+				order, _ := options["order_by"].([]interface{})
+				if len(order) == 0 || order[0] != tc.wantKey {
+					t.Errorf("heavy call %d: order_by = %v, want [%s]; options=%v", i, options["order_by"], tc.wantKey, options)
+				}
+			}
+			resp := decode(t, out)
+			if resp["total_datasets"] != 3.0 {
+				t.Errorf("total_datasets = %v, want 3; body=%s", resp["total_datasets"], out)
+			}
+			if resp["dataset_count"] != 2.0 {
+				t.Errorf("dataset_count = %v, want 2; body=%s", resp["dataset_count"], out)
+			}
+			list, _ := resp["datasets"].([]interface{})
+			got := [2]string{}
+			if len(list) >= 1 {
+				if ds, ok := list[0].(map[string]interface{}); ok {
+					got[0], _ = ds["name"].(string)
+				}
+			}
+			if len(list) >= 2 {
+				if ds, ok := list[1].(map[string]interface{}); ok {
+					got[1], _ = ds["name"].(string)
+				}
+			}
+			if got != tc.wantName {
+				t.Errorf("order_by=%s limit=2 names = %q, %q, want %q, %q; body=%s",
+					tc.orderBy, got[0], got[1], tc.wantName[0], tc.wantName[1], out)
+			}
+			// children_count must still reflect the full tree, not only the page.
+			if data, ok := findDataset(resp, "tank"); !ok {
+				t.Errorf("missing tank on the %s-desc page; body=%s", tc.orderBy, out)
+			} else if data["children_count"] != 1.0 {
+				t.Errorf("tank children_count = %v, want 1 (from the full name list); body=%s", data["children_count"], out)
+			}
+		})
 	}
 }
 
-// applySnapshotQueryPage models middleware filter_list limit/offset/order_by
-// on an already-filtered snapshot list. Dotted paths are supported. String
-// fields (including createtxg) sort lexically; numbers sort numerically.
-func applySnapshotQueryPage(rows []interface{}, options map[string]interface{}) interface{} {
+// applyQueryPage models middleware filter_list limit/offset/order_by
+// on an already-filtered list. Dotted paths are supported. Missing keys
+// sort as empty, so an invalid order_by is a no-op and limit returns
+// insertion order. String fields (including createtxg) sort lexically;
+// numbers sort numerically.
+func applyQueryPage(rows []interface{}, options map[string]interface{}) interface{} {
 	sorted := append([]interface{}{}, rows...)
 	if raw, ok := options["order_by"].([]interface{}); ok && len(raw) > 0 {
 		key, _ := raw[0].(string)

@@ -2312,13 +2312,18 @@ func queryCount(ctx context.Context, client *truenas.Client, method string, filt
 }
 
 func datasetServerOrder(orderBy string) []string {
+	// On 25.10 and 27.0, used and available are flattened to the top
+	// level of each pool.dataset.query row. There is no properties
+	// object, so -properties.used.parsed is ignored and limit returns
+	// collection order. Snapshot rows still nest creation under
+	// properties.creation.parsed; see snapshotServerOrder.
 	switch orderBy {
 	case "available":
-		return []string{"-properties.available.parsed"}
+		return []string{"-available.parsed"}
 	case "name":
 		return []string{"name"}
 	default:
-		return []string{"-properties.used.parsed"}
+		return []string{"-used.parsed"}
 	}
 }
 
