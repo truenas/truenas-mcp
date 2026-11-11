@@ -395,33 +395,33 @@ func TestQueryDatasetsPushesServerLimit(t *testing.T) {
 }
 
 // applyQueryPage models middleware filter_list limit/offset/order_by
-// on an already-filtered list. Multiple order_by keys are applied in
-// order, each breaking ties left by the previous one. Dotted paths are
-// supported. Missing keys sort as empty, so an invalid order_by is a
-// no-op and limit returns insertion order. String fields (including createtxg) sort lexically;
+// on an already-filtered list. Like do_order in
+// middlewared/utils/filter_list.py (also used by pool.dataset.query's
+// generic_query), each order_by key is a separate full stable sort, applied
+// in list order, so the LAST key becomes the primary order and earlier keys
+// only break its ties. A '-' prefix reverses that one sort; Python's
+// sorted(reverse=True) keeps equal rows in their previous order. limit and
+// offset are applied after ordering. Dotted paths are supported. Missing
+// keys sort as equal, so an invalid order_by is a no-op and limit returns
+// insertion order. String fields (including createtxg) sort lexically;
 // numbers sort numerically.
 func applyQueryPage(rows []interface{}, options map[string]interface{}) interface{} {
 	sorted := append([]interface{}{}, rows...)
-	if raw, ok := options["order_by"].([]interface{}); ok && len(raw) > 0 {
-		// Like filter_list, later keys break ties left by earlier ones.
-		sort.SliceStable(sorted, func(i, j int) bool {
-			for _, k := range raw {
-				key, _ := k.(string)
-				desc := strings.HasPrefix(key, "-")
-				if desc {
-					key = key[1:]
-				}
+	if raw, ok := options["order_by"].([]interface{}); ok {
+		for _, k := range raw {
+			key, _ := k.(string)
+			desc := strings.HasPrefix(key, "-")
+			if desc {
+				key = key[1:]
+			}
+			sort.SliceStable(sorted, func(i, j int) bool {
 				cmp := compareQueryValues(lookupDotted(sorted[i], key), lookupDotted(sorted[j], key))
-				if cmp == 0 {
-					continue
-				}
 				if desc {
 					return cmp > 0
 				}
 				return cmp < 0
-			}
-			return false
-		})
+			})
+		}
 	}
 	start := 0
 	if off, ok := options["offset"].(float64); ok && off > 0 {

@@ -744,7 +744,13 @@ func generateCapacityRecommendations(analysis map[string]interface{}) map[string
 // query_datasets (exact pool match, retrieve_children=false, and only the
 // properties simplifyDataset reads). A compact name listing gives the
 // total and children_count, so the full-row query asks the middleware for
-// only the top defaultQueryLimit rows (used desc, name asc on ties).
+// only the top defaultQueryLimit rows by used space.
+//
+// order_by is the single key query_datasets uses. The middleware applies
+// order_by keys as separate sorts in list order (do_order in
+// middlewared/utils/filter_list.py), so the last key becomes the primary
+// order: adding "name" would page by name and drop large datasets. The
+// name tie-break is applied client-side by analyzeDatasetCapacity.
 func queryPoolDatasetCapacity(ctx context.Context, client *truenas.Client, pool string) ([]map[string]interface{}, int, error) {
 	filters := []interface{}{datasetTypeFilter, []interface{}{"pool", "=", pool}}
 	names, _, err := queryDatasetNames(ctx, client, filters)
@@ -757,7 +763,7 @@ func queryPoolDatasetCapacity(ctx context.Context, client *truenas.Client, pool 
 			"properties":        datasetQueryProperties,
 		},
 		"limit":    defaultQueryLimit,
-		"order_by": append(datasetServerOrder("used"), "name"),
+		"order_by": datasetServerOrder("used"),
 	})
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query datasets: %w", err)
