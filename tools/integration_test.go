@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -107,13 +108,16 @@ type integrationInventory struct {
 func discoverInventory(t *testing.T, r *Registry) integrationInventory {
 	t.Helper()
 	inv := integrationInventory{
-		pool:       strings.TrimSpace(os.Getenv("TRUENAS_INTEGRATION_POOL")),
-		app:        strings.TrimSpace(os.Getenv("TRUENAS_INTEGRATION_APP")),
+		pool:       integrationPoolName(),
+		app:        integrationAppName(),
 		catalogApp: strings.TrimSpace(os.Getenv("TRUENAS_INTEGRATION_CATALOG_APP")),
 	}
 	if out, err := r.CallTool(t.Context(), "query_pools", map[string]interface{}{}); err == nil {
 		var pools []map[string]interface{}
-		if json.Unmarshal([]byte(out), &pools) == nil && inv.pool == "" {
+		// Read and dry-run tools may use the first pool when the env is
+		// unset. The scratch write cycle never does; it requires the
+		// pool to be named explicitly.
+		if json.Unmarshal([]byte(out), &pools) == nil && inv.pool == "" && !integrationWritesEnabled() {
 			for _, p := range pools {
 				if name, _ := p["name"].(string); name != "" {
 					inv.pool = name
@@ -379,8 +383,19 @@ func TestIntegrationWriteToolDryRuns(t *testing.T) {
 			}
 			out, err := r.CallTool(t.Context(), def.Name, args)
 			dumpToolResult(t, def.Name+"-dry-run", out, err)
-			if err != nil {
-				t.Logf("%s dry-run: %v", def.Name, err)
+			body := toolResultBody(out, err)
+			if body == "" {
+				if err != nil {
+					// A handler error (unknown id, cannot proceed) still
+					// means the tool ran; there is no structured preview
+					// to check.
+					t.Logf("%s dry-run: %v", def.Name, err)
+					return
+				}
+				t.Fatal("dry-run returned no result")
+			}
+			if err := dryRunResultError(body); err != nil {
+				t.Errorf("%s: %v\n%s", def.Name, err, body)
 			}
 		})
 		if reason != "" {
@@ -393,21 +408,24 @@ func TestIntegrationWriteToolDryRuns(t *testing.T) {
 }
 
 func TestIntegrationScratchWriteCycle(t *testing.T) {
-	if !envTruthy("TRUENAS_INTEGRATION_WRITES") {
+	if !integrationWritesEnabled() {
 		t.Skip("scratch write cycle requires TRUENAS_INTEGRATION_WRITES=1")
 	}
 	r, client := integrationRegistry(t)
-	inv := discoverInventory(t, r)
-	if inv.pool == "" || inv.datasetPath == "" {
-		t.Fatal("no pool available for a scratch dataset; set TRUENAS_INTEGRATION_POOL")
+	pool, skip := scratchWritePool()
+	if skip != "" {
+		t.Skip(skip)
 	}
 
-	name := inv.datasetPath
+	name := pool + "/mcp-it-" + time.Now().UTC().Format("20060102-150405")
 	t.Logf("scratch dataset %s", name)
 	out, err := r.CallTool(t.Context(), "create_dataset", map[string]interface{}{"name": name, "dry_run": true})
 	dumpToolResult(t, "create_dataset-scratch-dry-run", out, err)
 	if err != nil {
 		t.Fatalf("create_dataset dry-run: %v\n%s", err, out)
+	}
+	if derr := dryRunResultError(toolResultBody(out, err)); derr != nil {
+		t.Fatalf("create_dataset dry-run: %v\n%s", derr, out)
 	}
 	out, err = r.CallTool(t.Context(), "create_dataset", map[string]interface{}{"name": name})
 	dumpToolResult(t, "create_dataset-scratch", out, err)
@@ -415,14 +433,17 @@ func TestIntegrationScratchWriteCycle(t *testing.T) {
 		t.Fatalf("create_dataset: %v\n%s", err, out)
 	}
 	t.Cleanup(func() {
-		if _, err := client.Call(t.Context(), "pool.dataset.delete", name, map[string]interface{}{"recursive": true}); err != nil {
+		// t.Context() is already canceled when Cleanup runs.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if _, err := client.Call(ctx, "pool.dataset.delete", name, map[string]interface{}{"recursive": true}); err != nil {
 			t.Errorf("cleanup pool.dataset.delete %s: %v", name, err)
 		}
 	})
 
-	envApp := strings.TrimSpace(os.Getenv("TRUENAS_INTEGRATION_APP"))
+	envApp := integrationAppName()
 	if envApp == "" {
-		t.Log("skipping app cycle; set TRUENAS_INTEGRATION_APP to stop/start (and optionally delete) a disposable app")
+		t.Log("skipping app cycle; set TRUENAS_INTEGRATION_APP to stop and start a disposable app")
 		return
 	}
 
@@ -445,24 +466,5 @@ func TestIntegrationScratchWriteCycle(t *testing.T) {
 	dumpToolResult(t, "start_app", startOut, err)
 	if err != nil {
 		t.Fatalf("start_app: %v\n%s", err, startOut)
-	}
-
-	if !envTruthy("TRUENAS_INTEGRATION_ALLOW_APP_DELETE") {
-		t.Log("skipping delete_app; set TRUENAS_INTEGRATION_ALLOW_APP_DELETE=1 to delete TRUENAS_INTEGRATION_APP after confirmation")
-		return
-	}
-	delOut, err := r.CallTool(t.Context(), "delete_app", map[string]interface{}{"app_name": envApp})
-	dumpToolResult(t, "delete_app-preview", delOut, err)
-	if err != nil {
-		t.Fatalf("delete_app preview: %v\n%s", err, delOut)
-	}
-	delTok := replyToken(t, delOut)
-	if delTok == "" {
-		t.Fatalf("delete_app preview did not return a confirmation_token:\n%s", delOut)
-	}
-	delOut, err = r.CallTool(t.Context(), "delete_app", map[string]interface{}{"app_name": envApp, "confirmation_token": delTok})
-	dumpToolResult(t, "delete_app", delOut, err)
-	if err != nil {
-		t.Fatalf("delete_app: %v\n%s", err, delOut)
 	}
 }

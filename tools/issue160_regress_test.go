@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/truenas/truenas-mcp/mcp"
 )
 
 // TestIntegrationTestsAreOptIn is the default-suite check that the live
@@ -49,6 +52,105 @@ func TestIntegrationTestsAreOptIn(t *testing.T) {
 	}
 	if bytes.Contains(wf, []byte("-tags integration")) || bytes.Contains(wf, []byte("make integration")) {
 		t.Fatal("CI must not run the live integration suite as a required check")
+	}
+
+	if bytes.Contains(src, []byte("ALLOW_APP_DELETE")) || bytes.Contains(docs, []byte("ALLOW_APP_DELETE")) {
+		t.Error("the live suite must not offer a delete_app allow-list; drop delete_app from the suite")
+	}
+	if bytes.Contains(src, []byte(`"delete_app"`)) {
+		t.Error("integration_test.go must not call delete_app")
+	}
+	if !bytes.Contains(src, []byte("context.Background()")) || !bytes.Contains(src, []byte("context.WithTimeout")) {
+		t.Error("scratch cleanup must use context.Background with a timeout, not t.Context()")
+	}
+	if bytes.Contains(docs, []byte("default: first pool")) {
+		t.Error("docs must not default the scratch pool to the first pool")
+	}
+	if !bytes.Contains(docs, []byte("TRUENAS_INTEGRATION_WRITES=1")) {
+		t.Error("docs should say TRUENAS_INTEGRATION_WRITES=1")
+	}
+}
+
+func TestIntegrationWritesEnabledFailsClosed(t *testing.T) {
+	t.Setenv("TRUENAS_INTEGRATION_WRITES", "")
+	if integrationWritesEnabled() {
+		t.Fatal("unset TRUENAS_INTEGRATION_WRITES must not enable writes")
+	}
+	for _, v := range []string{"true", "yes", "TRUE", "Yes", "0", "2", "1 ", " 1"} {
+		t.Setenv("TRUENAS_INTEGRATION_WRITES", v)
+		if integrationWritesEnabled() {
+			t.Errorf("%q must not enable writes", v)
+		}
+	}
+	t.Setenv("TRUENAS_INTEGRATION_WRITES", "1")
+	if !integrationWritesEnabled() {
+		t.Fatal(`TRUENAS_INTEGRATION_WRITES=1 must enable writes`)
+	}
+}
+
+func TestIntegrationAppNameIsExplicit(t *testing.T) {
+	t.Setenv("TRUENAS_INTEGRATION_APP", "")
+	if got := integrationAppName(); got != "" {
+		t.Fatalf("unset app: got %q, want empty", got)
+	}
+	t.Setenv("TRUENAS_INTEGRATION_APP", "  plex  ")
+	if got := integrationAppName(); got != "plex" {
+		t.Fatalf("got %q, want plex", got)
+	}
+}
+
+func TestScratchWritePoolRequiresExplicitName(t *testing.T) {
+	t.Setenv("TRUENAS_INTEGRATION_POOL", "")
+	if pool, skip := scratchWritePool(); pool != "" || skip == "" {
+		t.Fatalf("unset pool: pool=%q skip=%q, want empty pool and a skip reason", pool, skip)
+	}
+	t.Setenv("TRUENAS_INTEGRATION_POOL", "   ")
+	if pool, skip := scratchWritePool(); pool != "" || skip == "" {
+		t.Fatalf("blank pool: pool=%q skip=%q, want empty pool and a skip reason", pool, skip)
+	}
+	t.Setenv("TRUENAS_INTEGRATION_POOL", "tank")
+	if pool, skip := scratchWritePool(); pool != "tank" || skip != "" {
+		t.Fatalf("explicit pool: pool=%q skip=%q, want tank and no skip", pool, skip)
+	}
+}
+
+func TestDryRunResultError(t *testing.T) {
+	ok := `{"tool":"create_dataset","dry_run":true,"executed":false}`
+	if err := dryRunResultError(ok); err != nil {
+		t.Fatal(err)
+	}
+	// The confirmation wrapper also sets the fields at the top level.
+	if err := dryRunResultError(`{"status":"confirmation_required","dry_run":true,"executed":false}`); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		"",
+		"not json",
+		`{"executed":false}`,
+		`{"dry_run":true}`,
+		`{"dry_run":true,"executed":true}`,
+		`{"dry_run":false,"executed":false}`,
+		`{"dry_run":"true","executed":false}`,
+	} {
+		if err := dryRunResultError(body); err == nil {
+			t.Errorf("accepted %s", body)
+		}
+	}
+}
+
+func TestToolResultBodyUsesReplyError(t *testing.T) {
+	if got := toolResultBody("out", nil); got != "out" {
+		t.Fatalf("got %q, want out", got)
+	}
+	err := &mcp.ReplyError{Message: "blocked", Reply: `{"dry_run":true,"executed":false}`}
+	if got := toolResultBody("", err); got != err.Reply {
+		t.Fatalf("got %q, want the ReplyError body", got)
+	}
+	if got := toolResultBody("out", err); got != "out" {
+		t.Fatalf("non-empty out should win, got %q", got)
+	}
+	if got := toolResultBody("", errors.New("plain")); got != "" {
+		t.Fatalf("plain error should yield empty body, got %q", got)
 	}
 }
 

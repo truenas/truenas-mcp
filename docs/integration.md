@@ -26,15 +26,15 @@ If the three required variables are missing, the tests skip. Optional:
 | `TRUENAS_TLS_CA` | PEM file to trust instead of the system store |
 | `TRUENAS_INSECURE=1` | Disable TLS verification (last resort) |
 | `TRUENAS_PROXY` | Proxy for the connection, or `none` |
-| `TRUENAS_INTEGRATION_POOL` | Pool for the scratch dataset (default: first pool) |
-| `TRUENAS_INTEGRATION_WRITES=1` | Enable the scratch write cycle (create a dataset; optional app cycle) |
-| `TRUENAS_INTEGRATION_APP` | Installed app for stop / start (and delete if allowed) |
-| `TRUENAS_INTEGRATION_ALLOW_APP_DELETE=1` | Allow `delete_app` on `TRUENAS_INTEGRATION_APP` after confirmation |
+| `TRUENAS_INTEGRATION_POOL` | Pool for the scratch dataset. Required when writes are enabled; there is no default |
+| `TRUENAS_INTEGRATION_WRITES=1` | Enable the scratch write cycle (must be exactly `1`) |
+| `TRUENAS_INTEGRATION_APP` | Installed app to stop and start during the scratch write cycle |
 | `TRUENAS_INTEGRATION_DUMP` | Directory to write each tool's JSON result as a fixture |
 
 Use a lab or otherwise disposable system. The default run only calls read
 tools and every write tool with `dry_run: true`, so it should not change the
-NAS. The scratch write cycle is separate and requires `TRUENAS_INTEGRATION_WRITES=1`.
+NAS. The scratch write cycle is separate and requires
+`TRUENAS_INTEGRATION_WRITES=1` plus `TRUENAS_INTEGRATION_POOL`.
 
 ## What it covers
 
@@ -43,12 +43,15 @@ NAS. The scratch write cycle is separate and requires `TRUENAS_INTEGRATION_WRITE
 - Every write and destructive tool's dry run, including the confirmation
   preview for destructive tools. Dummy values are used when the system has
   no matching object (for example a fake alert UUID); a "not found" or
-  "cannot proceed" error still counts as exercising the handler.
+  "cannot proceed" error still counts as exercising the handler. A
+  successful dry-run result must report `dry_run: true` and
+  `executed: false`.
 - A scratch write cycle, when enabled: create a uniquely named dataset
-  under the chosen pool, then delete it through `pool.dataset.delete`
+  under the named pool, then delete it through `pool.dataset.delete`
   (there is no `delete_dataset` tool). If `TRUENAS_INTEGRATION_APP` is set,
   the cycle also stops and starts that app through the confirmation-token
-  flow. Delete is only attempted when `TRUENAS_INTEGRATION_ALLOW_APP_DELETE=1`.
+  flow. The suite never deletes an app, and it never stops or starts one
+  unless that variable is set.
 
 Installing a new catalog app is not done automatically: values and host
 paths are site-specific. Dry-run `install_app` with a placeholder is
