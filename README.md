@@ -25,7 +25,7 @@ You need TrueNAS 25.10 or later.
 
 ### 1. Get the binary
 
-Download the archive for your platform from the [Releases page](https://github.com/truenas/truenas-mcp/releases): macOS (Apple Silicon), Linux (x86-64) or Windows (x86-64). Each archive holds one binary. Put it on your `PATH` as `truenas-mcp`:
+Download the archive for your platform from the [Releases page](https://github.com/truenas/truenas-mcp/releases): macOS (Apple Silicon), Linux (x86-64) or Windows (x86-64). Put the binary on your `PATH` as `truenas-mcp`:
 
 ```bash
 tar -xzf truenas-mcp-linux-amd64.tar.gz
@@ -44,7 +44,7 @@ make build    # writes ./truenas-mcp
 
 ### 2. Create a TrueNAS API key
 
-In the TrueNAS web UI, go to **System Settings → API Keys** and add a key. Note the user that owns it (for example `truenas_admin`). The key has that user's privileges, so use the narrowest role that covers what you need: Read-Only Administrator is enough for `--read-only`.
+In the TrueNAS web UI, open the user menu in the top-right corner and choose **My API Keys**, or go to **Credentials → Users**, select the user, and click **View API Keys**. Note the user that owns it (for example `truenas_admin`). The key has that user's privileges, so use the narrowest role that covers what you need: Read-Only Administrator is enough for `--read-only`.
 
 ### 3. Configure your MCP client
 
@@ -95,10 +95,7 @@ Then ask something like "What version of TrueNAS is running?"
 
 **`.local` names on Linux:** the static Linux release binary can't resolve `.local` (mDNS) names such as `truenas.local`. Use the IP address, an `/etc/hosts` entry or a DNS name, or build with `CGO_ENABLED=1 go build ./cmd/truenas-mcp`. macOS and Windows aren't affected.
 
-### More
-
-- [docs/configuration.md](docs/configuration.md): every flag, proxies, TLS, debug logging and troubleshooting.
-- [docs/safety.md](docs/safety.md): read-only mode, confirmation and dry runs, redaction, and protocol details for client authors.
+[docs/configuration.md](docs/configuration.md) lists every flag and covers proxies, TLS, debug logging and troubleshooting. [docs/safety.md](docs/safety.md) covers read-only mode, confirmation and dry runs, redaction, and protocol details for client authors.
 
 ## Development
 

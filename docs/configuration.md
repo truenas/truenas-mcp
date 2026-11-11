@@ -103,7 +103,7 @@ attacks on your network):
 "env": { "TRUENAS_INSECURE": "1" }
 ```
 
-To export the certificate: TrueNAS UI → System Settings → Certificates, or
+To export the certificate: TrueNAS UI → Credentials → Certificates, or
 `openssl s_client -connect 192.168.0.31:443 </dev/null 2>/dev/null | openssl x509 > truenas-cert.pem`
 
 ## Startup and connection
@@ -115,8 +115,6 @@ The binary connects directly to TrueNAS middleware's WebSocket endpoint:
 3. **Authenticates via API key**: Logs in with `auth.login_ex` (`API_KEY_PLAIN` mechanism, user from `--api-user`)
 
 The connection, login, and version check happen once, at startup, before the server reads any MCP request. If TrueNAS cannot be reached, the login fails, or the release is older than 25.10, the server logs the reason to stderr (`Could not connect to TrueNAS (no login was attempted): ...` when the connection fails, `Failed to authenticate with TrueNAS: ...` when the login is rejected, `TrueNAS 25.04.2 is not supported; TrueNAS 25.10 or later is required` when the version is too old, or `invalid TrueNAS host or URL: ...` for an unusable host setting) and exits with a non-zero status instead of starting without a working connection. This is intentional: the MCP client then shows the server as failed, and its log holds that message. Fix the cause (host, port, proxy, certificate, API key, or TrueNAS version, see [Troubleshooting](#troubleshooting)) and restart the client. After a reconnect mid-session (for example after a reboot), the version is read again and tool calls are refused if the new release is below 25.10.
-
-TrueNAS **requires** encrypted connections (`wss://`) for API key authentication. Using unencrypted `ws://` will cause your API key to be **revoked** as a security measure. This binary defaults to `wss://` to protect your credentials.
 
 ## Debug logging
 
@@ -217,8 +215,6 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - "invalid TrueNAS host or URL: ...": `--truenas-url` / `TRUENAS_URL` is unusable (bad port, user info in the URL, `https://`, ...); the message says why. Use the host name alone (`192.168.0.31`, `truenas.example.com:8443`, `[fd00::1]:8443`) or a `wss://host[:port]` URL
 - A `.local` name such as `truenas.local` does not resolve on Linux with the static release binary (or `make build`), because that binary does not use mDNS/nss-mdns. Use the IP address, an `/etc/hosts` entry, or a DNS name, or build from source with cgo (`CGO_ENABLED=1 go build`). macOS and Windows builds are unaffected, because cgo was already off for those cross-builds
 - "Could not connect to TrueNAS (no login was attempted)" means the TCP, proxy, TLS or WebSocket step failed; "Failed to authenticate with TrueNAS" means the connection worked and the login was rejected. If the connection drops during login and reconnecting fails, the message says so ("the connection was lost during login, and reconnecting failed") instead. The URL is logged without any query, fragment or user info, and error messages never quote them (at most they quote the host name or a short URL scheme)
-- Verify TrueNAS is accessible from your machine
-- Check firewall allows port 443 (wss), or the port you configured
 - `HTTP 404` / "TrueNAS 25.10 or later required": the JSON-RPC endpoint was not found (the server predates that API, which was introduced in 25.04); upgrade TrueNAS to 25.10 or later
 - "TrueNAS … is not supported; TrueNAS 25.10 or later is required": the server connected and logged in, but `system.info` reported a release older than 25.10 (including 25.04); upgrade TrueNAS
 - Verify the API key is valid and its owner has the privileges required for the tools you enable (see [Using Administrator Logins](https://www.truenas.com/docs/scale/25.10/scaletutorials/credentials/adminroles/))
@@ -237,8 +233,7 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 - `--tls-ca` cannot fix a name mismatch; `--insecure` is the last resort
 
 **Authentication Failures:**
-- Generate a new API key in TrueNAS System Settings → API Keys
-- Ensure the key has appropriate permissions
+- Create a new API key (user menu → **My API Keys**, or **Credentials → Users** → **View API Keys**)
 - Check that the key wasn't accidentally truncated when copying
 - Check that `--api-user` / `TRUENAS_API_USER` names the user that owns the key
 
@@ -253,15 +248,5 @@ The server stays on `/api/current` and records the connected release after
 login. Tools the connected release cannot run are omitted from `tools/list`
 and refused if called, with a message that names the tool and the version
 it needs, and states that nothing was executed. The per-tool range lives
-next to the safety table in `tools/version.go`.
-
-All current tools are available on TrueNAS 25.10 and later, with no upper
-bound:
-
-| Tools | TrueNAS versions |
-|-------|------------------|
-| Every tool listed in [full-features.md](full-features.md) | 25.10 and later |
-
-A later tool that exists only on 26, 27, or a single train will be added
-to the table with a min or max version and will be hidden on releases
-outside that range.
+next to the safety table in `tools/version.go`. All current tools run on
+TrueNAS 25.10 and later.

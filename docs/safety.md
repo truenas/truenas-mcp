@@ -297,12 +297,11 @@ Annotations were added in MCP 2025-03-26; clients that negotiate
 
 ### Security Best Practices
 
-1. **Always use secure WebSocket (wss://)** - enforced by default, ws:// is rejected
-2. **Generate a dedicated API key** for MCP use only, owned by a user whose privilege is no broader than the tools you enable
-3. **Use environment variables or `--api-key-file`** for API keys; do not pass `--api-key` on the command line (it is visible in the process list)
-4. **Restrict the API key's privileges** to the minimum required: [Read-Only Administrator](https://www.truenas.com/docs/scale/25.10/scaletutorials/credentials/adminroles/) (`READONLY_ADMIN`) for `--read-only` deployments, so TrueNAS itself rejects writes, otherwise the narrowest role that covers the enabled write tools
-5. **Rotate API keys periodically**
-6. **Start in `--read-only` mode** and enable write tools only where you need them (see [Safety controls](#safety-controls))
+1. **Generate a dedicated API key** for MCP use only, owned by a user whose privilege is no broader than the tools you enable
+2. **Use environment variables or `--api-key-file`** for API keys; do not pass `--api-key` on the command line (it is visible in the process list)
+3. **Restrict the API key's privileges** to the minimum required: [Read-Only Administrator](https://www.truenas.com/docs/scale/25.10/scaletutorials/credentials/adminroles/) (`READONLY_ADMIN`) for `--read-only` deployments, so TrueNAS itself rejects writes, otherwise the narrowest role that covers the enabled write tools
+4. **Rotate API keys periodically**
+5. **Start in `--read-only` mode** and enable write tools only where you need them (see [Safety controls](#safety-controls))
 
 ## Tasks for long-running operations
 
