@@ -112,16 +112,25 @@ func TestGetPoolCapacityDetailsPoolFilterAndTopLevelUsed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// One compact name listing (for totals) and one full-row query.
 	calls := datasetQueryCalls(t, fake)
-	if len(calls) != 1 {
-		t.Fatalf("dataset.query calls = %d, want 1; body=%s", len(calls), out)
+	if len(calls) != 2 {
+		t.Fatalf("dataset.query calls = %d, want 2; body=%s", len(calls), out)
 	}
-	filters, options := calls[0].filters, calls[0].options
-	if !hasFilter(filters, "pool", "=", "tank") {
-		t.Errorf("pool filter = %v, want [pool, =, tank]; params=%v", filters, filters)
+	for _, c := range calls {
+		if !hasFilter(c.filters, "pool", "=", "tank") {
+			t.Errorf("pool filter = %v, want [pool, =, tank]", c.filters)
+		}
+		if hasFilter(c.filters, "name", "^", "tank") {
+			t.Errorf("still using name prefix filter: %v", c.filters)
+		}
+		if !hasTypeInFilter(c.filters) {
+			t.Errorf("missing type IN [FILESYSTEM, VOLUME] filter; filters=%v", c.filters)
+		}
 	}
-	if hasFilter(filters, "name", "^", "tank") {
-		t.Errorf("still using name prefix filter: %v", filters)
+	filters, options := calls[1].filters, calls[1].options
+	if _, ok := options["select"]; ok {
+		t.Errorf("full-row query has a select: %v", options)
 	}
 	extra, _ := options["extra"].(map[string]interface{})
 	if extra["retrieve_children"] != false {

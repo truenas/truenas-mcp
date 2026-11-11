@@ -395,24 +395,32 @@ func TestQueryDatasetsPushesServerLimit(t *testing.T) {
 }
 
 // applyQueryPage models middleware filter_list limit/offset/order_by
-// on an already-filtered list. Dotted paths are supported. Missing keys
-// sort as empty, so an invalid order_by is a no-op and limit returns
-// insertion order. String fields (including createtxg) sort lexically;
+// on an already-filtered list. Multiple order_by keys are applied in
+// order, each breaking ties left by the previous one. Dotted paths are
+// supported. Missing keys sort as empty, so an invalid order_by is a
+// no-op and limit returns insertion order. String fields (including createtxg) sort lexically;
 // numbers sort numerically.
 func applyQueryPage(rows []interface{}, options map[string]interface{}) interface{} {
 	sorted := append([]interface{}{}, rows...)
 	if raw, ok := options["order_by"].([]interface{}); ok && len(raw) > 0 {
-		key, _ := raw[0].(string)
-		desc := strings.HasPrefix(key, "-")
-		if desc {
-			key = key[1:]
-		}
+		// Like filter_list, later keys break ties left by earlier ones.
 		sort.SliceStable(sorted, func(i, j int) bool {
-			cmp := compareQueryValues(lookupDotted(sorted[i], key), lookupDotted(sorted[j], key))
-			if desc {
-				return cmp > 0
+			for _, k := range raw {
+				key, _ := k.(string)
+				desc := strings.HasPrefix(key, "-")
+				if desc {
+					key = key[1:]
+				}
+				cmp := compareQueryValues(lookupDotted(sorted[i], key), lookupDotted(sorted[j], key))
+				if cmp == 0 {
+					continue
+				}
+				if desc {
+					return cmp > 0
+				}
+				return cmp < 0
 			}
-			return cmp < 0
+			return false
 		})
 	}
 	start := 0
