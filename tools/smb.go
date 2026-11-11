@@ -7,8 +7,112 @@ import (
 	"path"
 	"strings"
 
+	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/truenas"
 )
+
+func (r *Registry) registerSMBShareTools() {
+	// SMB share creation (write operation)
+	r.tools["create_smb_share"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "create_smb_share",
+			Description: "Create an SMB (Windows/macOS file sharing) share. This makes a ZFS dataset accessible over the network via the SMB/CIFS protocol.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create SMB shares, follow this conversation flow:\n\n**1. Dataset Selection:**\n- Ask: \"Do you want to create a new dataset or use an existing ZFS dataset?\"\n- If NEW: Use create_dataset tool first (with share_type=SMB, acltype=NFSV4)\n- If EXISTING: \n  * Query available datasets first with query_datasets\n  * Present options to user (NEVER suggest pool root like 'tank' or 'flash')\n  * Use the dataset's mountpoint as the path\n  * Warn: \"Never share a pool root - always use a child dataset\"\n- After dataset creation, use its mountpoint as the path\n\n**2. Share Name:**\n- Ask: \"What name should appear when browsing the network?\"\n- Rules: Max 80 chars, no \\ / [ ] : | < > + = ; , * ? \"\n- Cannot use: global, printers, homes\n- Suggest: Use a friendly, descriptive name like \"TeamDocs\" or \"PhotoArchive\"\n\n**3. Description:**\n- Ask: \"Add a description?\" (optional, shown when browsing shares)\n\n**4. Purpose Selection:**\n- Ask: \"What's this share for?\"\n- Options:\n  * DEFAULT_SHARE: Standard file sharing (most common)\n  * TIMEMACHINE_SHARE: macOS Time Machine backups\n  * MULTIPROTOCOL_SHARE: Both SMB and NFS access (complex permissions)\n  * PRIVATE_DATASETS_SHARE: User home directories\n  * VEEAM_REPOSITORY_SHARE: Veeam backup storage\n- Recommend DEFAULT_SHARE unless specific use case\n\n**5. Access Control:**\n- Ask: \"Read-only or read-write?\" (default: read-write)\n- Ask: \"Should it be visible when browsing?\" (default: yes)\n- Ask: \"Restrict to specific IP addresses?\" (optional, for hostsallow)\n- Ask: \"Hide from unauthorized users?\" (access_based_share_enumeration)\n\n**6. Purpose-Specific Questions:**\n\nFor TIMEMACHINE_SHARE:\n- Ask: \"What's the backup size limit?\" (recommend 2-3x Mac's disk size)\n- Set time_machine_quota in options\n\nFor MULTIPROTOCOL_SHARE:\n- Warn: \"Multi-protocol shares have complex permission interactions\"\n- Recommend: \"Use either SMB OR NFS, not both, unless you understand the implications\"\n\nFor PRIVATE_DATASETS_SHARE:\n- Suggest: \"Create separate datasets per user for isolation\"\n- Recommend: \"Use access_based_share_enumeration=true\"\n\n**7. Auditing (Optional):**\n- Ask: \"Enable access auditing?\" (tracks who accesses files)\n- If yes: Ask which groups to audit (empty = audit all)\n\n**IMPORTANT RECOMMENDATIONS:**\n- Default: enabled=true, browsable=true, readonly=false\n- For sensitive data: Set access_based_share_enumeration=true\n- For public shares: Use hostsdeny to block unwanted networks\n- For Time Machine: Set appropriate quota to prevent filling pool\n- For multi-protocol: Strongly recommend against unless necessary\n\n**SECURITY WARNINGS TO DISPLAY:**\n- If browsable=true + no hostsallow: \"Share visible and accessible from any network\"\n- If readonly=false: \"Users can modify, delete, and create files\"\n- If no access restrictions: \"Anyone on your network can access this share\"\n- Remind: \"Configure share permissions in TrueNAS UI after creation\"\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display complete summary including:\n   - Share name and network path (\\\\truenas\\sharename)\n   - Local path\n   - Purpose and access settings\n   - Security warnings if applicable\n3. Get explicit user confirmation: \"Shall I create this share?\"\n4. Warn: \"This is a WRITE operation that exposes data over your network\"\n5. After creation: Remind user to configure permissions via TrueNAS UI\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview including security warnings, then ask for confirmation.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name": map[string]interface{}{
+						"type":        "string",
+						"description": "Share name visible to clients (max 80 chars, case-insensitive, must be unique)",
+					},
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "ZFS dataset mountpoint starting with /mnt/ (e.g., /mnt/tank/shares/docs, NOT /mnt/tank). Use 'EXTERNAL' only for DFS proxy shares.",
+					},
+					"purpose": map[string]interface{}{
+						"type":        "string",
+						"description": "Share purpose: DEFAULT_SHARE (standard), TIMEMACHINE_SHARE (macOS backups), MULTIPROTOCOL_SHARE (SMB+NFS), PRIVATE_DATASETS_SHARE (home dirs)",
+						"enum":        []string{"DEFAULT_SHARE", "LEGACY_SHARE", "TIMEMACHINE_SHARE", "MULTIPROTOCOL_SHARE", "TIME_LOCKED_SHARE", "PRIVATE_DATASETS_SHARE", "EXTERNAL_SHARE", "VEEAM_REPOSITORY_SHARE", "FCP_SHARE"},
+						"default":     "DEFAULT_SHARE",
+					},
+					"enabled": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Enable share for network access (default: true)",
+						"default":     true,
+					},
+					"comment": map[string]interface{}{
+						"type":        "string",
+						"description": "Description shown when clients list shares (optional)",
+					},
+					"readonly": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Prevent clients from creating/modifying files (default: false)",
+						"default":     false,
+					},
+					"browsable": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Show share in network browse lists (default: true)",
+						"default":     true,
+					},
+					"access_based_share_enumeration": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Hide share from users without filesystem ACL access (default: false)",
+						"default":     false,
+					},
+					"hostsallow": map[string]interface{}{
+						"type":        "array",
+						"description": "IP addresses/networks allowed to access (empty = allow all)",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"hostsdeny": map[string]interface{}{
+						"type":        "array",
+						"description": "IP addresses/networks denied access (empty = deny none)",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+					},
+					"audit": map[string]interface{}{
+						"type":        "object",
+						"description": "Audit configuration for tracking file access",
+						"properties": map[string]interface{}{
+							"enable": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Enable audit logging",
+							},
+							"watch_list": map[string]interface{}{
+								"type":        "array",
+								"description": "Groups to audit (empty = audit all)",
+								"items": map[string]interface{}{
+									"type": "string",
+								},
+							},
+							"ignore_list": map[string]interface{}{
+								"type":        "array",
+								"description": "Groups to exclude from auditing",
+								"items": map[string]interface{}{
+									"type": "string",
+								},
+							},
+						},
+					},
+					"options": map[string]interface{}{
+						"type":        "object",
+						"description": "Purpose-specific options (varies by purpose)",
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview what will be created without executing (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"name", "path"},
+			},
+		},
+		Handler: handleCreateSMBShare,
+		Plan:    planCreateSMBShare,
+	}
+}
 
 // Middleware method names used as writePlan.Method must be declared in
 // this file (same-file contract for TestMiddlewareMethodContract).
