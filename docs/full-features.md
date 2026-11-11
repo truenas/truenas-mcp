@@ -27,7 +27,8 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 - **query_datasets** - Query datasets with intelligent filtering and sorting
   - Returns simplified, human-readable dataset information (~15 fields instead of 40+)
   - Filter by pool name (exact `pool` match, so `tank` does not include `tank2`), encryption status
-  - Asks the middleware for only the properties this tool uses (including `dedup` and encryption properties so `encrypted_only` works), without nested `children` trees (`retrieve_children: false`). An unfiltered call still sends a `type in [FILESYSTEM, VOLUME]` filter so middleware walks every dataset; `children_count` is derived from dataset names
+  - Asks the middleware for only the properties this tool uses (including `dedup` and encryption properties so `encrypted_only` works), without nested `children` trees (`retrieve_children: false`) and without user properties. An unfiltered call still sends a `type in [FILESYSTEM, VOLUME]` filter so middleware walks every dataset
+  - A compact name listing (name and encryption only) supplies `children_count` and `total_datasets`. The full-property query then sends `limit` and a server-side `order_by` (`-properties.used.parsed` by default, `-properties.available.parsed`, or `name`) so a large system does not return every dataset in one response
   - Sort by space usage (default), available space, or name
   - Limit results for manageable responses (default: 50, maximum: 1000). A requested limit above 1000 is capped, and the response note says so
   - `total_datasets` is the count after `encrypted_only`, before `limit`
@@ -43,7 +44,8 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Filter by dataset name, pool name, or holds presence (on 27.0 the middleware reports only its own `truenas` hold)
   - Sort by snapshot name (default, newest first), dataset, or creation time (`created`: newest first by `created_timestamp`, then `created_date`, then name)
   - Limit results for manageable responses (default: 50, maximum: 1000). A requested limit above 1000 is capped, and the response note says so
-  - An unfiltered query pushes `limit` and `order_by` to the middleware when sorting by `name` or `dataset`; if the page is full, a `count` query supplies `total_snapshots`. If that count query fails, `total_snapshots` is omitted and a note says the total is unknown
+  - Every query pushes `limit` and a server-side `order_by` (`-snapshot_name`, `dataset`, or `-properties.creation.parsed` for `created`). `createtxg` is an unpadded string, so it is not used as the creation order key. If the page is full, a `count` query supplies `total_snapshots`. If that count query fails, `total_snapshots` is omitted and a note says the total is unknown
+  - `holds_only` pages through results with `limit`/`offset` up to a 1000-row scan budget and says so when that budget is reached; more snapshots with holds may exist, so narrow the query with `pool` or `dataset`
   - Perfect for questions like "what recent snapshots exist?" or "show snapshots with holds"
 
 - **query_shares** - Query SMB and NFS share configurations

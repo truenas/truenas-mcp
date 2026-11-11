@@ -2778,7 +2778,7 @@ func verifyDatasetPathsExist(ctx context.Context, client *truenas.Client, paths 
 			[]interface{}{
 				[]interface{}{"name", "=", dataset},
 			},
-			map[string]interface{}{},
+			datasetExistenceQueryOptions(),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to look up dataset %s: %w", dataset, err)
