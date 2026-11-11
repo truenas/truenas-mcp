@@ -738,3 +738,78 @@ func TestDeleteBootEnvironmentConfirmedRefusesProtected(t *testing.T) {
 		t.Fatalf("a refused delete sent boot.environment.destroy: %v", calls)
 	}
 }
+
+func TestConfirmationTokenPathRequiresConfirmSummary(t *testing.T) {
+	client, _ := newFakeClient(t)
+	r := NewRegistry(client, nil)
+	args := map[string]interface{}{"delay": float64(30)}
+	callArgs := withoutKeys(args, "confirm", "confirmation_token", "dry_run")
+	plan := &writePlan{
+		Tool:       "system_reboot",
+		Method:     stubPlanMethod,
+		CallParams: []interface{}{callArgs},
+		TargetName: identityTarget(callArgs),
+	}
+	executed := false
+	tool := r.tools["system_reboot"]
+	tool.Plan = func(context.Context, *truenas.Client, map[string]interface{}) (*writePlan, error) {
+		return plan, nil
+	}
+	tool.Handler = func(context.Context, *truenas.Client, map[string]interface{}) (string, error) {
+		return `{"ok":true}`, nil
+	}
+	tool.Execute = func(context.Context, *truenas.Client, map[string]interface{}, *writePlan) (string, error) {
+		executed = true
+		return `{"ok":true}`, nil
+	}
+	r.tools["system_reboot"] = tool
+
+	t.Run("preview issues no token", func(t *testing.T) {
+		out, err := r.CallTool(t.Context(), "system_reboot", args)
+		if err == nil {
+			t.Fatalf("missing ConfirmSummary issued a preview: %s", out)
+		}
+		if !strings.Contains(err.Error(), "missing confirmation summary") || !strings.Contains(err.Error(), "nothing was executed") {
+			t.Errorf("error %q, want missing confirmation summary and nothing was executed", err)
+		}
+		combined := out
+		if err != nil {
+			combined += err.Error()
+		}
+		if tok := replyToken(t, out); tok != "" {
+			t.Errorf("issued confirmation_token %q with a missing summary", tok)
+		}
+		if strings.Contains(combined, "confirmation_token") {
+			t.Errorf("reply mentioned a confirmation_token with a missing summary: %s", combined)
+		}
+		if executed {
+			t.Error("executed the tool without a confirmation summary")
+		}
+	})
+
+	t.Run("redeemed token does not execute", func(t *testing.T) {
+		executed = false
+		argsHash, err := confirmationArgsHash(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		planHash, err := plan.planHash()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tok, err := r.confirmTokens.issueWithPlan("system_reboot", argsHash, planHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := r.CallTool(t.Context(), "system_reboot", tokenArgs(args, map[string]interface{}{"confirmation_token": tok}))
+		if err == nil {
+			t.Fatalf("missing ConfirmSummary executed with a planted token: %s", out)
+		}
+		if !strings.Contains(err.Error(), "missing confirmation summary") {
+			t.Errorf("error %q, want missing confirmation summary", err)
+		}
+		if executed {
+			t.Error("token path executed without a confirmation summary")
+		}
+	})
+}

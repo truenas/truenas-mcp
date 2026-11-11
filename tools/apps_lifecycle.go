@@ -551,8 +551,6 @@ Returns task_id for tracking progress with tasks_get.
 	}
 }
 
-// Middleware method names used as writePlan.Method must be declared in
-// this file (same-file contract for TestMiddlewareMethodContract).
 func handleQueryApps(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	appName, _ := args["app_name"].(string)
 	includeConfig, _ := args["include_config"].(bool)
@@ -916,6 +914,8 @@ func (r *Registry) executeUpgradeApp(ctx context.Context, client *truenas.Client
 	return string(formatted), nil
 }
 
+// Middleware method names used as writePlan.Method must be declared in
+// this file (same-file contract for TestMiddlewareMethodContract).
 const startAppMethod = "app.start"
 const stopAppMethod = "app.stop"
 const upgradeAppMethod = "app.upgrade"

@@ -218,6 +218,12 @@ func TestIssue157UpdateAppStorage(t *testing.T) {
 		if !strings.Contains(strings.ToLower(msg), "not migrated") {
 			t.Errorf("error %q, want it to state that data is not migrated", err)
 		}
+		if !strings.Contains(msg, "type or location") {
+			t.Errorf("error %q, want it to say type or location", err)
+		}
+		if strings.Contains(msg, "type or path") {
+			t.Errorf("error %q still says type or path, want type or location", err)
+		}
 		if n := len(fake.called("app.update")); n != 0 {
 			t.Errorf("app.update called %d times", n)
 		}
@@ -713,6 +719,89 @@ func TestIssue157ReviewStorageNits(t *testing.T) {
 		data, _ := storageOf(updateAppPayload(t, fake))["data"].(map[string]interface{})
 		if ro, ok := data["read_only"].(bool); !ok || ro {
 			t.Errorf("storage.data=%v, want read_only:false", data)
+		}
+	})
+
+	t.Run("ix_volume_config is filled on a same-location partial", func(t *testing.T) {
+		current := map[string]interface{}{
+			"storage": map[string]interface{}{
+				"config": map[string]interface{}{
+					"type": "ix_volume",
+					"ix_volume_config": map[string]interface{}{
+						"dataset_name": "config",
+						"acl_enable":   false,
+					},
+				},
+				"data":               issue157IxVolume("data"),
+				"additional_storage": []interface{}{},
+			},
+		}
+		r, fake := issue157Registry(t, current, false)
+		partial := map[string]interface{}{
+			"storage": map[string]interface{}{
+				"config": map[string]interface{}{
+					"type": "ix_volume",
+					"ix_volume_config": map[string]interface{}{
+						"dataset_name": "config",
+					},
+				},
+			},
+		}
+		out, err := callUpdateApp(t, r, partial, nil)
+		if err != nil {
+			t.Fatalf("same-location ix_volume partial was refused: %v\nout=%s", err, out)
+		}
+		payload := updateAppPayload(t, fake)
+		cfg, _ := storageOf(payload)["config"].(map[string]interface{})
+		iv, _ := cfg["ix_volume_config"].(map[string]interface{})
+		if name, _ := iv["dataset_name"].(string); name != "config" {
+			t.Errorf("ix_volume_config=%v, want dataset_name=config", iv)
+		}
+		if en, ok := iv["acl_enable"].(bool); !ok || en {
+			t.Errorf("ix_volume_config=%v, want acl_enable:false filled from the current config", iv)
+		}
+	})
+
+	t.Run("partial host_path_config.acl is filled on a same-location update", func(t *testing.T) {
+		current := map[string]interface{}{
+			"storage": map[string]interface{}{
+				"config":             issue157IxVolume("config"),
+				"data":               hostPathACLConfig("/mnt/tank/apps/jellyfin/data", "/mnt/tank/apps/jellyfin/acl-data"),
+				"additional_storage": []interface{}{},
+			},
+		}
+		r, fake := issue157Registry(t, current, false)
+		partial := map[string]interface{}{
+			"storage": map[string]interface{}{
+				"data": map[string]interface{}{
+					"type": "host_path",
+					"host_path_config": map[string]interface{}{
+						"path":       "/mnt/tank/apps/jellyfin/data",
+						"acl_enable": true,
+						"acl": map[string]interface{}{
+							"path": "/mnt/tank/apps/jellyfin/acl-data",
+						},
+					},
+				},
+			},
+		}
+		out, err := callUpdateApp(t, r, partial, nil)
+		if err != nil {
+			t.Fatalf("same-location partial acl was refused: %v\nout=%s", err, out)
+		}
+		payload := updateAppPayload(t, fake)
+		data, _ := storageOf(payload)["data"].(map[string]interface{})
+		cfg, _ := data["host_path_config"].(map[string]interface{})
+		acl, _ := cfg["acl"].(map[string]interface{})
+		if path, _ := acl["path"].(string); path != "/mnt/tank/apps/jellyfin/acl-data" {
+			t.Errorf("acl=%v, want the provided path", acl)
+		}
+		if _, ok := acl["entries"]; !ok {
+			t.Errorf("acl=%v, want entries filled from the current config", acl)
+		}
+		opts, _ := acl["options"].(map[string]interface{})
+		if force, _ := opts["force"].(bool); !force {
+			t.Errorf("acl=%v, want options.force:true filled from the current config", acl)
 		}
 	})
 }

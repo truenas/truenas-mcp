@@ -97,6 +97,7 @@ func TestBuildAndReleaseBinariesDisableCgo(t *testing.T) {
 type workflowStep struct {
 	Name string `yaml:"name"`
 	Run  string `yaml:"run"`
+	Uses string `yaml:"uses"`
 }
 
 type workflowDoc struct {
@@ -145,10 +146,87 @@ func assertLinuxStaticCheckStep(t *testing.T, rel string, step workflowStep) {
 	if !strings.Contains(run, "exit 1") {
 		t.Errorf("%s step %q should fail (exit 1) when the Linux binary is dynamic", rel, step.Name)
 	}
-	// If linux-arm64 is added, ldd on a foreign-arch binary is not reliable.
-	lower := strings.ToLower(run)
-	if !strings.Contains(lower, "arm64") || !(strings.Contains(lower, "readelf") || strings.Contains(lower, "file or readelf")) {
+	if !linuxArm64StaticCheckCommentOK(run) {
 		t.Errorf("%s step %q should comment that a future linux-arm64 check should use file or readelf rather than ldd", rel, step.Name)
+	}
+}
+
+// linuxArm64StaticCheckCommentOK reports whether a static-link check step
+// comments that a future linux-arm64 binary should be inspected with
+// readelf (not ldd). Only comment lines are considered, so a darwin-arm64
+// filename or GOARCH=arm64 in a command cannot satisfy the assertion.
+func linuxArm64StaticCheckCommentOK(run string) bool {
+	var comments []string
+	for _, line := range strings.Split(run, "\n") {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "#") {
+			comments = append(comments, strings.ToLower(trim))
+		}
+	}
+	blob := strings.Join(comments, "\n")
+	return strings.Contains(blob, "arm64") && strings.Contains(blob, "readelf")
+}
+
+func isLinuxAMD64BuildStep(step workflowStep) bool {
+	return strings.Contains(step.Run, "truenas-mcp-linux-amd64") && strings.Contains(step.Run, "go build")
+}
+
+func isLinuxArtifactPublishStep(step workflowStep) bool {
+	name := strings.ToLower(step.Name)
+	uses := strings.ToLower(step.Uses)
+	if strings.Contains(name, "upload linux") {
+		return true
+	}
+	if strings.Contains(uses, "upload-artifact") && strings.Contains(name, "linux") {
+		return true
+	}
+	if strings.Contains(uses, "action-gh-release") {
+		return true
+	}
+	return false
+}
+
+// assertLinuxStaticCheckStepOrder requires the static-link check to run
+// after the Linux AMD64 build and before the Linux artifact is published
+// (upload-artifact on build.yml, Create Release on release.yml).
+func assertLinuxStaticCheckStepOrder(t *testing.T, rel, src string) {
+	t.Helper()
+	var doc workflowDoc
+	if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatalf("%s is not valid YAML: %v", rel, err)
+	}
+	found := false
+	for jobName, job := range doc.Jobs {
+		buildIdx, checkIdx, pubIdx := -1, -1, -1
+		for i, step := range job.Steps {
+			if isLinuxAMD64BuildStep(step) {
+				buildIdx = i
+			}
+			if isLinuxStaticCheckStep(step) {
+				checkIdx = i
+			}
+			if isLinuxArtifactPublishStep(step) && pubIdx < 0 {
+				pubIdx = i
+			}
+		}
+		if checkIdx < 0 {
+			continue
+		}
+		found = true
+		if buildIdx < 0 {
+			t.Errorf("%s job %s: static-link check has no Linux AMD64 build step", rel, jobName)
+			continue
+		}
+		if pubIdx < 0 {
+			t.Errorf("%s job %s: static-link check has no following Linux artifact publish step", rel, jobName)
+			continue
+		}
+		if !(buildIdx < checkIdx && checkIdx < pubIdx) {
+			t.Errorf("%s job %s: static-link check (step %d) must come after the Linux AMD64 build (step %d) and before the Linux artifact is published (step %d)", rel, jobName, checkIdx, buildIdx, pubIdx)
+		}
+	}
+	if !found {
+		t.Errorf("%s: no static-link check step found for order assertion", rel)
 	}
 }
 
@@ -169,6 +247,7 @@ func TestBuildAndReleaseWorkflowsCheckLinuxBinaryIsStatic(t *testing.T) {
 			continue
 		}
 		assertLinuxStaticCheckStep(t, rel, steps[0])
+		assertLinuxStaticCheckStepOrder(t, rel, src)
 	}
 }
 
@@ -251,4 +330,54 @@ jobs:
 		}
 		assertLinuxStaticCheckStep(t, "fixture", steps[0])
 	})
+
+	t.Run("reworded arm64 comment still counts", func(t *testing.T) {
+		run := `bin=truenas-mcp-linux-amd64
+file_out=$(file "$bin")
+ldd_out=$(ldd "$bin" 2>&1 || true)
+# Future linux-arm64 artifacts should be checked with readelf, not ldd.
+`
+		if !linuxArm64StaticCheckCommentOK(run) {
+			t.Fatal("reworded arm64/readelf comment should be accepted")
+		}
+	})
+
+	t.Run("arm64 only in a non-comment command does not count", func(t *testing.T) {
+		run := `bin=truenas-mcp-linux-amd64
+cp truenas-mcp-darwin-arm64 /tmp/other
+file_out=$(file "$bin")
+ldd_out=$(ldd "$bin" 2>&1 || true)
+`
+		if linuxArm64StaticCheckCommentOK(run) {
+			t.Fatal("arm64 in a command or filename must not satisfy the comment assertion")
+		}
+	})
+}
+
+func TestLinuxStaticCheckStepOrderFinder(t *testing.T) {
+	src := `
+name: Release
+jobs:
+  release:
+    steps:
+    - name: Build for Linux AMD64
+      run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o truenas-mcp-linux-amd64 ./cmd/truenas-mcp
+    - name: Check Linux binary is statically linked
+      run: |
+        # If a linux-arm64 artifact is added, check it with file or
+        # readelf -l (no INTERP) instead: ldd on a foreign-arch binary
+        # is not reliable.
+        bin=truenas-mcp-linux-amd64
+        file_out=$(file "$bin")
+        ldd_out=$(ldd "$bin" 2>&1 || true)
+        if ! echo "$file_out" | grep -q 'statically linked'; then
+          exit 1
+        fi
+        if ! echo "$ldd_out" | grep -qi 'not a dynamic executable'; then
+          exit 1
+        fi
+    - name: Create Release
+      uses: softprops/action-gh-release@v3
+`
+	assertLinuxStaticCheckStepOrder(t, "fixture", src)
 }

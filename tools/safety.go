@@ -375,6 +375,9 @@ func (r *Registry) callDestructive(ctx context.Context, name string, tool Tool, 
 		if err != nil {
 			return "", fmt.Errorf("%s was NOT executed: %w; nothing was executed", name, err)
 		}
+		if err := requireConfirmSummary(name, plan); err != nil {
+			return "", err
+		}
 		planHash, err = plan.planHash()
 		if err != nil {
 			return "", fmt.Errorf("%s was NOT executed: %w; nothing was executed", name, err)

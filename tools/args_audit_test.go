@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,20 @@ type toolSource struct {
 	methods map[string]map[string]*ast.FuncDecl // receiver type -> method -> decl
 	// handlers maps tool name to the handler's function name.
 	handlers map[string]string
+	// funcFile maps a function declaration to the .go file it was parsed from.
+	funcFile map[*ast.FuncDecl]string
+	// toolFiles maps a tool name to the file that contains its r.tools registration.
+	toolFiles map[string]string
+}
+
+// undeclaredSchemaKeysHint tells the reader where to add a missing schema
+// key. When the registration file is known, it names that file; otherwise
+// the hint is file-neutral so it does not point at tools/registry.go.
+func undeclaredSchemaKeysHint(file string) string {
+	if file == "" {
+		return "add them to the tool's input schema or stop reading them"
+	}
+	return "add them to the schema in tools/" + file + " or stop reading them"
 }
 
 func loadToolSource(t *testing.T) *toolSource {
@@ -70,16 +85,20 @@ func loadToolSource(t *testing.T) *toolSource {
 		t.Fatal("no package source files found")
 	}
 	src := &toolSource{
-		funcs:    map[string]*ast.FuncDecl{},
-		methods:  map[string]map[string]*ast.FuncDecl{},
-		handlers: map[string]string{},
+		funcs:     map[string]*ast.FuncDecl{},
+		methods:   map[string]map[string]*ast.FuncDecl{},
+		handlers:  map[string]string{},
+		funcFile:  map[*ast.FuncDecl]string{},
+		toolFiles: map[string]string{},
 	}
 	for _, file := range files {
+		filename := srcFileName(fset, file)
 		for _, decl := range file.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
+			src.funcFile[fd] = filename
 			if fd.Recv == nil {
 				src.funcs[fd.Name.Name] = fd
 				continue
@@ -131,6 +150,9 @@ func (s *toolSource) collectHandlers(t *testing.T, fd *ast.FuncDecl, seen map[st
 		name, ok := stringLit(idx.Index)
 		if !ok {
 			return true
+		}
+		if file := s.funcFile[fd]; file != "" {
+			s.toolFiles[name] = file
 		}
 		lit, ok := as.Rhs[0].(*ast.CompositeLit)
 		if !ok {
@@ -275,7 +297,7 @@ func TestHandlersOnlyReadDeclaredArguments(t *testing.T) {
 			continue
 		}
 		if len(missing) > 0 {
-			t.Errorf("%s: handler %s reads %v, which the input schema does not declare (add them to the schema in tools/registry.go or stop reading them)", name, handler, missing)
+			t.Errorf("%s: handler %s reads %v, which the input schema does not declare (%s)", name, handler, missing, undeclaredSchemaKeysHint(src.toolFiles[name]))
 		}
 	}
 }
@@ -299,5 +321,38 @@ func TestAuditSeesKnownReads(t *testing.T) {
 				t.Errorf("audit found no read of %q by %s (found %v)", key, tool, read)
 			}
 		}
+	}
+}
+
+func srcFileName(fset *token.FileSet, file *ast.File) string {
+	if file == nil || fset == nil {
+		return ""
+	}
+	pos := fset.Position(file.Pos())
+	return filepath.Base(pos.Filename)
+}
+
+func TestUndeclaredKeyErrorNamesTheFileThatHoldsTheTool(t *testing.T) {
+	src := loadToolSource(t)
+	cases := map[string]string{
+		"query_datasets":              "query.go",
+		"delete_app":                  "apps_lifecycle.go",
+		"configure_directory_service": "directoryservices.go",
+	}
+	for tool, wantFile := range cases {
+		if src.toolFiles[tool] != wantFile {
+			t.Errorf("%s registered in %q, want %q", tool, src.toolFiles[tool], wantFile)
+		}
+		msg := undeclaredSchemaKeysHint(src.toolFiles[tool])
+		if !strings.Contains(msg, "tools/"+wantFile) {
+			t.Errorf("hint for %s = %q, want it to name tools/%s", tool, msg, wantFile)
+		}
+		if strings.Contains(msg, "tools/registry.go") {
+			t.Errorf("hint for %s still points at registry.go: %q", tool, msg)
+		}
+	}
+	neutral := undeclaredSchemaKeysHint("")
+	if strings.Contains(neutral, "registry.go") || strings.Contains(neutral, "tools/") {
+		t.Errorf("neutral hint should not name a file: %q", neutral)
 	}
 }

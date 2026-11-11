@@ -213,3 +213,16 @@ func TestMarkdownLinksResolve(t *testing.T) {
 		}
 	}
 }
+
+func TestTruenasURLFlagHelpUsesNeutralExample(t *testing.T) {
+	f := flag.Lookup("truenas-url")
+	if f == nil {
+		t.Fatal("--truenas-url is not registered")
+	}
+	if strings.Contains(strings.ToLower(f.Usage), ".local") {
+		t.Errorf("--truenas-url help uses a .local example, which the static Linux binary cannot resolve: %q", f.Usage)
+	}
+	if !strings.Contains(f.Usage, "example.com") && !strings.Contains(f.Usage, "10.") && !strings.Contains(f.Usage, "192.") {
+		t.Errorf("--truenas-url help %q, want a neutral example such as truenas.example.com or an IP", f.Usage)
+	}
+}

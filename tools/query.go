@@ -126,8 +126,6 @@ func datasetChildrenCount(name string, names []string) int {
 	return n
 }
 
-// queryCount runs method(filters, {count: true}) and returns the integer
-// total when the middleware answers with a JSON number.
 func joinNote(existing interface{}, add string) string {
 	if s, ok := existing.(string); ok && s != "" {
 		return s + "; " + add
@@ -147,6 +145,8 @@ func queryLimit(args map[string]interface{}) (limit int, capped bool) {
 	return int(l), false
 }
 
+// queryCount runs method(filters, {count: true}) and returns the integer
+// total when the middleware answers with a JSON number.
 func queryCount(ctx context.Context, client *truenas.Client, method string, filters []interface{}) (int, bool) {
 	raw, err := client.Call(ctx, method, filters, map[string]interface{}{"count": true})
 	if err != nil {
@@ -192,6 +192,12 @@ func snapshotServerOrder(orderBy string) []string {
 // queryDatasetNames lists dataset names (and encryption) with a compact
 // query so query_datasets can compute children_count and totals without
 // fetching every property for every row.
+//
+// This listing is intentionally unbounded. children_count and the
+// total_datasets figure are computed from the complete name list, so a
+// cap would silently under-count on large systems. The query is already
+// compact (select name, encrypted; no nested children; no full property
+// set), and the client's 10 MiB response read limit still applies.
 func queryDatasetNames(ctx context.Context, client *truenas.Client, filters []interface{}) ([]string, map[string]bool, error) {
 	raw, err := client.Call(ctx, "pool.dataset.query", filters, map[string]interface{}{
 		"select": []interface{}{"name", "encrypted"},
@@ -432,43 +438,37 @@ func simplifyDataset(ds map[string]interface{}) map[string]interface{} {
 	return summary
 }
 
-// sortDatasets sorts a slice of simplified datasets by the specified field
+// sortDatasets sorts a slice of simplified datasets by the specified field.
+// used and available are descending (largest first); name is ascending.
+// Ties, including equal used or available values, break by name so the
+// order is deterministic.
 func sortDatasets(datasets []map[string]interface{}, orderBy string) {
-	sort.Slice(datasets, func(i, j int) bool {
+	sort.SliceStable(datasets, func(i, j int) bool {
 		switch orderBy {
 		case "used":
-			// Sort by used_bytes descending (largest first)
 			iUsed, iOk := datasets[i]["used_bytes"].(float64)
 			jUsed, jOk := datasets[j]["used_bytes"].(float64)
-			if iOk && jOk {
+			if iOk && jOk && iUsed != jUsed {
 				return iUsed > jUsed
 			}
-			return false
+			if iOk != jOk {
+				return iOk
+			}
 		case "available":
-			// Sort by available_bytes descending (most available first)
 			iAvail, iOk := datasets[i]["available_bytes"].(float64)
 			jAvail, jOk := datasets[j]["available_bytes"].(float64)
-			if iOk && jOk {
+			if iOk && jOk && iAvail != jAvail {
 				return iAvail > jAvail
 			}
-			return false
+			if iOk != jOk {
+				return iOk
+			}
 		case "name":
-			// Sort by name alphabetically
-			iName, iOk := datasets[i]["name"].(string)
-			jName, jOk := datasets[j]["name"].(string)
-			if iOk && jOk {
-				return iName < jName
-			}
-			return false
-		default:
-			// Default to name
-			iName, iOk := datasets[i]["name"].(string)
-			jName, jOk := datasets[j]["name"].(string)
-			if iOk && jOk {
-				return iName < jName
-			}
-			return false
+			// Fall through to the name comparison.
 		}
+		iName, _ := datasets[i]["name"].(string)
+		jName, _ := datasets[j]["name"].(string)
+		return iName < jName
 	})
 }
 
