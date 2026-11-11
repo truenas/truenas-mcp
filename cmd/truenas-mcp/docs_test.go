@@ -39,15 +39,15 @@ func stripFences(md string) string {
 	return strings.Join(out, "\n")
 }
 
-// TestREADMEFlagsMatchBinary keeps the README flag list and the flags the
-// binary registers in step, in both directions.
-func TestREADMEFlagsMatchBinary(t *testing.T) {
-	readme := stripFences(repoFile(t, "README.md"))
-	start := strings.Index(readme, "### Flags")
+// TestFlagDocsMatchBinary keeps the flag list in docs/configuration.md and
+// the flags the binary registers in step, in both directions.
+func TestFlagDocsMatchBinary(t *testing.T) {
+	doc := stripFences(repoFile(t, "docs/configuration.md"))
+	start := strings.Index(doc, "## Flags")
 	if start < 0 {
-		t.Fatal("README.md has no '### Flags' section")
+		t.Fatal("docs/configuration.md has no '## Flags' section")
 	}
-	section := readme[start+len("### Flags"):]
+	section := doc[start+len("## Flags"):]
 	if end := strings.Index(section, "\n#"); end >= 0 {
 		section = section[:end]
 	}
@@ -56,7 +56,7 @@ func TestREADMEFlagsMatchBinary(t *testing.T) {
 		documented[m[1]] = true
 	}
 	if len(documented) == 0 {
-		t.Fatal("no flags found in the README '### Flags' section")
+		t.Fatal("no flags found in the docs/configuration.md '## Flags' section")
 	}
 
 	registered := map[string]bool{}
@@ -70,12 +70,12 @@ func TestREADMEFlagsMatchBinary(t *testing.T) {
 	var problems []string
 	for name := range documented {
 		if !registered[name] {
-			problems = append(problems, "README documents --"+name+", which the binary does not register")
+			problems = append(problems, "docs/configuration.md documents --"+name+", which the binary does not register")
 		}
 	}
 	for name := range registered {
 		if !documented[name] {
-			problems = append(problems, "the binary registers --"+name+", which the README does not document")
+			problems = append(problems, "the binary registers --"+name+", which docs/configuration.md does not document")
 		}
 	}
 	sort.Strings(problems)
@@ -122,15 +122,15 @@ func TestGoVersionMentionsMatchGoMod(t *testing.T) {
 	}
 }
 
-// TestSDKVersionMentionMatchesGoMod keeps the Go MCP SDK version the README
+// TestSDKVersionMentionMatchesGoMod keeps the Go MCP SDK version docs/safety.md
 // names in step with go.mod.
 func TestSDKVersionMentionMatchesGoMod(t *testing.T) {
 	m := regexp.MustCompile(`(?m)^\s*github\.com/modelcontextprotocol/go-sdk (v\S+)`).FindStringSubmatch(repoFile(t, "go.mod"))
 	if m == nil {
 		t.Fatal("go.mod does not require github.com/modelcontextprotocol/go-sdk")
 	}
-	if !strings.Contains(repoFile(t, "README.md"), "Go MCP SDK](https://github.com/modelcontextprotocol/go-sdk) ("+m[1]+")") {
-		t.Errorf("README.md does not name the Go MCP SDK version %s from go.mod", m[1])
+	if !strings.Contains(repoFile(t, "docs/safety.md"), "Go MCP SDK](https://github.com/modelcontextprotocol/go-sdk) ("+m[1]+")") {
+		t.Errorf("docs/safety.md does not name the Go MCP SDK version %s from go.mod", m[1])
 	}
 }
 

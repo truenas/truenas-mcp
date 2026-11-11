@@ -226,7 +226,7 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		}
 	}
 	if destructive != 10 {
-		t.Errorf("%d destructive tools, want 10; update the README and docs/full-features.md too", destructive)
+		t.Errorf("%d destructive tools, want 10; update docs/safety.md and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
 		if s.Overwrites {
