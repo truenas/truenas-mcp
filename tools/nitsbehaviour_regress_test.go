@@ -232,16 +232,16 @@ func TestNitsInstallAppJobIDErrorIsGeneric(t *testing.T) {
 func TestNitsReadmeJobIDWording(t *testing.T) {
 	text := readmeFile(t)
 	if !strings.Contains(text, "bare") || !strings.Contains(strings.ToLower(text), "integer") {
-		t.Error("README should say job methods return a bare integer")
+		t.Error("docs/safety.md should say job methods return a bare integer")
 	}
 	if !strings.Contains(strings.ToLower(text), "also accept") && !strings.Contains(strings.ToLower(text), "also accepts") {
-		t.Error("README should say the tools also accept an array")
+		t.Error("docs/safety.md should say the tools also accept an array")
 	}
 }
 
 func readmeFile(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "README.md"))
+	b, err := os.ReadFile(filepath.Join("..", "docs", "safety.md"))
 	if err != nil {
 		t.Fatal(err)
 	}

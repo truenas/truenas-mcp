@@ -572,7 +572,7 @@ func TestRefreshDirectoryCacheReportsSubmittedStatus(t *testing.T) {
 }
 
 func TestIssue111iREADMEDocumentsPlanMigration(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "README.md"))
+	raw, err := os.ReadFile(filepath.Join("..", "docs", "safety.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +588,7 @@ func TestIssue111iREADMEDocumentsPlanMigration(t *testing.T) {
 	// paragraphs (the ones that also mention start_app / shared plan).
 	idx := strings.Index(body, "`start_app` builds one plan")
 	if idx < 0 {
-		t.Fatal("could not find the plan-backed behaviour section in README.md")
+		t.Fatal("could not find the plan-backed behaviour section in docs/safety.md")
 	}
 	section := body[idx:]
 	if end := strings.Index(section, "\n## "); end > 0 {
@@ -596,16 +596,16 @@ func TestIssue111iREADMEDocumentsPlanMigration(t *testing.T) {
 	}
 	for _, n := range needles {
 		if !strings.Contains(section, n) {
-			t.Errorf("README plan-backed section should mention %q", n)
+			t.Errorf("docs/safety.md plan-backed section should mention %q", n)
 		}
 	}
 	if !strings.Contains(section, "password") && !strings.Contains(section, "secret") && !strings.Contains(section, "values") {
-		t.Error("README should say install_app values secrets are masked in previews")
+		t.Error("docs/safety.md should say install_app values secrets are masked in previews")
 	}
 	if !strings.Contains(section, "host-path") && !strings.Contains(section, "host path") && !strings.Contains(section, "already exists") {
-		t.Error("README should document that install_app dry-run now matches the real call on host-path and existing-name guards")
+		t.Error("docs/safety.md should document that install_app dry-run now matches the real call on host-path and existing-name guards")
 	}
 	if !strings.Contains(section, "submitted") || !strings.Contains(section, "refresh_directory_cache") {
-		t.Error("README should say refresh_directory_cache reports submitted status instead of cache_refreshed true")
+		t.Error("docs/safety.md should say refresh_directory_cache reports submitted status instead of cache_refreshed true")
 	}
 }

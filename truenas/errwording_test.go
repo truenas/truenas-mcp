@@ -480,7 +480,7 @@ func TestUnsupportedSchemeEchoIsRestricted(t *testing.T) {
 
 // TestEndpointErrorsNeverEchoQueryFragmentOrUserinfo checks that no error from
 // the endpoint (ValidateEndpoint or a connect attempt) quotes the secret parts
-// of the input, so the README claim that the URL is logged without query or
+// of the input, so the docs/configuration.md claim that the URL is logged without query or
 // fragment holds for errors too.
 func TestEndpointErrorsNeverEchoQueryFragmentOrUserinfo(t *testing.T) {
 	clearProxyEnv(t)

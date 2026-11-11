@@ -191,7 +191,7 @@ func fuzzCounts(n int, seed int64) (leaks, over map[string]int, example map[stri
 
 // fuzzLeakFreeShapes are the shapes that must not leak at all. Add a shape
 // here when a gap is closed. The "stray" shape only measures over-redaction,
-// which is a known limit (see README), and it must not leak either.
+// which is a known limit (see docs/safety.md), and it must not leak either.
 var fuzzLeakFreeShapes = map[string]bool{
 	"sshpass": true, "outer-escape": true, "cr": true, "stray": true, "idiom-user": true, "mixed": true,
 }

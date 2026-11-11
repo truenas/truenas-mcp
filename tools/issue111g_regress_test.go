@@ -190,7 +190,7 @@ func TestApplyUpdateNullNewVersionIsBlocked(t *testing.T) {
 // An explicit dry_run (or a call without a token) of apply_update when
 // update.status has no new_version is documented as a breaking change.
 func TestREADMENotesApplyUpdateNullNewVersionIsBreakingChange(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(repoRoot(t), "README.md"))
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "safety.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,14 +202,14 @@ func TestREADMENotesApplyUpdateNullNewVersionIsBreakingChange(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error(`README.md must have a "> **Breaking change:**" note that apply_update with no new_version now returns an error result with status "blocked"`)
+		t.Error(`docs/safety.md must have a "> **Breaking change:**" note that apply_update with no new_version now returns an error result with status "blocked"`)
 	}
 }
 
 // A confirmed system_reboot or apply_update re-reads system.info (and, for
 // apply_update, update.status) and fails closed if those reads fail.
 func TestREADMENotesRebootAndUpdateRereadBeforeWrite(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(repoRoot(t), "README.md"))
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "safety.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestREADMENotesRebootAndUpdateRereadBeforeWrite(t *testing.T) {
 	hasStatus := strings.Contains(text, "update.status")
 	hasFailClosed := strings.Contains(text, "fails closed") || strings.Contains(text, "fail closed")
 	if !hasInfo || !hasStatus || !hasFailClosed {
-		t.Error(`README.md must note that a confirmed reboot or update does read-only pre-reads (system.info and update.status) and fails closed if they fail`)
+		t.Error(`docs/safety.md must note that a confirmed reboot or update does read-only pre-reads (system.info and update.status) and fails closed if they fail`)
 	}
 }
 

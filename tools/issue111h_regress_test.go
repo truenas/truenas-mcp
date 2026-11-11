@@ -187,52 +187,52 @@ func TestDownloadUpdateAlreadyDownloadedDoesNotSkipRequestedVersion(t *testing.T
 }
 
 func TestREADMENotesAuxiliaryParametersInReadOnlyDirectoryConfig(t *testing.T) {
-	text, err := os.ReadFile(filepath.Join("..", "README.md"))
+	text, err := os.ReadFile(filepath.Join("..", "docs", "safety.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := string(text)
 	if !strings.Contains(body, "auxiliary_parameters") {
-		t.Fatal("README.md does not mention auxiliary_parameters")
+		t.Fatal("docs/safety.md does not mention auxiliary_parameters")
 	}
 	// The exact-key mask also hides this field in read-only query output,
 	// not only in configure/leave previews.
 	if !strings.Contains(body, "query_directory_services") ||
 		!(strings.Contains(strings.ToLower(body), "read-only") || strings.Contains(body, "read only") || strings.Contains(body, "query output") || strings.Contains(body, "directory config output")) {
-		t.Error("README.md must say auxiliary_parameters is also masked in read-only directory config output (query_directory_services)")
+		t.Error("docs/safety.md must say auxiliary_parameters is also masked in read-only directory config output (query_directory_services)")
 	}
 }
 
 func TestREADMENotesDownloadUpdatePassesTrainAndVersion(t *testing.T) {
-	text, err := os.ReadFile(filepath.Join("..", "README.md"))
+	text, err := os.ReadFile(filepath.Join("..", "docs", "safety.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := string(text)
 	if !strings.Contains(body, "download_update") {
-		t.Fatal("README.md does not mention download_update")
+		t.Fatal("docs/safety.md does not mention download_update")
 	}
 	// Must document that train and version are passed through to
 	// update.download, not ignored.
 	lower := strings.ToLower(body)
 	if !strings.Contains(body, "update.download") {
-		t.Error("README.md must mention the update.download middleware method for download_update")
+		t.Error("docs/safety.md must mention the update.download middleware method for download_update")
 	}
 	if !strings.Contains(lower, "train") || !strings.Contains(lower, "version") {
-		t.Error("README.md must mention download_update train and version")
+		t.Error("docs/safety.md must mention download_update train and version")
 	}
 	// A leftover "ignored" claim next to those fields is the bug being fixed.
 	if strings.Contains(body, "train and version were ignored") ||
 		strings.Contains(body, "documents them as ignored") {
-		t.Error("README.md still describes download_update train/version as ignored")
+		t.Error("docs/safety.md still describes download_update train/version as ignored")
 	}
 	if !strings.Contains(lower, "both") {
-		t.Error("README.md must say train and version are both passed through or both omitted")
+		t.Error("docs/safety.md must say train and version are both passed through or both omitted")
 	}
 }
 
 func TestREADMENotesBlankTrainAndVersionAreOmitted(t *testing.T) {
-	text, err := os.ReadFile(filepath.Join("..", "README.md"))
+	text, err := os.ReadFile(filepath.Join("..", "docs", "safety.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,14 +245,14 @@ func TestREADMENotesBlankTrainAndVersionAreOmitted(t *testing.T) {
 		}
 	}
 	if section == "" {
-		t.Fatal("README.md has no download_update paragraph that mentions train")
+		t.Fatal("docs/safety.md has no download_update paragraph that mentions train")
 	}
 	lower := strings.ToLower(section)
 	hasBlank := strings.Contains(lower, "blank") || strings.Contains(lower, "whitespace")
 	hasOmitted := strings.Contains(lower, "omitted") || strings.Contains(lower, "omit")
 	hasEmptyParams := strings.Contains(section, "params: []") || strings.Contains(section, "params []") || strings.Contains(section, "`[]`")
 	if !hasBlank || !hasOmitted || !hasEmptyParams {
-		t.Errorf("README.md download_update docs must say that if train and version are both blank or whitespace, they are treated as omitted and params [] is sent; section=%q", section)
+		t.Errorf("docs/safety.md download_update docs must say that if train and version are both blank or whitespace, they are treated as omitted and params [] is sent; section=%q", section)
 	}
 }
 
