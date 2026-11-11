@@ -302,6 +302,9 @@ var datasetTypeFilter = []interface{}{"type", "in", []interface{}{"FILESYSTEM", 
 const (
 	defaultQueryLimit = 50
 	maxQueryLimit     = 1000
+	// snapshotHoldsScanBudget is the maximum number of snapshot rows
+	// holds_only will page through when filtering for holds.
+	snapshotHoldsScanBudget = 1000
 )
 
 // datasetChildrenCount returns how many names are direct children of name
@@ -350,6 +353,70 @@ func queryCount(ctx context.Context, client *truenas.Client, method string, filt
 	return int(n), true
 }
 
+func datasetServerOrder(orderBy string) []string {
+	// On 25.10 and 27.0, used and available are flattened to the top
+	// level of each pool.dataset.query row. There is no properties
+	// object, so -properties.used.parsed is ignored and limit returns
+	// collection order. Snapshot rows still nest creation under
+	// properties.creation.parsed; see snapshotServerOrder.
+	switch orderBy {
+	case "available":
+		return []string{"-available.parsed"}
+	case "name":
+		return []string{"name"}
+	default:
+		return []string{"-used.parsed"}
+	}
+}
+
+func snapshotServerOrder(orderBy string) []string {
+	switch orderBy {
+	case "dataset":
+		return []string{"dataset"}
+	case "created":
+		// createtxg is a string and is not zero-padded, so lexical
+		// -createtxg mis-orders values such as "9" and "10". Creation
+		// time lives under properties.creation.parsed as a number.
+		return []string{"-properties.creation.parsed"}
+	default:
+		return []string{"-snapshot_name"}
+	}
+}
+
+// queryDatasetNames lists dataset names (and encryption) with a compact
+// query so query_datasets can compute children_count and totals without
+// fetching every property for every row.
+func queryDatasetNames(ctx context.Context, client *truenas.Client, filters []interface{}) ([]string, map[string]bool, error) {
+	raw, err := client.Call(ctx, "pool.dataset.query", filters, map[string]interface{}{
+		"select": []interface{}{"name", "encrypted"},
+		"extra": map[string]interface{}{
+			"retrieve_children":   false,
+			"properties":          []interface{}{"encryption"},
+			"retrieve_user_props": false,
+		},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse dataset names: %w", err)
+	}
+	names := make([]string, 0, len(rows))
+	encrypted := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		name, _ := row["name"].(string)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+		if enc, ok := row["encrypted"].(bool); ok && enc {
+			encrypted[name] = true
+		}
+	}
+	return names, encrypted, nil
+}
+
 func handleQueryDatasets(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	// Always include a structured filter. With retrieve_children=false and
 	// no filters, 25.10 and 27.0 middleware do not recurse below pool roots.
@@ -360,14 +427,36 @@ func handleQueryDatasets(ctx context.Context, client *truenas.Client, args map[s
 		filters = append(filters, []interface{}{"pool", "=", pool})
 	}
 
-	options := map[string]interface{}{
-		"extra": map[string]interface{}{
-			"retrieve_children": false,
-			"properties":        datasetQueryProperties,
-		},
+	// Compact name listing for children_count and totals, so the
+	// full-property query can be limited without losing hierarchy.
+	names, encryptedByName, err := queryDatasetNames(ctx, client, filters)
+	if err != nil {
+		return "", err
 	}
 
-	result, err := client.Call(ctx, "pool.dataset.query", filters, options)
+	orderBy := "used"
+	if order, ok := args["order_by"].(string); ok && order != "" {
+		orderBy = order
+	}
+	limit, capped := queryLimit(args)
+	encryptedOnly, _ := args["encrypted_only"].(bool)
+
+	heavyFilters := filters
+	if encryptedOnly {
+		heavyFilters = append(append([]interface{}{}, filters...), []interface{}{"encrypted", "=", true})
+	}
+
+	options := map[string]interface{}{
+		"extra": map[string]interface{}{
+			"retrieve_children":   false,
+			"properties":          datasetQueryProperties,
+			"retrieve_user_props": false,
+		},
+		"limit":    limit,
+		"order_by": datasetServerOrder(orderBy),
+	}
+
+	result, err := client.Call(ctx, "pool.dataset.query", heavyFilters, options)
 	if err != nil {
 		return "", err
 	}
@@ -375,13 +464,6 @@ func handleQueryDatasets(ctx context.Context, client *truenas.Client, args map[s
 	var datasets []map[string]interface{}
 	if err := json.Unmarshal(result, &datasets); err != nil {
 		return "", fmt.Errorf("failed to parse datasets: %w", err)
-	}
-
-	names := make([]string, 0, len(datasets))
-	for _, ds := range datasets {
-		if n, ok := ds["name"].(string); ok {
-			names = append(names, n)
-		}
 	}
 
 	simplified := make([]map[string]interface{}, 0, len(datasets))
@@ -395,7 +477,7 @@ func handleQueryDatasets(ctx context.Context, client *truenas.Client, args map[s
 
 	// Filter by encryption after children_count so the count reflects the
 	// full hierarchy, not only encrypted neighbours.
-	if encryptedOnly, ok := args["encrypted_only"].(bool); ok && encryptedOnly {
+	if encryptedOnly {
 		filtered := make([]map[string]interface{}, 0)
 		for _, ds := range simplified {
 			if encrypted, ok := ds["encrypted"].(bool); ok && encrypted {
@@ -405,14 +487,17 @@ func handleQueryDatasets(ctx context.Context, client *truenas.Client, args map[s
 		simplified = filtered
 	}
 
-	orderBy := "used"
-	if order, ok := args["order_by"].(string); ok && order != "" {
-		orderBy = order
-	}
 	sortDatasets(simplified, orderBy)
 
-	limit, capped := queryLimit(args)
-	total := len(simplified)
+	total := len(names)
+	if encryptedOnly {
+		total = 0
+		for _, name := range names {
+			if encryptedByName[name] {
+				total++
+			}
+		}
+	}
 	if len(simplified) > limit {
 		simplified = simplified[:limit]
 	}
@@ -610,69 +695,59 @@ func handleQuerySnapshots(ctx context.Context, client *truenas.Client, args map[
 	}
 	limit, capped := queryLimit(args)
 
-	// Unfiltered calls can return every snapshot on the NAS. Push limit
-	// and order_by when the sort key is a middleware field. holds_only
-	// and "created" still need the full list (post-filter or computed sort).
-	unfiltered := true
-	if dataset, ok := args["dataset"].(string); ok && dataset != "" {
-		unfiltered = false
-	}
-	if pool, ok := args["pool"].(string); ok && pool != "" {
-		unfiltered = false
-	}
-	pushLimit := unfiltered && !holdsOnly && (orderBy == "name" || orderBy == "dataset")
-	if pushLimit {
-		options["limit"] = limit
-		if orderBy == "name" {
-			options["order_by"] = []string{"-snapshot_name"}
-		} else {
-			options["order_by"] = []string{"dataset"}
-		}
-	}
+	var (
+		simplified     []map[string]interface{}
+		totalSnapshots int
+		totalKnown     = true
+		note           string
+	)
 
-	result, err := client.Call(ctx, "pool.snapshot.query", filters, options)
-	if err != nil {
-		return "", err
-	}
-
-	var snapshots []map[string]interface{}
-	if err := json.Unmarshal(result, &snapshots); err != nil {
-		return "", fmt.Errorf("failed to parse snapshots: %w", err)
-	}
-
-	// Simplify response
-	simplified := make([]map[string]interface{}, 0, len(snapshots))
-	for _, snap := range snapshots {
-		summary := simplifySnapshot(snap)
-		simplified = append(simplified, summary)
-	}
-
-	// Filter by holds_only if requested
 	if holdsOnly {
-		filtered := make([]map[string]interface{}, 0)
-		for _, snap := range simplified {
-			if holdsCount, ok := snap["holds_count"].(int); ok && holdsCount > 0 {
-				filtered = append(filtered, snap)
+		var budgetHit bool
+		var scanned int
+		var err error
+		simplified, totalSnapshots, totalKnown, budgetHit, scanned, err = queryHeldSnapshots(ctx, client, filters, extra, orderBy, limit)
+		if err != nil {
+			return "", err
+		}
+		if budgetHit {
+			note = fmt.Sprintf("Stopped after scanning %d snapshots; more snapshots with holds may exist. Narrow the query with a pool or dataset filter", scanned)
+		} else if !totalKnown && len(simplified) == limit {
+			note = fmt.Sprintf("Showing %d snapshots with holds (limited)", len(simplified))
+		}
+	} else {
+		options["limit"] = limit
+		options["order_by"] = snapshotServerOrder(orderBy)
+
+		result, err := client.Call(ctx, "pool.snapshot.query", filters, options)
+		if err != nil {
+			return "", err
+		}
+
+		var snapshots []map[string]interface{}
+		if err := json.Unmarshal(result, &snapshots); err != nil {
+			return "", fmt.Errorf("failed to parse snapshots: %w", err)
+		}
+
+		simplified = make([]map[string]interface{}, 0, len(snapshots))
+		for _, snap := range snapshots {
+			simplified = append(simplified, simplifySnapshot(snap))
+		}
+
+		sortSnapshots(simplified, orderBy)
+
+		totalSnapshots = len(simplified)
+		if len(snapshots) >= limit {
+			if n, ok := queryCount(ctx, client, "pool.snapshot.query", filters); ok {
+				totalSnapshots = n
+			} else {
+				totalKnown = false
+				note = "Snapshot total is unknown; the count query failed"
 			}
 		}
-		simplified = filtered
-	}
-
-	sortSnapshots(simplified, orderBy)
-
-	totalSnapshots := len(simplified)
-	totalKnown := true
-	// A count query is only needed when the page was full; otherwise the
-	// returned rows are the complete result.
-	if pushLimit && len(snapshots) >= limit {
-		if n, ok := queryCount(ctx, client, "pool.snapshot.query", filters); ok {
-			totalSnapshots = n
-		} else {
-			totalKnown = false
+		if len(simplified) > limit {
+			simplified = simplified[:limit]
 		}
-	}
-	if len(simplified) > limit {
-		simplified = simplified[:limit]
 	}
 
 	// Add metadata wrapper
@@ -683,8 +758,8 @@ func handleQuerySnapshots(ctx context.Context, client *truenas.Client, args map[
 	}
 	if totalKnown {
 		response["total_snapshots"] = totalSnapshots
-	} else {
-		response["note"] = "Snapshot total is unknown; the count query failed"
+	} else if note == "" {
+		note = "Snapshot total is unknown; the count query failed"
 	}
 	if dataset, ok := args["dataset"].(string); ok && dataset != "" {
 		response["dataset_filter"] = dataset
@@ -696,10 +771,13 @@ func handleQuerySnapshots(ctx context.Context, client *truenas.Client, args map[
 		response["holds_filter"] = "only snapshots with holds"
 	}
 	if totalKnown && len(simplified) < totalSnapshots {
-		response["note"] = fmt.Sprintf("Showing %d of %d snapshots (limited)", len(simplified), totalSnapshots)
+		note = joinNote(note, fmt.Sprintf("Showing %d of %d snapshots (limited)", len(simplified), totalSnapshots))
 	}
 	if capped {
-		response["note"] = joinNote(response["note"], "limit was capped to 1000")
+		note = joinNote(note, "limit was capped to 1000")
+	}
+	if note != "" {
+		response["note"] = note
 	}
 
 	formatted, err := json.MarshalIndent(response, "", "  ")
@@ -708,6 +786,68 @@ func handleQuerySnapshots(ctx context.Context, client *truenas.Client, args map[
 	}
 
 	return string(formatted), nil
+}
+
+// queryHeldSnapshots pages through pool.snapshot.query with a server-side
+// limit and order, keeping snapshots that have holds, up to
+// snapshotHoldsScanBudget rows.
+func queryHeldSnapshots(ctx context.Context, client *truenas.Client, filters []interface{}, extra map[string]interface{}, orderBy string, limit int) (rows []map[string]interface{}, total int, known, budgetHit bool, scanned int, err error) {
+	held := make([]map[string]interface{}, 0)
+	offset := 0
+	exhausted := false
+	for scanned < snapshotHoldsScanBudget {
+		remaining := snapshotHoldsScanBudget - scanned
+		pageSize := limit
+		if pageSize < defaultQueryLimit {
+			pageSize = defaultQueryLimit
+		}
+		if pageSize > remaining {
+			pageSize = remaining
+		}
+		options := map[string]interface{}{
+			"extra":    extra,
+			"limit":    pageSize,
+			"order_by": snapshotServerOrder(orderBy),
+		}
+		if offset > 0 {
+			options["offset"] = offset
+		}
+		result, callErr := client.Call(ctx, "pool.snapshot.query", filters, options)
+		if callErr != nil {
+			return nil, 0, false, false, scanned, callErr
+		}
+		var page []map[string]interface{}
+		if err := json.Unmarshal(result, &page); err != nil {
+			return nil, 0, false, false, scanned, fmt.Errorf("failed to parse snapshots: %w", err)
+		}
+		if len(page) == 0 {
+			exhausted = true
+			break
+		}
+		scanned += len(page)
+		offset += len(page)
+		for _, snap := range page {
+			summary := simplifySnapshot(snap)
+			if holdsCount, ok := summary["holds_count"].(int); ok && holdsCount > 0 {
+				held = append(held, summary)
+			}
+		}
+		if len(page) < pageSize {
+			exhausted = true
+			break
+		}
+		if len(held) >= limit {
+			break
+		}
+	}
+	budgetHit = !exhausted && scanned >= snapshotHoldsScanBudget
+	sortSnapshots(held, orderBy)
+	total = len(held)
+	known = exhausted
+	if len(held) > limit {
+		held = held[:limit]
+	}
+	return held, total, known, budgetHit, scanned, nil
 }
 
 // simplifySnapshot extracts the most relevant fields from a raw snapshot object

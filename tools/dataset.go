@@ -406,10 +406,25 @@ const ancestorsInheritNote = "Missing ancestors are created with no properties o
 // maxDatasetNameLen is OpenZFS's ZFS_MAX_DATASET_NAME_LEN minus the NUL.
 const maxDatasetNameLen = 255
 
+// datasetExistenceQueryOptions returns pool.dataset.query options that
+// only check whether a named dataset exists. Without these, middleware
+// defaults retrieve_children to true (embedding the child tree on a
+// name match) and returns every property, including user properties.
+func datasetExistenceQueryOptions() map[string]interface{} {
+	return map[string]interface{}{
+		"select": []interface{}{"name"},
+		"extra": map[string]interface{}{
+			"retrieve_children":   false,
+			"properties":          []interface{}{},
+			"retrieve_user_props": false,
+		},
+	}
+}
+
 func datasetNameExists(ctx context.Context, client *truenas.Client, name string) (bool, error) {
 	result, err := client.Call(ctx, "pool.dataset.query",
 		[]interface{}{[]interface{}{"name", "=", name}},
-		map[string]interface{}{},
+		datasetExistenceQueryOptions(),
 	)
 	if err != nil {
 		return false, fmt.Errorf("failed to check dataset %s: %w", name, err)

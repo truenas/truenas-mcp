@@ -139,7 +139,15 @@ func datasetQueryLikeMiddleware(t *testing.T, params json.RawMessage, rows []int
 		}
 		out = append(out, ds)
 	}
-	return out
+	if options["count"] == true {
+		return out
+	}
+	// Apply middleware filter_list order_by, then limit/offset, on the
+	// given dotted key path. Invalid keys (such as properties.used.parsed
+	// on a flattened 25.10/27.0 row) are a no-op, so limit returns
+	// insertion order.
+	page, _ := applyQueryPage(out, options).([]interface{})
+	return page
 }
 
 func queryFilterRegistry(t *testing.T, fake *fakeMiddleware) *Registry {
