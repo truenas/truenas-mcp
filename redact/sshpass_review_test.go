@@ -104,7 +104,7 @@ func TestTextSshpassContinuation(t *testing.T) {
 // quote is not in it, as the sh -c wrappers rewrite it), each option before
 // it, each command after it, and each wrapper (plain text, sh -c "...", sh -c
 // '...', JSON), none of the password is left visible. Where a form is not in
-// this matrix the scanner has a documented gap (see the README). The matrix
+// this matrix the scanner has a documented gap (see docs/safety.md). The matrix
 // was compared with the redaction before the scan was rewritten: nothing
 // that was redacted then is visible now.
 func TestTextSshpassMatrix(t *testing.T) {

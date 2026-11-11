@@ -198,11 +198,13 @@ func TestExampleConfigHasNoAPIKeyFlag(t *testing.T) {
 }
 
 func TestREADMEDoesNotRecommendAdminKey(t *testing.T) {
-	readme := repoFile(t, "README.md")
-	if strings.Contains(readme, "admin recommended") {
-		t.Error("README.md still says \"admin recommended\" for the API key")
-	}
-	if strings.Contains(readme, "has admin permissions") {
-		t.Error("README.md still tells the reader to give the API key admin permissions")
+	for _, doc := range markdownFiles(t) {
+		text := repoFile(t, doc)
+		if strings.Contains(text, "admin recommended") {
+			t.Errorf("%s still says \"admin recommended\" for the API key", doc)
+		}
+		if strings.Contains(text, "has admin permissions") {
+			t.Errorf("%s still tells the reader to give the API key admin permissions", doc)
+		}
 	}
 }
