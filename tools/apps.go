@@ -1090,10 +1090,10 @@ func queryAppConfig(ctx context.Context, client *truenas.Client, appName string)
 
 // deleteAppHostPathStoragePaths collects host paths from a 25.10 values
 // object (storage slots, additional_storage, bare host_path entries, and
-// compose bind mounts). When acl_enable is set, acl.path is used because
-// that is what the apps library mounts. Entries with type ix_volume are
-// skipped: their dataset_name is not a host path. Paths are sorted and
-// de-duplicated for a stable preview.
+// compose service volumes bind mounts). When acl_enable is set, acl.path
+// is used because that is what the apps library mounts. Entries with type
+// ix_volume are skipped: their dataset_name is not a host path. Paths are
+// sorted and de-duplicated for a stable preview.
 func deleteAppHostPathStoragePaths(values map[string]interface{}) []string {
 	paths := []string{}
 	collectDeleteAppHostPaths(values, &paths)
@@ -1109,6 +1109,11 @@ func deleteAppHostPathStoragePaths(values map[string]interface{}) []string {
 	return out
 }
 
+// collectDeleteAppHostPaths walks a values object for host paths. Short-syntax
+// Compose bind mounts ("/host:/container") are read only from service volumes
+// arrays, so command or entrypoint arguments that happen to start with '/' and
+// contain ':' are not listed as preserved paths. Long-syntax volumes entries
+// (type bind with a source) are still collected via deleteAppHostPathFromMap.
 func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 	if obj == nil {
 		return
@@ -1116,7 +1121,7 @@ func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 	if p := deleteAppHostPathFromMap(obj); p != "" {
 		*paths = append(*paths, p)
 	}
-	for _, value := range obj {
+	for key, value := range obj {
 		if nested, ok := value.(map[string]interface{}); ok {
 			collectDeleteAppHostPaths(nested, paths)
 		}
@@ -1124,9 +1129,11 @@ func collectDeleteAppHostPaths(obj map[string]interface{}, paths *[]string) {
 			for _, item := range array {
 				if itemObj, ok := item.(map[string]interface{}); ok {
 					collectDeleteAppHostPaths(itemObj, paths)
-				} else if s, ok := item.(string); ok {
-					if p := composeBindSource(s); p != "" {
-						*paths = append(*paths, p)
+				} else if key == "volumes" {
+					if s, ok := item.(string); ok {
+						if p := composeBindSource(s); p != "" {
+							*paths = append(*paths, p)
+						}
 					}
 				}
 			}

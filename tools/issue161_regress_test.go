@@ -455,3 +455,45 @@ func TestDeleteAppPreviewListsBareHostPathAndComposeBindMounts(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteAppPreviewIgnoresComposeCommandArrayLookalikes(t *testing.T) {
+	// Short-syntax bind-mount detection must only look at service volumes
+	// arrays. A command argument like "/x:y" starts with '/' and contains
+	// ':', but it is not a mount and must not appear in storage_paths.
+	cfg := map[string]interface{}{
+		"services": map[string]interface{}{
+			"app": map[string]interface{}{
+				"command":    []interface{}{"/x:y", "/bin/sh:-c"},
+				"entrypoint": []interface{}{"/usr/local/bin/start:now"},
+				"volumes": []interface{}{
+					"/mnt/tank/data:/data",
+					map[string]interface{}{
+						"type":   "bind",
+						"source": "/mnt/tank/media",
+						"target": "/media",
+					},
+				},
+			},
+		},
+	}
+	r, fake := deleteAppPreviewRegistry(t, cfg, nil, nil)
+	out := deleteAppDryRun(t, r)
+	assertAppConfigCalled(t, fake, "plex")
+	state, warnings := deleteAppPreviewState(t, out)
+	got := storagePathsOf(t, state)
+	want := []string{"/mnt/tank/data", "/mnt/tank/media"}
+	if len(got) != len(want) {
+		t.Fatalf("storage_paths = %v, want %v\n%s", got, want, out)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("storage_paths = %v, want %v (volumes bind mounts only)\n%s", got, want, out)
+		}
+	}
+	joined := strings.Join(append(append([]string{}, got...), warnings...), "\n")
+	for _, lookalike := range []string{"/x:y", "/x", "/bin/sh:-c", "/bin/sh", "/usr/local/bin/start:now", "/usr/local/bin/start"} {
+		if strings.Contains(joined, lookalike) {
+			t.Errorf("preview listed command/entrypoint argument %q as a preserved path:\n%s", lookalike, out)
+		}
+	}
+}
