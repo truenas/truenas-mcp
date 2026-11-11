@@ -4,7 +4,7 @@ How to build the server, every flag and environment variable, proxies, and troub
 
 ## Building from source
 
-**Requirements:** Go 1.27.3 or later (the `go` directive in `go.mod`), and `make` for the targets below. With the default `GOTOOLCHAIN=auto`, a Go command that supports toolchain selection downloads the required toolchain automatically; with `GOTOOLCHAIN=local`, an older Go refuses to build.
+**Requirements:** Go 1.27.4 or later (the `go` directive in `go.mod`), and `make` for the targets below. With the default `GOTOOLCHAIN=auto`, a Go command that supports toolchain selection downloads the required toolchain automatically; with `GOTOOLCHAIN=local`, an older Go refuses to build.
 
 ```bash
 git clone https://github.com/truenas/truenas-mcp.git

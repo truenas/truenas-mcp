@@ -44,6 +44,8 @@ jobs:
 
     - name: Run govulncheck
       run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      env:
+        GOTOOLCHAIN: local
 
     - name: Generate coverage report
       run: |
