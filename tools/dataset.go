@@ -11,9 +11,155 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/truenas"
 )
+
+func (r *Registry) registerDatasetTools() {
+	// Dataset creation (write operation)
+	r.tools["create_dataset"] = Tool{
+		Definition: mcp.Tool{
+			Name:        "create_dataset",
+			Description: "Create a ZFS dataset (filesystem or volume) for storage. This tool is reusable for SMB shares, NFS exports, iSCSI LUNs, and application storage. Supports native ZFS encryption (encryption=true with encryption_options), compression, quotas, and advanced ZFS features.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create datasets, ask these questions in order:\n\n1. **Pool Selection**: Query available pools first, ask which pool to use\n2. **Dataset Name**: Suggest format 'pool/shares/name' or 'pool/apps/name'\n3. **Dataset Type**: FILESYSTEM (default, for files) or VOLUME (for block storage/VMs)\n4. **Share Type Optimization** (if for sharing):\n   - SMB: Windows/Mac file shares (recommend for SMB shares)\n   - NFS: Unix/Linux file shares\n   - MULTIPROTOCOL: Both SMB and NFS access\n   - APPS: Application storage\n   - GENERIC: General purpose (default)\n5. **Encryption** (recommend for sensitive data):\n   - Ask: \"Is this for sensitive data?\"\n   - If yes: set encryption=true and encryption_options with exactly ONE method; ask which the user wants and do not default to one: generate_key=true, passphrase (8-512 bytes) or key (64 hex characters). encryption_options without encryption=true is rejected\n   - generate_key: TrueNAS stores the key in its key database and does not return it; this tool cannot export it, so tell the user to back it up in the TrueNAS web UI (Datasets > select the dataset > Encryption > Export Key) and keep a copy somewhere other than this system\n   - passphrase: TrueNAS does not store it; if it is lost the data is lost\n   - key: the user must keep it; this tool does not return or recover it\n   - Under a passphrase-encrypted parent, the new dataset must use a passphrase (TrueNAS refuses generate_key and key there)\n   - The algorithm is not configurable through this tool; new encrypted datasets use AES-256-GCM\n6. **Compression**: LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF\n7. **Space Quota** (optional): Ask if they want to limit size\n8. **ACL Type** (for SMB): NFSV4 (recommended for SMB/Windows), POSIX (Unix)\n9. **Advanced** (usually skip unless user asks):\n   - Deduplication: Warn about RAM overhead, recommend OFF\n   - Checksum, snapdir, atime, readonly\n\n**IMPORTANT RECOMMENDATIONS:**\n- For SMB shares: share_type=SMB, acltype=NFSV4, compression=LZ4\n- For NFS exports: share_type=NFS, acltype=POSIX, compression=LZ4\n- For multi-protocol: share_type=MULTIPROTOCOL, acltype=NFSV4\n- For apps: share_type=APPS, compression=LZ4 or ZSTD\n- Always recommend compression=LZ4 unless user has specific needs\n- Warn: Deduplication uses ~5GB RAM per TB, not recommended for most users\n- Warn: Encryption cannot be removed later, only option is to copy data elsewhere\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display summary showing: name, type, optimization, compression, encryption, quota, mountpoint\n3. Get explicit user confirmation with \"Shall I proceed?\"\n4. Warn: This is a WRITE operation creating permanent storage\n5. If encryption enabled, remind the user of the key-backup note for the chosen method after creation\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. The preview's ancestors_to_create lists any missing parent datasets that would be created (create_ancestors defaults to true), from parent to child. Those ancestors are created with no properties of their own; they inherit compression, ACL type and encryption from their parent and have no quota of their own, and do not receive this dataset's share_type, compression or encryption. Under an unencrypted parent, ancestors of an encrypted dataset are unencrypted. The preview fails if the pool does not exist, the dataset already exists, or the name is invalid. Show user the preview, then ask for confirmation to proceed.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name": map[string]interface{}{
+						"type":        "string",
+						"description": "Dataset path including pool (e.g., 'tank/shares/documents' or 'pool/apps/immich')",
+					},
+					"type": map[string]interface{}{
+						"type":        "string",
+						"description": "FILESYSTEM (default, for files/directories) or VOLUME (for block storage/iSCSI/VMs)",
+						"enum":        []string{"FILESYSTEM", "VOLUME"},
+						"default":     "FILESYSTEM",
+					},
+					"volsize": map[string]interface{}{
+						"type":        "integer",
+						"description": "Required for VOLUME type: size in bytes (e.g., 1099511627776 for 1TB)",
+						"minimum":     1,
+					},
+					"share_type": map[string]interface{}{
+						"type":        "string",
+						"description": "Optimization hint: GENERIC (default), SMB, NFS, MULTIPROTOCOL, APPS",
+						"enum":        []string{"GENERIC", "SMB", "NFS", "MULTIPROTOCOL", "APPS"},
+					},
+					"compression": map[string]interface{}{
+						"type":        "string",
+						"description": "LZ4 (recommended, balanced), ZSTD (modern), GZIP (higher compression), OFF, or INHERIT (default)",
+						"enum":        []string{"LZ4", "ZSTD", "GZIP", "GZIP-1", "GZIP-9", "OFF", "INHERIT"},
+					},
+					"acltype": map[string]interface{}{
+						"type":        "string",
+						"description": "NFSV4 (recommended for SMB/Windows ACLs) or POSIX (Unix permissions)",
+						"enum":        []string{"NFSV4", "POSIX", "INHERIT"},
+					},
+					"encryption": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Create the dataset as a new ZFS encryption root (cannot be removed later). Requires encryption_options. inherit_encryption is sent as false automatically; passing inherit_encryption=true with this is rejected",
+					},
+					"encryption_options": map[string]interface{}{
+						"type":        "object",
+						"description": "Key material for a new encrypted dataset; only valid together with encryption=true. Provide exactly one of generate_key=true, passphrase or key. The passphrase and key are secrets and are masked in dry-run output",
+						"properties": map[string]interface{}{
+							"generate_key": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Let TrueNAS generate the key and store it in its key database; it is not returned. This tool cannot export it: back it up in the TrueNAS web UI (Datasets > select the dataset > Encryption > Export Key) and keep a copy elsewhere. Refused under a passphrase-encrypted parent",
+							},
+							"passphrase": map[string]interface{}{
+								"type":        "string",
+								"description": "Passphrase of 8 to 512 bytes. It is not stored by TrueNAS: if it is lost the data is lost",
+							},
+							"key": map[string]interface{}{
+								"type":        "string",
+								"description": "Raw encryption key as exactly 64 hexadecimal characters. You must keep a copy; this tool never returns it. Refused under a passphrase-encrypted parent",
+							},
+							"pbkdf2iters": map[string]interface{}{
+								"type":        "integer",
+								"description": "PBKDF2 iterations for a passphrase (optional; only with passphrase; minimum 100000, TrueNAS 27.0 requires at least 1300000). Omit to use the TrueNAS default",
+							},
+						},
+					},
+					"quota": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum space for dataset + children in bytes (e.g., 1099511627776 for 1TB)",
+						"minimum":     0,
+					},
+					"refquota": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum space for dataset only (excluding children) in bytes",
+						"minimum":     0,
+					},
+					"create_ancestors": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Auto-create missing parent datasets (default: true). A dry-run preview lists any missing ancestors that would be created, from parent to child, in ancestors_to_create. Those ancestors inherit compression, ACL type and encryption from their parent and have no quota of their own",
+						"default":     true,
+					},
+					"readonly": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Make dataset read-only (default: false)",
+						"default":     false,
+					},
+					"deduplication": map[string]interface{}{
+						"type":        "string",
+						"description": "OFF (recommended), ON, or VERIFY. Warning: Uses ~5GB RAM per TB of storage",
+						"enum":        []string{"OFF", "ON", "VERIFY", "INHERIT"},
+					},
+					"checksum": map[string]interface{}{
+						"type":        "string",
+						"description": "Data integrity algorithm: SHA256 (default), BLAKE3, SHA512, etc.",
+					},
+					"snapdir": map[string]interface{}{
+						"type":        "string",
+						"description": "Snapshot directory visibility: VISIBLE or HIDDEN",
+						"enum":        []string{"VISIBLE", "HIDDEN", "INHERIT"},
+					},
+					"atime": map[string]interface{}{
+						"type":        "string",
+						"description": "File access time tracking: ON or OFF (OFF improves performance)",
+						"enum":        []string{"ON", "OFF", "INHERIT"},
+					},
+					"volblocksize": map[string]interface{}{
+						"type":        "string",
+						"description": "VOLUME type only (rejected for FILESYSTEM): volume block size. Defaults to 16K, or 128K on a dRAID pool",
+						"enum":        []string{"512", "512B", "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K"},
+					},
+					"inherit_encryption": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Optional. Whether the dataset inherits the parent's encryption settings (TrueNAS default: true). false asks for an unencrypted dataset, which TrueNAS rejects under an encrypted parent. To create a new encrypted dataset use encryption=true with encryption_options instead (inherit_encryption is then sent as false automatically); inherit_encryption=true together with encryption=true is rejected",
+					},
+					"user_properties": map[string]interface{}{
+						"type":        "array",
+						"description": "Optional ZFS user properties to set on the dataset, each an object with a 'key' containing a colon in namespace:property form (e.g. 'org:note') and a string 'value'. Property names should use only lowercase letters, digits and ': . _ -' (newer TrueNAS versions reject anything else) and must not repeat within the list. Do not set properties TrueNAS manages itself (org.freenas:description, org.freenas:quota_warning, org.freenas:quota_critical, org.freenas:refquota_warning, org.freenas:refquota_critical, org.truenas:managedby); use the dedicated fields (comments, quota_warning, ...) instead",
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"key": map[string]interface{}{
+									"type":        "string",
+									"description": "User property name in namespace:property form; must contain a colon, e.g. 'org:note'",
+								},
+								"value": map[string]interface{}{
+									"type":        "string",
+									"description": "User property value",
+								},
+							},
+							"required": []string{"key", "value"},
+						},
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Preview what will be created without executing (default: false)",
+						"default":     false,
+					},
+				},
+				"required": []string{"name"},
+			},
+		},
+		Handler: handleCreateDataset,
+		Plan:    planCreateDataset,
+	}
+}
 
 // Middleware method names used as writePlan.Method must be declared in
 // this file (same-file contract for TestMiddlewareMethodContract).

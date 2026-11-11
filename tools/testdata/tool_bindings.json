@@ -1,0 +1,241 @@
+[
+  {
+    "name": "analyze_capacity",
+    "handler": "handleAnalyzeCapacity"
+  },
+  {
+    "name": "apply_update",
+    "handler": "(*Registry).handleApplyUpdateWithDryRun",
+    "plan": "planApplyUpdate",
+    "execute": "(*Registry).executeApplyUpdate"
+  },
+  {
+    "name": "check_updates",
+    "handler": "handleCheckUpdates"
+  },
+  {
+    "name": "configure_directory_service",
+    "handler": "(*Registry).handleConfigureDirectoryServiceWithDryRun",
+    "plan": "planConfigureDirectoryService",
+    "execute": "(*Registry).executeConfigureDirectoryService"
+  },
+  {
+    "name": "create_dataset",
+    "handler": "handleCreateDataset",
+    "plan": "planCreateDataset"
+  },
+  {
+    "name": "create_nfs_share",
+    "handler": "handleCreateNFSShare",
+    "plan": "planCreateNFSShare"
+  },
+  {
+    "name": "create_scrub_schedule",
+    "handler": "(*Registry).handleCreateScrubScheduleWithDryRun",
+    "plan": "planCreateScrubSchedule"
+  },
+  {
+    "name": "create_smb_share",
+    "handler": "handleCreateSMBShare",
+    "plan": "planCreateSMBShare"
+  },
+  {
+    "name": "delete_app",
+    "handler": "(*Registry).handleDeleteAppWithDryRun",
+    "plan": "planDeleteApp",
+    "execute": "(*Registry).executeDeleteApp"
+  },
+  {
+    "name": "delete_boot_environment",
+    "handler": "(*Registry).handleDeleteBootEnvironmentWithDryRun",
+    "plan": "planDeleteBootEnvironment",
+    "execute": "executeDeleteBootEnvironment"
+  },
+  {
+    "name": "delete_scrub_schedule",
+    "handler": "(*Registry).handleDeleteScrubScheduleWithDryRun",
+    "plan": "planDeleteScrubSchedule",
+    "execute": "executeDeleteScrubSchedule"
+  },
+  {
+    "name": "dismiss_alert",
+    "handler": "handleDismissAlertWithDryRun",
+    "plan": "planDismissAlert"
+  },
+  {
+    "name": "download_update",
+    "handler": "(*Registry).handleDownloadUpdateWithDryRun",
+    "plan": "planDownloadUpdate"
+  },
+  {
+    "name": "get_app_catalog_details",
+    "handler": "handleGetAppCatalogDetails"
+  },
+  {
+    "name": "get_app_config",
+    "handler": "handleGetAppConfig"
+  },
+  {
+    "name": "get_arc_metrics",
+    "handler": "handleGetArcMetrics"
+  },
+  {
+    "name": "get_current_boot_environment",
+    "handler": "handleGetCurrentBootEnvironment"
+  },
+  {
+    "name": "get_directory_service_status",
+    "handler": "handleGetDirectoryServiceStatus"
+  },
+  {
+    "name": "get_disk_metrics",
+    "handler": "handleGetDiskMetrics"
+  },
+  {
+    "name": "get_network_metrics",
+    "handler": "handleGetNetworkMetrics"
+  },
+  {
+    "name": "get_pool_capacity_details",
+    "handler": "handleGetPoolCapacityDetails"
+  },
+  {
+    "name": "get_scrub_status",
+    "handler": "handleGetScrubStatus"
+  },
+  {
+    "name": "get_system_metrics",
+    "handler": "handleGetSystemMetrics"
+  },
+  {
+    "name": "get_ups_metrics",
+    "handler": "handleGetUpsMetrics"
+  },
+  {
+    "name": "install_app",
+    "handler": "(*Registry).handleInstallAppWithDryRun",
+    "plan": "planInstallApp"
+  },
+  {
+    "name": "leave_directory_service",
+    "handler": "(*Registry).handleLeaveDirectoryServiceWithDryRun",
+    "plan": "planLeaveDirectoryService",
+    "execute": "(*Registry).executeLeaveDirectoryService"
+  },
+  {
+    "name": "list_alerts",
+    "handler": "handleListAlerts"
+  },
+  {
+    "name": "list_directory_certificates",
+    "handler": "handleListDirectoryCertificates"
+  },
+  {
+    "name": "query_apps",
+    "handler": "handleQueryApps"
+  },
+  {
+    "name": "query_boot_environments",
+    "handler": "handleQueryBootEnvironments"
+  },
+  {
+    "name": "query_datasets",
+    "handler": "handleQueryDatasets"
+  },
+  {
+    "name": "query_directory_services",
+    "handler": "handleQueryDirectoryServices"
+  },
+  {
+    "name": "query_jobs",
+    "handler": "handleQueryJobs"
+  },
+  {
+    "name": "query_pools",
+    "handler": "handleQueryPools"
+  },
+  {
+    "name": "query_scrub_schedules",
+    "handler": "handleQueryScrubSchedules"
+  },
+  {
+    "name": "query_shares",
+    "handler": "handleQueryShares"
+  },
+  {
+    "name": "query_snapshots",
+    "handler": "handleQuerySnapshots"
+  },
+  {
+    "name": "query_vms",
+    "handler": "handleQueryVMs"
+  },
+  {
+    "name": "refresh_directory_cache",
+    "handler": "(*Registry).handleRefreshDirectoryCacheWithDryRun",
+    "plan": "planRefreshDirectoryCache"
+  },
+  {
+    "name": "restore_alert",
+    "handler": "handleRestoreAlertWithDryRun",
+    "plan": "planRestoreAlert"
+  },
+  {
+    "name": "run_scrub",
+    "handler": "(*Registry).handleRunScrubWithDryRun",
+    "plan": "planRunScrub"
+  },
+  {
+    "name": "search_app_catalog",
+    "handler": "handleSearchAppCatalog"
+  },
+  {
+    "name": "start_app",
+    "handler": "(*Registry).handleStartAppWithDryRun",
+    "plan": "planStartApp"
+  },
+  {
+    "name": "stop_app",
+    "handler": "(*Registry).handleStopAppWithDryRun",
+    "plan": "planStopApp",
+    "execute": "(*Registry).executeStopApp"
+  },
+  {
+    "name": "system_health",
+    "handler": "handleSystemHealth"
+  },
+  {
+    "name": "system_info",
+    "handler": "handleSystemInfo"
+  },
+  {
+    "name": "system_reboot",
+    "handler": "handleSystemRebootWithDryRun",
+    "plan": "planSystemReboot",
+    "execute": "executeSystemReboot"
+  },
+  {
+    "name": "tasks_get",
+    "handler": "(*Registry).handleTasksGet"
+  },
+  {
+    "name": "tasks_list",
+    "handler": "(*Registry).handleTasksList"
+  },
+  {
+    "name": "update_app",
+    "handler": "(*Registry).handleUpdateAppWithDryRun",
+    "plan": "planUpdateApp",
+    "execute": "(*Registry).executeUpdateApp"
+  },
+  {
+    "name": "update_status",
+    "handler": "handleUpdateStatus"
+  },
+  {
+    "name": "upgrade_app",
+    "handler": "(*Registry).handleUpgradeAppWithDryRun",
+    "plan": "planUpgradeApp",
+    "execute": "(*Registry).executeUpgradeApp"
+  }
+]
