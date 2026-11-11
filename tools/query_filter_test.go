@@ -147,7 +147,29 @@ func datasetQueryLikeMiddleware(t *testing.T, params json.RawMessage, rows []int
 	// on a flattened 25.10/27.0 row) are a no-op, so limit returns
 	// insertion order.
 	page, _ := applyQueryPage(out, options).([]interface{})
-	return page
+	return applyQuerySelect(page, options)
+}
+
+// applyQuerySelect models the middleware select option: when present,
+// each row keeps only the listed top-level fields.
+func applyQuerySelect(rows []interface{}, options map[string]interface{}) []interface{} {
+	sel, ok := options["select"].([]interface{})
+	if !ok || len(sel) == 0 {
+		return rows
+	}
+	out := make([]interface{}, 0, len(rows))
+	for _, raw := range rows {
+		src, _ := raw.(map[string]interface{})
+		row := map[string]interface{}{}
+		for _, f := range sel {
+			name, _ := f.(string)
+			if v, ok := src[name]; ok {
+				row[name] = v
+			}
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 func queryFilterRegistry(t *testing.T, fake *fakeMiddleware) *Registry {

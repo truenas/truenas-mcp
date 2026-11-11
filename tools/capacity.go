@@ -566,34 +566,18 @@ func handleGetPoolCapacityDetails(ctx context.Context, client *truenas.Client, a
 		poolAnalysis["status"] = pool["status"]
 		poolAnalysis["healthy"] = pool["healthy"]
 
-		// Same dataset query as query_datasets: exact pool match,
-		// retrieve_children=false, and only the properties simplifyDataset
-		// reads. Errors are reported on the pool instead of dropping datasets.
+		// Errors are reported on the pool instead of dropping datasets.
 		poolAnalysis["datasets"] = []map[string]interface{}{}
 		name, _ := pool["name"].(string)
-		datasetResult, err := client.Call(ctx, "pool.dataset.query",
-			[]interface{}{datasetTypeFilter, []interface{}{"pool", "=", name}},
-			map[string]interface{}{
-				"extra": map[string]interface{}{
-					"retrieve_children": false,
-					"properties":        datasetQueryProperties,
-				},
-			},
-		)
+		top, total, err := queryPoolDatasetCapacity(ctx, client, name)
 		if err != nil {
-			poolAnalysis["datasets_error"] = fmt.Sprintf("failed to query datasets: %v", err)
+			poolAnalysis["datasets_error"] = err.Error()
 		} else {
-			var datasets []map[string]interface{}
-			if err := json.Unmarshal(datasetResult, &datasets); err != nil {
-				poolAnalysis["datasets_error"] = fmt.Sprintf("failed to parse datasets: %v", err)
-			} else {
-				top, total := analyzeDatasetCapacity(datasets)
-				poolAnalysis["datasets"] = top
-				poolAnalysis["dataset_count"] = len(top)
-				poolAnalysis["total_datasets"] = total
-				if len(top) < total {
-					poolAnalysis["datasets_note"] = fmt.Sprintf("Showing %d of %d datasets (largest by used space)", len(top), total)
-				}
+			poolAnalysis["datasets"] = top
+			poolAnalysis["dataset_count"] = len(top)
+			poolAnalysis["total_datasets"] = total
+			if len(top) < total {
+				poolAnalysis["datasets_note"] = fmt.Sprintf("Showing %d of %d datasets (largest by used space)", len(top), total)
 			}
 		}
 
@@ -755,17 +739,44 @@ func generateCapacityRecommendations(analysis map[string]interface{}) map[string
 	}
 }
 
+// queryPoolDatasetCapacity returns the largest datasets in pool by used
+// space and the pool's total dataset count. It uses the same filters as
+// query_datasets (exact pool match, retrieve_children=false, and only the
+// properties simplifyDataset reads). A compact name listing gives the
+// total and children_count, so the full-row query asks the middleware for
+// only the top defaultQueryLimit rows (used desc, name asc on ties).
+func queryPoolDatasetCapacity(ctx context.Context, client *truenas.Client, pool string) ([]map[string]interface{}, int, error) {
+	filters := []interface{}{datasetTypeFilter, []interface{}{"pool", "=", pool}}
+	names, _, err := queryDatasetNames(ctx, client, filters)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query datasets: %w", err)
+	}
+	result, err := client.Call(ctx, "pool.dataset.query", filters, map[string]interface{}{
+		"extra": map[string]interface{}{
+			"retrieve_children": false,
+			"properties":        datasetQueryProperties,
+		},
+		"limit":    defaultQueryLimit,
+		"order_by": append(datasetServerOrder("used"), "name"),
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query datasets: %w", err)
+	}
+	var datasets []map[string]interface{}
+	if err := json.Unmarshal(result, &datasets); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse datasets: %w", err)
+	}
+	top, total := analyzeDatasetCapacity(datasets, names)
+	return top, total, nil
+}
+
 // analyzeDatasetCapacity summarises datasets for get_pool_capacity_details
 // using the same parser as query_datasets (top-level used/available, not a
-// nested properties object). It returns the top defaultQueryLimit datasets
-// by used space and the total count before the limit.
-func analyzeDatasetCapacity(datasets []map[string]interface{}) (top []map[string]interface{}, total int) {
-	names := make([]string, 0, len(datasets))
-	for _, ds := range datasets {
-		if n, ok := ds["name"].(string); ok {
-			names = append(names, n)
-		}
-	}
+// nested properties object). datasets is the server-limited page of full
+// rows; names is the compact listing of every dataset in the pool, used
+// for children_count and the total. It returns at most defaultQueryLimit
+// datasets by used space (name breaks ties) and the total count.
+func analyzeDatasetCapacity(datasets []map[string]interface{}, names []string) (top []map[string]interface{}, total int) {
 	simplified := make([]map[string]interface{}, 0, len(datasets))
 	for _, ds := range datasets {
 		summary := simplifyDataset(ds)
@@ -780,7 +791,11 @@ func analyzeDatasetCapacity(datasets []map[string]interface{}) (top []map[string
 		simplified = append(simplified, summary)
 	}
 	sortDatasets(simplified, "used")
-	total = len(simplified)
+	total = len(names)
+	if len(simplified) > total {
+		// A dataset created between the two queries.
+		total = len(simplified)
+	}
 	if len(simplified) > defaultQueryLimit {
 		simplified = simplified[:defaultQueryLimit]
 	}
