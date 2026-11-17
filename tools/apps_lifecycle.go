@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/truenas/truenas-mcp/mcp"
+	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/truenas"
 )
@@ -169,7 +170,7 @@ func (r *Registry) registerAppTools() {
 					},
 					"values": map[string]interface{}{
 						"type":        "object",
-						"description": "Updated configuration values. Use get_app_config to retrieve current values first. Storage may be omitted to leave current storage unchanged. If a partial storage object is sent, omitted slots are filled from the current config before the update is submitted. When a provided slot keeps the same type and location, omitted top-level keys and omitted fields of host_path_config, nfs_config, and cifs_config are also filled from the current slot. New entries, and type or location changes that are not a same-type NFS or CIFS server/path change, must be host_path; unchanged existing entries, including ix_volume, are left as they are.",
+						"description": "Updated configuration values. Use get_app_config to retrieve current values first. Storage may be omitted to leave current storage unchanged. If a partial storage object is sent, omitted slots are filled from the current config before the update is submitted. When a provided slot keeps the same type and location, omitted top-level keys and omitted fields of host_path_config, nfs_config, and cifs_config are also filled from the current slot. New entries, and type or location changes that are not a same-type NFS or CIFS server/path change, must be host_path; unchanged existing entries, including ix_volume, are left as they are. A value that is exactly [REDACTED] (as get_app_config shows secrets) keeps the stored value at that path; the update is refused if nothing is stored there.",
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -1193,6 +1194,14 @@ func planUpdateApp(ctx context.Context, client *truenas.Client, args map[string]
 		return nil, err
 	}
 
+	// A redaction marker from get_app_config is put back to the stored
+	// secret, so a resent nested object does not overwrite it. kept names
+	// those paths; everything shown below masks them again.
+	values, kept, err := restoreRedactedValues(values, currentConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	valuesOut := values
 	var datasetPaths, missing, storageWarnings []string
 	if !isCustomApp(app) {
@@ -1206,16 +1215,27 @@ func planUpdateApp(ctx context.Context, client *truenas.Client, args map[string]
 		}
 	}
 
+	if err := checkKeptValues(kept, currentConfig, valuesOut); err != nil {
+		return nil, err
+	}
+
 	warnings := []string{
 		"App containers will be restarted to apply configuration changes.",
 	}
 	warnings = append(warnings, storageWarnings...)
+	keptNames := valuePathNames(kept)
+	if len(kept) > 0 {
+		warnings = append(warnings, "Secret values sent as "+redact.Marker+" are kept at their stored value (not shown) for: "+strings.Join(keptNames, ", "))
+	}
 	if len(missing) > 0 {
 		warnings = append(warnings, "CRITICAL: The following datasets must exist before updating. Use create_dataset tool:")
 		for _, ds := range missing {
 			warnings = append(warnings, fmt.Sprintf("  - %s", ds))
 		}
 	}
+
+	shownCurrent := maskValuePaths(currentConfig, kept)
+	shownValues := maskValuePaths(valuesOut, kept)
 
 	return &writePlan{
 		Tool:       "update_app",
@@ -1225,7 +1245,7 @@ func planUpdateApp(ctx context.Context, client *truenas.Client, args map[string]
 		ParamNames: []string{"app_name", "options"},
 		CurrentState: map[string]interface{}{
 			"app_name":         appName,
-			"current_config":   currentConfig,
+			"current_config":   shownCurrent,
 			"missing_datasets": missing,
 			"storage_paths":    datasetPaths,
 		},
@@ -1237,7 +1257,8 @@ func planUpdateApp(ctx context.Context, client *truenas.Client, args map[string]
 				Target:      "app.update",
 				Details: map[string]interface{}{
 					"app_name":      appName,
-					"new_values":    valuesOut,
+					"new_values":    shownValues,
+					"kept_values":   keptNames,
 					"storage_paths": datasetPaths,
 				},
 			},
@@ -1247,9 +1268,20 @@ func planUpdateApp(ctx context.Context, client *truenas.Client, args map[string]
 		TargetName:    appName,
 		Result:        map[string]interface{}{"missing": missing},
 		ConfirmSummary: newConfirmSummary("Update an application configuration",
-			append([]string{confirmFact("app", appName)}, updateAppConfirmFacts(currentConfig, valuesOut)...)...,
+			updateAppSummaryFacts(appName, shownCurrent, shownValues, keptNames)...,
 		),
 	}, nil
+}
+
+// updateAppSummaryFacts are the confirmation facts for update_app. current
+// and next must already have kept secrets masked at the same paths, so a
+// kept secret compares equal and is never shown.
+func updateAppSummaryFacts(appName string, current, next map[string]interface{}, kept []string) []string {
+	facts := append([]string{confirmFact("app", appName)}, updateAppConfirmFacts(current, next)...)
+	if len(kept) > 0 {
+		facts = append(facts, "kept at stored value (not shown) for: "+strings.Join(kept, ", "))
+	}
+	return facts
 }
 
 func (r *Registry) handleUpdateAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
