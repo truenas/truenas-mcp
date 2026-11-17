@@ -1278,10 +1278,16 @@ func planUpdateApp(ctx context.Context, client *truenas.Client, args map[string]
 // kept secret compares equal and is never shown.
 func updateAppSummaryFacts(appName string, current, next map[string]interface{}, kept []string) []string {
 	facts := append([]string{confirmFact("app", appName)}, updateAppConfirmFacts(current, next)...)
-	if len(kept) > 0 {
-		facts = append(facts, "kept at stored value (not shown) for: "+strings.Join(kept, ", "))
+	return append(facts, keptValuesFacts(kept)...)
+}
+
+// keptValuesFacts is the confirmation fact naming the paths whose stored
+// secret is kept, never the values.
+func keptValuesFacts(kept []string) []string {
+	if len(kept) == 0 {
+		return nil
 	}
-	return facts
+	return []string{"kept at stored value (not shown) for: " + strings.Join(kept, ", ")}
 }
 
 func (r *Registry) handleUpdateAppWithDryRun(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {

@@ -97,10 +97,6 @@ func confirmFact(key string, value interface{}) string {
 	return key + ": " + confirmShown(key, value)
 }
 
-func confirmChangeFact(key string, from, to interface{}) string {
-	return key + ": " + confirmShown(key, from) + " -> " + confirmShown(key, to)
-}
-
 func confirmShown(key string, value interface{}) string {
 	wrapped := redact.Value(map[string]interface{}{key: value})
 	v := value
@@ -119,9 +115,13 @@ func confirmBoolFact(key string, v bool) string {
 }
 
 // updateAppConfirmFacts lists top-level keys whose values differ from the
-// current config, and every storage slot whose type or location differs.
-// Omitted current keys are unchanged under a shallow merge and are not
-// listed. Values are redacted under their key names.
+// current config, then one fact per changed leaf field (path: old -> new),
+// so an unchanged field inside a resent object is not shown as part of the
+// change, and every storage slot whose type or location differs. Omitted
+// current keys are unchanged under a shallow merge and are not listed.
+// Shown values come from the redacted current and next values, so a field
+// that is secret in context (an env entry's value) stays masked, and a
+// changed secret is reported without its value.
 func updateAppConfirmFacts(current, next map[string]interface{}) []string {
 	if current == nil {
 		current = map[string]interface{}{}
@@ -129,6 +129,8 @@ func updateAppConfirmFacts(current, next map[string]interface{}) []string {
 	if next == nil {
 		next = map[string]interface{}{}
 	}
+	shownCur := redact.Value(deepCopyValue(current))
+	shownNext := redact.Value(deepCopyValue(next))
 	keys := make([]string, 0, len(next))
 	for k := range next {
 		keys = append(keys, k)
@@ -144,9 +146,12 @@ func updateAppConfirmFacts(current, next map[string]interface{}) []string {
 			continue
 		}
 		changed = append(changed, k)
-		valueFacts = append(valueFacts, confirmChangeFact(k, current[k], next[k]))
+		cur, curOK := current[k]
+		valueFacts = leafDiffFacts(valueFacts, valuePath{k},
+			leafSide{cur, childShown(shownCur, k), curOK},
+			leafSide{next[k], childShown(shownNext, k), true})
 	}
-	sort.Slice(valueFacts, func(i, j int) bool { return len(valueFacts[i]) < len(valueFacts[j]) })
+	sort.SliceStable(valueFacts, func(i, j int) bool { return len(valueFacts[i]) < len(valueFacts[j]) })
 	var facts []string
 	if len(changed) > 0 {
 		facts = append(facts, "changing keys: "+strings.Join(changed, ", "))
@@ -156,6 +161,88 @@ func updateAppConfirmFacts(current, next map[string]interface{}) []string {
 		facts = append(facts, storageDiffFacts(asStringMap(current["storage"]), asStringMap(next["storage"]))...)
 	}
 	return facts
+}
+
+// leafSide is one side of a field-level diff: the raw value (compared),
+// the redacted value at the same path (shown) and whether it is present.
+type leafSide struct {
+	raw, shown interface{}
+	ok         bool
+}
+
+// childShown is the redacted value under key k (a string or an int index)
+// of shown. Under a value redaction replaced wholesale, every child is
+// shown as the marker.
+func childShown(shown interface{}, k interface{}) interface{} {
+	switch s := shown.(type) {
+	case map[string]interface{}:
+		if key, ok := k.(string); ok {
+			return s[key]
+		}
+	case []interface{}:
+		if i, ok := k.(int); ok && i >= 0 && i < len(s) {
+			return s[i]
+		}
+	case string:
+		if s == redact.Marker {
+			return redact.Marker
+		}
+	}
+	return nil
+}
+
+// leafDiffFacts appends a "path: old -> new" fact for each leaf that
+// differs between a and b. Objects are compared key by key and lists of
+// the same length index by index; anything else is a leaf.
+func leafDiffFacts(facts []string, p valuePath, a, b leafSide) []string {
+	if a.ok == b.ok && (!a.ok || jsonValuesEqual(a.raw, b.raw)) {
+		return facts
+	}
+	am, aMap := a.raw.(map[string]interface{})
+	bm, bMap := b.raw.(map[string]interface{})
+	if a.ok && b.ok && aMap && bMap {
+		names := map[string]bool{}
+		for k := range am {
+			names[k] = true
+		}
+		for k := range bm {
+			names[k] = true
+		}
+		for _, k := range sortedKeys(names) {
+			av, aok := am[k]
+			bv, bok := bm[k]
+			facts = leafDiffFacts(facts, appendPath(p, k),
+				leafSide{av, childShown(a.shown, k), aok},
+				leafSide{bv, childShown(b.shown, k), bok})
+		}
+		return facts
+	}
+	al, aList := a.raw.([]interface{})
+	bl, bList := b.raw.([]interface{})
+	if a.ok && b.ok && aList && bList && len(al) == len(bl) {
+		for i := range al {
+			facts = leafDiffFacts(facts, appendPath(p, i),
+				leafSide{al[i], childShown(a.shown, i), true},
+				leafSide{bl[i], childShown(b.shown, i), true})
+		}
+		return facts
+	}
+	if a.ok && b.ok && jsonValuesEqual(a.shown, b.shown) {
+		// Both sides are masked the same way: say it changed, not to what.
+		return append(facts, p.String()+": changed (secret, not shown)")
+	}
+	return append(facts, p.String()+": "+leafShown(a)+" -> "+leafShown(b))
+}
+
+func leafShown(s leafSide) string {
+	if !s.ok {
+		return "(not set)"
+	}
+	b, err := json.Marshal(s.shown)
+	if err != nil {
+		return redact.Marker
+	}
+	return string(b)
 }
 
 func asStringMap(v interface{}) map[string]interface{} {

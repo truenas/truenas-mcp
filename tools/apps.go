@@ -797,6 +797,12 @@ func planInstallApp(ctx context.Context, client *truenas.Client, args map[string
 	if !ok {
 		return nil, fmt.Errorf("values parameter is required. Use get_app_catalog_details to see the schema and build the configuration")
 	}
+	// A new app has no stored value to keep, so the redaction marker (for
+	// example copied from another app's get_app_config) would be installed
+	// as the literal value.
+	if p, found := findRedactionMarker(values, nil); found {
+		return nil, fmt.Errorf("values.%s is or contains the redaction marker %s; install_app has no stored value to keep, so the marker would be installed as the real value. Send the real value instead", p, redact.Marker)
+	}
 
 	version := "latest"
 	if v, ok := args["version"].(string); ok && v != "" {
