@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/truenas/truenas-mcp/internal/mwtime"
 	"github.com/truenas/truenas-mcp/mcp"
@@ -92,6 +93,10 @@ var (
 	jobProgressFields = []string{"percent", "description"}
 )
 
+// taskTimezoneNote is set when the NAS time zone could not be read, so
+// task times are shown in UTC.
+const taskTimezoneNote = "NAS timezone unavailable; times are shown in UTC"
+
 // taskIDFilter returns the id filter for an optional integer task_id.
 func taskIDFilter(args map[string]interface{}) ([]interface{}, int, bool) {
 	v, ok := args["task_id"].(float64)
@@ -160,7 +165,8 @@ func boundTaskText(v interface{}) (string, bool) {
 
 // simplifyTaskState is the last-run summary of a zettarepl task state
 // ({state, datetime, error, warnings, last_snapshot, progress, reason}).
-func simplifyTaskState(v interface{}) map[string]interface{} {
+// datetime is rendered in loc, the NAS time zone, like the scrub tools.
+func simplifyTaskState(v interface{}, loc *time.Location) map[string]interface{} {
 	state, ok := v.(map[string]interface{})
 	if !ok {
 		return map[string]interface{}{"state": "UNKNOWN"}
@@ -172,6 +178,8 @@ func simplifyTaskState(v interface{}) map[string]interface{} {
 		out["state"] = "UNKNOWN"
 	}
 	if when, ts := mwtime.Normalize(state["datetime"]); ts > 0 {
+		out["datetime"] = formatInLocation(time.Unix(ts, 0), loc)
+	} else if when != "" {
 		out["datetime"] = when
 	}
 	for _, k := range []string{"error", "reason"} {
@@ -252,7 +260,7 @@ func simplifyBoundSnapshotTask(v interface{}) map[string]interface{} {
 // host, user, private key id and host key) is reduced to its id; netcat
 // addresses, encryption keys and key locations, properties_override and
 // the raw job are dropped.
-func simplifyReplication(task map[string]interface{}) map[string]interface{} {
+func simplifyReplication(task map[string]interface{}, loc *time.Location) map[string]interface{} {
 	out := pickAllowed(task, []string{
 		"id", "name", "enabled", "direction", "transport", "source_datasets", "target_dataset",
 		"recursive", "exclude", "replicate", "auto", "only_matching_schedule", "naming_schema",
@@ -292,7 +300,7 @@ func simplifyReplication(task map[string]interface{}) map[string]interface{} {
 	}
 	out["retention"] = retention
 
-	out["last_run"] = simplifyTaskState(task["state"])
+	out["last_run"] = simplifyTaskState(task["state"], loc)
 	if job, ok := task["job"].(map[string]interface{}); ok {
 		cur := pickAllowed(job, []string{"id", "state"})
 		if p, ok := pickAllowedMap(job["progress"], jobProgressFields).(map[string]interface{}); ok && len(p) > 0 {
@@ -339,9 +347,10 @@ func handleQueryReplications(ctx context.Context, client *truenas.Client, args m
 	if byID && len(rows) == 0 {
 		return "", fmt.Errorf("replication task %d not found", id)
 	}
+	loc, _, assumedUTC := nasTimezone(ctx, client)
 	list := make([]map[string]interface{}, 0, len(rows))
 	for _, row := range rows {
-		list = append(list, simplifyReplication(row))
+		list = append(list, simplifyReplication(row, loc))
 	}
 	response := map[string]interface{}{
 		"replications": list,
@@ -362,12 +371,15 @@ func handleQueryReplications(ctx context.Context, client *truenas.Client, args m
 	if note != "" {
 		response["note"] = note
 	}
+	if assumedUTC {
+		response["timezone_note"] = taskTimezoneNote
+	}
 	return marshalJSON(response)
 }
 
 // simplifySnapshotTask projects a pool.snapshottask.query entry onto the
 // fields query_snapshot_tasks returns.
-func simplifySnapshotTask(task map[string]interface{}) map[string]interface{} {
+func simplifySnapshotTask(task map[string]interface{}, loc *time.Location) map[string]interface{} {
 	out := pickAllowed(task, []string{"id", "dataset", "recursive", "exclude", "enabled", "naming_schema", "allow_empty", "vmware_sync"})
 	out["schedule"] = taskSchedule(task["schedule"])
 	retention := map[string]interface{}{
@@ -380,7 +392,7 @@ func simplifySnapshotTask(task map[string]interface{}) map[string]interface{} {
 		}
 	}
 	out["retention"] = retention
-	state := simplifyTaskState(task["state"])
+	state := simplifyTaskState(task["state"], loc)
 	out["last_run"] = state
 	out["last_snapshot"] = state["last_snapshot"]
 	return out
@@ -484,6 +496,12 @@ func snapshotTaskCoverage(ctx context.Context, client *truenas.Client, task map[
 	if len(missing) > 0 {
 		cov["note"] = fmt.Sprintf("%d covered dataset(s) have no @%s snapshot: they were created (or un-excluded) after the last run, or that snapshot was removed. They have nothing for a replication of this task to send until the task runs again", len(missing), snapName)
 	}
+	if len(covered) > 1 && len(missing) == len(covered) {
+		// On 27 the lookup is by dataset path, and a covered dataset
+		// removed between the dataset listing and this lookup empties the
+		// whole result.
+		cov["note"] = cov["note"].(string) + ". No covered dataset has it, which can also mean a dataset was removed while this was being read: query again to confirm"
+	}
 	return cov
 }
 
@@ -567,9 +585,10 @@ func handleQuerySnapshotTasks(ctx context.Context, client *truenas.Client, args 
 
 	bound, boundErr := boundReplications(ctx, client)
 
+	loc, _, assumedUTC := nasTimezone(ctx, client)
 	list := make([]map[string]interface{}, 0, len(rows))
 	for _, row := range rows {
-		out := simplifySnapshotTask(row)
+		out := simplifySnapshotTask(row, loc)
 		ds, _ := row["dataset"].(string)
 		pool := datasetPool(ds)
 		if cov := snapshotTaskCoverage(ctx, client, row, poolNames[pool], poolErrs[pool]); cov != nil {
@@ -610,6 +629,9 @@ func handleQuerySnapshotTasks(ctx context.Context, client *truenas.Client, args 
 	}
 	if note != "" {
 		response["note"] = note
+	}
+	if assumedUTC {
+		response["timezone_note"] = taskTimezoneNote
 	}
 	return marshalJSON(response)
 }

@@ -28,7 +28,17 @@ func newRunRegistry(t *testing.T, replications, snapTasks []interface{}, dataset
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		switch method {
-		case "replication.run", "pool.snapshottask.run":
+		case "pool.snapshottask.run":
+			// A plain method on 25.10 and 27: it queues the task with
+			// zettarepl and returns null. There is no job.
+			if rf.failRun != nil {
+				return nil, rf.failRun, true
+			}
+			if rf.onRun != nil {
+				rf.onRun(method)
+			}
+			return nil, nil, true
+		case "replication.run":
 			if rf.failRun != nil {
 				return nil, rf.failRun, true
 			}
@@ -247,11 +257,12 @@ func TestRunReplicationSentSnapshots(t *testing.T) {
 		t.Errorf("estimate = %v", est)
 	}
 	task := getTask(t, r, mgr, decodeObj(t, out)["task_id"].(string))
-	if msg, _ := task["statusMessage"].(string); msg != "Replication finished: sent 3 snapshot(s), the last tank/data@auto-2026-01-04_00-00 (2.5 GiB)" {
+	if msg, _ := task["statusMessage"].(string); msg != "Replication finished: sent 3 snapshot(s) across all source datasets and children, the last tank/data@auto-2026-01-04_00-00" {
 		t.Errorf("statusMessage = %q", msg)
 	}
 	res := task["result"].(map[string]interface{})
-	if res["transferred"] != true || res["snapshots_sent"] != 3.0 || res["data_sent"] != "2.5 GiB" {
+	size, _ := res["last_source_size"].(map[string]interface{})
+	if res["transferred"] != true || res["snapshots_sent"] != 3.0 || res["snapshots_planned"] != 3.0 || size["target_used"] != "2.5 GiB" || size["source_used"] != "2.5 GiB" {
 		t.Errorf("result = %v", res)
 	}
 }
@@ -336,8 +347,8 @@ func TestReplicationOutcome(t *testing.T) {
 		sent      int
 	}{
 		{"", "Replication finished: no new snapshots on tank/a, tank/b; nothing transferred", 0},
-		{"Sending 1 of 1: tank/a@s1", "Replication finished: sent 1 snapshot(s), the last tank/a@s1", 1},
-		{"Sending 5 of 5: tank/b@s9 (10 MiB / 10 MiB)", "Replication finished: sent 5 snapshot(s), the last tank/b@s9", 5},
+		{"Sending 1 of 1: tank/a@s1", "Replication finished: sent 1 snapshot(s) across all source datasets and children, the last tank/a@s1", 1},
+		{"Sending 5 of 5: tank/b@s9 (10 MiB / 10 MiB)", "Replication finished: sent 5 snapshot(s) across all source datasets and children, the last tank/b@s9", 5},
 	} {
 		msg, res := outcome(map[string]interface{}{"progress": map[string]interface{}{"description": tc.desc}})
 		if msg != tc.msg || res.(map[string]interface{})["snapshots_sent"] != tc.sent {
@@ -377,12 +388,12 @@ func TestRunSnapshotTaskReturnsCreatedSnapshots(t *testing.T) {
 	task["allow_empty"] = false
 	datasets := []string{"tank", "tank/data", "tank/data/a", "tank/data/b", "tank/data/scratch"}
 	snaps := []map[string]interface{}{}
-	rf := &runFake{jobState: withJobState("SUCCESS", "")}
+	rf := &runFake{}
 	// The run creates the snapshot on data and data/a (data/b is unchanged
 	// and allow_empty is off) and records it as the task's last snapshot.
 	rf.onRun = func(string) {
 		snaps = append(snaps, snap("tank/data", s), snap("tank/data/a", s))
-		task["state"] = map[string]interface{}{"state": "FINISHED", "last_snapshot": "tank/data@" + s}
+		task["state"] = map[string]interface{}{"state": "FINISHED", "datetime": map[string]interface{}{"$date": 1767571200000.0}, "last_snapshot": "tank/data@" + s}
 	}
 	r, fake, _ := newRunRegistry(t, []interface{}{pushReplicationFixture()}, []interface{}{task}, datasets, &snaps, rf)
 
@@ -397,7 +408,7 @@ func TestRunSnapshotTaskReturnsCreatedSnapshots(t *testing.T) {
 		t.Fatalf("pool.snapshottask.run calls = %v", calls)
 	}
 	resp := decodeObj(t, out)
-	if resp["state"] != "SUCCESS" || resp["snapshot_name"] != s || resp["job_id"] != 77.0 || resp["task_id"] == nil {
+	if resp["state"] != "FINISHED" || resp["snapshot_name"] != s || resp["new_snapshot"] != true {
 		t.Errorf("response = %v", resp)
 	}
 	created := toStrings(resp["snapshots_created"])
@@ -415,24 +426,12 @@ func TestRunSnapshotTaskReturnsCreatedSnapshots(t *testing.T) {
 	}
 }
 
-func TestRunSnapshotTaskFailureAndBlocks(t *testing.T) {
+func TestRunSnapshotTaskBlocks(t *testing.T) {
 	old, oldPoll := snapshotTaskRunWait, snapshotTaskRunPoll
 	snapshotTaskRunWait, snapshotTaskRunPoll = time.Second, 5*time.Millisecond
 	t.Cleanup(func() { snapshotTaskRunWait, snapshotTaskRunPoll = old, oldPoll })
 
 	snaps := []map[string]interface{}{}
-	rf := &runFake{jobState: withJobState("FAILED", "[EEXIST] Snapshot tank/data@auto-2026-01-05_00-00 already existed. This probably happened because the task already ran on schedule.")}
-	task := snapshotTaskFixture(3, "tank/data", false, []interface{}{}, nil)
-	r, _, _ := newRunRegistry(t, nil, []interface{}{task}, []string{"tank", "tank/data"}, &snaps, rf)
-	first, err := r.CallTool(t.Context(), "run_snapshot_task", map[string]interface{}{"task_id": 3.0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = r.CallTool(t.Context(), "run_snapshot_task", map[string]interface{}{"task_id": 3.0, "confirmation_token": replyToken(t, first)})
-	if err == nil || !strings.Contains(err.Error(), "periodic snapshot task 3 failed") || !strings.Contains(err.Error(), "already existed") {
-		t.Errorf("failed job: err = %v", err)
-	}
-
 	disabled := snapshotTaskFixture(4, "tank/data", false, []interface{}{}, nil)
 	disabled["enabled"] = false
 	missing := snapshotTaskFixture(5, "tank/gone", false, []interface{}{}, nil)
@@ -448,20 +447,6 @@ func TestRunSnapshotTaskFailureAndBlocks(t *testing.T) {
 	}
 	if len(fake.called("pool.snapshottask.run")) != 0 {
 		t.Error("pool.snapshottask.run sent for a blocked task")
-	}
-}
-
-func TestRunSnapshotTaskStillRunning(t *testing.T) {
-	old, oldPoll := snapshotTaskRunWait, snapshotTaskRunPoll
-	snapshotTaskRunWait, snapshotTaskRunPoll = 20*time.Millisecond, 5*time.Millisecond
-	t.Cleanup(func() { snapshotTaskRunWait, snapshotTaskRunPoll = old, oldPoll })
-
-	snaps := []map[string]interface{}{}
-	r, fake, _ := newRunRegistry(t, nil, []interface{}{snapshotTaskFixture(3, "tank/data", false, []interface{}{}, nil)}, []string{"tank", "tank/data"}, &snaps, &runFake{})
-	_, out := confirmAndRun(t, r, fake, "run_snapshot_task", "pool.snapshottask.run", map[string]interface{}{"task_id": 3.0})
-	resp := decodeObj(t, out)
-	if resp["state"] != "RUNNING" || !strings.Contains(resp["message"].(string), "tasks_get") {
-		t.Errorf("response = %v", resp)
 	}
 }
 

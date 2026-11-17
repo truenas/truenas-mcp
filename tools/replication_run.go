@@ -21,10 +21,10 @@ const (
 )
 
 var (
-	// snapshotTaskRunWait bounds how long run_snapshot_task waits for its
-	// job before reading back the snapshots. Taking a snapshot is quick;
-	// vmware_sync tasks can take longer, and then the caller follows the
-	// returned task instead.
+	// snapshotTaskRunWait bounds how long run_snapshot_task follows the
+	// task's state before reading back the snapshots. Taking a snapshot is
+	// quick; vmware_sync tasks can take longer, and then the caller checks
+	// query_snapshot_tasks instead.
 	snapshotTaskRunWait = 2 * time.Minute
 	snapshotTaskRunPoll = time.Second
 	// maxEstimateSnapshots bounds the source snapshot listing used by the
@@ -52,7 +52,7 @@ func (r *Registry) registerReplicationRunTools() {
 	r.tools["run_snapshot_task"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "run_snapshot_task",
-			Description: "Run a periodic snapshot task now, outside its schedule. The task's own configuration decides what is snapshotted. Waits briefly for the snapshot job, then reads back and returns the snapshot names it created on each covered dataset (and any covered dataset that has none). Replication tasks bound to the task (auto, no own schedule) start right after it and may prune target snapshots per their retention; the preview lists them. Destructive: needs confirmation. Refused for a disabled task.",
+			Description: "Run a periodic snapshot task now, outside its schedule. The task's own configuration decides what is snapshotted. TrueNAS queues the run and returns no job, so the tool follows the task's own state for up to about 2 minutes, then reads back and returns the snapshot names it created on each covered dataset (and any covered dataset that has none). If the run has not finished by then, it says so; check query_snapshot_tasks before running it again. Replication tasks bound to the task (auto, no own schedule) start right after it and may prune target snapshots per their retention; the preview lists them. Destructive: needs confirmation. Refused for a disabled task.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -70,7 +70,7 @@ func (r *Registry) registerReplicationRunTools() {
 	r.tools["run_replication"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "run_replication",
-			Description: "Run a replication task now, outside its schedule. Returns a job id and a task_id to follow with tasks_get; it does not wait for the transfer. When the job finishes, the task says either that nothing was transferred (no new snapshots) or how many snapshots were sent. A task bound to a periodic snapshot task ships snapshots that already exist and creates none: run run_snapshot_task first to include current data. The preview shows source, target, direction, retention and an estimate of whether anything would be sent. Destructive (retention and allow_from_scratch can delete target snapshots or data): needs confirmation. Refused while the task is running or on hold.",
+			Description: "Run a replication task now, outside its schedule. Returns a job id and a task_id to follow with tasks_get; it does not wait for the transfer. When the job finishes, the task says that nothing was transferred (no new snapshots), how many snapshots were sent across all source datasets and children, or that it could not tell. A task bound to a periodic snapshot task ships snapshots that already exist and creates none: run run_snapshot_task first to include current data. The preview shows source, target, direction, retention and an estimate of whether anything would be sent. Destructive (retention and allow_from_scratch can delete target snapshots or data): needs confirmation. Refused while the task is running or on hold, and on TrueNAS 25.10 while it is disabled.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -88,7 +88,7 @@ func (r *Registry) registerReplicationRunTools() {
 	r.tools["create_snapshot"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "create_snapshot",
-			Description: "Create a ZFS snapshot of a dataset now, for example before changing it. Returns the resulting snapshot name and, for a recursive snapshot, the datasets it was taken on. The snapshot has no retention: it stays until it is deleted. Refused if a snapshot with that name already exists on any dataset it would cover. Use dry_run to preview.",
+			Description: "Create a ZFS snapshot of a dataset now, for example before changing it. Returns the resulting snapshot name and, for a recursive snapshot, the datasets it was taken on. No retention applies unless the name matches a periodic snapshot task's naming schema; the preview warns about that, about replications that may ship it, and about replication targets. Refused if a snapshot with that name already exists on any dataset it would cover. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -249,7 +249,8 @@ func planRunSnapshotTask(ctx context.Context, client *truenas.Client, args map[s
 	}
 	after, afterErr := replicationsAfterSnapshotTask(ctx, client, id)
 
-	summary := simplifySnapshotTask(task)
+	loc, _, _ := nasTimezone(ctx, client)
+	summary := simplifySnapshotTask(task, loc)
 	current := map[string]interface{}{
 		"snapshot_task":    summary,
 		"datasets_covered": len(covered),
@@ -306,7 +307,6 @@ func planRunSnapshotTask(ctx context.Context, client *truenas.Client, args map[s
 		Method:       snapshotTaskRunMethod,
 		CallParams:   []interface{}{id},
 		ParamNames:   []string{"id"},
-		JobMethod:    snapshotTaskRunMethod,
 		TargetName:   dataset,
 		CurrentState: current,
 		Actions: []PlannedAction{{
@@ -326,6 +326,7 @@ func planRunSnapshotTask(ctx context.Context, client *truenas.Client, args map[s
 			"covered":     covered,
 			"after":       ids,
 			"allow_empty": allowEmpty,
+			"before":      readSnapshotTaskState(task),
 		},
 	}, nil
 }
@@ -344,112 +345,142 @@ func (r *Registry) handleRunSnapshotTaskWithDryRun(ctx context.Context, client *
 	return r.executeRunSnapshotTask(ctx, client, args, plan)
 }
 
-// waitForJob polls core.get_jobs for jobID until it leaves RUNNING/WAITING
-// or wait passes, and returns the last row read (nil if none was).
-func waitForJob(ctx context.Context, client *truenas.Client, jobID int, method string, wait, every time.Duration) (map[string]interface{}, error) {
+// snapshotTaskState is the part of a periodic snapshot task's zettarepl
+// state that tells one run from the next.
+type snapshotTaskState struct {
+	State        string
+	DatetimeMS   float64 // state.datetime in ms since the epoch; 0 if unset
+	LastSnapshot string
+	Error        string
+}
+
+func readSnapshotTaskState(task map[string]interface{}) snapshotTaskState {
+	st, _ := task["state"].(map[string]interface{})
+	out := snapshotTaskState{}
+	out.State, _ = st["state"].(string)
+	out.LastSnapshot, _ = st["last_snapshot"].(string)
+	out.Error, _ = st["error"].(string)
+	switch d := st["datetime"].(type) {
+	case map[string]interface{}:
+		out.DatetimeMS, _ = d["$date"].(float64)
+	case float64:
+		out.DatetimeMS = d
+	}
+	return out
+}
+
+// finishedAfter reports whether cur is the end of a run that started after
+// before was read: zettarepl sets state.datetime on every RUNNING, FINISHED
+// and ERROR update, so a newer datetime with a final state is a new run.
+func (cur snapshotTaskState) finishedAfter(before snapshotTaskState) bool {
+	if cur.State != "FINISHED" && cur.State != "ERROR" {
+		return false
+	}
+	return cur.DatetimeMS > before.DatetimeMS
+}
+
+// waitForSnapshotTaskRun polls pool.snapshottask.query for task id until a
+// run newer than before has finished, wait passes or ctx ends. It returns
+// the last state read, whether the run finished, and the last poll error.
+func waitForSnapshotTaskRun(ctx context.Context, client *truenas.Client, id int, before snapshotTaskState, wait, every time.Duration) (map[string]interface{}, bool, error) {
 	deadline := time.Now().Add(wait)
 	var last map[string]interface{}
+	var lastErr error
 	for {
-		raw, err := client.Call(ctx, "core.get_jobs", []interface{}{[]interface{}{"id", "=", jobID}})
-		if err != nil {
-			return last, err
-		}
-		var rows []map[string]interface{}
-		if err := json.Unmarshal(raw, &rows); err != nil {
-			return last, fmt.Errorf("unexpected core.get_jobs result")
-		}
-		if len(rows) > 0 {
-			if m, _ := rows[0]["method"].(string); m != method {
-				return nil, fmt.Errorf("job %d is no longer the %s job (the middleware restarted)", jobID, method)
-			}
-			last = rows[0]
-			switch last["state"] {
-			case "SUCCESS", "FAILED", "ABORTED":
-				return last, nil
-			}
-		}
-		if !time.Now().Before(deadline) {
-			return last, nil
-		}
 		select {
 		case <-ctx.Done():
-			return last, ctx.Err()
+			return last, false, ctx.Err()
 		case <-time.After(every):
+		}
+		raw, err := client.Call(ctx, "pool.snapshottask.query", []interface{}{[]interface{}{"id", "=", id}})
+		task, err := queryOneTask(raw, err, "periodic snapshot task", id)
+		if err == nil {
+			last, lastErr = task, nil
+			if readSnapshotTaskState(task).finishedAfter(before) {
+				return task, true, nil
+			}
+		} else {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			return last, false, lastErr
 		}
 	}
 }
 
+// executeRunSnapshotTask queues the task and follows its own state.
+// pool.snapshottask.run is a plain method on 25.10 and 27, not a job: it
+// queues the task with zettarepl and returns null, so there is no job id.
 func (r *Registry) executeRunSnapshotTask(ctx context.Context, client *truenas.Client, args map[string]interface{}, plan *writePlan) (string, error) {
 	if err := plan.blockedReply(); err != nil {
 		return "", err
 	}
 	id, _ := intID(plan.CallParams[0])
-	result, err := callPlan(ctx, client, plan)
-	if err != nil {
+	before, _ := plan.Result["before"].(snapshotTaskState)
+	if _, err := callPlan(ctx, client, plan); err != nil {
 		return "", fmt.Errorf("failed to run periodic snapshot task %d: %w", id, err)
-	}
-	jobID, err := parseJobID(result)
-	if err != nil {
-		return "", fmt.Errorf("periodic snapshot task %d returned no job id; nothing was confirmed run", id)
 	}
 
 	response := map[string]interface{}{
 		"snapshot_task_id": id,
 		"dataset":          plan.TargetName,
-		"job_id":           jobID,
+		"queued":           true,
 	}
-	if r.taskManager != nil {
-		task, err := r.taskManager.CreateJobTask(ctx, "run_snapshot_task", args, jobID, time.Hour, tasks.WithExpectedMethod(snapshotTaskRunMethod))
-		if err != nil {
-			return "", fmt.Errorf("failed to create task: %w", err)
+	task, finished, waitErr := waitForSnapshotTaskRun(ctx, client, id, before, snapshotTaskRunWait, snapshotTaskRunPoll)
+	if !finished {
+		response["state"] = "QUEUED"
+		msg := fmt.Sprintf("Periodic snapshot task %d was queued, but its run was not seen to finish within %s", id, snapshotTaskRunWait)
+		switch {
+		case ctx.Err() != nil:
+			msg = fmt.Sprintf("Periodic snapshot task %d was queued; this call ended before its run was seen to finish", id)
+		case waitErr != nil:
+			msg += fmt.Sprintf(" (the task could not be read: %s)", boundedErr(waitErr))
 		}
-		response["task_id"] = task.TaskID
+		if task != nil {
+			if st := readSnapshotTaskState(task).State; st != "" {
+				response["task_state"] = st
+			}
+		}
+		response["message"] = msg + fmt.Sprintf(". It may still be running: check query_snapshot_tasks task_id %d (last_run and last_snapshot) before running it again", id)
+		return marshalJSON(response)
 	}
 
-	job, waitErr := waitForJob(ctx, client, jobID, snapshotTaskRunMethod, snapshotTaskRunWait, snapshotTaskRunPoll)
-	state, _ := job["state"].(string)
-	switch {
-	case state == "FAILED":
-		msg, _ := job["error"].(string)
-		msg, _ = tasks.BoundText(msg, maxTaskStateText)
+	cur := readSnapshotTaskState(task)
+	if cur.State == "ERROR" {
+		msg, _ := tasks.BoundText(cur.Error, maxTaskStateText)
+		if msg == "" {
+			msg = "no error text was recorded"
+		}
 		return "", fmt.Errorf("periodic snapshot task %d failed: %s", id, msg)
-	case state == "ABORTED":
-		return "", fmt.Errorf("periodic snapshot task %d was aborted", id)
-	case state != "SUCCESS":
-		response["state"] = "RUNNING"
-		if state == "" {
-			response["state"] = "UNKNOWN"
-		}
-		msg := fmt.Sprintf("Periodic snapshot task %d started (job %d) but had not finished when this call returned; ", id, jobID)
-		if waitErr != nil {
-			msg = fmt.Sprintf("Periodic snapshot task %d started (job %d) but its job could not be read (%s); ", id, jobID, boundedErr(waitErr))
-		}
-		if tid, ok := response["task_id"]; ok {
-			msg += fmt.Sprintf("follow it with tasks_get task_id %v, then ", tid)
-		}
-		response["message"] = msg + fmt.Sprintf("read the created snapshot with query_snapshot_tasks task_id %d (last_snapshot and coverage)", id)
-		return marshalJSON(response)
 	}
 
-	response["state"] = "SUCCESS"
+	response["state"] = "FINISHED"
 	covered, _ := plan.Result["covered"].([]string)
-	raw, err := client.Call(ctx, "pool.snapshottask.query", []interface{}{[]interface{}{"id", "=", id}})
-	task, err := queryOneTask(raw, err, "periodic snapshot task", id)
-	if err != nil {
-		response["message"] = fmt.Sprintf("The job finished, but the task could not be read back (%s); check query_snapshot_tasks task_id %d", boundedErr(err), id)
-		return marshalJSON(response)
-	}
-	st, _ := task["state"].(map[string]interface{})
-	last, _ := st["last_snapshot"].(string)
-	_, snapName, ok := lastSnapshotName(last)
+	_, snapName, ok := lastSnapshotName(cur.LastSnapshot)
 	if !ok {
-		response["message"] = fmt.Sprintf("The job finished, but the task records no last snapshot; check query_snapshot_tasks task_id %d", id)
+		response["message"] = fmt.Sprintf("The run finished, but the task records no last snapshot; check query_snapshot_tasks task_id %d", id)
 		return marshalJSON(response)
 	}
+	last := cur.LastSnapshot
+	if last == before.LastSnapshot {
+		// zettarepl reports a manual run whose snapshot name already
+		// exists (the task already ran this minute) as a success for the
+		// existing snapshot.
+		response["snapshot_name"] = snapName
+		response["new_snapshot"] = false
+		msg := fmt.Sprintf("Periodic snapshot task %d ran, but its snapshot %s already existed (the task already ran within the time its naming schema resolves to), so this run created no new snapshot", id, last)
+		if after, _ := plan.Result["after"].([]string); len(after) > 0 {
+			response["replications_started_after"] = after
+			msg += fmt.Sprintf(". Replication task(s) %s still start after it", strings.Join(after, ", "))
+		}
+		response["message"] = msg
+		return marshalJSON(response)
+	}
+	response["new_snapshot"] = true
 	response["snapshot_name"] = snapName
 	have, err := datasetsWithSnapshot(ctx, client, covered, snapName)
 	if err != nil {
-		response["message"] = fmt.Sprintf("The job finished and recorded %s, but the snapshots could not be read back (%s)", last, boundedErr(err))
+		response["message"] = fmt.Sprintf("The run finished and recorded %s, but the snapshots could not be read back (%s)", last, boundedErr(err))
 		return marshalJSON(response)
 	}
 	created := []string{}
@@ -660,7 +691,8 @@ func planRunReplication(ctx context.Context, client *truenas.Client, args map[st
 	if err != nil {
 		return nil, err
 	}
-	summary := simplifyReplication(task)
+	loc, _, _ := nasTimezone(ctx, client)
+	summary := simplifyReplication(task, loc)
 	name, _ := task["name"].(string)
 	direction, _ := task["direction"].(string)
 	sources := strings.Join(stringList(task["source_datasets"]), ", ")
@@ -679,11 +711,6 @@ func planRunReplication(ctx context.Context, client *truenas.Client, args map[st
 		blocked = append(blocked, fmt.Sprintf("replication task %d is on hold: %s", id, reason))
 	}
 
-	estimate := map[string]interface{}{}
-	if len(blocked) == 0 {
-		estimate = replicationSendEstimate(ctx, client, task)
-	}
-
 	var warnings []string
 	bound, _ := summary["bound_snapshot_tasks"].([]map[string]interface{})
 	boundIDs := make([]string, 0, len(bound))
@@ -694,7 +721,14 @@ func planRunReplication(ctx context.Context, client *truenas.Client, args map[st
 		warnings = append(warnings, fmt.Sprintf("Bound to periodic snapshot task(s) %s: this run ships snapshots that already exist and creates none. Run run_snapshot_task first to include current data", strings.Join(boundIDs, ", ")))
 	}
 	if enabled, _ := task["enabled"].(bool); !enabled {
-		warnings = append(warnings, "The task is disabled; a manual run still runs it")
+		switch disabledReplicationRuns(ctx, client) {
+		case "refused":
+			blocked = append(blocked, fmt.Sprintf("replication task %d is disabled; TrueNAS 25.10 does not run a disabled replication task (enable it first, or upgrade: 26 and later run it)", id))
+		case "runs":
+			warnings = append(warnings, "The task is disabled; on this TrueNAS version (26 or later) a manual run still runs it")
+		default:
+			warnings = append(warnings, "The task is disabled: TrueNAS 25.10 refuses to run it, while 26 and later still run it manually (the TrueNAS version is unknown here)")
+		}
 	}
 	switch retention {
 	case "SOURCE":
@@ -706,6 +740,11 @@ func planRunReplication(ctx context.Context, client *truenas.Client, args map[st
 		warnings = append(warnings, "allow_from_scratch is on: if source and target share no snapshot, the target dataset's data is destroyed and replicated from scratch")
 	}
 	warnings = append(warnings, "A replication can run for hours; follow it with tasks_get instead of waiting")
+
+	estimate := map[string]interface{}{}
+	if len(blocked) == 0 {
+		estimate = replicationSendEstimate(ctx, client, task)
+	}
 
 	facts := []string{
 		confirmFact("direction", direction),
@@ -765,13 +804,31 @@ func (r *Registry) handleRunReplicationWithDryRun(ctx context.Context, client *t
 	return r.executeRunReplication(ctx, client, args, plan)
 }
 
+// replicationProgressPattern matches the job progress text middleware's
+// zettarepl plugin sets when a snapshot send starts or progresses
+// (_set_replication_task_progress, the same on 25.10 and 27):
+//
+//	Sending {sent+1} of {total}: {dataset}@{snapshot}[ ({bytes} / {bytes})][ [total {dst} of {src}]]
+//
+// sent and total come from zettarepl's GlobalReplicationContext, which is
+// one per replication task and sums over every source dataset and child
+// of the run, so they are task-wide counts, not per-dataset ones.
 var replicationProgressPattern = regexp.MustCompile(`^Sending (\d+) of (\d+): (\S+)`)
-var replicationTotalPattern = regexp.MustCompile(`\[total (.+?) of (.+?)\]`)
 
-// replicationOutcome reads a finished replication.run job. zettarepl sets
-// the progress text only when it starts sending a snapshot ("Sending N of
-// M: dataset@snapshot ..."), so a successful job with no such text sent
-// nothing; otherwise all M snapshots of the run were sent.
+// replicationSizePattern is the optional "[total {dst} of {src}]" suffix:
+// the used size of the target and the source dataset of the source being
+// replicated, not the amount of data sent.
+var replicationSizePattern = regexp.MustCompile(`\[total (.+?) of (.+?)\]$`)
+
+// replicationOutcome reads a finished replication.run job. middleware sets
+// the progress text only when a snapshot send starts (and updates it while
+// it runs), so a successful job with no progress text sent nothing. When
+// the text has the "Sending N of M" form, N is the number of snapshot sends
+// that ran, counted across all source datasets and children: the last one
+// started was the N-th, and the job only succeeds once it completed. M is
+// the planned total, which can be higher than N when an attempt failed and
+// was retried. Any other text is reported as is, with no claim about what
+// was transferred.
 func replicationOutcome(sources []string) func(job map[string]interface{}) (string, interface{}) {
 	where := strings.Join(sources, ", ")
 	if where == "" {
@@ -779,22 +836,43 @@ func replicationOutcome(sources []string) func(job map[string]interface{}) (stri
 	}
 	return func(job map[string]interface{}) (string, interface{}) {
 		progress, _ := job["progress"].(map[string]interface{})
-		desc, _ := progress["description"].(string)
-		m := replicationProgressPattern.FindStringSubmatch(desc)
-		if m == nil {
+		rawDesc, present := progress["description"]
+		if !present || rawDesc == nil || rawDesc == "" {
 			return fmt.Sprintf("Replication finished: no new snapshots on %s; nothing transferred", where),
 				map[string]interface{}{"transferred": false, "snapshots_sent": 0}
 		}
-		total, _ := strconv.Atoi(m[2])
+		desc, isText := rawDesc.(string)
+		m := replicationProgressPattern.FindStringSubmatch(desc)
+		if !isText || m == nil {
+			text := desc
+			if !isText {
+				text = fmt.Sprint(rawDesc)
+			}
+			text, _ = tasks.BoundText(text, maxTaskStateText)
+			return fmt.Sprintf("Replication finished; could not determine what was transferred (progress text: %q)", text),
+				map[string]interface{}{"transferred": nil, "progress_description": text}
+		}
+		sent, err1 := strconv.Atoi(m[1])
+		planned, err2 := strconv.Atoi(m[2])
+		if err1 != nil || err2 != nil {
+			text, _ := tasks.BoundText(desc, maxTaskStateText)
+			return fmt.Sprintf("Replication finished; could not determine what was transferred (progress text: %q)", text),
+				map[string]interface{}{"transferred": nil, "progress_description": text}
+		}
+		lastSent, _ := tasks.BoundText(m[3], maxTaskStateText)
 		out := map[string]interface{}{
 			"transferred":        true,
-			"snapshots_sent":     total,
-			"last_snapshot_sent": m[3],
+			"snapshots_sent":     sent,
+			"snapshots_planned":  planned,
+			"last_snapshot_sent": lastSent,
+			"count_note":         "Counts are snapshot sends across all source datasets and children of the run; with a name pattern (name_regex) one incremental send can carry intermediate snapshots too",
 		}
-		msg := fmt.Sprintf("Replication finished: sent %d snapshot(s), the last %s", total, m[3])
-		if t := replicationTotalPattern.FindStringSubmatch(desc); t != nil {
-			out["data_sent"] = t[1]
-			msg += fmt.Sprintf(" (%s)", t[1])
+		msg := fmt.Sprintf("Replication finished: sent %d snapshot(s) across all source datasets and children, the last %s", sent, lastSent)
+		if planned > sent {
+			msg += fmt.Sprintf(" (%d were planned; a planned count above the sent count usually means an attempt failed and was retried)", planned)
+		}
+		if t := replicationSizePattern.FindStringSubmatch(desc); t != nil {
+			out["last_source_size"] = map[string]interface{}{"target_used": t[1], "source_used": t[2]}
 		}
 		return msg, out
 	}
@@ -841,6 +919,21 @@ func (r *Registry) executeRunReplication(ctx context.Context, client *truenas.Cl
 	}
 	response["message"] = strings.TrimSpace(msg)
 	return marshalJSON(response)
+}
+
+// disabledReplicationRuns says what replication.run does with a disabled
+// task on the connected TrueNAS: 25.10 refuses it ("Task is not enabled"),
+// 26.0 and later run it (middleware NAS-141823). It returns "refused",
+// "runs", or "" when the version is not known.
+func disabledReplicationRuns(ctx context.Context, client *truenas.Client) string {
+	v, err, ok := client.SessionVersion(ctx)
+	if !ok || err != nil || v.IsZero() {
+		return ""
+	}
+	if v.Less(truenas.Version{Major: 26}) {
+		return "refused"
+	}
+	return "runs"
 }
 
 // ---- create_snapshot ----
@@ -898,13 +991,107 @@ func planCreateSnapshot(ctx context.Context, client *truenas.Client, args map[st
 			"datasets_to_capture": len(covered),
 			"datasets":            capStrings(covered, maxCoverageDatasets),
 		},
-		Warnings: []string{
+		Warnings: append([]string{
 			"The snapshot keeps the blocks it references: space they use is not freed while it exists",
-			"No retention applies: the snapshot stays until it is deleted",
-		},
+		}, snapshotTaskInteractionWarnings(ctx, client, covered, name)...),
 		Blocked: blocked,
 		Result:  map[string]interface{}{"covered": covered},
 	}, nil
+}
+
+// datasetUnder reports whether ds is root or, when recursive, one of its
+// descendants that is not excluded (zettarepl's own rule: a child of an
+// excluded dataset is excluded too).
+func datasetUnder(ds, root string, recursive bool, exclude []string) bool {
+	if ds == root {
+		return true
+	}
+	if !recursive || !strings.HasPrefix(ds, root+"/") {
+		return false
+	}
+	for _, e := range exclude {
+		if ds == e || strings.HasPrefix(ds, e+"/") {
+			return false
+		}
+	}
+	return true
+}
+
+// snapshotTaskInteractionWarnings says how existing tasks may act on a
+// manual snapshot named name on the covered datasets: a periodic snapshot
+// task whose naming schema matches it may remove it by retention, a push
+// replication whose naming rules match it may ship it, and a replication
+// whose target is on this system may fail its next incremental receive
+// because of it.
+func snapshotTaskInteractionWarnings(ctx context.Context, client *truenas.Client, covered []string, name string) []string {
+	covers := func(root string, recursive bool, exclude []string) bool {
+		for _, ds := range covered {
+			if datasetUnder(ds, root, recursive, exclude) {
+				return true
+			}
+		}
+		return false
+	}
+	var warnings []string
+	if raw, err := client.Call(ctx, "pool.snapshottask.query", []interface{}{}, map[string]interface{}{"order_by": []string{"id"}}); err != nil {
+		warnings = append(warnings, "Could not check periodic snapshot tasks (pool.snapshottask.query failed); if the name matches a task's naming schema, that task's retention may remove the snapshot")
+	} else {
+		var rows []map[string]interface{}
+		if json.Unmarshal(raw, &rows) == nil {
+			var ids []string
+			for _, row := range rows {
+				ds, _ := row["dataset"].(string)
+				rec, _ := row["recursive"].(bool)
+				schema, _ := row["naming_schema"].(string)
+				if schema == "" || !covers(ds, rec, stringList(row["exclude"])) || !namingSchemaRegexp(schema).MatchString(name) {
+					continue
+				}
+				ids = append(ids, fmt.Sprint(row["id"]))
+			}
+			if len(ids) > 0 {
+				warnings = append(warnings, fmt.Sprintf("The name matches the naming schema of periodic snapshot task(s) %s on this dataset or a parent: it may be removed by that task's retention once it is older than the task's lifetime, and replications of that task may ship it", strings.Join(ids, ", ")))
+			} else {
+				warnings = append(warnings, "No retention applies: the snapshot stays until it is deleted")
+			}
+		}
+	}
+	raw, err := client.Call(ctx, "replication.query", []interface{}{}, map[string]interface{}{"order_by": []string{"id"}})
+	if err != nil {
+		return append(warnings, "Could not check replication tasks (replication.query failed); a manual snapshot on a replication target can make its next incremental receive fail")
+	}
+	var rows []map[string]interface{}
+	if json.Unmarshal(raw, &rows) != nil {
+		return warnings
+	}
+	var ships, targets []string
+	for _, row := range rows {
+		id := fmt.Sprint(row["id"])
+		dir, _ := row["direction"].(string)
+		transport, _ := row["transport"].(string)
+		rec, _ := row["recursive"].(bool)
+		exclude := stringList(row["exclude"])
+		if dir == "PUSH" {
+			if match := replicationNameMatcher(row); match != nil && match(name) {
+				for _, src := range stringList(row["source_datasets"]) {
+					if covers(src, rec, exclude) {
+						ships = append(ships, id)
+						break
+					}
+				}
+			}
+		}
+		// The target is on this system for a PULL, or a LOCAL push.
+		if target, _ := row["target_dataset"].(string); target != "" && (dir == "PULL" || transport == "LOCAL") && covers(target, rec, nil) {
+			targets = append(targets, id)
+		}
+	}
+	if len(ships) > 0 {
+		warnings = append(warnings, fmt.Sprintf("The name matches the naming rules of push replication task(s) %s, whose source includes this dataset: their next run may ship it", strings.Join(ships, ", ")))
+	}
+	if len(targets) > 0 {
+		warnings = append(warnings, fmt.Sprintf("This dataset is the target (or inside the target) of replication task(s) %s: a manual snapshot there can make the next incremental receive fail until it is removed, and the replication's retention may delete it", strings.Join(targets, ", ")))
+	}
+	return warnings
 }
 
 // firstKey returns the first of order that is set in m.

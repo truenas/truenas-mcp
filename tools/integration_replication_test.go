@@ -142,7 +142,7 @@ func TestIntegrationReplicationRunCycle(t *testing.T) {
 	}
 
 	resp = confirmed("run_snapshot_task", map[string]interface{}{"task_id": pstID})
-	if resp["state"] != "SUCCESS" || resp["snapshots_created_count"] != 2.0 {
+	if resp["state"] != "FINISHED" || resp["new_snapshot"] != true || resp["snapshots_created_count"] != 2.0 {
 		t.Errorf("run_snapshot_task = %v", resp)
 	}
 

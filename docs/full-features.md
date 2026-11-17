@@ -478,12 +478,12 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 - **query_replications** - List replication tasks and their last run
   - Direction (`PUSH`/`PULL`), transport, source datasets, target dataset, recursion, excludes, retention policy and schedule (with a readable form)
   - `trigger` says what starts the task: its own schedule, the periodic snapshot tasks it is bound to (`bound_snapshot_tasks`), or manual only. A task bound to a periodic snapshot task ships the snapshots that task created; it does not create any
-  - `last_run` has the state, time, error, warnings and `last_snapshot` (the last snapshot sent); `current_job` is the middleware job of a run in progress or the last run
+  - `last_run` has the state, time, error, warnings and `last_snapshot` (the last snapshot sent); `current_job` is the middleware job of a run in progress or the last run. `last_run.datetime` is in the NAS time zone (like the scrub tools); if that cannot be read, times are UTC and `timezone_note` says so
   - SSH connection details are never returned: no host, user, port, key pair or host key, only the keychain connection id (`ssh_connection_id`). Encryption keys and key locations, netcat addresses and property overrides are left out as well; only the `encryption` flag is shown
   - `task_id` returns one task; `limit` bounds the list (default 50, maximum 1000). When the list is cut, `total_replications` and a `note` say so
 - **query_snapshot_tasks** - List periodic snapshot tasks and what their last run covered
-  - Dataset, recursion, excludes, naming schema, schedule, retention, `allow_empty` and `last_snapshot` (the snapshot the task last created, which shows it ran)
-  - For a recursive task, `coverage` lists the datasets the task covers today and which have no snapshot from the last run, for example children created after that run. A replication of the task has nothing to send for those datasets until the task runs again. Dataset lists are capped at 100 entries; the counts are complete
+  - Dataset, recursion, excludes, naming schema, schedule, retention, `allow_empty` and `last_snapshot` (the snapshot the task last created, which shows it ran). `last_run.datetime` is in the NAS time zone
+  - For a recursive task, `coverage` lists the datasets the task covers today and which have no snapshot from the last run, for example children created after that run. A replication of the task has nothing to send for those datasets until the task runs again. Dataset lists are capped at 100 entries; the counts are complete. If no covered dataset has the snapshot, the note also says to query again, because a dataset removed while the lookup runs can empty the result
   - `bound_replications` lists the replication tasks that run after this task
   - `task_id` returns one task, `dataset` filters by exact dataset, and `limit` bounds the list (default 50, maximum 1000)
 - **run_snapshot_task** - Run a periodic snapshot task now (**destructive**)
@@ -491,21 +491,29 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Input is `task_id` only; the task's own configuration decides what is snapshotted
   - The preview names the task, the datasets it covers today, the naming schema, retention, and the replication tasks that start right after it (bound, automatic, enabled and without their own schedule). Those replications may delete target snapshots per their retention, which is why this tool is destructive
   - Refused (no token) for a disabled task, a task whose dataset is gone, or a task that is already running
-  - Waits up to two minutes for the snapshot job, then reads back the task's `last_snapshot` and the snapshots on each covered dataset and returns `snapshot_name`, `snapshots_created` (`dataset@name`) and `datasets_without_snapshot`. With `allow_empty` off, unchanged datasets get no snapshot and are listed there. If the job is still running, returns its `job_id` and `task_id` for `tasks_get`
-  - A job error is returned as an error, for example when a snapshot with that name already exists because the task just ran on schedule
+  - TrueNAS queues the run and returns no job (`pool.snapshottask.run` is not a job method on 25.10 or 27.0), so there is no `job_id` or `tasks_get` task. The tool follows the task's own state (`pool.snapshottask.query`) for up to two minutes, until a run newer than the one before the call is `FINISHED` or `ERROR`
+  - When it finishes (`state: FINISHED`), reads back the task's `last_snapshot` and the snapshots on each covered dataset and returns `snapshot_name`, `new_snapshot`, `snapshots_created` (`dataset@name`) and `datasets_without_snapshot`. With `allow_empty` off, unchanged datasets get no snapshot and are listed there
+  - If `last_snapshot` did not change, the snapshot name already existed (the task already ran within the time its naming schema resolves to): TrueNAS reports such a manual run as a success, and the tool returns `new_snapshot: false` and says no new snapshot was created
+  - An `ERROR` state is returned as an error with the task's (redacted, bounded) error text
+  - If the run is not seen to finish in time, or the call ends first, returns `state: QUEUED`: the run may still be going. Check `query_snapshot_tasks task_id` (its `last_run` and `last_snapshot`) before running it again
 - **run_replication** - Run a replication task now (**destructive**)
   - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
   - Input is `task_id` only. Sends `replication.run` with the task id (accepted by 25.10 and 27.0)
   - The preview shows direction, source, target, transport, retention and `allow_from_scratch`, and an `estimate`: for a `PUSH` task, the number of snapshots on the source matching the task's naming schemas (or `name_regex`) that are newer than the last snapshot sent. The estimate looks at one source dataset; for `PULL` tasks it is unknown (`would_send: null`)
   - If the task is bound to a periodic snapshot task, the preview, the confirmation and the result say so: the run ships snapshots that already exist and creates none
-  - Refused (no token) while the task is `RUNNING` or on `HOLD`; a disabled task can still be run, with a warning
-  - Does not wait for the transfer: returns `job_id` and a `task_id` for `tasks_get`. When the job finishes, the task's `statusMessage` and `result` say either "no new snapshots on <dataset>; nothing transferred" (`transferred: false`) or "sent N snapshot(s), the last <dataset@snapshot>" with the data total (`transferred: true`, `snapshots_sent`)
+  - Refused (no token) while the task is `RUNNING` or on `HOLD`. A disabled task is refused on TrueNAS 25.10, which does not run it; on 26 and later it still runs, and the preview warns. If the version is not known, the preview explains both
+  - Does not wait for the transfer: returns `job_id` and a `task_id` for `tasks_get`. When the job finishes, the task's `statusMessage` and `result` say one of:
+    - "no new snapshots on <dataset>; nothing transferred" (`transferred: false`), only when the job has no progress text: TrueNAS sets it when a snapshot send starts
+    - "sent N snapshot(s) across all source datasets and children, the last <dataset@snapshot>" (`transferred: true`, `snapshots_sent`, `snapshots_planned`, `last_snapshot_sent`). The count is TrueNAS's own task-wide send counter, which covers every source dataset and child of a recursive or multi-source run. With a name pattern (`name_regex`) one incremental send can carry intermediate snapshots too. `last_source_size` is the used size of the target and source for the last source dataset, not the amount of data sent
+    - "could not determine what was transferred" (`transferred: null`) with the redacted, bounded `progress_description`, for any other progress text
 - **create_snapshot** - Create a snapshot on demand
   - Input: `dataset`, `name` (the part after `@`; letters, digits, `_`, `-`, `.`, `:`), optional `recursive`
   - Dry-run mode previews the datasets the snapshot would cover
+  - A write tool like `create_dataset` and `run_scrub`: it runs without a confirmation token unless `dry_run` is set
+  - The preview warns when the name matches the naming schema of a periodic snapshot task on the dataset or a parent (that task's retention may remove it later, and its replications may ship it), when it matches the naming rules of a push replication whose source includes the dataset (its next run may ship it), and when the dataset is (inside) the target of a replication on this system (a manual snapshot there can make the next incremental receive fail until it is removed)
   - Refused if the dataset does not exist or a snapshot with that name already exists on any covered dataset
   - Returns the resulting snapshot name (`dataset@name`); a recursive snapshot also lists the snapshots read back on each child
-  - The snapshot has no retention and stays until it is deleted
+  - Unless a periodic snapshot task's retention applies (see the warnings above), the snapshot stays until it is deleted
 
 ## Task Management
 
