@@ -134,7 +134,9 @@ func restoreRedactedValue(v, cur interface{}, curOK bool, path valuePath, kept *
 //   - every enclosing entry keeps its identity (its name, key, variable,
 //     username or principal field), so a secret is not handed to a
 //     different entry even when the new name is masked too (DB_PASSWORD
-//     renamed to API_TOKEN);
+//     renamed to API_TOKEN). This fails closed: a legitimate rename that
+//     keeps the secret is refused too, and the caller must send the real
+//     value;
 //   - no enclosing storage entry changed its type or location, so a stored
 //     share credential is never sent to a different server or path (the
 //     same rule that limits filling omitted storage fields). An entry is

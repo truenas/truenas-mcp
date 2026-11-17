@@ -203,7 +203,7 @@ idmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed t
 
 TrueNAS removes its computer account from the domain using the credential you provide, then resets its local directory service configuration and disables the service. LDAP cannot be left; use configure_directory_service with enable=false to disable it.
 
-**credential is required:** a KERBEROS_USER credential, {credential_type: "KERBEROS_USER", username: "admin", password: "pass"}, for an account with the administrative privileges needed to remove the computer account. It is used for this operation only and is never shown: the password is masked in the dry run and in stored task data.
+**credential is required:** a KERBEROS_USER credential, {credential_type: "KERBEROS_USER", username: "admin", password: "pass"}, for an account with the administrative privileges needed to remove the computer account. It is used for this operation only and is never shown: the password is masked in the dry run and in stored task data. A password that is or contains [REDACTED] is refused.
 
 **WARNING:** This is a destructive operation:
 - Removes TrueNAS from the domain
@@ -769,6 +769,11 @@ func planLeaveDirectoryService(ctx context.Context, client *truenas.Client, args
 	payload, err := buildDirectoryServiceLeavePayload(args)
 	if err != nil {
 		return nil, err
+	}
+	// Nothing stored can stand in for the leave credential, so the
+	// redaction marker would only be tried as the real password.
+	if p, found := findRedactionMarker(payload, nil); found {
+		return nil, fmt.Errorf("%s is or contains the redaction marker %s; leave_directory_service has no stored credential to keep, so send the real password", p, redact.Marker)
 	}
 	cred, _ := payload["credential"].(map[string]interface{})
 	username, _ := cred["username"].(string)

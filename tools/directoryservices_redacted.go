@@ -25,7 +25,19 @@ var dsScopeFields = []valuePath{
 	{"configuration", "domain"},
 	{"configuration", "target_server"},
 	{"configuration", "server_urls"},
+	// LDAP auxiliary_parameters lines are written into the same SSSD
+	// domain section as the bind credential, so a line such as
+	// ldap_backup_uri or ldap_uri can point the stored secret at another
+	// server. When the parameters are themselves the kept secret, the
+	// substituted value equals the stored one.
+	{"configuration", "auxiliary_parameters"},
 }
+
+// dsTLSFields are boolean fields that protect a stored secret on the wire
+// (LDAP and IPA certificate validation and STARTTLS, and an idmap
+// backend's certificate validation). With a kept secret they may not be
+// turned off relative to the stored config at the same path.
+var dsTLSFields = map[string]bool{"validate_certificates": true, "starttls": true}
 
 // restoreDirectoryServiceSecrets replaces every value in payload that is
 // exactly redact.Marker with the value stored at the same path in the
@@ -63,8 +75,11 @@ func restoreDirectoryServiceSecrets(ctx context.Context, client *truenas.Client,
 //     URL, bind DN and base DN), so the secret is not used for a different
 //     account or server;
 //   - the directory it belongs to is unchanged: service_type, and when
-//     sent, kerberos_realm and the configuration's domain, target_server
-//     and server_urls match the stored config.
+//     sent, kerberos_realm and the configuration's domain, target_server,
+//     server_urls and auxiliary_parameters match the stored config;
+//   - no certificate validation or STARTTLS flag (anywhere in the payload,
+//     including idmap backends) is turned off where the stored config has
+//     it on. Turning one on is fine.
 func checkDirectoryServiceKept(kept []valuePath, stored, next map[string]interface{}) error {
 	if len(kept) == 0 {
 		return nil
@@ -110,6 +125,32 @@ func checkDirectoryServiceKept(kept []valuePath, stored, next map[string]interfa
 		}
 		if err := checkDSScope(p, stored, next); err != nil {
 			return err
+		}
+	}
+	return checkDSTLSKept(kept[0], stored, next, nil)
+}
+
+// checkDSTLSKept refuses, naming kept path p, when any dsTLSFields field in
+// next is false where the stored config at the same path has it true.
+func checkDSTLSKept(p valuePath, stored map[string]interface{}, next interface{}, path valuePath) error {
+	switch x := next.(type) {
+	case map[string]interface{}:
+		for _, k := range sortedKeys(x) {
+			child := appendPath(path, k)
+			if b, ok := x[k].(bool); ok && dsTLSFields[k] && !b {
+				if cv, _ := getValuePath(stored, child); cv == true {
+					return fmt.Errorf("%s is the redaction marker %s, but %s turns off a TLS protection the stored config has, so the stored secret is not kept; send the real value instead, or leave %s on", p, redact.Marker, child, k)
+				}
+			}
+			if err := checkDSTLSKept(p, stored, x[k], child); err != nil {
+				return err
+			}
+		}
+	case []interface{}:
+		for i, c := range x {
+			if err := checkDSTLSKept(p, stored, c, appendPath(path, i)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

@@ -138,7 +138,9 @@ func TestConfigureDirectoryServiceKeepsRedactedBindPassword(t *testing.T) {
 	if got := args["credential"].(map[string]interface{})["bindpw"]; got != redact.Marker {
 		t.Fatalf("test setup: query_directory_services shows bindpw as %v, want the marker", got)
 	}
-	args["configuration"].(map[string]interface{})["validate_certificates"] = false
+	// Raising TLS protection is fine with a kept secret.
+	args["configuration"].(map[string]interface{})["starttls"] = true
+	args["configuration"].(map[string]interface{})["schema"] = "RFC2307BIS"
 
 	check := func(label, out string) {
 		t.Helper()
@@ -190,8 +192,8 @@ func TestConfigureDirectoryServiceKeepsRedactedBindPassword(t *testing.T) {
 	if got := sent["credential"].(map[string]interface{})["bindpw"]; got != fakeStoredBindPW {
 		t.Errorf("directoryservices.update credential.bindpw = %v, want the stored value (the marker must not be stored)", got)
 	}
-	if got := sent["configuration"].(map[string]interface{})["validate_certificates"]; got != false {
-		t.Errorf("configuration.validate_certificates = %v, want the caller's change", got)
+	if got := sent["configuration"].(map[string]interface{}); got["starttls"] != true || got["schema"] != "RFC2307BIS" {
+		t.Errorf("configuration = %v, want the caller's starttls and schema changes", got)
 	}
 }
 
@@ -238,6 +240,31 @@ func TestConfigureDirectoryServiceRedactedMarkerRefused(t *testing.T) {
 		"embedded marker": {storedLDAPConfig, func(a obj) {
 			a["configuration"].(map[string]interface{})["auxiliary_parameters"] = "x=" + redact.Marker
 		}, "configuration.auxiliary_parameters"},
+		"auxiliary backup URI added": {storedLDAPConfig, func(a obj) {
+			a["configuration"].(map[string]interface{})["auxiliary_parameters"] = "ldap_backup_uri = ldaps://other.example.invalid"
+		}, "configuration.auxiliary_parameters"},
+		"auxiliary ldap_uri redefined": {storedLDAPConfig, func(a obj) {
+			a["configuration"].(map[string]interface{})["auxiliary_parameters"] = "ldap_uri = ldaps://other.example.invalid"
+		}, "configuration.auxiliary_parameters"},
+		"certificate validation turned off": {storedLDAPConfig, func(a obj) {
+			a["configuration"].(map[string]interface{})["validate_certificates"] = false
+		}, "configuration.validate_certificates"},
+		"starttls turned off": {func() obj {
+			st := storedLDAPConfig()
+			st["configuration"].(map[string]interface{})["server_urls"] = []interface{}{"ldap://ldap.example.com"}
+			st["configuration"].(map[string]interface{})["starttls"] = true
+			return st
+		}, func(a obj) {
+			a["configuration"].(map[string]interface{})["starttls"] = false
+		}, "configuration.starttls"},
+		"idmap certificate validation turned off": {func() obj {
+			st := storedADConfig()
+			st["configuration"].(map[string]interface{})["idmap"].(map[string]interface{})["idmap_domain"].(map[string]interface{})["validate_certificates"] = true
+			return st
+		}, func(a obj) {
+			dom := a["configuration"].(map[string]interface{})["idmap"].(map[string]interface{})["idmap_domain"].(map[string]interface{})
+			dom["validate_certificates"] = false
+		}, "configuration.idmap.idmap_domain.validate_certificates"},
 		"idmap URL changed": {storedADConfig, func(a obj) {
 			dom := a["configuration"].(map[string]interface{})["idmap"].(map[string]interface{})["idmap_domain"].(map[string]interface{})
 			dom["ldap_url"] = "ldap://other.example.com"
@@ -424,5 +451,33 @@ func TestUpdateAppConfirmFactsAreFieldLevel(t *testing.T) {
 		if strings.Contains(facts, refuse) {
 			t.Errorf("facts contain %q:\n%s", refuse, facts)
 		}
+	}
+}
+
+// leave_directory_service has no stored credential to keep, so a password
+// sent as the marker is refused before any middleware call instead of
+// costing a failed authentication against the domain account.
+func TestLeaveDirectoryServiceRefusesRedactionMarker(t *testing.T) {
+	for name, pw := range map[string]string{"exact": redact.Marker, "embedded": "x" + redact.Marker} {
+		t.Run(name, func(t *testing.T) {
+			r, fake := dsStoredFake(t, storedADConfig())
+			args := obj{"credential": obj{"credential_type": "KERBEROS_USER", "username": "admin", "password": pw}}
+			for _, extra := range []obj{{"dry_run": true}, {}} {
+				out, err := r.CallTool(t.Context(), "leave_directory_service", withArgs(args, extra))
+				if err == nil {
+					t.Fatalf("leave_directory_service (%v) accepted the marker: %s", extra, out)
+				}
+				if !strings.Contains(err.Error(), "credential.password") || !strings.Contains(err.Error(), redact.Marker) {
+					t.Errorf("error %q, want the path credential.password and the marker named", err)
+				}
+			}
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			for _, c := range fake.calls {
+				if strings.HasPrefix(c.Method, "directoryservices.") {
+					t.Errorf("middleware %s called before the refusal", c.Method)
+				}
+			}
+		})
 	}
 }
