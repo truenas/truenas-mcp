@@ -474,6 +474,20 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Recommends manual scrub frequency
   - **WARNING**: Pool will no longer auto-scrub
 
+## Replication and Snapshot Tasks
+
+- **query_replications** - List replication tasks and their last run
+  - Direction (`PUSH`/`PULL`), transport, source datasets, target dataset, recursion, excludes, retention policy and schedule (with a readable form)
+  - `trigger` says what starts the task: its own schedule, the periodic snapshot tasks it is bound to (`bound_snapshot_tasks`), or manual only. A task bound to a periodic snapshot task ships the snapshots that task created; it does not create any
+  - `last_run` has the state, time, error, warnings and `last_snapshot` (the last snapshot sent); `current_job` is the middleware job of a run in progress or the last run
+  - SSH connection details are never returned: no host, user, port, key pair or host key, only the keychain connection id (`ssh_connection_id`). Encryption keys and key locations, netcat addresses and property overrides are left out as well; only the `encryption` flag is shown
+  - `task_id` returns one task; `limit` bounds the list (default 50, maximum 1000). When the list is cut, `total_replications` and a `note` say so
+- **query_snapshot_tasks** - List periodic snapshot tasks and what their last run covered
+  - Dataset, recursion, excludes, naming schema, schedule, retention, `allow_empty` and `last_snapshot` (the snapshot the task last created, which shows it ran)
+  - For a recursive task, `coverage` lists the datasets the task covers today and which have no snapshot from the last run, for example children created after that run. A replication of the task has nothing to send for those datasets until the task runs again. Dataset lists are capped at 100 entries; the counts are complete
+  - `bound_replications` lists the replication tasks that run after this task
+  - `task_id` returns one task, `dataset` filters by exact dataset, and `limit` bounds the list (default 50, maximum 1000)
+
 ## Task Management
 
 For long-running operations like app upgrades, system updates, and scrubs:

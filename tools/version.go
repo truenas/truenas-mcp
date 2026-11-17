@@ -41,6 +41,9 @@ var toolVersion = map[string]VersionRange{
 	"create_scrub_schedule": {Min: truenas.MinSupported},
 	"run_scrub":             {Min: truenas.MinSupported},
 	"delete_scrub_schedule": {Min: truenas.MinSupported},
+	// Replication and periodic snapshot tasks
+	"query_replications":   {Min: truenas.MinSupported},
+	"query_snapshot_tasks": {Min: truenas.MinSupported},
 	// Directory services
 	"get_directory_service_status": {Min: truenas.MinSupported},
 	"query_directory_services":     {Min: truenas.MinSupported},

@@ -155,12 +155,20 @@
     "handler": "handleQueryPools"
   },
   {
+    "name": "query_replications",
+    "handler": "handleQueryReplications"
+  },
+  {
     "name": "query_scrub_schedules",
     "handler": "handleQueryScrubSchedules"
   },
   {
     "name": "query_shares",
     "handler": "handleQueryShares"
+  },
+  {
+    "name": "query_snapshot_tasks",
+    "handler": "handleQuerySnapshotTasks"
   },
   {
     "name": "query_snapshots",
