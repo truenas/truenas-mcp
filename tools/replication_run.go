@@ -273,6 +273,7 @@ func planRunSnapshotTask(ctx context.Context, client *truenas.Client, args map[s
 
 	warnings := []string{
 		fmt.Sprintf("Creates one snapshot named from the schema '%s' on each of %d dataset(s) now; it fails if a snapshot with that name already exists (for example the task already ran this minute)", schema, len(covered)),
+		"A real run does not create a job: the tool polls the snapshot task's state for up to about 2 minutes, then returns the result. If the run has not finished by then, it returns QUEUED; check query_snapshot_tasks",
 	}
 	if !allowEmpty {
 		warnings = append(warnings, "allow_empty is off: a dataset with no changes since its previous snapshot of this task gets no new snapshot")

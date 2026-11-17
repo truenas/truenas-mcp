@@ -399,7 +399,7 @@ func TestRunSnapshotTaskReturnsCreatedSnapshots(t *testing.T) {
 
 	preview, out := confirmAndRun(t, r, fake, "run_snapshot_task", "pool.snapshottask.run", map[string]interface{}{"task_id": 3.0})
 	body, _ := json.Marshal(preview)
-	for _, want := range []string{"Replication task(s) 1 start when this task finishes", "allow_empty is off", `"datasets_covered":3`} {
+	for _, want := range []string{"Replication task(s) 1 start when this task finishes", "allow_empty is off", `"datasets_covered":3`, "does not create a job", "about 2 minutes", "QUEUED", "query_snapshot_tasks"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("preview missing %q:\n%s", want, body)
 		}
