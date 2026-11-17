@@ -34,6 +34,13 @@ This document provides example natural language queries you can use with TrueNAS
 - "What snapshots exist for my important datasets?"
 - "List snapshots created by automatic snapshot tasks"
 
+## Replication and Snapshot Tasks
+
+- "Show me my replication tasks and when each last ran"
+- "Did the last replication of tank/data succeed?"
+- "Which periodic snapshot task feeds replication task 1?"
+- "Does my recursive snapshot task on tank/data cover every child dataset?"
+
 ## Virtual Machines
 
 - "What VMs are currently running?"
