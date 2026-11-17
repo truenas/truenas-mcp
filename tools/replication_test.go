@@ -167,24 +167,15 @@ func taskQueryFake(t *testing.T, replications, snapTasks []interface{}, datasets
 		case "pool.snapshottask.query":
 			return page(snapTasks), nil, true
 		case "pool.dataset.query":
-			rows := []interface{}{}
-			for _, d := range datasets {
-				rows = append(rows, map[string]interface{}{"name": d, "pool": datasetPool(d), "type": "FILESYSTEM"})
-			}
 			var out []interface{}
-			for _, row := range rows {
-				// Only the pool filter matters here; the type filter is "in".
-				m := row.(map[string]interface{})
-				keep := true
-				for _, f := range filters {
-					arr, _ := f.([]interface{})
-					if len(arr) == 3 && arr[0] == "pool" && m["pool"] != arr[2] {
-						keep = false
-					}
-				}
-				if keep {
+			for _, d := range datasets {
+				row := map[string]interface{}{"id": d, "name": d, "pool": datasetPool(d), "type": "FILESYSTEM"}
+				if jobMatchesFilters(row, filters) {
 					out = append(out, row)
 				}
+			}
+			if out == nil {
+				out = []interface{}{}
 			}
 			return out, nil, true
 		case "pool.snapshot.query":
@@ -537,5 +528,17 @@ func TestCoveredDatasets(t *testing.T) {
 	}
 	if got := coveredDatasets("q", true, nil, names); len(got) != 0 {
 		t.Errorf("missing dataset = %v", got)
+	}
+}
+
+// fixtureTaskDataset is a dataset the shared safety-test fakes know.
+const fixtureTaskDataset = "tank/apps/jellyfin/data"
+
+// replicationTaskFixtures are replication.query and pool.snapshottask.query
+// results for the registry-wide safety tests: task 1 of each kind, runnable.
+func replicationTaskFixtures() map[string]interface{} {
+	return map[string]interface{}{
+		"replication.query":       []interface{}{pushReplicationFixture()},
+		"pool.snapshottask.query": []interface{}{snapshotTaskFixture(1, fixtureTaskDataset, false, []interface{}{}, nil)},
 	}
 }

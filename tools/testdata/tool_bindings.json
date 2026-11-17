@@ -40,6 +40,11 @@
     "plan": "planCreateSMBShare"
   },
   {
+    "name": "create_snapshot",
+    "handler": "(*Registry).handleCreateSnapshotWithDryRun",
+    "plan": "planCreateSnapshot"
+  },
+  {
     "name": "delete_app",
     "handler": "(*Registry).handleDeleteAppWithDryRun",
     "plan": "planDeleteApp",
@@ -189,9 +194,21 @@
     "plan": "planRestoreAlert"
   },
   {
+    "name": "run_replication",
+    "handler": "(*Registry).handleRunReplicationWithDryRun",
+    "plan": "planRunReplication",
+    "execute": "(*Registry).executeRunReplication"
+  },
+  {
     "name": "run_scrub",
     "handler": "(*Registry).handleRunScrubWithDryRun",
     "plan": "planRunScrub"
+  },
+  {
+    "name": "run_snapshot_task",
+    "handler": "(*Registry).handleRunSnapshotTaskWithDryRun",
+    "plan": "planRunSnapshotTask",
+    "execute": "(*Registry).executeRunSnapshotTask"
   },
   {
     "name": "search_app_catalog",

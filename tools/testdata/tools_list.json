@@ -738,6 +738,43 @@
     }
   },
   {
+    "name": "create_snapshot",
+    "description": "Create a ZFS snapshot of a dataset now, for example before changing it. Returns the resulting snapshot name and, for a recursive snapshot, the datasets it was taken on. The snapshot has no retention: it stays until it is deleted. Refused if a snapshot with that name already exists on any dataset it would cover. Use dry_run to preview.",
+    "inputSchema": {
+      "properties": {
+        "dataset": {
+          "description": "Required: Dataset or zvol to snapshot (e.g. 'tank/data')",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without creating (default: false)",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Required: Snapshot name, the part after '@' (letters, digits, '_', '-', '.', ':')",
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "description": "Optional: Also snapshot every child dataset, atomically (default: false)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "dataset",
+        "name"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "delete_app",
     "description": "Remove an installed application. IMPORTANT: Host-path datasets are NOT deleted and must be manually removed after app deletion. Data will be preserved in original locations. Use dry-run mode to preview what will be deleted. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
@@ -1742,6 +1779,38 @@
     }
   },
   {
+    "name": "run_replication",
+    "description": "Run a replication task now, outside its schedule. Returns a job id and a task_id to follow with tasks_get; it does not wait for the transfer. When the job finishes, the task says either that nothing was transferred (no new snapshots) or how many snapshots were sent. A task bound to a periodic snapshot task ships snapshots that already exist and creates none: run run_snapshot_task first to include current data. The preview shows source, target, direction, retention and an estimate of whether anything would be sent. Destructive (retention and allow_from_scratch can delete target snapshots or data): needs confirmation. Refused while the task is running or on hold. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without running (default: false)",
+          "type": "boolean"
+        },
+        "task_id": {
+          "description": "Required: Replication task id (from query_replications)",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "run_scrub",
     "description": "Manually start an immediate scrub on a pool. Returns a task ID for progress tracking when a scrub starts. Only ONLINE or DEGRADED pools are accepted. If the last scrub finished less than (threshold-1) days ago (default threshold 7, so under 6 days), returns scrub_started: false and does not start a scrub. **When to use**: Before critical backups, after hardware changes, when scheduled scrub was missed. Safe to run anytime but adds I/O load. Can be safely interrupted and resumed.",
     "inputSchema": {
@@ -1770,6 +1839,38 @@
     "annotations": {
       "readOnlyHint": false,
       "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "run_snapshot_task",
+    "description": "Run a periodic snapshot task now, outside its schedule. The task's own configuration decides what is snapshotted. Waits briefly for the snapshot job, then reads back and returns the snapshot names it created on each covered dataset (and any covered dataset that has none). Replication tasks bound to the task (auto, no own schedule) start right after it and may prune target snapshots per their retention; the preview lists them. Destructive: needs confirmation. Refused for a disabled task. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without running (default: false)",
+          "type": "boolean"
+        },
+        "task_id": {
+          "description": "Required: Periodic snapshot task id (from query_snapshot_tasks)",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
       "idempotentHint": false,
       "openWorldHint": false
     }

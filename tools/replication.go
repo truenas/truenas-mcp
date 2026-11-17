@@ -228,11 +228,13 @@ func stringList(v interface{}) []string {
 }
 
 func intID(v interface{}) (int, bool) {
-	f, ok := v.(float64)
-	if !ok {
-		return 0, false
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
 	}
-	return int(f), true
+	return 0, false
 }
 
 // simplifyBoundSnapshotTask is a periodic snapshot task as embedded in a

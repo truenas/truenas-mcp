@@ -70,6 +70,7 @@ func (r *Registry) registerTools() {
 	r.registerScrubTools()
 
 	r.registerReplicationTools()
+	r.registerReplicationRunTools()
 
 	r.registerDirectoryServiceTools()
 
