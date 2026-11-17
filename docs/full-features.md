@@ -175,6 +175,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Enforces structured dataset layout: /mnt/<pool>/apps/<appname>/<volume>
   - Validates app instance names (lowercase, alphanumeric, hyphens)
   - Verifies datasets exist before installation
+  - Refuses, naming the path, any value that is or contains `[REDACTED]` (for example copied from another app's `get_app_config`): a new app has no stored value to keep, so the marker would be installed as the real value
   - Supports dry-run mode to preview installation
   - Returns task ID for tracking installation progress
   - The `install_app` and `get_app_catalog_details` tool descriptions describe the install workflow (search, review the schema, plan storage, create datasets, dry-run, then install). Run-as and resource defaults come from the app schema, not from fixed values in the tool result.
@@ -199,7 +200,8 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - New storage entries, and type or location changes that are not a same-type NFS or CIFS server/path change, must be `type: host_path` with a cleaned path under `/mnt/<pool>/` on an existing dataset (the same path and dataset-exists checks as install_app). Unchanged existing entries, including `ix_volume`, are left as they are
   - Changing the type or location of an existing slot, including an NFS or CIFS server or path, requires `allow_storage_change=true`. The preview and confirmation prompt name each changed slot, its old and new location, and state that data is not migrated
   - A change to `read_only` or ACL settings (`acl_enable` or `acl`) on a slot whose type and location are unchanged does not need the flag, but is listed as a plan warning with the old and new values
-  - A value that is exactly `[REDACTED]` (as `get_app_config` shows secrets) keeps the value stored at that path, so a nested object can be resent without overwriting its secret. It is refused, naming the path, if nothing redacted is stored there, if the change would leave the kept value unredacted (for example a renamed or reordered environment entry), or if the enclosing storage entry changes type or location. The preview and confirmation prompt name each kept path, never the value (see [docs/safety.md](safety.md#dry-runs-and-previews))
+  - A value that is exactly `[REDACTED]` (as `get_app_config` shows secrets) keeps the value stored at that path, so a nested object can be resent without overwriting its secret. It is refused, naming the path, if nothing redacted is stored there, if the change would leave the kept value unredacted (for example a renamed or reordered environment entry), if an enclosing entry changes its `name`, `key`, `variable`, `username`, `principal`, `binddn` or `credential_type` (for example `DB_PASSWORD` renamed to `API_TOKEN`), or if the enclosing storage entry changes type or location (judged from both the stored and the sent entry). The preview and confirmation prompt name each kept path, never the value (see [docs/safety.md](safety.md#dry-runs-and-previews))
+  - The confirmation prompt lists each changed leaf field (`network.hostname: "a" -> "b"`) rather than whole nested objects; a changed secret is shown as `changed (secret, not shown)`, and kept paths are listed separately
   - Supports dry-run mode
 
 - **start_app** - Start a stopped application
@@ -254,6 +256,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
     - Query timeout (5-60 seconds, default: 10)
     - Kerberos realm (optional)
     - Service-specific configuration (domain, hostname, etc.)
+  - A secret sent back as `[REDACTED]` (as `query_directory_services` shows it, for example `credential.bindpw` or an idmap `ldap_user_dn_password`) keeps its stored value when the account, backend and directory it belongs to are unchanged; otherwise the call is refused, naming the path. The preview and confirmation prompt name each kept path, never the value (see [docs/safety.md](safety.md#dry-runs-and-previews))
   - Security features:
     - All passwords/keytabs masked in output
     - Validation of credential types and required fields

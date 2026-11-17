@@ -210,14 +210,14 @@ func TestUpdateAppRedactedMarkerInLists(t *testing.T) {
 		peers := values["peers"].([]interface{})
 		peers[0].(map[string]interface{})["preshared_key"] = redact.Marker
 		peers[1].(map[string]interface{})["preshared_key"] = redact.Marker
-		peers[1].(map[string]interface{})["name"] = "b2"
+		peers[1].(map[string]interface{})["keepalive"] = 25.0
 		if _, err := callUpdateApp(t, r, values, nil); err != nil {
 			t.Fatalf("update_app: %v", err)
 		}
 		sent := updateAppPayload(t, fake)["peers"].([]interface{})
 		if sent[0].(map[string]interface{})["preshared_key"] != "fake-psk-a-0000" ||
 			sent[1].(map[string]interface{})["preshared_key"] != "fake-psk-b-0000" ||
-			sent[1].(map[string]interface{})["name"] != "b2" {
+			sent[1].(map[string]interface{})["keepalive"] != 25.0 {
 			t.Errorf("app.update peers = %v, want stored keys kept by index", sent)
 		}
 	})
@@ -309,7 +309,7 @@ func TestUpdateAppPlanMasksKeptSecretBeforeRedaction(t *testing.T) {
 		t.Errorf("CallParams still carry the marker: %s", params)
 	}
 	summary := strings.Join(plan.ConfirmSummary.forDisplay().Facts, "\n")
-	if !strings.Contains(summary, "network.auth_key") || !strings.Contains(summary, "network: ") {
+	if !strings.Contains(summary, "network.auth_key") || !strings.Contains(summary, `network.hostname: "app-node" -> "app-node-2"`) {
 		t.Errorf("confirmation facts %q, want the changed key and the kept path", summary)
 	}
 }
