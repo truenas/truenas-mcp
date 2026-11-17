@@ -463,12 +463,15 @@ func (r *Registry) executeRunSnapshotTask(ctx context.Context, client *truenas.C
 	}
 	last := cur.LastSnapshot
 	if last == before.LastSnapshot {
-		// zettarepl reports a manual run whose snapshot name already
-		// exists (the task already ran this minute) as a success for the
-		// existing snapshot.
+		// zettarepl treats an already-existing snapshot name as success
+		// only during a DST step-back (zettarepl.py:178 on 25.10 and 27).
+		// Otherwise it reports ERROR, and the tool already returns a
+		// failure above. A FINISHED run whose last_snapshot did not
+		// change is that DST case: the name already existed and no new
+		// snapshot was created.
 		response["snapshot_name"] = snapName
 		response["new_snapshot"] = false
-		msg := fmt.Sprintf("Periodic snapshot task %d ran, but its snapshot %s already existed (the task already ran within the time its naming schema resolves to), so this run created no new snapshot", id, last)
+		msg := fmt.Sprintf("Periodic snapshot task %d ran, but its snapshot %s already existed (zettarepl treats an existing name as success only during a DST step-back), so this run created no new snapshot", id, last)
 		if after, _ := plan.Result["after"].([]string); len(after) > 0 {
 			response["replications_started_after"] = after
 			msg += fmt.Sprintf(". Replication task(s) %s still start after it", strings.Join(after, ", "))
@@ -808,16 +811,18 @@ func (r *Registry) handleRunReplicationWithDryRun(ctx context.Context, client *t
 // zettarepl plugin sets when a snapshot send starts or progresses
 // (_set_replication_task_progress, the same on 25.10 and 27):
 //
-//	Sending {sent+1} of {total}: {dataset}@{snapshot}[ ({bytes} / {bytes})][ [total {dst} of {src}]]
+//	Sending {sent+1} of {total}: {dataset}@{snapshot}[ ({bytes} / {bytes})][ [total {dst} of {max}]]
 //
 // sent and total come from zettarepl's GlobalReplicationContext, which is
 // one per replication task and sums over every source dataset and child
 // of the run, so they are task-wide counts, not per-dataset ones.
 var replicationProgressPattern = regexp.MustCompile(`^Sending (\d+) of (\d+): (\S+)`)
 
-// replicationSizePattern is the optional "[total {dst} of {src}]" suffix:
-// the used size of the target and the source dataset of the source being
-// replicated, not the amount of data sent.
+// replicationSizePattern is the optional "[total {dst} of {max}]" suffix.
+// dst is the used size of the target of the dataset being replicated;
+// max is max(source used, target used). Middleware uses the max so the
+// "of" value is never smaller than the target. This is not the amount of
+// data sent.
 var replicationSizePattern = regexp.MustCompile(`\[total (.+?) of (.+?)\]$`)
 
 // replicationOutcome reads a finished replication.run job. middleware sets
@@ -872,7 +877,7 @@ func replicationOutcome(sources []string) func(job map[string]interface{}) (stri
 			msg += fmt.Sprintf(" (%d were planned; a planned count above the sent count usually means an attempt failed and was retried)", planned)
 		}
 		if t := replicationSizePattern.FindStringSubmatch(desc); t != nil {
-			out["last_source_size"] = map[string]interface{}{"target_used": t[1], "source_used": t[2]}
+			out["last_source_size"] = map[string]interface{}{"target_used": t[1], "max_used": t[2]}
 		}
 		return msg, out
 	}
@@ -923,8 +928,8 @@ func (r *Registry) executeRunReplication(ctx context.Context, client *truenas.Cl
 
 // disabledReplicationRuns says what replication.run does with a disabled
 // task on the connected TrueNAS: 25.10 refuses it ("Task is not enabled"),
-// 26.0 and later run it (middleware NAS-141823). It returns "refused",
-// "runs", or "" when the version is not known.
+// while middleware allows running disabled replications from 26.0. It
+// returns "refused", "runs", or "" when the version is not known.
 func disabledReplicationRuns(ctx context.Context, client *truenas.Client) string {
 	v, err, ok := client.SessionVersion(ctx)
 	if !ok || err != nil || v.IsZero() {
@@ -1056,12 +1061,9 @@ func snapshotTaskInteractionWarnings(ctx context.Context, client *truenas.Client
 		}
 	}
 	raw, err := client.Call(ctx, "replication.query", []interface{}{}, map[string]interface{}{"order_by": []string{"id"}})
-	if err != nil {
-		return append(warnings, "Could not check replication tasks (replication.query failed); a manual snapshot on a replication target can make its next incremental receive fail")
-	}
 	var rows []map[string]interface{}
-	if json.Unmarshal(raw, &rows) != nil {
-		return warnings
+	if err != nil || json.Unmarshal(raw, &rows) != nil {
+		return append(warnings, "Could not check replication tasks (replication.query failed); a manual snapshot on a replication target can make its next incremental receive fail")
 	}
 	var ships, targets []string
 	for _, row := range rows {

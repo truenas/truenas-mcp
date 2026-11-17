@@ -262,7 +262,7 @@ func TestRunReplicationSentSnapshots(t *testing.T) {
 	}
 	res := task["result"].(map[string]interface{})
 	size, _ := res["last_source_size"].(map[string]interface{})
-	if res["transferred"] != true || res["snapshots_sent"] != 3.0 || res["snapshots_planned"] != 3.0 || size["target_used"] != "2.5 GiB" || size["source_used"] != "2.5 GiB" {
+	if res["transferred"] != true || res["snapshots_sent"] != 3.0 || res["snapshots_planned"] != 3.0 || size["target_used"] != "2.5 GiB" || size["max_used"] != "2.5 GiB" {
 		t.Errorf("result = %v", res)
 	}
 }

@@ -95,8 +95,10 @@ func TestRunSnapshotTaskErrorState(t *testing.T) {
 	}
 }
 
-// A manual run whose snapshot name already exists is reported by zettarepl
-// as success for the existing snapshot: last_snapshot does not change.
+// zettarepl treats an already-existing snapshot name as success only
+// during a DST step-back; last_snapshot is then unchanged. Otherwise it
+// reports ERROR (covered by TestRunSnapshotTaskErrorState). This is the
+// DST success path.
 func TestRunSnapshotTaskSnapshotAlreadyExisted(t *testing.T) {
 	shortSnapshotTaskWait(t, 2*time.Second)
 	const last = "auto-2026-01-05_00-00"
@@ -109,7 +111,8 @@ func TestRunSnapshotTaskSnapshotAlreadyExisted(t *testing.T) {
 	r, fake, _ := newRunRegistry(t, nil, []interface{}{task}, []string{"tank", "tank/data"}, &snaps, rf)
 	_, out := confirmAndRun(t, r, fake, "run_snapshot_task", "pool.snapshottask.run", map[string]interface{}{"task_id": 3.0})
 	resp := decodeObj(t, out)
-	if resp["state"] != "FINISHED" || resp["new_snapshot"] != false || !strings.Contains(resp["message"].(string), "already existed") {
+	msg, _ := resp["message"].(string)
+	if resp["state"] != "FINISHED" || resp["new_snapshot"] != false || !strings.Contains(msg, "already existed") || !strings.Contains(msg, "DST step-back") {
 		t.Errorf("response = %v", resp)
 	}
 }
@@ -210,6 +213,13 @@ func TestReplicationOutcomeTaskWideCount(t *testing.T) {
 		if !strings.Contains(msg, "all source datasets") {
 			t.Errorf("%q: message = %q", tc.desc, msg)
 		}
+	}
+	// "[total {dst} of {max}]": max is max(source used, target used), not
+	// the source used size alone. When the target is smaller, they differ.
+	_, res := outcome(map[string]interface{}{"progress": map[string]interface{}{"description": "Sending 1 of 1: tank/a@s1 [total 2.5 GiB of 4.0 GiB]"}})
+	size, _ := res.(map[string]interface{})["last_source_size"].(map[string]interface{})
+	if size["target_used"] != "2.5 GiB" || size["max_used"] != "4.0 GiB" || size["source_used"] != nil {
+		t.Errorf("last_source_size = %v, want target_used 2.5 GiB and max_used 4.0 GiB", size)
 	}
 }
 
@@ -362,6 +372,40 @@ func TestCreateSnapshotTaskInteractionWarnings(t *testing.T) {
 	}
 	if len(fake.called("pool.snapshot.create")) != 0 {
 		t.Error("dry run created a snapshot")
+	}
+}
+
+// A failed or unreadable replication.query still warns that replication
+// tasks could not be checked. An unreadable result must not drop the warning.
+func TestCreateSnapshotReplicationQueryCheckFails(t *testing.T) {
+	datasets := []string{"tank", "tank/data"}
+	for _, tc := range []struct {
+		name string
+		ret  interface{}
+		err  map[string]interface{}
+	}{
+		{"failed", nil, map[string]interface{}{"message": "Not authorized", "code": -32001}},
+		{"unreadable", map[string]interface{}{"not": "a list"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snaps := []map[string]interface{}{}
+			r, fake, _ := newRunRegistry(t, nil, nil, datasets, &snaps, &runFake{})
+			inner := fake.handle
+			fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+				if method == "replication.query" {
+					return tc.ret, tc.err, true
+				}
+				return inner(method, params)
+			}
+			resp := callTool(t, r, "create_snapshot", map[string]interface{}{"dataset": "tank/data", "name": "manual-1", "dry_run": true})
+			w := strings.Join(toStrings(resp["warnings"]), "|")
+			if !strings.Contains(w, "Could not check replication") {
+				t.Errorf("warnings = %s, want a could-not-check-replication warning", w)
+			}
+			if len(fake.called("pool.snapshot.create")) != 0 {
+				t.Error("dry run created a snapshot")
+			}
+		})
 	}
 }
 
