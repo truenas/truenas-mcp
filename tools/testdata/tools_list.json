@@ -2001,7 +2001,7 @@
           "type": "boolean"
         },
         "values": {
-          "description": "Updated configuration values. Use get_app_config to retrieve current values first. Storage may be omitted to leave current storage unchanged. If a partial storage object is sent, omitted slots are filled from the current config before the update is submitted. When a provided slot keeps the same type and location, omitted top-level keys and omitted fields of host_path_config, nfs_config, and cifs_config are also filled from the current slot. New entries, and type or location changes that are not a same-type NFS or CIFS server/path change, must be host_path; unchanged existing entries, including ix_volume, are left as they are.",
+          "description": "Updated configuration values. Use get_app_config to retrieve current values first. Storage may be omitted to leave current storage unchanged. If a partial storage object is sent, omitted slots are filled from the current config before the update is submitted. When a provided slot keeps the same type and location, omitted top-level keys and omitted fields of host_path_config, nfs_config, and cifs_config are also filled from the current slot. New entries, and type or location changes that are not a same-type NFS or CIFS server/path change, must be host_path; unchanged existing entries, including ix_volume, are left as they are. A value that is exactly [REDACTED] (as get_app_config shows secrets) keeps the stored value at that path; the update is refused if nothing is stored there.",
           "type": "object"
         }
       },
