@@ -35,9 +35,13 @@ var dsScopeFields = []valuePath{
 
 // dsTLSFields are boolean fields that protect a stored secret on the wire
 // (LDAP and IPA certificate validation and STARTTLS, and an idmap
-// backend's certificate validation). With a kept secret they may not be
-// turned off relative to the stored config at the same path.
-var dsTLSFields = map[string]bool{"validate_certificates": true, "starttls": true}
+// backend's certificate validation), mapped to their middleware default.
+// With a kept secret they may not be turned off relative to the stored
+// config at the same path. directoryservices.update merges only top-level
+// keys, so a field omitted from a sent object takes its default: an
+// omitted field whose default is false (starttls) counts as turned off;
+// validate_certificates defaults to true, so omitting it is allowed.
+var dsTLSFields = map[string]bool{"validate_certificates": true, "starttls": false}
 
 // restoreDirectoryServiceSecrets replaces every value in payload that is
 // exactly redact.Marker with the value stored at the same path in the
@@ -78,8 +82,10 @@ func restoreDirectoryServiceSecrets(ctx context.Context, client *truenas.Client,
 //     sent, kerberos_realm and the configuration's domain, target_server,
 //     server_urls and auxiliary_parameters match the stored config;
 //   - no certificate validation or STARTTLS flag (anywhere in the payload,
-//     including idmap backends) is turned off where the stored config has
-//     it on. Turning one on is fine.
+//     including idmap backends and trusted domains) is turned off where the
+//     stored config has it on, either explicitly or, for a flag whose
+//     middleware default is false, by omitting it from a sent object.
+//     Turning one on is fine.
 func checkDirectoryServiceKept(kept []valuePath, stored, next map[string]interface{}) error {
 	if len(kept) == 0 {
 		return nil
@@ -127,7 +133,40 @@ func checkDirectoryServiceKept(kept []valuePath, stored, next map[string]interfa
 			return err
 		}
 	}
-	return checkDSTLSKept(kept[0], stored, next, nil)
+	if err := checkDSTLSKept(kept[0], stored, next, nil); err != nil {
+		return err
+	}
+	return checkDSTLSOmitted(kept[0], stored, next, stored, nil)
+}
+
+// checkDSTLSOmitted refuses, naming kept path p, when a dsTLSFields field
+// whose middleware default is false is true in the stored config but
+// omitted from next, while next sends the top-level object holding it (so
+// the middleware resets the field to its default instead of keeping it).
+func checkDSTLSOmitted(p valuePath, stored, next map[string]interface{}, cur interface{}, path valuePath) error {
+	switch x := cur.(type) {
+	case map[string]interface{}:
+		for _, k := range sortedKeys(x) {
+			child := appendPath(path, k)
+			if def, isTLS := dsTLSFields[k]; isTLS && !def && x[k] == true && len(child) > 1 {
+				if _, sent := getValuePath(next, child[:1]); sent {
+					if _, ok := getValuePath(next, child); !ok {
+						return fmt.Errorf("%s is the redaction marker %s, but %s is omitted while the stored config has it on; the middleware would reset it to false, so the stored secret is not kept. Send %s: true, or send the real value instead", p, redact.Marker, child, k)
+					}
+				}
+			}
+			if err := checkDSTLSOmitted(p, stored, next, x[k], child); err != nil {
+				return err
+			}
+		}
+	case []interface{}:
+		for i, c := range x {
+			if err := checkDSTLSOmitted(p, stored, next, c, appendPath(path, i)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // checkDSTLSKept refuses, naming kept path p, when any dsTLSFields field in
@@ -137,7 +176,8 @@ func checkDSTLSKept(p valuePath, stored map[string]interface{}, next interface{}
 	case map[string]interface{}:
 		for _, k := range sortedKeys(x) {
 			child := appendPath(path, k)
-			if b, ok := x[k].(bool); ok && dsTLSFields[k] && !b {
+			_, isTLS := dsTLSFields[k]
+			if b, ok := x[k].(bool); ok && isTLS && !b {
 				if cv, _ := getValuePath(stored, child); cv == true {
 					return fmt.Errorf("%s is the redaction marker %s, but %s turns off a TLS protection the stored config has, so the stored secret is not kept; send the real value instead, or leave %s on", p, redact.Marker, child, k)
 				}

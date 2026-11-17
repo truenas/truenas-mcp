@@ -256,7 +256,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
     - Query timeout (5-60 seconds, default: 10)
     - Kerberos realm (optional)
     - Service-specific configuration (domain, hostname, etc.)
-  - A secret sent back as `[REDACTED]` (as `query_directory_services` shows it, for example `credential.bindpw` or an idmap `ldap_user_dn_password`) keeps its stored value when the account, backend and directory it belongs to (including LDAP `auxiliary_parameters`) are unchanged and no `validate_certificates` or `starttls` flag is turned off; otherwise the call is refused, naming the path. The preview and confirmation prompt name each kept path, never the value (see [docs/safety.md](safety.md#dry-runs-and-previews))
+  - A secret sent back as `[REDACTED]` (as `query_directory_services` shows it, for example `credential.bindpw` or an idmap `ldap_user_dn_password`) keeps its stored value when the account, backend and directory it belongs to (including LDAP `auxiliary_parameters`) are unchanged and no `validate_certificates` or `starttls` flag is turned off (leaving out `starttls`, whose default is false, counts as turning it off); otherwise the call is refused, naming the path. The preview and confirmation prompt name each kept path, never the value (see [docs/safety.md](safety.md#dry-runs-and-previews))
   - Security features:
     - All passwords/keytabs masked in output
     - Validation of credential types and required fields

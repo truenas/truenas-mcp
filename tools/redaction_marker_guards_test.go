@@ -257,6 +257,14 @@ func TestConfigureDirectoryServiceRedactedMarkerRefused(t *testing.T) {
 		}, func(a obj) {
 			a["configuration"].(map[string]interface{})["starttls"] = false
 		}, "configuration.starttls"},
+		"starttls omitted (middleware default false)": {func() obj {
+			st := storedLDAPConfig()
+			st["configuration"].(map[string]interface{})["server_urls"] = []interface{}{"ldap://ldap.example.com"}
+			st["configuration"].(map[string]interface{})["starttls"] = true
+			return st
+		}, func(a obj) {
+			delete(a["configuration"].(map[string]interface{}), "starttls")
+		}, "configuration.starttls"},
 		"idmap certificate validation turned off": {func() obj {
 			st := storedADConfig()
 			st["configuration"].(map[string]interface{})["idmap"].(map[string]interface{})["idmap_domain"].(map[string]interface{})["validate_certificates"] = true
@@ -326,6 +334,22 @@ func TestConfigureDirectoryServiceKeepsRedactedAuxiliaryParameters(t *testing.T)
 	_, err := r.CallTool(t.Context(), "configure_directory_service", withArgs(args, obj{"dry_run": true}))
 	if err == nil || !strings.Contains(err.Error(), "configuration.auxiliary_parameters") || strings.Contains(err.Error(), "fake-aux-secret") {
 		t.Errorf("err = %v, want a refusal naming configuration.auxiliary_parameters", err)
+	}
+}
+
+// validate_certificates defaults to true in the middleware, so omitting it
+// from a sent configuration does not weaken TLS and a kept secret is still
+// kept.
+func TestConfigureDirectoryServiceKeptSecretAllowsOmittedValidateCertificates(t *testing.T) {
+	stored := storedLDAPConfig()
+	r, fake := dsStoredFake(t, stored)
+	args := dsArgsFromQuery(t, stored)
+	delete(args["configuration"].(map[string]interface{}), "validate_certificates")
+	if _, err := r.CallTool(t.Context(), "configure_directory_service", approve(t, r, "configure_directory_service", args)); err != nil {
+		t.Fatalf("configure_directory_service: %v", err)
+	}
+	if got := dsUpdateSent(t, fake)["credential"].(map[string]interface{})["bindpw"]; got != fakeStoredBindPW {
+		t.Errorf("credential.bindpw = %v, want the stored value", got)
 	}
 }
 
