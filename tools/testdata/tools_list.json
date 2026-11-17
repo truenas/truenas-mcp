@@ -1502,6 +1502,31 @@
     }
   },
   {
+    "name": "query_replications",
+    "description": "List configured ZFS replication tasks and the state of each: direction (PUSH/PULL), transport, source datasets, target dataset, recursion, schedule or the periodic snapshot tasks it is bound to, retention policy, and the last run (state, time, error, warnings, last snapshot sent). SSH connection details are not returned; only the keychain connection id is. Use 'task_id' for one task and 'limit' to bound the list (default: 50, maximum: 1000).",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Optional: Maximum number of tasks to return (default: 50, maximum: 1000)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "task_id": {
+          "description": "Optional: Replication task id (from this tool) to return only that task",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "query_scrub_schedules",
     "description": "Query configured scrub schedules for all pools. Scrubs verify data integrity by reading all blocks and checking checksums, detecting and repairing silent corruption. Use filtering to view specific pools or only enabled schedules.",
     "inputSchema": {
@@ -1538,6 +1563,35 @@
             "all"
           ],
           "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "query_snapshot_tasks",
+    "description": "List periodic snapshot tasks: dataset, recursion and excludes, naming schema, schedule, retention, the last run and last_snapshot (the snapshot the task last created, which proves it ran). For a recursive task, 'coverage' lists the datasets the task covers today and which of them have no snapshot from the last run (for example children created after it ran), so a gap in what a replication will ship is visible. 'bound_replications' lists the replication tasks that run after this task. Use 'task_id' for one task, 'dataset' for an exact dataset, and 'limit' to bound the list (default: 50, maximum: 1000).",
+    "inputSchema": {
+      "properties": {
+        "dataset": {
+          "description": "Optional: Return only tasks on this dataset (exact match)",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Optional: Maximum number of tasks to return (default: 50, maximum: 1000)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "task_id": {
+          "description": "Optional: Periodic snapshot task id (from this tool) to return only that task",
+          "minimum": 1,
+          "type": "integer"
         }
       },
       "type": "object"

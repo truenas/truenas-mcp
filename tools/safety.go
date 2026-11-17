@@ -83,6 +83,10 @@ var toolSafety = map[string]Safety{
 	"run_scrub":             {Access: Write},
 	"delete_scrub_schedule": {Access: Destructive, Idempotent: true},
 
+	// Replication and periodic snapshot tasks
+	"query_replications":   {Access: Read},
+	"query_snapshot_tasks": {Access: Read},
+
 	// Directory services
 	"get_directory_service_status": {Access: Read},
 	"query_directory_services":     {Access: Read},
