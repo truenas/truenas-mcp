@@ -324,3 +324,141 @@ func TestRestoreRedactedValuesLeavesUnmarkedValues(t *testing.T) {
 		t.Errorf("out = %v, want %v", out, values)
 	}
 }
+
+const fakeEnvSecret = "fake-env-secret-0000"
+
+func envAppConfig() map[string]interface{} {
+	cfg := issue157IxVolumeConfig()
+	cfg["TZ"] = "UTC"
+	cfg["env"] = []interface{}{
+		map[string]interface{}{"name": "DB_PASSWORD", "value": fakeEnvSecret},
+		map[string]interface{}{"name": "LOG_LEVEL", "value": "info"},
+	}
+	return cfg
+}
+
+func envEntry(name, value string) map[string]interface{} {
+	return map[string]interface{}{"name": name, "value": value}
+}
+
+// A value masked only because of a sibling (an env entry's name) is kept
+// when the sibling is unchanged.
+func TestUpdateAppRedactedEnvValueKeptWhenUnchanged(t *testing.T) {
+	current := envAppConfig()
+	masked := redact.Value(cloneValues(current)).(map[string]interface{})
+	if got := masked["env"].([]interface{})[0].(map[string]interface{})["value"]; got != redact.Marker {
+		t.Fatalf("test setup: env[0].value is shown as %v, want the marker", got)
+	}
+	r, fake := issue157Registry(t, current, false)
+	values := cloneValues(masked)
+	values["env"].([]interface{})[1].(map[string]interface{})["value"] = "debug"
+	if _, err := callUpdateApp(t, r, values, nil); err != nil {
+		t.Fatalf("update_app: %v", err)
+	}
+	env := updateAppPayload(t, fake)["env"].([]interface{})
+	if env[0].(map[string]interface{})["value"] != fakeEnvSecret || env[1].(map[string]interface{})["value"] != "debug" {
+		t.Errorf("app.update env = %v, want the stored secret kept and LOG_LEVEL changed", env)
+	}
+}
+
+// Blocker: keeping a stored secret where the outgoing values would no
+// longer redact it (a renamed or reordered env entry) must be refused, or
+// the next get_app_config shows the secret in clear.
+func TestUpdateAppRedactedMarkerRefusedWhenNoLongerRedacted(t *testing.T) {
+	for name, env := range map[string][]interface{}{
+		"rename":  {envEntry("VISIBLE_NAME", redact.Marker), envEntry("LOG_LEVEL", "info")},
+		"reorder": {envEntry("LOG_LEVEL", redact.Marker), envEntry("DB_PASSWORD", redact.Marker)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			current := envAppConfig()
+			r, fake := issue157Registry(t, current, false)
+			values := cloneValues(current)
+			values["env"] = env
+			for _, extra := range []map[string]interface{}{{"dry_run": true}, nil} {
+				out, err := callUpdateApp(t, r, cloneValues(values), extra)
+				if err == nil {
+					t.Fatalf("update_app (%v) kept a secret where it is no longer redacted: %s", extra, out)
+				}
+				if !strings.Contains(err.Error(), "env[0].value") {
+					t.Errorf("error %q, want the path env[0].value", err)
+				}
+				if strings.Contains(err.Error(), fakeEnvSecret) {
+					t.Errorf("error leaks the stored value: %v", err)
+				}
+			}
+			if n := len(fake.called("app.update")); n != 0 {
+				t.Errorf("app.update called %d times", n)
+			}
+		})
+	}
+}
+
+// A marker on a stored value that get_app_config does not redact is not
+// "kept": it is refused.
+func TestUpdateAppRedactedMarkerOnNonSecretRefused(t *testing.T) {
+	current := envAppConfig()
+	r, fake := issue157Registry(t, current, false)
+	values := cloneValues(current)
+	values["TZ"] = redact.Marker
+	_, err := callUpdateApp(t, r, values, nil)
+	if err == nil || !strings.Contains(err.Error(), "values.TZ") {
+		t.Fatalf("err = %v, want a refusal naming values.TZ", err)
+	}
+	if n := len(fake.called("app.update")); n != 0 {
+		t.Errorf("app.update called %d times", n)
+	}
+}
+
+func cifsAppConfig(server string) map[string]interface{} {
+	return issue157ConfigWithAdditional(issue157CIFSEntry(server, "/media", "/mnt/smb"))
+}
+
+func cifsValuesWithMarker(server string) map[string]interface{} {
+	values := cifsAppConfig(server)
+	entry := values["storage"].(map[string]interface{})["additional_storage"].([]interface{})[0].(map[string]interface{})
+	entry["cifs_config"].(map[string]interface{})["password"] = redact.Marker
+	entry["read_only"] = true
+	return values
+}
+
+func cifsPasswordSent(t *testing.T, fake *fakeMiddleware) interface{} {
+	t.Helper()
+	add := storageOf(updateAppPayload(t, fake))["additional_storage"].([]interface{})
+	return add[0].(map[string]interface{})["cifs_config"].(map[string]interface{})["password"]
+}
+
+// A CIFS password sent back as the marker is kept when the share's
+// server and path are unchanged.
+func TestUpdateAppRedactedCIFSPasswordKeptOnSameShare(t *testing.T) {
+	r, fake := issue157Registry(t, cifsAppConfig("files.example.invalid"), false)
+	if _, err := callUpdateApp(t, r, cifsValuesWithMarker("files.example.invalid"), nil); err != nil {
+		t.Fatalf("update_app: %v", err)
+	}
+	if got := cifsPasswordSent(t, fake); got != issue157CIFSPassword {
+		t.Errorf("app.update cifs password = %v, want the stored password", got)
+	}
+}
+
+// Blocker: the stored CIFS password must not be sent to a different
+// server, even with allow_storage_change.
+func TestUpdateAppRedactedCIFSPasswordRefusedOnServerChange(t *testing.T) {
+	r, fake := issue157Registry(t, cifsAppConfig("files.example.invalid"), false)
+	for _, extra := range []map[string]interface{}{
+		{"allow_storage_change": true, "dry_run": true},
+		{"allow_storage_change": true},
+	} {
+		out, err := callUpdateApp(t, r, cifsValuesWithMarker("other.example.invalid"), extra)
+		if err == nil {
+			t.Fatalf("update_app (%v) sent the stored CIFS password to a new server: %s", extra, out)
+		}
+		if !strings.Contains(err.Error(), "storage.additional_storage[0].cifs_config.password") {
+			t.Errorf("error %q, want the kept path", err)
+		}
+		if strings.Contains(err.Error(), issue157CIFSPassword) {
+			t.Errorf("error leaks the stored password: %v", err)
+		}
+	}
+	if n := len(fake.called("app.update")); n != 0 {
+		t.Errorf("app.update called %d times", n)
+	}
+}

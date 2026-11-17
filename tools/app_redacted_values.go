@@ -99,7 +99,7 @@ func restoreRedactedValue(v, cur interface{}, curOK bool, path valuePath, kept *
 		stored, ok := cur.(string)
 		if x == redact.Marker {
 			if !curOK || !ok || stored == "" {
-				return nil, fmt.Errorf("values.%s is the redaction marker %s, but the current app config has no stored secret at that path to keep; send the real value instead (omitting it may clear it)", path, redact.Marker)
+				return nil, fmt.Errorf("values.%s is the redaction marker %s, but the current app config has no non-empty text value at that path to keep; send the real value instead (omitting it may clear it)", path, redact.Marker)
 			}
 			*kept = append(*kept, path)
 			return stored, nil
@@ -111,6 +111,83 @@ func restoreRedactedValue(v, cur interface{}, curOK bool, path valuePath, kept *
 	default:
 		return v, nil
 	}
+}
+
+// checkKeptValues refuses a kept path unless keeping it is safe:
+//   - get_app_config redacts the stored value there (redact.Value of current
+//     has the marker at that path), so only real redacted secrets are kept;
+//   - the outgoing values still redact it there after substitution and
+//     storage processing, so a renamed or reordered sibling (for example an
+//     env entry name) cannot move the secret out from under redaction;
+//   - no enclosing storage entry changed its type or location, so a stored
+//     share credential is never sent to a different server or path (the
+//     same rule that limits filling omitted storage fields).
+func checkKeptValues(kept []valuePath, current, next map[string]interface{}) error {
+	if len(kept) == 0 {
+		return nil
+	}
+	shownCurrent := redact.Value(deepCopyValue(current))
+	shownNext := redact.Value(deepCopyValue(next))
+	for _, p := range kept {
+		if v, ok := getValuePath(shownCurrent, p); !ok || v != redact.Marker {
+			return fmt.Errorf("values.%s is the redaction marker %s, but get_app_config does not redact the stored value at that path, so it cannot be kept; send the real value instead", p, redact.Marker)
+		}
+		if v, ok := getValuePath(shownNext, p); !ok || v != redact.Marker {
+			return fmt.Errorf("values.%s is the redaction marker %s, but keeping the stored value there would leave it unredacted because the fields around it changed (for example a renamed or reordered entry); send the real value instead, or keep the surrounding fields unchanged", p, redact.Marker)
+		}
+		for i := len(p) - 1; i > 0; i-- {
+			prefix := p[:i]
+			nextEntry, _ := getValuePath(next, prefix)
+			nextMap, ok := nextEntry.(map[string]interface{})
+			if !ok || !isStorageEntryShape(nextMap) {
+				continue
+			}
+			curEntry, _ := getValuePath(current, prefix)
+			curMap, _ := curEntry.(map[string]interface{})
+			if !storageLocationUnchanged(curMap, nextMap) {
+				return fmt.Errorf("values.%s is the redaction marker %s, but the storage entry %s changes type or location, so its stored value is not kept; send the real value for the new location", p, redact.Marker, prefix)
+			}
+		}
+	}
+	return nil
+}
+
+// isStorageEntryShape reports whether m looks like a catalog storage
+// entry: a string type plus a <type>_config object.
+func isStorageEntryShape(m map[string]interface{}) bool {
+	typ := storageEntryType(m)
+	if typ == "" {
+		return false
+	}
+	_, ok := m[typ+"_config"].(map[string]interface{})
+	return ok
+}
+
+func getValuePath(root interface{}, p valuePath) (interface{}, bool) {
+	cur := root
+	for _, seg := range p {
+		switch c := cur.(type) {
+		case map[string]interface{}:
+			k, ok := seg.(string)
+			if !ok {
+				return nil, false
+			}
+			v, exists := c[k]
+			if !exists {
+				return nil, false
+			}
+			cur = v
+		case []interface{}:
+			idx, ok := seg.(int)
+			if !ok || idx < 0 || idx >= len(c) {
+				return nil, false
+			}
+			cur = c[idx]
+		default:
+			return nil, false
+		}
+	}
+	return cur, true
 }
 
 func appendPath(p valuePath, seg interface{}) valuePath {

@@ -1215,6 +1215,10 @@ func planUpdateApp(ctx context.Context, client *truenas.Client, args map[string]
 		}
 	}
 
+	if err := checkKeptValues(kept, currentConfig, valuesOut); err != nil {
+		return nil, err
+	}
+
 	warnings := []string{
 		"App containers will be restarted to apply configuration changes.",
 	}
