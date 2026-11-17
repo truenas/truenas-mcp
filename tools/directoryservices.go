@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/truenas/truenas-mcp/mcp"
+	"github.com/truenas/truenas-mcp/redact"
 	"github.com/truenas/truenas-mcp/tasks"
 	"github.com/truenas/truenas-mcp/truenas"
 )
@@ -72,7 +73,7 @@ func (r *Registry) registerDirectoryServiceTools() {
 	r.tools["configure_directory_service"] = Tool{
 		Definition: mcp.Tool{
 			Name: "configure_directory_service",
-			Description: `Configure and join a directory service (Active Directory, LDAP, or IPA) with TrueNAS directoryservices.update (TrueNAS 25.10 or later). Setting enable=true joins the domain automatically the first time. The arguments are the fields of that API call. Omitted optional fields keep their current value.
+			Description: `Configure and join a directory service (Active Directory, LDAP, or IPA) with TrueNAS directoryservices.update (TrueNAS 25.10 or later). Setting enable=true joins the domain automatically the first time. The arguments are the fields of that API call. Omitted optional fields keep their current value. A secret sent as [REDACTED] (as query_directory_services shows it) keeps its stored value only when its account, server and directory are unchanged; otherwise the call is refused.
 
 **To enable or change a service, service_type, credential, configuration and enable are all required, and configuration must match service_type. The old flat arguments (type, server, bindname, netbiosname, ssl, domain, ...) no longer exist: put them in credential and configuration as below.**
 
@@ -202,7 +203,7 @@ idmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed t
 
 TrueNAS removes its computer account from the domain using the credential you provide, then resets its local directory service configuration and disables the service. LDAP cannot be left; use configure_directory_service with enable=false to disable it.
 
-**credential is required:** a KERBEROS_USER credential, {credential_type: "KERBEROS_USER", username: "admin", password: "pass"}, for an account with the administrative privileges needed to remove the computer account. It is used for this operation only and is never shown: the password is masked in the dry run and in stored task data.
+**credential is required:** a KERBEROS_USER credential, {credential_type: "KERBEROS_USER", username: "admin", password: "pass"}, for an account with the administrative privileges needed to remove the computer account. It is used for this operation only and is never shown: the password is masked in the dry run and in stored task data. A password that is or contains [REDACTED] is refused.
 
 **WARNING:** This is a destructive operation:
 - Removes TrueNAS from the domain
@@ -550,6 +551,14 @@ func planConfigureDirectoryService(ctx context.Context, client *truenas.Client, 
 	if err != nil {
 		return nil, err
 	}
+	// Secrets sent back as the redaction marker (as query_directory_services
+	// shows them) keep their stored value, or the update is refused.
+	payload, kept, err := restoreDirectoryServiceSecrets(ctx, client, payload)
+	if err != nil {
+		return nil, err
+	}
+	keptNames := valuePathNames(kept)
+	shownPayload := maskDirectoryServicePayload(maskValuePaths(payload, kept))
 	serviceType, _ := payload["service_type"].(string)
 	enabled, _ := payload["enable"].(bool)
 	credType := ""
@@ -611,6 +620,9 @@ func planConfigureDirectoryService(ctx context.Context, client *truenas.Client, 
 		warnings = append(warnings,
 			fmt.Sprintf("Credential type %s will be sent; secret values are masked in this preview", credType))
 	}
+	if len(kept) > 0 {
+		warnings = append(warnings, "Secret values sent as "+redact.Marker+" are kept at their stored value (not shown) for: "+strings.Join(keptNames, ", "))
+	}
 
 	operation, verb := "configure", "configure"
 	if !enabled {
@@ -626,7 +638,8 @@ func planConfigureDirectoryService(ctx context.Context, client *truenas.Client, 
 				"method":  directoryServicesUpdateMethod,
 				"enabled": enabled,
 				// Exactly what will be sent to TrueNAS, with secret values masked.
-				"payload": maskDirectoryServicePayload(payload),
+				"payload":     shownPayload,
+				"kept_values": keptNames,
 			},
 		},
 	}
@@ -685,7 +698,7 @@ func planConfigureDirectoryService(ctx context.Context, client *truenas.Client, 
 				confirmFact("service_type", target),
 				confirmBoolFact("enable", enabled),
 				confirmBoolFact("force", force),
-			}, directoryServiceTargetFacts(payload)...)...,
+			}, append(directoryServiceTargetFacts(shownPayload), keptValuesFacts(keptNames)...)...)...,
 		),
 	}, nil
 }
@@ -756,6 +769,11 @@ func planLeaveDirectoryService(ctx context.Context, client *truenas.Client, args
 	payload, err := buildDirectoryServiceLeavePayload(args)
 	if err != nil {
 		return nil, err
+	}
+	// Nothing stored can stand in for the leave credential, so the
+	// redaction marker would only be tried as the real password.
+	if p, found := findRedactionMarker(payload, nil); found {
+		return nil, fmt.Errorf("%s is or contains the redaction marker %s; leave_directory_service has no stored credential to keep, so send the real password", p, redact.Marker)
 	}
 	cred, _ := payload["credential"].(map[string]interface{})
 	username, _ := cred["username"].(string)
