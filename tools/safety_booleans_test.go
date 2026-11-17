@@ -55,6 +55,9 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 		"dismiss_alert":           {"uuid": "alert-1"},
 		"restore_alert":           {"uuid": "alert-1"},
 		"refresh_directory_cache": {},
+		"run_snapshot_task":       {"task_id": 1.0},
+		"run_replication":         {"task_id": 1.0},
+		"create_snapshot":         {"dataset": fixtureTaskDataset, "name": "manual-1"},
 	}
 	args := map[string]interface{}{}
 	for k, v := range valid[name] {
@@ -89,6 +92,9 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 		"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
 		"update.status":            updateStatusAvailable("25.10.1"),
 		"core.get_jobs":            []interface{}{},
+		"pool.dataset.query":       []interface{}{map[string]interface{}{"name": fixtureTaskDataset}},
+		"replication.query":        replicationTaskFixtures()["replication.query"],
+		"pool.snapshottask.query":  replicationTaskFixtures()["pool.snapshottask.query"],
 	}, nil)
 	r := NewRegistry(client, nil)
 

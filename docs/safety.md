@@ -82,7 +82,7 @@ is set (`upgrade_app` may be named; it stays limited to dry runs).
 TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
-**Confirmation for destructive tools.** These ten tools execute only after
+**Confirmation for destructive tools.** These twelve tools execute only after
 confirmation. When the MCP client supports form elicitation, the server asks
 the user to approve a short preview in the client and executes only if they
 accept. Otherwise the tools execute only with a `confirmation_token` from a
@@ -100,11 +100,13 @@ preview of the same call:
 | `configure_directory_service` | Disabling or re-pointing a joined service cuts off domain users, like leaving |
 | `leave_directory_service` | Leaves the domain; domain users lose access to shares |
 | `delete_scrub_schedule` | Removes automatic data-integrity checks |
+| `run_snapshot_task` | Starts the replication tasks bound to the snapshot task, whose retention can delete target snapshots; the task's own retention can remove old snapshots |
+| `run_replication` | Retention (`SOURCE` or `CUSTOM`) deletes target snapshots after the transfer, and `allow_from_scratch` can destroy the target dataset's data when no common snapshot exists |
 
 No other tool needs a token: the other write tools (`create_dataset`,
 `create_smb_share`, `create_nfs_share`, `install_app`, `start_app`,
-`download_update`, `create_scrub_schedule`, `run_scrub`, `dismiss_alert`,
-`restore_alert`, `refresh_directory_cache`) run directly and keep their
+`download_update`, `create_scrub_schedule`, `run_scrub`, `create_snapshot`,
+`dismiss_alert`, `restore_alert`, `refresh_directory_cache`) run directly and keep their
 optional `dry_run`, and read tools never take one.
 
 **Elicitation (primary path).** If the client declared the MCP form
@@ -163,8 +165,8 @@ the canonical JSON of the arguments (keys sorted; `confirmation_token`,
 `null` counts as omitted). For tools that share a plan between preview and
 execute (`stop_app`, `delete_boot_environment`, `delete_app`,
 `delete_scrub_schedule`, `upgrade_app`, `update_app`, `system_reboot`,
-`apply_update`, `configure_directory_service`, `leave_directory_service`),
-the token is also bound to
+`apply_update`, `configure_directory_service`, `leave_directory_service`,
+`run_snapshot_task`, `run_replication`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
@@ -263,7 +265,7 @@ schema), `host_path_config.acl_enable` must also be a JSON boolean.
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`)
 derived from the same table, so clients can apply their own approval prompts.
-`destructiveHint` is true for the ten destructive tools (the ones that need a
+`destructiveHint` is true for the twelve destructive tools (the ones that need a
 confirmation token, `update_app` included) and false for every other tool.
 Annotations were added in MCP 2025-03-26; clients that negotiate
 `2024-11-05` ignore the extra field.
@@ -409,6 +411,8 @@ The `update_app` confirmation prompt lists the top-level keys that change and th
 `leave_directory_service` refuses a credential value that is or contains `[REDACTED]`, naming the path, before any middleware call: there is no stored credential to keep, so the marker would only be tried as the real password against the domain account.
 
 `download_update`, `dismiss_alert`, `restore_alert`, `refresh_directory_cache`, `create_scrub_schedule`, and `run_scrub` use the same shared plan for preview and the real call. Their dry runs now include `"dry_run": true, "executed": false` like the other plan-backed previews. Jobs started by `download_update` and `run_scrub` are tracked with `WithExpectedMethod` (`update.download` and `pool.scrub.scrub`).
+
+`run_snapshot_task`, `run_replication` and `create_snapshot` use the same shared plan for preview and the real call (`pool.snapshottask.run`, `replication.run` with only the task id, and `pool.snapshot.create` with `dataset`, `name` and `recursive`). A preview that says the run cannot proceed (a disabled or missing snapshot task, a replication task that is running or on hold or, on 25.10, disabled, a snapshot name that already exists) is an error and issues no token. `run_replication` returns the job id at once and tracks it with `WithExpectedMethod` (`replication.run`); when the job finishes, `tasks_get` reports whether anything was transferred, read from the job's final progress text. Only a missing or empty progress text is reported as "nothing transferred"; text it cannot parse is reported as "could not determine what was transferred". `pool.snapshottask.run` creates no job (it queues the task and returns null), so `run_snapshot_task` follows the task's own state for up to two minutes, then reads the task's `last_snapshot` and the snapshots on the covered datasets back from the middleware; if the run has not finished by then, it says the run was queued and points to `query_snapshot_tasks` instead of reporting success or failure. A disabled replication task is refused on 25.10, where `replication.run` refuses it too.
 
 `download_update` passes optional `train` and `version` through to `update.download`. Both must be set, or both omitted (matching 25.10's `UpdateDownloadArgs` and `plugins/update_/download.py`). When both are omitted, or both are blank or whitespace, they are treated as omitted and the middleware call still has empty parameters (`params: []`) and downloads the update offered by the configured profile, as before. When both are set, the call is `update.download` with those two positional arguments. A request for only one of them is refused. A completed download (`update_download_progress.percent == 100`) is not treated as already done if the caller asked for a different `version`.
 

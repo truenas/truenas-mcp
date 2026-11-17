@@ -97,6 +97,16 @@ func WithExpectedMethod(method string) TaskOption {
 	}
 }
 
+// WithJobOutcome makes a job task report what outcome derives from the
+// finished job row as its status message and result, for jobs whose
+// success alone does not say what happened (a replication that had
+// nothing to send still succeeds).
+func WithJobOutcome(outcome func(job map[string]interface{}) (message string, result interface{})) TaskOption {
+	return func(t *Task) {
+		t.outcome = outcome
+	}
+}
+
 // PollNow polls every active task once, outside the background schedule.
 func (m *Manager) PollNow() {
 	m.poller.pollAllTasks(m.ctx)

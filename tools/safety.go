@@ -86,6 +86,8 @@ var toolSafety = map[string]Safety{
 	// Replication and periodic snapshot tasks
 	"query_replications":   {Access: Read},
 	"query_snapshot_tasks": {Access: Read},
+	"run_snapshot_task":    {Access: Destructive},
+	"run_replication":      {Access: Destructive},
 
 	// Directory services
 	"get_directory_service_status": {Access: Read},
@@ -99,6 +101,7 @@ var toolSafety = map[string]Safety{
 	"query_pools":               {Access: Read},
 	"query_datasets":            {Access: Read},
 	"query_snapshots":           {Access: Read},
+	"create_snapshot":           {Access: Write},
 	"query_shares":              {Access: Read},
 	"query_vms":                 {Access: Read},
 	"create_dataset":            {Access: Write},

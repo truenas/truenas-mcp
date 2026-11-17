@@ -76,6 +76,10 @@ type Task struct {
 	missingPolls int
 	pollErrors   int
 
+	// outcome, set by WithJobOutcome, derives the status message and
+	// result of a successful job.
+	outcome func(job map[string]interface{}) (string, interface{})
+
 	// App health check, set by WithAppHealthCheck: once the job succeeds the
 	// task only completes after this app reports RUNNING.
 	VerifyApp       string        `json:"-"`

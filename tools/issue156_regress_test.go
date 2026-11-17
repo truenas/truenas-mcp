@@ -57,6 +57,8 @@ func issue156Registry(t *testing.T, appConfig map[string]interface{}, catalog ma
 			"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
 			"update.status":            updateStatusAvailable("25.10.1"),
 			"core.get_jobs":            []interface{}{},
+			"replication.query":        replicationTaskFixtures()["replication.query"],
+			"pool.snapshottask.query":  replicationTaskFixtures()["pool.snapshottask.query"],
 		},
 		handle: func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
 			if method == "app.query" {

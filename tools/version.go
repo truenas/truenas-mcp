@@ -44,6 +44,9 @@ var toolVersion = map[string]VersionRange{
 	// Replication and periodic snapshot tasks
 	"query_replications":   {Min: truenas.MinSupported},
 	"query_snapshot_tasks": {Min: truenas.MinSupported},
+	"run_snapshot_task":    {Min: truenas.MinSupported},
+	"run_replication":      {Min: truenas.MinSupported},
+	"create_snapshot":      {Min: truenas.MinSupported},
 	// Directory services
 	"get_directory_service_status": {Min: truenas.MinSupported},
 	"query_directory_services":     {Min: truenas.MinSupported},

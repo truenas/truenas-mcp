@@ -103,6 +103,10 @@ type integrationInventory struct {
 	hasScrubID  bool
 	taskID      string
 	datasetPath string
+	// replicationID and snapshotTaskID are the first task of each kind,
+	// or 0 when there is none.
+	replicationID  float64
+	snapshotTaskID float64
 }
 
 func discoverInventory(t *testing.T, r *Registry) integrationInventory {
@@ -238,6 +242,23 @@ func discoverInventory(t *testing.T, r *Registry) integrationInventory {
 			}
 		}
 	}
+	for _, q := range []struct {
+		tool, list string
+		id         *float64
+	}{
+		{"query_replications", "replications", &inv.replicationID},
+		{"query_snapshot_tasks", "snapshot_tasks", &inv.snapshotTaskID},
+	} {
+		if out, err := r.CallTool(t.Context(), q.tool, map[string]interface{}{"limit": 1.0}); err == nil {
+			resp := map[string]interface{}{}
+			if json.Unmarshal([]byte(out), &resp) == nil {
+				if list, _ := resp[q.list].([]interface{}); len(list) > 0 {
+					row, _ := list[0].(map[string]interface{})
+					*q.id, _ = row["id"].(float64)
+				}
+			}
+		}
+	}
 	if inv.pool != "" {
 		inv.datasetPath = inv.pool + "/mcp-it-" + time.Now().UTC().Format("20060102-150405")
 	}
@@ -267,6 +288,8 @@ func argsForTool(name string, required []string, inv integrationInventory, dryRu
 		case "name":
 			if name == "create_dataset" && inv.datasetPath != "" {
 				args["name"] = inv.datasetPath
+			} else if name == "create_snapshot" {
+				args["name"] = "mcp-it-snap"
 			} else if name == "create_smb_share" {
 				args["name"] = "mcp-it-share"
 			} else {
@@ -311,8 +334,24 @@ func argsForTool(name string, required []string, inv integrationInventory, dryRu
 			default:
 				missing = append(missing, field)
 			}
+		case "dataset":
+			if inv.pool != "" {
+				args["dataset"] = inv.pool
+			} else {
+				missing = append(missing, field)
+			}
 		case "task_id":
-			if inv.taskID != "" {
+			if name == "run_replication" || name == "run_snapshot_task" {
+				id := inv.replicationID
+				if name == "run_snapshot_task" {
+					id = inv.snapshotTaskID
+				}
+				if id > 0 {
+					args["task_id"] = id
+				} else {
+					missing = append(missing, field)
+				}
+			} else if inv.taskID != "" {
 				args["task_id"] = inv.taskID
 			} else {
 				missing = append(missing, field)

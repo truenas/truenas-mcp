@@ -208,11 +208,12 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"system_reboot": Destructive, "apply_update": Destructive, "delete_boot_environment": Destructive,
 		"delete_app": Destructive, "leave_directory_service": Destructive, "delete_scrub_schedule": Destructive,
 		"stop_app": Destructive, "upgrade_app": Destructive, "configure_directory_service": Destructive,
-		"update_app":      Destructive,
+		"update_app": Destructive, "run_snapshot_task": Destructive, "run_replication": Destructive,
 		"download_update": Write, "install_app": Write,
 		"start_app": Write, "refresh_directory_cache": Write,
 		"create_dataset": Write, "create_smb_share": Write, "create_nfs_share": Write,
 		"create_scrub_schedule": Write, "run_scrub": Write, "dismiss_alert": Write, "restore_alert": Write,
+		"create_snapshot": Write,
 	}
 	for name, s := range toolSafety {
 		if got, exp := s.Access, want[name]; exp != 0 && got != exp || exp == 0 && got != Read {
@@ -225,8 +226,8 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 			destructive++
 		}
 	}
-	if destructive != 10 {
-		t.Errorf("%d destructive tools, want 10; update docs/safety.md and docs/full-features.md too", destructive)
+	if destructive != 12 {
+		t.Errorf("%d destructive tools, want 12; update docs/safety.md and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
 		if s.Overwrites {

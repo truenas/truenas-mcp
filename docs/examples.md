@@ -40,6 +40,9 @@ This document provides example natural language queries you can use with TrueNAS
 - "Did the last replication of tank/data succeed?"
 - "Which periodic snapshot task feeds replication task 1?"
 - "Does my recursive snapshot task on tank/data cover every child dataset?"
+- "Snapshot tank/data before I change it"
+- "Run snapshot task 3 now and show me the snapshots it made"
+- "Replicate tank/data off-site now"
 
 ## Virtual Machines
 

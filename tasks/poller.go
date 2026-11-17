@@ -306,6 +306,13 @@ func (p *Poller) updateTaskFromJob(ctx context.Context, task *Task, job map[stri
 			// the app is observed running, or report what state it is in.
 			// The result is reported in the bounded job summary.
 			newStatus, statusMessage = p.verifyApp(ctx, task)
+		} else if task.outcome != nil {
+			msg, result := task.outcome(job)
+			statusMessage, _ = BoundText(msg, MaxJobTextBytes)
+			task.Result, task.ResultTruncated, task.ResultSizeBytes = BoundResult(result)
+			if !task.ResultTruncated {
+				task.ResultSizeBytes = 0
+			}
 		} else if result, ok := job["result"]; ok && result != nil {
 			task.Result, task.ResultTruncated, task.ResultSizeBytes = BoundResult(result)
 			if !task.ResultTruncated {
