@@ -97,9 +97,9 @@ func (r *Registry) registerDatasetTools() {
 						"default":     true,
 					},
 					"readonly": map[string]interface{}{
-						"type":        "boolean",
-						"description": "Make dataset read-only (default: false)",
-						"default":     false,
+						"type":        "string",
+						"description": "Read-only: ON, OFF, or INHERIT from the parent (default when omitted)",
+						"enum":        []string{"ON", "OFF", "INHERIT"},
 					},
 					"deduplication": map[string]interface{}{
 						"type":        "string",
@@ -229,7 +229,7 @@ func buildCreateDatasetPayload(args map[string]interface{}) (map[string]interfac
 	} else {
 		payload["create_ancestors"] = true
 	}
-	if readonly, ok := args["readonly"].(bool); ok {
+	if readonly, ok := args["readonly"].(string); ok && readonly != "" {
 		payload["readonly"] = readonly
 	}
 	if dedup, ok := args["deduplication"].(string); ok && dedup != "" {
