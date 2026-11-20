@@ -1,9 +1,33 @@
 package tools
 
 import (
+	"context"
+	"math/rand/v2"
 	"strings"
 	"testing"
 )
+
+func TestCreateDatasetSendsReadonlyAsString(t *testing.T) {
+	values := []string{"ON", "OFF", "INHERIT"}
+	want := values[rand.IntN(len(values))]
+	client, fake := newFakeClientWith(t, encFakeResults(), nil)
+	if _, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/secure", "readonly": want}); err != nil {
+		t.Fatal(err)
+	}
+	if got := createPayload(t, fake)["readonly"]; got != want {
+		t.Errorf("readonly = %#v, want %q", got, want)
+	}
+}
+
+func TestCreateDatasetOmitsUnsetReadonly(t *testing.T) {
+	client, fake := newFakeClientWith(t, encFakeResults(), nil)
+	if _, err := handleCreateDataset(context.Background(), client, map[string]interface{}{"name": "tank/secure"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := createPayload(t, fake)["readonly"]; ok {
+		t.Errorf("readonly = %#v, want it left out", got)
+	}
+}
 
 func TestValidateDatasetName(t *testing.T) {
 	tests := []struct {

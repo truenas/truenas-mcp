@@ -291,7 +291,8 @@ func TestWrongTypedArgumentsSendNothing(t *testing.T) {
 		want string
 	}{
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "quota": "10G"}, "quota must be an integer"},
-		{"create_dataset", map[string]interface{}{"name": "tank/y", "readonly": "true"}, "readonly must be a boolean"},
+		{"create_dataset", map[string]interface{}{"name": "tank/y", "readonly": true}, "readonly must be a string"},
+		{"create_dataset", map[string]interface{}{"name": "tank/y", "readonly": "true"}, "readonly must be one of"},
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "create_ancestors": "false"}, "create_ancestors must be a boolean"},
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "create_ancestors": 0.0}, "create_ancestors must be a boolean"},
 		{"create_dataset", map[string]interface{}{"name": "tank/y", "create_ancestors": "false", "dry_run": true}, "create_ancestors must be a boolean"},

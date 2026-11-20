@@ -377,9 +377,13 @@
           "type": "integer"
         },
         "readonly": {
-          "default": false,
-          "description": "Make dataset read-only (default: false)",
-          "type": "boolean"
+          "description": "Read-only: ON, OFF, or INHERIT from the parent (default when omitted)",
+          "enum": [
+            "ON",
+            "OFF",
+            "INHERIT"
+          ],
+          "type": "string"
         },
         "refquota": {
           "description": "Maximum space for dataset only (excluding children) in bytes",
