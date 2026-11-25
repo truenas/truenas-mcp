@@ -646,11 +646,13 @@ func TestSOCKS5ReplyErrorDefaultPort(t *testing.T) {
 
 func TestSOCKS5ReplyFailureMatch(t *testing.T) {
 	for in, want := range map[string]string{
-		"proxy: SOCKS5 proxy at proxy.example.com:1080 failed to connect: general failure":     "general failure",
-		"proxy: SOCKS5 proxy at [2001:db8::1]:1080 failed to connect: TTL expired":             "TTL expired",
-		"proxy: SOCKS5 proxy at proxy.example.com:1080 rejected username/password":             "",
-		"proxy: failed to read connect reply from SOCKS5 proxy at proxy.example.com:1080: EOF": "",
-		"dial tcp 192.0.2.1:1080: connect: connection refused":                                 "",
+		"socks connect tcp 127.0.0.1:1080->truenas.example.com:443: unknown error general SOCKS server failure":      "general failure",
+		"socks connect tcp [2001:db8::1]:1080->truenas.example.com:443: unknown error TTL expired":                   "TTL expired",
+		"socks connect tcp 127.0.0.1:1080->truenas.example.com:443: unknown error connection not allowed by ruleset": "connection forbidden",
+		"socks connect tcp 127.0.0.1:1080->truenas.example.com:443: unknown error unknown code: 66":                  "unknown error",
+		"socks connect tcp 127.0.0.1:1080->truenas.example.com:443: username/password authentication failed":         "",
+		"socks connect tcp 127.0.0.1:1080->truenas.example.com:443: unexpected EOF":                                  "",
+		"dial tcp 192.0.2.1:1080: connect: connection refused":                                                       "",
 	} {
 		got, ok := socksReplyFailure(errors.New(in))
 		if got != want || ok != (want != "") {
