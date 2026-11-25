@@ -1,6 +1,6 @@
 # Configuration
 
-How to build the server, every flag and environment variable, proxies, and troubleshooting. For setup basics see the [README](../README.md).
+How to build the server, create an API key with `truenas-mcp setup`, every flag and environment variable, proxies, and troubleshooting. For setup basics see the [README](../README.md).
 
 ## Building from source
 
@@ -27,7 +27,7 @@ Binaries report their version with `--version`. `make` takes the version from `g
 ## Flags
 
 - `--truenas-url` - TrueNAS hostname (required, or use `TRUENAS_URL` env var)
-  - Examples: `192.168.0.31`, `truenas.example.com` or `fd00::10` (automatically uses `wss://<host>:443/api/current`), a host with a port such as `192.168.0.31:8443` or `[2001:db8::10]:8443`, or a full `wss://host[:port]/api/current` URL. A `.local` name such as `truenas.local` is accepted, but on Linux the static release binary cannot resolve it via mDNS (use the IP, an `/etc/hosts` entry, or a DNS name, or build from source with `CGO_ENABLED=1 go build`); macOS and Windows builds are unaffected
+  - Examples: `192.0.2.10`, `truenas.example.com` or `fd00::10` (automatically uses `wss://<host>:443/api/current`), a host with a port such as `192.0.2.10:8443` or `[2001:db8::10]:8443`, or a full `wss://host[:port]/api/current` URL. A `.local` name such as `truenas.local` is accepted, but on Linux the static release binary cannot resolve it via mDNS (use the IP, an `/etc/hosts` entry, or a DNS name, or build from source with `CGO_ENABLED=1 go build`); macOS and Windows builds are unaffected
   - Credentials go in `TRUENAS_API_KEY` (or `--api-key-file` / `--api-key`) and `--api-user`; a URL containing `user:password@` is refused
   - A bare host cannot include a path; use a full `wss://` URL for that
   - A `wss://` URL ending in the legacy `/websocket` (or `/websocket/`) path is rewritten to `/api/current` with a one-time warning; the legacy endpoint is deprecated and planned for removal in TrueNAS 28
@@ -36,6 +36,7 @@ Binaries report their version with `--version`. `make` takes the version from `g
 - `--api-key-file` - Path to a file containing the API key (or use `TRUENAS_API_KEY_FILE`). The file is read at startup, one trailing newline is trimmed, and on Unix a file readable by group or others is refused (use mode `0600`). The file contents are never logged. Provide only one of `--api-key` / `TRUENAS_API_KEY` or `--api-key-file` / `TRUENAS_API_KEY_FILE`; a flag wins over the environment
 - `--api-user` - The user that owns the API key, sent to `auth.login_ex` (required, or use `TRUENAS_API_USER`), e.g. `truenas_admin`. There is no default; the server exits at startup if it is missing
 - `--tls-ca` - Path to a PEM certificate to trust, e.g. the TrueNAS self-signed certificate (or use `TRUENAS_TLS_CA` env var)
+- `--tls-pin` - Trust only the server certificate with this SHA-256 fingerprint, `SHA256:AB:CD:...` (or use `TRUENAS_TLS_PIN`). The chain and host name are not checked; any other certificate is refused. Cannot be combined with `--tls-ca` or `--insecure`; `truenas-mcp setup` writes the value for you
 - `--insecure` - Disable TLS certificate verification entirely (or set `TRUENAS_INSECURE=1`) - **unsafe**: allows man-in-the-middle attacks; prefer `--tls-ca`
 - `--proxy` - Proxy for the TrueNAS connection, overriding `HTTPS_PROXY` and `ALL_PROXY` (or use `TRUENAS_PROXY` env var); `none` ignores proxy environment variables; see [Proxies](#proxies)
 - `--debug` - Enable debug logging (or set `TRUENAS_MCP_DEBUG=1`)
@@ -49,24 +50,69 @@ Examples:
 
 ```bash
 # Recommended: environment variables (the key is not visible in the process list)
-export TRUENAS_URL=192.168.0.31
+export TRUENAS_URL=192.0.2.10
 export TRUENAS_API_KEY=your-api-key
 export TRUENAS_API_USER=your-api-user
 ./truenas-mcp
 
 # Or read the key from a mode 0600 file
-export TRUENAS_URL=192.168.0.31
+export TRUENAS_URL=192.0.2.10
 export TRUENAS_API_KEY_FILE=/path/to/truenas-api-key
 export TRUENAS_API_USER=your-api-user
 ./truenas-mcp
 
 # --api-key works, but the key is visible in the process list
-./truenas-mcp --truenas-url 192.168.0.31 --api-key your-api-key --api-user your-api-user
+./truenas-mcp --truenas-url 192.0.2.10 --api-key your-api-key --api-user your-api-user
 
 # With debug logging (full request/response bodies, credentials redacted)
 ./truenas-mcp --debug
 # or: TRUENAS_MCP_DEBUG=1 ./truenas-mcp
 ```
+
+## Setup: create the API key
+
+`truenas-mcp setup` logs in to TrueNAS once with a user name and password, creates an API key, saves it to a private file and prints the client configuration. The password is used for that one login and is never stored.
+
+```bash
+truenas-mcp setup --host truenas.example.com --user truenas_admin --key-owner mcp-bot
+```
+
+What it does, in order:
+
+1. Connects over `wss://` with certificate verification on. If the certificate is not trusted (TrueNAS ships a self-signed one), it stops and shows the certificate's SHA-256 fingerprint. Type `yes` to trust it, or pass `--trust-fingerprint SHA256:...` after checking it. The fingerprint is pinned and saved to `<host>.pin`.
+2. Logs in with `auth.login_ex` (`PASSWORD_PLAIN`). If the account uses two-factor authentication, it asks for the code (up to 3 tries).
+3. Checks that TrueNAS is 25.10 or later, and that the key owner exists and has a role. If the owner has `FULL_ADMIN`, you must type the user name (or pass `--yes-full-admin`). A dedicated user with a limited role, passed with `--key-owner`, is the better choice. Setup never creates users.
+4. Creates the key with `api_key.create`. If the name is taken it appends `-2`, `-3`, and so on. With `--rotate` it resets the existing key of that name instead (`api_key.update` with `reset`).
+5. Writes the key to `<config dir>/<host>.key`: the directory is mode `0700`, the file `0600`, written atomically. If saving fails, the key is deleted from TrueNAS again.
+6. Logs out, then logs in on a new connection with the new key and calls `system.info` to prove it works.
+7. Prints the file path, key name and id, how to revoke the key, and a client snippet that points `TRUENAS_API_KEY_FILE` at the file. The key itself is never printed.
+
+The default config directory is `truenas-mcp` under the user config directory (`~/.config` on Linux, `~/Library/Application Support` on macOS, `%AppData%` on Windows). `<host>` is the host name in lower case, with `_<port>` added when the port is not 443.
+
+**Password and code input.** There is no password or OTP flag. On a terminal, setup asks with a hidden prompt. Scripts and agent tools can use `TRUENAS_SETUP_PASSWORD` and `TRUENAS_SETUP_OTP`, which setup reads once and removes from its environment right away, or `--password-stdin` / `--otp-stdin`, which read one line each from stdin (password first). A wrong password is asked again once, on a terminal only. See [Setup security notes](safety.md#setup-security-notes).
+
+Setup flags:
+
+- `--host` - TrueNAS host name, IP or `wss://` URL (required)
+- `--user` - User to log in as (asked on a terminal if omitted; required otherwise)
+- `--key-owner` - User that owns the key (default: the login user)
+- `--name` - Key name (default `truenas-mcp-<this computer's hostname>`), cleaned to `a-z`, `0-9`, `.` and `-`
+- `--expires` - Key lifetime such as `90d`, `12w` or `1y` (units `h`, `d`, `w`, `y`; at most 10 years), or `never` (default `1y`)
+- `--rotate` - Reset the existing key with this name, owned by the key owner, and replace its key file
+- `--force` - Replace an existing key file
+- `--tls-ca` - PEM certificate or CA to trust
+- `--trust-fingerprint` - Trust and pin the certificate with this fingerprint without asking
+- `--insecure` - Turn off certificate verification; you must type `insecure` to confirm, so it only works on a terminal
+- `--config-dir` - Where to write `<host>.key` and `<host>.pin`
+- `--print-config` - Snippet to print: `json` (default), `claude-desktop`, `cursor` or `claude-code`
+- `--password-stdin`, `--otp-stdin` - Read the password or code from stdin
+- `--yes-full-admin` - Allow a `FULL_ADMIN` key owner without typing the confirmation
+- `--proxy` - Proxy for the connection, as for the server
+- `--debug` - Log requests and responses to stderr, with credentials redacted
+
+Progress and the summary go to stderr; only the snippet goes to stdout. A later run for the same host reuses the saved pin.
+
+Exit codes: `0` success, `1` other failure, `2` bad flags, `3` login refused (wrong password, expired password, HA standby, mechanism not allowed), `4` two-factor code missing or rejected, `5` certificate not trusted or pin mismatch, `6` permission (including GPOS STIG mode, which does not allow API keys, and an unconfirmed `FULL_ADMIN` owner), `7` config directory or key file, `8` could not connect, `9` the new key did not work, `10` TrueNAS older than 25.10.
 
 ## API key
 
@@ -89,14 +135,25 @@ export your server's certificate once and trust it (recommended):
 
 ```json
 "env": {
-  "TRUENAS_URL": "192.168.0.31",
+  "TRUENAS_URL": "192.0.2.10",
   "TRUENAS_API_KEY": "your-api-key-here",
   "TRUENAS_API_USER": "your-api-user",
   "TRUENAS_TLS_CA": "/path/to/truenas-cert.pem"
 }
 ```
 
-or explicitly disable verification (not recommended - allows man-in-the-middle
+or pin the certificate's SHA-256 fingerprint (what `truenas-mcp setup` does).
+A pin trusts exactly that certificate, whatever names it lists:
+
+```json
+"env": { "TRUENAS_TLS_PIN": "SHA256:AB:CD:...:EF" }
+```
+
+`openssl x509 -noout -fingerprint -sha256 -in truenas-cert.pem` prints the
+same hex digits. When the certificate is replaced, the connection is refused
+until the pin is updated.
+
+Or explicitly disable verification (not recommended - allows man-in-the-middle
 attacks on your network):
 
 ```json
@@ -104,7 +161,7 @@ attacks on your network):
 ```
 
 To export the certificate: TrueNAS UI → Credentials → Certificates, or
-`openssl s_client -connect 192.168.0.31:443 </dev/null 2>/dev/null | openssl x509 > truenas-cert.pem`
+`openssl s_client -connect 192.0.2.10:443 </dev/null 2>/dev/null | openssl x509 > truenas-cert.pem`
 
 ## Startup and connection
 
@@ -212,7 +269,7 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 ## Troubleshooting
 
 **Connection Issues:**
-- "invalid TrueNAS host or URL: ...": `--truenas-url` / `TRUENAS_URL` is unusable (bad port, user info in the URL, `https://`, ...); the message says why. Use the host name alone (`192.168.0.31`, `truenas.example.com:8443`, `[fd00::1]:8443`) or a `wss://host[:port]` URL
+- "invalid TrueNAS host or URL: ...": `--truenas-url` / `TRUENAS_URL` is unusable (bad port, user info in the URL, `https://`, ...); the message says why. Use the host name alone (`192.0.2.10`, `truenas.example.com:8443`, `[fd00::1]:8443`) or a `wss://host[:port]` URL
 - A `.local` name such as `truenas.local` does not resolve on Linux with the static release binary (or `make build`), because that binary does not use mDNS/nss-mdns. Use the IP address, an `/etc/hosts` entry, or a DNS name, or build from source with cgo (`CGO_ENABLED=1 go build`). macOS and Windows builds are unaffected, because cgo was already off for those cross-builds
 - "Could not connect to TrueNAS (no login was attempted)" means the TCP, proxy, TLS or WebSocket step failed; "Failed to authenticate with TrueNAS" means the connection worked and the login was rejected. If the connection drops during login and reconnecting fails, the message says so ("the connection was lost during login, and reconnecting failed") instead. The URL is logged without any query, fragment or user info, and error messages never quote them (at most they quote the host name or a short URL scheme)
 - `HTTP 404` / "TrueNAS 25.10 or later required": the JSON-RPC endpoint was not found (the server predates that API, which was introduced in 25.04); upgrade TrueNAS to 25.10 or later
