@@ -70,29 +70,48 @@ jobs:
     - name: Build for macOS ARM64
       run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-darwin-arm64 ./cmd/truenas-mcp
 
+    - name: Build for macOS AMD64
+      run: CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-darwin-amd64 ./cmd/truenas-mcp
+
     - name: Build for Windows AMD64
       run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-windows-amd64.exe ./cmd/truenas-mcp
+
+    - name: Build for Windows ARM64
+      run: CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-windows-arm64.exe ./cmd/truenas-mcp
 
     - name: Build for Linux AMD64
       run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-linux-amd64 ./cmd/truenas-mcp
 
-    - name: Check Linux binary is statically linked
+    - name: Build for Linux ARM64
+      run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.Version=$VERSION" -o truenas-mcp-linux-arm64 ./cmd/truenas-mcp
+
+    - name: Check Linux binaries are statically linked
       run: |
-        # If a linux-arm64 artifact is added, check it with file or
-        # readelf -l (no INTERP) instead: ldd on a foreign-arch binary
-        # is not reliable.
+        # The runner is amd64, so arm64 binaries are never executed.
+        # file and readelf -l (no INTERP segment) work on any arch;
+        # ldd is only reliable on the native amd64 binary.
         set -euo pipefail
-        bin=truenas-mcp-linux-amd64
-        file_out=$(file "$bin")
-        echo "$file_out"
-        ldd_out=$(ldd "$bin" 2>&1 || true)
-        echo "$ldd_out"
-        if ! echo "$file_out" | grep -q 'statically linked'; then
-          echo "error: Linux binary is not statically linked (file)"
+        for bin in truenas-mcp-linux-amd64 truenas-mcp-linux-arm64; do
+          file_out=$(file "$bin")
+          echo "$file_out"
+          if ! echo "$file_out" | grep -q 'statically linked'; then
+            echo "error: $bin is not statically linked (file)"
+            exit 1
+          fi
+          phdrs=$(readelf -l "$bin")
+          if echo "$phdrs" | grep -q 'INTERP'; then
+            echo "error: $bin has a program interpreter (readelf)"
+            exit 1
+          fi
+        done
+        if ! file truenas-mcp-linux-arm64 | grep -q 'ARM aarch64'; then
+          echo "error: truenas-mcp-linux-arm64 is not an aarch64 binary"
           exit 1
         fi
+        ldd_out=$(ldd truenas-mcp-linux-amd64 2>&1 || true)
+        echo "$ldd_out"
         if ! echo "$ldd_out" | grep -qi 'not a dynamic executable'; then
-          echo "error: Linux binary is not statically linked (ldd)"
+          echo "error: truenas-mcp-linux-amd64 is not statically linked (ldd)"
           exit 1
         fi
 
@@ -103,6 +122,13 @@ jobs:
         path: truenas-mcp-darwin-arm64
         retention-days: 30
 
+    - name: Upload macOS AMD64 binary
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: truenas-mcp-darwin-amd64
+        path: truenas-mcp-darwin-amd64
+        retention-days: 30
+
     - name: Upload Windows AMD64 binary
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
@@ -110,9 +136,23 @@ jobs:
         path: truenas-mcp-windows-amd64.exe
         retention-days: 30
 
+    - name: Upload Windows ARM64 binary
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: truenas-mcp-windows-arm64
+        path: truenas-mcp-windows-arm64.exe
+        retention-days: 30
+
     - name: Upload Linux AMD64 binary
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: truenas-mcp-linux-amd64
         path: truenas-mcp-linux-amd64
+        retention-days: 30
+
+    - name: Upload Linux ARM64 binary
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: truenas-mcp-linux-arm64
+        path: truenas-mcp-linux-arm64
         retention-days: 30
