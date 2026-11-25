@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -37,6 +38,11 @@ type fakeMiddleware struct {
 	hold       <-chan struct{}
 	held       chan struct{}
 	heldOnce   sync.Once
+	// drop, when it returns true for a call, closes the connection
+	// without replying (after handle has run), like a link going down.
+	drop func(method string) bool
+	// refuse rejects new connections while set.
+	refuse atomic.Bool
 }
 
 type fakeCall struct {
@@ -47,9 +53,18 @@ type fakeCall struct {
 var fakeResults = map[string]interface{}{
 	"auth.login_ex": map[string]interface{}{"response_type": "SUCCESS"},
 	"system.info":   map[string]interface{}{"hostname": "nas", "version": "25.10.0", "uptime_seconds": 100},
+	// Network tools: one SLAAC interface, no pending interface changes.
+	"network.configuration.config":  networkConfigFixture("", ""),
+	"interface.has_pending_changes": false,
+	"interface.checkin_waiting":     nil,
+	"interface.query":               []interface{}{netIfaceFixture("eth0", true, nil, nil)},
 }
 
 func (f *fakeMiddleware) serve(w http.ResponseWriter, r *http.Request) {
+	if f.refuse.Load() {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -83,7 +98,11 @@ func (f *fakeMiddleware) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		hold := f.holdMethod != "" && req.Method == f.holdMethod && req.Method != "auth.login_ex"
 		heldCh, holdCh := f.held, f.hold
+		drop := f.drop != nil && f.drop(req.Method)
 		f.mu.Unlock()
+		if drop {
+			return
+		}
 		if hold {
 			if heldCh != nil {
 				f.heldOnce.Do(func() { close(heldCh) })
@@ -213,7 +232,9 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"start_app": Write, "refresh_directory_cache": Write,
 		"create_dataset": Write, "create_smb_share": Write, "create_nfs_share": Write,
 		"create_scrub_schedule": Write, "run_scrub": Write, "dismiss_alert": Write, "restore_alert": Write,
-		"create_snapshot": Write,
+		"create_snapshot":       Write,
+		"update_network_config": Destructive, "update_network_interface": Destructive,
+		"checkin_network_changes": Write, "rollback_network_changes": Write,
 	}
 	for name, s := range toolSafety {
 		if got, exp := s.Access, want[name]; exp != 0 && got != exp || exp == 0 && got != Read {
@@ -226,8 +247,8 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 			destructive++
 		}
 	}
-	if destructive != 12 {
-		t.Errorf("%d destructive tools, want 12; update docs/safety.md and docs/full-features.md too", destructive)
+	if destructive != 14 {
+		t.Errorf("%d destructive tools, want 14; update docs/safety.md and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
 		if s.Overwrites {

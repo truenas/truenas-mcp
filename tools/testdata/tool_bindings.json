@@ -14,6 +14,11 @@
     "handler": "handleCheckUpdates"
   },
   {
+    "name": "checkin_network_changes",
+    "handler": "(*Registry).handleCheckinNetworkChangesWithDryRun",
+    "plan": "(*Registry).planCheckinNetworkChanges"
+  },
+  {
     "name": "configure_directory_service",
     "handler": "(*Registry).handleConfigureDirectoryServiceWithDryRun",
     "plan": "planConfigureDirectoryService",
@@ -97,8 +102,16 @@
     "handler": "handleGetDiskMetrics"
   },
   {
+    "name": "get_network_config",
+    "handler": "handleGetNetworkConfig"
+  },
+  {
     "name": "get_network_metrics",
     "handler": "handleGetNetworkMetrics"
+  },
+  {
+    "name": "get_pending_network_changes",
+    "handler": "(*Registry).handleGetPendingNetworkChanges"
   },
   {
     "name": "get_pool_capacity_details",
@@ -156,6 +169,10 @@
     "handler": "handleQueryJobs"
   },
   {
+    "name": "query_network_interfaces",
+    "handler": "handleQueryNetworkInterfaces"
+  },
+  {
     "name": "query_pools",
     "handler": "handleQueryPools"
   },
@@ -192,6 +209,11 @@
     "name": "restore_alert",
     "handler": "handleRestoreAlertWithDryRun",
     "plan": "planRestoreAlert"
+  },
+  {
+    "name": "rollback_network_changes",
+    "handler": "(*Registry).handleRollbackNetworkChangesWithDryRun",
+    "plan": "(*Registry).planRollbackNetworkChanges"
   },
   {
     "name": "run_replication",
@@ -252,6 +274,18 @@
     "handler": "(*Registry).handleUpdateAppWithDryRun",
     "plan": "planUpdateApp",
     "execute": "(*Registry).executeUpdateApp"
+  },
+  {
+    "name": "update_network_config",
+    "handler": "handleUpdateNetworkConfigWithDryRun",
+    "plan": "planUpdateNetworkConfig",
+    "execute": "executeUpdateNetworkConfig"
+  },
+  {
+    "name": "update_network_interface",
+    "handler": "(*Registry).handleUpdateNetworkInterfaceWithDryRun",
+    "plan": "planUpdateNetworkInterface",
+    "execute": "(*Registry).executeUpdateNetworkInterface"
   },
   {
     "name": "update_status",

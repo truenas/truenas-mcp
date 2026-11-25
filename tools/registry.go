@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/truenas/truenas-mcp/mcp"
@@ -34,6 +35,11 @@ type Registry struct {
 	// requireHumanConfirm refuses destructive tools on clients that did
 	// not declare form elicitation, instead of falling back to a token.
 	requireHumanConfirm bool
+
+	// netChange is the last interface change this server committed
+	// (tools/network_interface.go), guarded by netMu.
+	netMu     sync.Mutex
+	netChange *networkChange
 }
 
 type Tool struct {
@@ -91,6 +97,8 @@ func (r *Registry) registerTools() {
 	r.registerAlertTools()
 
 	r.registerMetricsTools()
+
+	r.registerNetworkTools()
 
 	r.registerAppTools()
 

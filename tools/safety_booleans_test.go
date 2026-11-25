@@ -10,7 +10,7 @@ import (
 const secretDryRunValue = "true-secret-must-not-be-echoed"
 
 func writeishMiddlewareMethod(method string) bool {
-	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details"} {
+	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".has_pending_changes", ".checkin_waiting", ".websocket_local_ip", ".system_routes"} {
 		if strings.HasSuffix(method, suffix) {
 			return false
 		}
@@ -45,19 +45,21 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 			"credential":    map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"},
 			"configuration": map[string]interface{}{"domain": "example.com", "hostname": "nas"},
 		},
-		"delete_scrub_schedule":   {"id": 1.0},
-		"create_scrub_schedule":   {"pool": "tank", "schedule": map[string]interface{}{"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*"}},
-		"run_scrub":               {"pool": "tank"},
-		"create_dataset":          {"name": "tank/x"},
-		"create_smb_share":        {"name": "share", "path": "/mnt/tank/share"},
-		"create_nfs_share":        {"path": "/mnt/tank/share"},
-		"download_update":         {},
-		"dismiss_alert":           {"uuid": "alert-1"},
-		"restore_alert":           {"uuid": "alert-1"},
-		"refresh_directory_cache": {},
-		"run_snapshot_task":       {"task_id": 1.0},
-		"run_replication":         {"task_id": 1.0},
-		"create_snapshot":         {"dataset": fixtureTaskDataset, "name": "manual-1"},
+		"delete_scrub_schedule":    {"id": 1.0},
+		"create_scrub_schedule":    {"pool": "tank", "schedule": map[string]interface{}{"minute": "00", "hour": "00", "dom": "*", "dow": "7", "month": "*"}},
+		"run_scrub":                {"pool": "tank"},
+		"create_dataset":           {"name": "tank/x"},
+		"create_smb_share":         {"name": "share", "path": "/mnt/tank/share"},
+		"create_nfs_share":         {"path": "/mnt/tank/share"},
+		"download_update":          {},
+		"dismiss_alert":            {"uuid": "alert-1"},
+		"restore_alert":            {"uuid": "alert-1"},
+		"refresh_directory_cache":  {},
+		"run_snapshot_task":        {"task_id": 1.0},
+		"run_replication":          {"task_id": 1.0},
+		"create_snapshot":          {"dataset": fixtureTaskDataset, "name": "manual-1"},
+		"update_network_config":    {"ipv6gateway": "2001:db8:1::1"},
+		"update_network_interface": {"interface": "eth0", "add_aliases": []interface{}{"2001:db8:1::10/64"}},
 	}
 	args := map[string]interface{}{}
 	for k, v := range valid[name] {

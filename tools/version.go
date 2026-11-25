@@ -75,6 +75,14 @@ var toolVersion = map[string]VersionRange{
 	"get_disk_metrics":    {Min: truenas.MinSupported},
 	"get_arc_metrics":     {Min: truenas.MinSupported},
 	"get_ups_metrics":     {Min: truenas.MinSupported},
+	// Network configuration
+	"get_network_config":          {Min: truenas.MinSupported},
+	"query_network_interfaces":    {Min: truenas.MinSupported},
+	"get_pending_network_changes": {Min: truenas.MinSupported},
+	"update_network_config":       {Min: truenas.MinSupported},
+	"update_network_interface":    {Min: truenas.MinSupported},
+	"checkin_network_changes":     {Min: truenas.MinSupported},
+	"rollback_network_changes":    {Min: truenas.MinSupported},
 	// Apps
 	"query_apps":              {Min: truenas.MinSupported},
 	"get_app_config":          {Min: truenas.MinSupported},

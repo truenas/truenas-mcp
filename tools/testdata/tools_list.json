@@ -83,6 +83,26 @@
     }
   },
   {
+    "name": "checkin_network_changes",
+    "description": "Keep the interface change committed by update_network_interface: calls interface.checkin, which cancels TrueNAS's automatic rollback. Call it only after verifying the new configuration, and before `remaining_seconds` (60 by default) runs out. Refused when nothing is waiting for check-in, including changes that are only staged. A successful call also shows that this server can still reach TrueNAS over the new configuration.",
+    "inputSchema": {
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "description": "Optional: show what is waiting for check-in without checking it in (default: false)",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "configure_directory_service",
     "description": "Configure and join a directory service (Active Directory, LDAP, or IPA) with TrueNAS directoryservices.update (TrueNAS 25.10 or later). Setting enable=true joins the domain automatically the first time. The arguments are the fields of that API call. Omitted optional fields keep their current value. A secret sent as [REDACTED] (as query_directory_services shows it) keeps its stored value only when its account, server and directory are unchanged; otherwise the call is refused.\n\n**To enable or change a service, service_type, credential, configuration and enable are all required, and configuration must match service_type. The old flat arguments (type, server, bindname, netbiosname, ssl, domain, ...) no longer exist: put them in credential and configuration as below.**\n\n**To disable the configured service, send only enable=false** (no service_type, credential or configuration): the settings are kept and domain authentication stops until it is enabled again. When service_type is sent with enable=false, a KERBEROS_USER credential is rejected for ACTIVEDIRECTORY and IPA (TrueNAS does not store it); use KERBEROS_PRINCIPAL.\n\n**Credential (credential_type and its fields):**\n\nActive Directory and IPA (Kerberos only; the first join needs KERBEROS_USER with domain admin rights):\n- KERBEROS_USER: {credential_type: \"KERBEROS_USER\", username: \"admin\", password: \"pass\"}\n- KERBEROS_PRINCIPAL: {credential_type: \"KERBEROS_PRINCIPAL\", principal: \"host/truenas@EXAMPLE.COM\"} (the principal must already be in a keytab on TrueNAS)\n\nLDAP (also accepts the Kerberos types above, which need kerberos_realm to be set):\n- LDAP_PLAIN: {credential_type: \"LDAP_PLAIN\", binddn: \"cn=admin,dc=example,dc=com\", bindpw: \"pass\"}\n- LDAP_ANONYMOUS: {credential_type: \"LDAP_ANONYMOUS\"}\n- LDAP_MTLS: {credential_type: \"LDAP_MTLS\", client_certificate: \"name of a certificate on TrueNAS\"}\n\n**Configuration (fields per service_type; * = required):**\n- ACTIVEDIRECTORY: hostname*, domain*, site, computer_account_ou, use_default_domain, enable_trusted_domains, trusted_domains, idmap\n  e.g. {hostname: \"truenas\", domain: \"corp.example.com\"}\n- IPA: target_server*, hostname*, domain*, basedn*, smb_domain, validate_certificates\n  e.g. {target_server: \"ipa.example.com\", hostname: \"truenas\", domain: \"example.com\", basedn: \"dc=example,dc=com\"}\n- LDAP: server_urls* (ldap:// or ldaps:// URIs), basedn*, starttls, validate_certificates, schema (RFC2307 or RFC2307BIS), search_bases, attribute_maps, auxiliary_parameters\n  e.g. {server_urls: [\"ldaps://ldap.example.com\"], basedn: \"dc=example,dc=com\"}\nidmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed to TrueNAS unchanged; see the TrueNAS API docs for directoryservices.update for their fields.\n\n**Security:**\n- Credentials are stored in TrueNAS configuration\n- Use Kerberos principals with keytabs instead of passwords for production\n- Dry-run shows the exact payload that would be sent with every secret value masked (password, bindpw, ldap_user_dn_password in idmap and trusted_domains, ...); credential_type and username stay visible\n\n**Returns:** task_id for tracking the long-running domain join job (2-10 minutes typical) **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
@@ -1086,6 +1106,20 @@
     }
   },
   {
+    "name": "get_network_config",
+    "description": "Get the global network configuration (network.configuration): hostname, domain, IPv4 and IPv6 default gateways and nameservers, next to what is applied right now. `configured` is what is saved; `applied` is read from the running system (the first IPv4 and IPv6 default route and the active nameservers). `gateway_status` compares them per address family: `applied` (the configured gateway is the default route), `not_applied`, `dynamic` (no static gateway; the route comes from DHCP or IPv6 router advertisements) or `none`. `default_routes` lists every default route with its interface. Use it to verify update_network_config.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "get_network_metrics",
     "description": "Get network interface traffic metrics",
     "inputSchema": {
@@ -1107,6 +1141,20 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_pending_network_changes",
+    "description": "Show the state of the interface check-in window. `state` is awaiting_checkin (a committed change rolls back automatically in `remaining_seconds` unless checkin_network_changes is called), staged (saved but not applied, for example from the web UI) or none. `last_change` is the last change this server committed and its `outcome` (awaiting_checkin, connection_lost, checked_in, rolled_back, changed_elsewhere or unknown), worked out by comparing the interface with the values before and after the change. Needs an API key with the NETWORK_INTERFACE_WRITE role, because TrueNAS guards these methods with it.",
+    "inputSchema": {
+      "properties": {},
       "type": "object"
     },
     "annotations": {
@@ -1529,6 +1577,25 @@
     }
   },
   {
+    "name": "query_network_interfaces",
+    "description": "List network interfaces with their saved configuration and the addresses actually on them. `configured_aliases` are the static aliases saved in TrueNAS; `applied_addresses` are read from the running system, each with `source` static, dynamic (SLAAC, DHCP or temporary) or link_local. `ipv6_auto` is IPv6 autoconfiguration (SLAAC). `this_server_connection` marks the interface carrying this server's own connection. `pending_changes` shows whether an interface change is staged or waiting for check-in (see get_pending_network_changes).",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "description": "Optional: one interface by name, e.g. eth0",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "query_pools",
     "description": "Query storage pools with their status, capacity, and health information. Returns allow-listed pool fields, RAIDZ expansion progress, a compact topology (type, path, name, guid, status, disk, device, and trimmed read/write/checksum error stats), and a trimmed scrub/resilver scan; it does not pass through the raw middleware record.",
     "inputSchema": {
@@ -1779,6 +1846,26 @@
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "rollback_network_changes",
+    "description": "Revert pending interface changes now (interface.rollback): restores the interface configuration and IPv4 gateway saved before the changes were staged, whether they are waiting for check-in or only staged (including changes made in the web UI). Changes made with update_network_config are not reverted. Refused when nothing is pending.",
+    "inputSchema": {
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "description": "Optional: show what would be reverted without reverting it (default: false)",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
       "openWorldHint": false
     }
   },
@@ -2120,6 +2207,115 @@
       "readOnlyHint": false,
       "destructiveHint": true,
       "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "update_network_config",
+    "description": "Change global network settings: hostname, domain, IPv4 or IPv6 default gateway, nameserver1-3. Only the fields you pass change; an empty string clears a gateway or nameserver. **Applies immediately and is NOT rolled back automatically**: unlike update_network_interface there is no 60-second check-in window, so a wrong gateway can cut this server's connection and stay in place. The preview shows the current values so the change can be reverted with another call. Refused while interface changes are pending (finish them with checkin_network_changes or rollback_network_changes first). Verify the result with get_network_config. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "domain": {
+          "description": "Optional: DNS domain name",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: preview without changing anything (default: false)",
+          "type": "boolean"
+        },
+        "hostname": {
+          "description": "Optional: new hostname (cannot be cleared; refused by TrueNAS while joined to Active Directory or IPA)",
+          "minLength": 1,
+          "type": "string"
+        },
+        "ipv4gateway": {
+          "description": "Optional: IPv4 default gateway, e.g. 192.0.2.1; empty string removes the static gateway. TrueNAS refuses a gateway no interface can reach",
+          "type": "string"
+        },
+        "ipv6gateway": {
+          "description": "Optional: IPv6 default gateway, e.g. 2001:db8::1 or fe80::1%eth0 (a link-local gateway needs %interface); empty string removes the static gateway",
+          "type": "string"
+        },
+        "nameserver1": {
+          "description": "Optional: primary DNS server address; empty string clears it",
+          "type": "string"
+        },
+        "nameserver2": {
+          "description": "Optional: secondary DNS server address; empty string clears it",
+          "type": "string"
+        },
+        "nameserver3": {
+          "description": "Optional: tertiary DNS server address; empty string clears it",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "update_network_interface",
+    "description": "Add or remove static IPv4/IPv6 aliases on one interface and turn IPv6 autoconfiguration (SLAAC) on or off. The change is staged (interface.update) and applied with interface.commit with rollback on. **TrueNAS then rolls it back automatically after checkin_timeout_seconds (default 60) unless it is checked in.** The reply has `status` awaiting_checkin, `remaining_seconds` and `rollback_at`. Within that window: verify with query_network_interfaces (and, if you can, reach the new address from outside), then call checkin_network_changes to keep the change, or rollback_network_changes to revert at once; doing nothing reverts it. If this server's connection drops during the commit it reconnects and reports the state; if it cannot reconnect the reply is `connection_lost` and TrueNAS rolls back on its own. Refused while other interface changes are pending, and when the change would remove the address this server is connected through. Only one change can be pending at a time. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "add_aliases": {
+          "description": "Optional: static addresses to add, each address/prefix, e.g. 2001:db8::10/64 or 192.0.2.10/24",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "checkin_timeout_seconds": {
+          "default": 60,
+          "description": "Optional: seconds TrueNAS waits for checkin_network_changes before rolling back (default 60)",
+          "maximum": 600,
+          "minimum": 15,
+          "type": "integer"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: preview without changing anything (default: false)",
+          "type": "boolean"
+        },
+        "interface": {
+          "description": "Required: interface name, e.g. eth0 (from query_network_interfaces)",
+          "type": "string"
+        },
+        "ipv6_auto": {
+          "description": "Optional: turn IPv6 autoconfiguration (SLAAC) on or off; omit to keep it as it is",
+          "type": "boolean"
+        },
+        "remove_aliases": {
+          "description": "Optional: static aliases to remove, as address/prefix or address",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "interface"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
       "openWorldHint": false
     }
   },
