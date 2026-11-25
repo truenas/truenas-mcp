@@ -22,6 +22,7 @@ func teamDocsShare() map[string]interface{} {
 		"options": map[string]interface{}{
 			"hostsallow": []interface{}{"192.0.2.0/24"}, "hostsdeny": []interface{}{},
 			"guestok": false, "auxsmbconf": "sentinel-aux-param = 1",
+			"path_suffix": "sentinel-suffix/%U",
 		},
 	}
 }
@@ -69,6 +70,9 @@ func TestGetShareACLByName(t *testing.T) {
 	}
 	if strings.Contains(out, "auxsmbconf") || strings.Contains(out, "sentinel-aux-param") {
 		t.Errorf("output contains auxsmbconf:\n%s", out)
+	}
+	if strings.Contains(out, "path_suffix") || strings.Contains(out, "sentinel-suffix") {
+		t.Errorf("output contains path_suffix:\n%s", out)
 	}
 
 	q := lastParams(t, fake, "sharing.smb.query")
