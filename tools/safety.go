@@ -107,6 +107,8 @@ var toolSafety = map[string]Safety{
 	"create_dataset":            {Access: Write},
 	"create_smb_share":          {Access: Write},
 	"create_nfs_share":          {Access: Write},
+	"get_share_acl":             {Access: Read},
+	"get_filesystem_acl":        {Access: Read},
 	"analyze_capacity":          {Access: Read},
 	"get_pool_capacity_details": {Access: Read},
 

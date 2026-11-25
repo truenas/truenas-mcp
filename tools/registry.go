@@ -97,6 +97,8 @@ func (r *Registry) registerTools() {
 
 	r.registerNFSShareTools()
 
+	r.registerACLTools()
+
 	r.registerAlertTools()
 
 	r.registerMetricsTools()

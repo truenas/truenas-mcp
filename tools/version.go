@@ -63,6 +63,8 @@ var toolVersion = map[string]VersionRange{
 	"create_dataset":            {Min: truenas.MinSupported},
 	"create_smb_share":          {Min: truenas.MinSupported},
 	"create_nfs_share":          {Min: truenas.MinSupported},
+	"get_share_acl":             {Min: truenas.MinSupported},
+	"get_filesystem_acl":        {Min: truenas.MinSupported},
 	"analyze_capacity":          {Min: truenas.MinSupported},
 	"get_pool_capacity_details": {Min: truenas.MinSupported},
 	// Alerts

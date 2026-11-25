@@ -51,6 +51,15 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 - **query_shares** - Query SMB and NFS share configurations
   - Returns the same SMB and NFS share records as main (no field select), including SMB `options` (`hostsallow`/`hostsdeny`), `access_based_share_enumeration`, `audit`, and `locked`, and NFS `security`, `expose_snapshots`, `locked`, and `aliases`
 
+- **get_share_acl** - Show the share-level ACL of an SMB share, by `share_name` or `share_id`
+  - Each entry has who it applies to (name, SID, Unix id), `ALLOWED` or `DENIED`, and the permission level (`FULL`, `CHANGE`, `READ`)
+  - Also returns the share settings that block access: path, enabled, readonly, `hostsallow`/`hostsdeny`
+  - `HOMES` means the home-directory share. The share ACL only applies over SMB; the filesystem ACL must allow the access too
+- **get_filesystem_acl** - Show the filesystem ACL of a path under `/mnt/<pool>`
+  - ACL type (`NFS4`, `POSIX1E` or `DISABLED`), owner and group with names, mode bits, and each entry: tag, who, `ALLOW`/`DENY`, permissions and inheritance flags (NFSv4, in evaluation order), or access/default scope and effective permissions after the mask (POSIX)
+  - Only absolute paths under `/mnt/<pool>` are accepted. Relative paths, `..`, other system paths and symlinks that lead outside `/mnt/<pool>` are refused before anything is read
+  - `simplified: true` shows NFSv4 permissions and flags as basic names (`FULL_CONTROL`, `MODIFY`, `READ`, `TRAVERSE`; `INHERIT`, `NOINHERIT`) where they match exactly
+
 ### Virtualization
 - **query_vms** - Query virtual machines with intelligent filtering and sorting
   - Requests only the VM fields this tool uses

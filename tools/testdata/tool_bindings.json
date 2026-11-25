@@ -102,6 +102,10 @@
     "handler": "handleGetDiskMetrics"
   },
   {
+    "name": "get_filesystem_acl",
+    "handler": "handleGetFilesystemACL"
+  },
+  {
     "name": "get_network_config",
     "handler": "handleGetNetworkConfig"
   },
@@ -120,6 +124,10 @@
   {
     "name": "get_scrub_status",
     "handler": "handleGetScrubStatus"
+  },
+  {
+    "name": "get_share_acl",
+    "handler": "handleGetShareACL"
   },
   {
     "name": "get_system_metrics",

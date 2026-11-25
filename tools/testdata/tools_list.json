@@ -1106,6 +1106,33 @@
     }
   },
   {
+    "name": "get_filesystem_acl",
+    "description": "Get the filesystem ACL of a file or directory under /mnt/\u003cpool\u003e: ACL type (NFS4, POSIX1E or DISABLED), owner and group (uid/gid with names), Unix mode bits, and each ACL entry (tag, who, ALLOW/DENY for NFS4, permissions, inheritance flags; access or default scope and effective permissions after the mask for POSIX). NFSv4 entries are returned in evaluation order. Only absolute paths under /mnt/\u003cpool\u003e are accepted; system paths, relative paths, '..' and symlinks that lead outside /mnt/\u003cpool\u003e are refused. Set 'simplified' to show NFSv4 permissions and flags as basic names (FULL_CONTROL, MODIFY, READ, TRAVERSE; INHERIT, NOINHERIT) where they match exactly.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "Absolute path under /mnt/\u003cpool\u003e, e.g. /mnt/tank/shares/docs",
+          "type": "string"
+        },
+        "simplified": {
+          "default": false,
+          "description": "Show NFSv4 permissions and flags as basic names where they match exactly (default: false, every permission listed)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "get_network_config",
     "description": "Get the global network configuration (network.configuration): hostname, domain, IPv4 and IPv6 default gateways and nameservers, next to what is applied right now. `configured` is what is saved; `applied` is read from the running system (the first IPv4 and IPv6 default route and the active nameservers). `gateway_status` compares them per address family: `applied` (the configured gateway is the default route), `not_applied`, `dynamic` (no static gateway; the route comes from DHCP or IPv6 router advertisements) or `none`. `default_routes` lists every default route with its interface. Use it to verify update_network_config.",
     "inputSchema": {
@@ -1190,6 +1217,30 @@
       "properties": {
         "pool": {
           "description": "Optional: Specific pool name (omit or pass an empty string for all pools)",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_share_acl",
+    "description": "Get the share-level ACL of an SMB share: who each entry applies to (user or group name, SID, Unix id), whether it is ALLOWED or DENIED, and the permission level (FULL, CHANGE, READ). Also returns the share settings that affect access (path, enabled, readonly, hostsallow/hostsdeny). The share ACL only applies to SMB connections; SMB access also needs the filesystem ACL of the share path to allow it, which get_filesystem_acl returns. Give exactly one of 'share_name' or 'share_id'.",
+    "inputSchema": {
+      "properties": {
+        "share_id": {
+          "description": "SMB share id (from query_shares)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "share_name": {
+          "description": "SMB share name (case-insensitive). HOMES means the home-directory share",
           "type": "string"
         }
       },
