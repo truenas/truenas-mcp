@@ -337,6 +337,24 @@ func appliedAddresses(iface map[string]interface{}) []map[string]interface{} {
 	return out
 }
 
+// hasAutoconfiguredIPv6 reports whether the interface has IPv6 addresses
+// that are neither configured aliases nor link-local (SLAAC or temporary).
+func hasAutoconfiguredIPv6(iface map[string]interface{}) bool {
+	configured := map[netip.Addr]bool{}
+	for _, a := range parseAliases(iface["aliases"]) {
+		if addr, ok := a.addr(); ok {
+			configured[addr] = true
+		}
+	}
+	state, _ := iface["state"].(map[string]interface{})
+	for _, a := range parseAliases(state["aliases"]) {
+		if addr, ok := a.addr(); ok && addr.Is6() && !addr.Is4In6() && !addr.IsLinkLocalUnicast() && !configured[addr] {
+			return true
+		}
+	}
+	return false
+}
+
 func ifaceHasAddr(iface map[string]interface{}, ip netip.Addr) bool {
 	state, _ := iface["state"].(map[string]interface{})
 	for _, a := range append(parseAliases(iface["aliases"]), parseAliases(state["aliases"])...) {
@@ -814,6 +832,10 @@ func planUpdateNetworkInterface(ctx context.Context, client *truenas.Client, arg
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("IPv6 autoconfiguration stays on: %s is added next to the SLAAC addresses", a.cidr()))
 			break
 		}
+	}
+	if curAuto || hasAutoconfiguredIPv6(iface) {
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf("%s uses IPv6 autoconfiguration (SLAAC): the commit can briefly remove the autoconfigured IPv6 addresses "+
+			"until they are learned again from router advertisements, so connections over them may drop for a moment", name))
 	}
 	plan.Warnings = append(plan.Warnings,
 		fmt.Sprintf("After the commit, TrueNAS rolls the change back automatically in %d seconds unless checkin_network_changes is called", timeout),

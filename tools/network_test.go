@@ -1194,3 +1194,63 @@ func TestUpdateNetworkConfigGatewaySubnetWarnings(t *testing.T) {
 		t.Errorf("link-local gateway warned: %s", out)
 	}
 }
+
+// TrueNAS rejects the zoned form fe80::1%<interface>; it is refused before
+// any token is issued.
+func TestUpdateNetworkConfigRefusesZonedGateway(t *testing.T) {
+	r, _, fake := netRegistry(t)
+	for _, args := range []map[string]interface{}{
+		{"ipv6gateway": "fe80::1%eth0", "dry_run": true},
+		{"ipv6gateway": "fe80::1%eth0"},
+		{"ipv6gateway": "2001:db8::1%eth0"},
+		{"nameserver1": "fe80::53%eth0"},
+	} {
+		out, err := r.CallTool(t.Context(), "update_network_config", args)
+		if err == nil || !strings.Contains(err.Error(), "must not carry a %interface zone") || !strings.Contains(err.Error(), "without the zone") {
+			t.Errorf("%v: err = %v", args, err)
+		}
+		if strings.Contains(out, "confirmation_token") {
+			t.Errorf("%v: token issued: %s", args, out)
+		}
+	}
+	if n := len(fake.called("network.configuration.update")); n != 0 {
+		t.Errorf("update sent %d times", n)
+	}
+	// The zone-less form is accepted.
+	if _, err := r.CallTool(t.Context(), "update_network_config", map[string]interface{}{"ipv6gateway": netTestRAGW, "dry_run": true}); err != nil {
+		t.Errorf("zone-less link-local gateway: %v", err)
+	}
+}
+
+func TestNetworkInterfaceWarnsAboutSLAACAddresses(t *testing.T) {
+	r, sim, _ := netRegistry(t)
+	const want = "can briefly remove the autoconfigured IPv6 addresses"
+	dry := func(args map[string]interface{}) string {
+		t.Helper()
+		out, err := r.CallTool(t.Context(), "update_network_interface", mergeArgs(args, map[string]interface{}{"dry_run": true}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	// ipv6_auto on (with a SLAAC address).
+	if out := dry(map[string]interface{}{"interface": "eth0", "add_aliases": []interface{}{"192.0.2.20/24"}}); !strings.Contains(out, want) {
+		t.Errorf("ipv6_auto on: %s", out)
+	}
+	// ipv6_auto off but autoconfigured addresses still on the interface.
+	sim.mu.Lock()
+	e := sim.db["eth0"]
+	e.ipv6Auto = false
+	sim.db["eth0"] = e
+	sim.mu.Unlock()
+	if out := dry(map[string]interface{}{"interface": "eth0", "add_aliases": []interface{}{"192.0.2.20/24"}}); !strings.Contains(out, want) {
+		t.Errorf("autoconfigured addresses present: %s", out)
+	}
+	// Neither: no warning.
+	sim.mu.Lock()
+	sim.applied["eth0"] = e
+	sim.mu.Unlock()
+	if out := dry(map[string]interface{}{"interface": "eth0", "add_aliases": []interface{}{"192.0.2.20/24"}}); strings.Contains(out, want) {
+		t.Errorf("no SLAAC: %s", out)
+	}
+}

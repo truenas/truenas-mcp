@@ -2238,7 +2238,7 @@
           "type": "string"
         },
         "ipv6gateway": {
-          "description": "Optional: IPv6 default gateway, e.g. 2001:db8::1 or fe80::1%eth0 (a link-local gateway needs %interface); empty string removes the static gateway",
+          "description": "Optional: IPv6 default gateway, e.g. 2001:db8::1 or fe80::1 (a link-local gateway is given without a %interface zone, which TrueNAS rejects); empty string removes the static gateway",
           "type": "string"
         },
         "nameserver1": {

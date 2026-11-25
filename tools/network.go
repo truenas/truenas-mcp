@@ -79,7 +79,7 @@ func (r *Registry) registerNetworkTools() {
 					},
 					"ipv6gateway": map[string]interface{}{
 						"type":        "string",
-						"description": "Optional: IPv6 default gateway, e.g. 2001:db8::1 or fe80::1%eth0 (a link-local gateway needs %interface); empty string removes the static gateway",
+						"description": "Optional: IPv6 default gateway, e.g. 2001:db8::1 or fe80::1 (a link-local gateway is given without a %interface zone, which TrueNAS rejects); empty string removes the static gateway",
 					},
 					"nameserver1": map[string]interface{}{
 						"type":        "string",
@@ -258,6 +258,9 @@ func normalizeNetworkSetting(key, value string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
+	if strings.Contains(value, "%") {
+		return "", fmt.Errorf("%s must not carry a %%interface zone: TrueNAS rejects it; give the address without the zone, e.g. fe80::1", key)
+	}
 	addr, err := netip.ParseAddr(value)
 	if err != nil {
 		return "", fmt.Errorf("%s must be an IP address or an empty string", key)
@@ -267,10 +270,6 @@ func normalizeNetworkSetting(key, value string) (string, error) {
 		return "", fmt.Errorf("ipv4gateway must be an IPv4 address")
 	case key == "ipv6gateway" && (!addr.Is6() || addr.Is4In6()):
 		return "", fmt.Errorf("ipv6gateway must be an IPv6 address")
-	case key == "ipv6gateway" && addr.Zone() != "" && !addr.IsLinkLocalUnicast():
-		return "", fmt.Errorf("ipv6gateway may carry a %%interface zone only for a link-local (fe80::/10) address")
-	case key != "ipv6gateway" && addr.Zone() != "":
-		return "", fmt.Errorf("%s must not carry a %%interface zone", key)
 	case addr.IsUnspecified() || addr.IsLoopback() || addr.IsMulticast():
 		return "", fmt.Errorf("%s must be a unicast address that is not loopback or unspecified", key)
 	}
