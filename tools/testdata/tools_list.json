@@ -1745,7 +1745,7 @@
   },
   {
     "name": "query_snapshots",
-    "description": "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, sizes and dataset. Holds are included only with 'include_holds' or 'holds_only' (they cost an extra lookup per snapshot). Use 'limit' to control result size (default: 50, maximum: 1000), 'order_by' to sort.",
+    "description": "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, sizes and dataset. Holds are included only with 'include_holds' or 'holds_only' (they cost an extra lookup per snapshot). 'include_retention' adds when each snapshot becomes eligible for automatic removal and what sets that date. Use 'limit' to control result size (default: 50, maximum: 1000), 'order_by' to sort.",
     "inputSchema": {
       "properties": {
         "dataset": {
@@ -1758,6 +1758,10 @@
         },
         "include_holds": {
           "description": "Optional: Include each snapshot's holds (default: false; one extra lookup per snapshot on the NAS)",
+          "type": "boolean"
+        },
+        "include_retention": {
+          "description": "Optional: Include each snapshot's retention: the removal date set by a periodic snapshot task or a retention property, or null if none (default: false; the NAS reads snapshot tasks and user properties to work it out)",
           "type": "boolean"
         },
         "limit": {

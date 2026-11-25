@@ -46,6 +46,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Limit results for manageable responses (default: 50, maximum: 1000). A requested limit above 1000 is capped, and the response note says so
   - Every query pushes `limit` and a server-side `order_by` (`-snapshot_name`, `dataset`, or `-properties.creation.parsed` for `created`). `createtxg` is an unpadded string, so it is not used as the creation order key. If the page is full, a `count` query supplies `total_snapshots`. If that count query fails, `total_snapshots` is omitted and a note says the total is unknown
   - `holds_only` pages through results with `limit`/`offset` up to a 1000-row scan budget and says so when that budget is reached; more snapshots with holds may exist, so narrow the query with `pool` or `dataset`
+  - `include_retention` (opt-in, `extra.retention`) adds `retention` to each snapshot: `removal_date` (ISO-8601 UTC), `removal_timestamp`, `source` (`periodic_snapshot_task` or `property`) and `periodic_snapshot_task_id`, or `null` when nothing schedules removal. `retention_included` says whether it was requested
   - Perfect for questions like "what recent snapshots exist?" or "show snapshots with holds"
 
 - **query_shares** - Query SMB and NFS share configurations
