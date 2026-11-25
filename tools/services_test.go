@@ -87,3 +87,23 @@ func TestQueryServicesByName(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// query_services returns a fixed set of keys, so a raw service.query
+// field (such as pids) cannot slip into the output.
+func TestQueryServicesOutputKeys(t *testing.T) {
+	r, _ := serviceFake(t)
+	resp := callTool(t, r, "query_services", map[string]interface{}{})
+	if got := strings.Join(sortedKeys(resp), ","); got != "count,note,running,services" {
+		t.Errorf("response keys = %s", got)
+	}
+	for _, item := range resp["services"].([]interface{}) {
+		m := item.(map[string]interface{})
+		if got := strings.Join(sortedKeys(m), ","); got != "enabled_at_boot,name,running,state" {
+			t.Errorf("service %v keys = %s", m["name"], got)
+		}
+	}
+	resp = callTool(t, r, "query_services", map[string]interface{}{"name": "ssh"})
+	if got := strings.Join(sortedKeys(resp), ","); got != "count,running,services" {
+		t.Errorf("response keys without UNKNOWN = %s", got)
+	}
+}

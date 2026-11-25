@@ -104,6 +104,11 @@ func bootPoolFixture() map[string]interface{} {
 
 type diskFakeOpts struct {
 	detailsErr, tempsErr bool
+	// reusedName adds a present disk named sde, the last known name of
+	// the REMOVED tank device, with this zfs_guid ("" for none).
+	reusedName     bool
+	reusedNameGUID string
+	dismissed      bool
 }
 
 func diskFake(t *testing.T, opts diskFakeOpts) (*Registry, *fakeMiddleware) {
@@ -113,7 +118,18 @@ func diskFake(t *testing.T, opts diskFakeOpts) (*Registry, *fakeMiddleware) {
 		_ = json.Unmarshal(params, &p)
 		switch method {
 		case "disk.query":
-			return diskQueryFixtures(), nil, true
+			rows := diskQueryFixtures()
+			if opts.reusedName {
+				var guid interface{}
+				if opts.reusedNameGUID != "" {
+					guid = opts.reusedNameGUID
+				}
+				rows = append(rows, map[string]interface{}{
+					"identifier": "{serial}OTHER-DISK-0009", "name": "sde", "serial": "OTHER-DISK-0009",
+					"model": "OTHER SSD 2TB", "size": 2000398934016.0, "type": "SSD", "bus": "ATA", "pool": nil, "zfs_guid": guid,
+				})
+			}
+			return rows, nil, true
 		case "disk.details":
 			if opts.detailsErr {
 				return nil, map[string]interface{}{"code": -32001, "message": "details failed"}, true
@@ -136,6 +152,9 @@ func diskFake(t *testing.T, opts diskFakeOpts) (*Registry, *fakeMiddleware) {
 				"sda": []interface{}{40.0, 70.0}, "sdb": []interface{}{75.0, 70.0},
 				"nvme0n1": []interface{}{50.0, nil}, "sdg": nil,
 			}
+			if opts.reusedName {
+				all["sde"] = []interface{}{33.0, 60.0}
+			}
 			names, _ := p[0].([]interface{})
 			out := map[string]interface{}{}
 			for _, n := range names {
@@ -147,7 +166,7 @@ func diskFake(t *testing.T, opts diskFakeOpts) (*Registry, *fakeMiddleware) {
 				"uuid": "fake-uuid", "klass": "DiskTemperatureTooHot", "level": "CRITICAL",
 				"args":      map[string]interface{}{"device": "/dev/sdb", "serial": "FAKE-SERIAL-0002", "crit_threshold": 70.0, "temp": 75.0},
 				"formatted": "Disk /dev/sdb (with serial: FAKE-SERIAL-0002) critical temperature threshold is 70 degrees celsius and the current temp is 75 degrees celsius",
-				"mail":      "sentinel-mail", "key": "sentinel-key", "dismissed": false,
+				"mail":      "sentinel-mail", "key": "sentinel-key", "dismissed": opts.dismissed,
 			}}, nil, true
 		}
 		return nil, nil, false
@@ -309,7 +328,7 @@ func TestGetDiskHealthFindsFailingDisks(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := json.Marshal(resp["unhealthy"]); string(got) != `["sdb","sde"]` {
+	if got, _ := json.Marshal(resp["unhealthy"]); string(got) != `["guid 1005 (last seen as sde)","sdb"]` {
 		t.Errorf("unhealthy = %s", got)
 	}
 	list := resp["disks"].([]interface{})
@@ -331,9 +350,16 @@ func TestGetDiskHealthFindsFailingDisks(t *testing.T) {
 	if sdb["pool"] != "tank" || sdb["vdev"] != "mirror-0" || sdb["vdev_status"] != "DEGRADED" || sdb["serial"] != "FAKE-SERIAL-0002" {
 		t.Errorf("sdb = %v", sdb)
 	}
-	sde := disks["sde"]
-	if sde["zfs_status"] != "REMOVED" || sde["serial"] != "FAKE-SERIAL-0005" || sde["guid"] != "1005" {
-		t.Errorf("sde = %v", sde)
+	if _, ok := disks["sde"]; ok {
+		t.Errorf("removed device is named after a disk that is not present: %v", disks["sde"])
+	}
+	removed := disks[""]
+	if removed["zfs_status"] != "REMOVED" || removed["serial"] != "FAKE-SERIAL-0005" || removed["guid"] != "1005" ||
+		removed["last_known_name"] != "sde" || removed["name"] != nil {
+		t.Errorf("removed device = %v", removed)
+	}
+	if !strings.Contains(strings.Join(stringList(removed["problems"]), " | "), "not matched to any disk") {
+		t.Errorf("removed device problems = %v", removed["problems"])
 	}
 	if sda := disks["sda"]; sda["healthy"] != true || sda["temperature_c"] != 40.0 || sda["critical_temperature_c"] != 70.0 {
 		t.Errorf("sda = %v", sda)
@@ -360,11 +386,11 @@ func TestGetDiskHealthFindsFailingDisks(t *testing.T) {
 	}
 
 	p := lastParams(t, fake, "disk.temperatures")
-	if got, _ := json.Marshal(p); string(got) != `[["nvme0n1","sda","sdb","sdc","sde","sdf","sdg"],true]` {
+	if got, _ := json.Marshal(p); string(got) != `[["nvme0n1","sda","sdb","sdc","sdf","sdg"],true]` {
 		t.Errorf("disk.temperatures params = %s", got)
 	}
 	p = lastParams(t, fake, "disk.temperature_alerts")
-	if got, _ := json.Marshal(p); string(got) != `[["nvme0n1","sda","sdb","sdc","sde","sdf","sdg"]]` {
+	if got, _ := json.Marshal(p); string(got) != `[["nvme0n1","sda","sdb","sdc","sdf","sdg"]]` {
 		t.Errorf("disk.temperature_alerts params = %s", got)
 	}
 }
@@ -409,8 +435,120 @@ func TestGetDiskHealthTemperatureFailureIsANote(t *testing.T) {
 		t.Errorf("sda has a temperature without disk.temperatures: %v", disks["sda"])
 	}
 	// The temperature alert still marks sdb, and ZFS state still counts.
-	if got, _ := json.Marshal(resp["unhealthy"]); string(got) != `["sdb","sde"]` {
+	if got, _ := json.Marshal(resp["unhealthy"]); string(got) != `["guid 1005 (last seen as sde)","sdb"]` {
 		t.Errorf("unhealthy = %s", got)
+	}
+}
+
+// A REMOVED pool device keeps the name its disk had when last seen. If
+// Linux has given that name to another disk, the removed device must keep
+// its own serial and model, get no temperature, and the other disk must
+// still be listed as a disk in no pool.
+func TestGetDiskHealthRemovedDeviceNameReused(t *testing.T) {
+	r, fake := diskFake(t, diskFakeOpts{reusedName: true})
+	resp := callTool(t, r, "get_disk_health", map[string]interface{}{})
+	if resp["count"] != 8.0 {
+		t.Errorf("count = %v, want 8 (6 pool devices + sdg + sde)", resp["count"])
+	}
+	disks := disksByName(t, resp)
+	removed := disks[""]
+	if removed["zfs_status"] != "REMOVED" || removed["guid"] != "1005" || removed["last_known_name"] != "sde" ||
+		removed["serial"] != "FAKE-SERIAL-0005" || removed["model"] != "FAKE HDD 8TB" || removed["type"] != "UNKNOWN" {
+		t.Errorf("removed device = %v", removed)
+	}
+	for _, key := range []string{"temperature_c", "critical_temperature_c"} {
+		if _, ok := removed[key]; ok {
+			t.Errorf("removed device has %s from the disk now named sde: %v", key, removed)
+		}
+	}
+	sde := disks["sde"]
+	if sde == nil {
+		t.Fatalf("present sde is missing from the no-pool list: %v", disks)
+	}
+	if sde["pool"] != nil || sde["serial"] != "OTHER-DISK-0009" || sde["temperature_c"] != 33.0 || sde["healthy"] != true {
+		t.Errorf("present sde = %v", sde)
+	}
+	if got, _ := json.Marshal(resp["unhealthy"]); string(got) != `["guid 1005 (last seen as sde)","sdb"]` {
+		t.Errorf("unhealthy = %s", got)
+	}
+	p := lastParams(t, fake, "disk.temperatures")
+	if got, _ := json.Marshal(p); string(got) != `[["nvme0n1","sda","sdb","sdc","sde","sdf","sdg"],true]` {
+		t.Errorf("disk.temperatures params = %s", got)
+	}
+
+	// name=sde returns the present disk and the removed device it
+	// used to name, each with its own identity.
+	resp = callTool(t, r, "get_disk_health", map[string]interface{}{"name": "sde"})
+	if resp["count"] != 2.0 {
+		t.Errorf("name=sde count = %v, want 2", resp["count"])
+	}
+	disks = disksByName(t, resp)
+	if disks[""]["serial"] != "FAKE-SERIAL-0005" || disks["sde"]["serial"] != "OTHER-DISK-0009" {
+		t.Errorf("name=sde disks = %v", disks)
+	}
+
+	// pool=tank leaves the present sde out: it is in no pool.
+	resp = callTool(t, r, "get_disk_health", map[string]interface{}{"pool": "tank"})
+	disks = disksByName(t, resp)
+	if disks["sde"] != nil || disks[""]["serial"] != "FAKE-SERIAL-0005" {
+		t.Errorf("pool=tank disks = %v", disks)
+	}
+}
+
+// When the present disk with the last known name has the leaf's ZFS guid,
+// it is the same disk: the device is named and joined to it.
+func TestGetDiskHealthRemovedDeviceSameGUID(t *testing.T) {
+	r, _ := diskFake(t, diskFakeOpts{reusedName: true, reusedNameGUID: "1005"})
+	resp := callTool(t, r, "get_disk_health", map[string]interface{}{})
+	if resp["count"] != 7.0 {
+		t.Errorf("count = %v, want 7 (6 pool devices + sdg)", resp["count"])
+	}
+	disks := disksByName(t, resp)
+	sde := disks["sde"]
+	if sde["pool"] != "tank" || sde["zfs_status"] != "REMOVED" || sde["serial"] != "OTHER-DISK-0009" ||
+		sde["temperature_c"] != 33.0 || sde["last_known_name"] != nil {
+		t.Errorf("sde = %v", sde)
+	}
+	if _, ok := disks[""]; ok {
+		t.Errorf("unnamed device left: %v", disks[""])
+	}
+}
+
+func TestGetDiskHealthDismissedTemperatureAlert(t *testing.T) {
+	r, _ := diskFake(t, diskFakeOpts{dismissed: true})
+	resp := callTool(t, r, "get_disk_health", map[string]interface{}{"name": "sdb"})
+	disks := disksByName(t, resp)
+	problems := strings.Join(stringList(disks["sdb"]["problems"]), " | ")
+	if !strings.Contains(problems, "temperature alert: (dismissed) Disk /dev/sdb") {
+		t.Errorf("sdb problems = %q", problems)
+	}
+	alerts := resp["temperature_alerts"].([]interface{})
+	if len(alerts) != 1 || alerts[0].(map[string]interface{})["dismissed"] != true {
+		t.Errorf("temperature_alerts = %v", alerts)
+	}
+}
+
+// Each NVMe signal is enough on its own: a disk not named nvme* is NVMe
+// by bus, by driver (disk.details) or by subsystem (disk.query).
+func TestDiskTypeNVMeSignals(t *testing.T) {
+	for _, tc := range []struct {
+		desc string
+		name string
+		rows []map[string]interface{}
+		want string
+	}{
+		{"name only", "nvme1n1", []map[string]interface{}{{"type": "SSD", "bus": "UNKNOWN"}}, "NVMe"},
+		{"bus only", "sdx", []map[string]interface{}{{"type": "SSD", "bus": "NVME", "driver": "", "subsystem": "block"}}, "NVMe"},
+		{"driver only", "sdx", []map[string]interface{}{{"type": "SSD", "bus": "UNKNOWN", "driver": "nvme", "subsystem": "block"}}, "NVMe"},
+		{"subsystem only", "sdx", []map[string]interface{}{{"type": "SSD", "bus": "UNKNOWN", "subsystem": "nvme"}}, "NVMe"},
+		{"signal in second row", "sdx", []map[string]interface{}{{"type": "SSD", "bus": "UNKNOWN"}, {"driver": "nvme"}}, "NVMe"},
+		{"sata ssd", "sdx", []map[string]interface{}{{"type": "SSD", "bus": "ATA", "driver": "ahci", "subsystem": "scsi"}}, "SSD"},
+		{"hdd", "sdx", []map[string]interface{}{{"type": "HDD", "bus": "ATA", "driver": "ahci", "subsystem": "scsi"}}, "HDD"},
+		{"unknown", "sdx", []map[string]interface{}{nil, {"bus": "UNKNOWN"}}, "UNKNOWN"},
+	} {
+		if got := diskType(tc.name, tc.rows...); got != tc.want {
+			t.Errorf("%s: diskType = %s, want %s", tc.desc, got, tc.want)
+		}
 	}
 }
 

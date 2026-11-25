@@ -69,10 +69,10 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Filter by `name`, `pool` or `unused_only`; `limit` bounds the list (default 50, maximum 1000). SED passwords and free-text descriptions are not returned
 - **get_disk_health** - One call to find a failing disk
   - For each pool device (data pools and the boot pool): ZFS state, read/write/checksum error counts and the parent vdev. Disks in no pool are included with temperature only
-  - Temperature and critical threshold (cached by TrueNAS for up to 5 minutes) and active disk temperature alerts
-  - Each disk has `healthy` and `problems`; unhealthy disks come first and are named in `unhealthy`. A device that is no longer on the system is named from the TrueNAS disk record when there is one, otherwise by its ZFS guid
+  - Temperature and critical threshold (cached by TrueNAS for up to 5 minutes) and current disk temperature alerts. An alert dismissed in the UI still counts while TrueNAS keeps reporting it, and is marked `(dismissed)`
+  - Each disk has `healthy` and `problems`; unhealthy disks come first and are named in `unhealthy`. A device that is no longer on the system has `name` null, its serial and model from the TrueNAS disk record, and `last_known_name` set to the name it had (Linux may have given that name to another disk since); it is labelled by its ZFS guid
   - TrueNAS 25.10 has no public SMART test API, so SMART self-test results and attributes are not included
-  - Filter by `name` or `pool`. If temperatures or alerts cannot be read, the rest is still returned with a `note`
+  - Filter by `name` (also matches a removed device's `last_known_name`) or `pool`. If temperatures or alerts cannot be read, the rest is still returned with a `note`
 - **query_services** - List system services (`cifs` is SMB) with `state` (`RUNNING`, `STOPPED`, or `UNKNOWN` if TrueNAS could not read it in time), `running` and `enabled_at_boot`. `name` returns one service
 
 ### Alerts

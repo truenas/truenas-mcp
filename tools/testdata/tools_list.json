@@ -1067,11 +1067,11 @@
   },
   {
     "name": "get_disk_health",
-    "description": "Report the health of every disk in one call, to find a disk that is failing: its ZFS device state and read/write/checksum error counts from the pool topology (data pools and the boot pool), its temperature and critical threshold, and any active disk temperature alert. Each disk has 'healthy' and a list of 'problems'; unhealthy disks are listed first and named in 'unhealthy'. Disks not in a pool are included with temperature only. TrueNAS 25.10 has no public SMART test API, so SMART self-test results and attributes are not included. Temperatures are cached by TrueNAS for up to 5 minutes. Use 'name' for one disk or 'pool' for the disks of one pool.",
+    "description": "Report the health of every disk in one call, to find a disk that is failing: its ZFS device state and read/write/checksum error counts from the pool topology (data pools and the boot pool), its temperature and critical threshold, and any current disk temperature alert (an alert dismissed in the UI still counts while TrueNAS keeps reporting it, and is marked dismissed). Each disk has 'healthy' and a list of 'problems'; unhealthy disks are listed first and named in 'unhealthy'. Disks not in a pool are included with temperature only. A removed or unavailable pool device whose disk is not present has 'name' null and its serial and model from the TrueNAS disk database; 'last_known_name' is the name it had, which Linux may since have given to another disk. TrueNAS 25.10 has no public SMART test API, so SMART self-test results and attributes are not included. Temperatures are cached by TrueNAS for up to 5 minutes. Use 'name' for one disk or 'pool' for the disks of one pool.",
     "inputSchema": {
       "properties": {
         "name": {
-          "description": "Optional: Disk name (exact match, e.g. 'sda' or 'nvme0n1') to return only that disk",
+          "description": "Optional: Disk name (exact match, e.g. 'sda' or 'nvme0n1') to return only that disk; a removed pool device whose last known name matches is also returned",
           "minLength": 1,
           "type": "string"
         },

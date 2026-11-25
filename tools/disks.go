@@ -51,13 +51,13 @@ func (r *Registry) registerDiskTools() {
 	r.tools["get_disk_health"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "get_disk_health",
-			Description: "Report the health of every disk in one call, to find a disk that is failing: its ZFS device state and read/write/checksum error counts from the pool topology (data pools and the boot pool), its temperature and critical threshold, and any active disk temperature alert. Each disk has 'healthy' and a list of 'problems'; unhealthy disks are listed first and named in 'unhealthy'. Disks not in a pool are included with temperature only. TrueNAS 25.10 has no public SMART test API, so SMART self-test results and attributes are not included. Temperatures are cached by TrueNAS for up to 5 minutes. Use 'name' for one disk or 'pool' for the disks of one pool.",
+			Description: "Report the health of every disk in one call, to find a disk that is failing: its ZFS device state and read/write/checksum error counts from the pool topology (data pools and the boot pool), its temperature and critical threshold, and any current disk temperature alert (an alert dismissed in the UI still counts while TrueNAS keeps reporting it, and is marked dismissed). Each disk has 'healthy' and a list of 'problems'; unhealthy disks are listed first and named in 'unhealthy'. Disks not in a pool are included with temperature only. A removed or unavailable pool device whose disk is not present has 'name' null and its serial and model from the TrueNAS disk database; 'last_known_name' is the name it had, which Linux may since have given to another disk. TrueNAS 25.10 has no public SMART test API, so SMART self-test results and attributes are not included. Temperatures are cached by TrueNAS for up to 5 minutes. Use 'name' for one disk or 'pool' for the disks of one pool.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"name": map[string]interface{}{
 						"type":        "string",
-						"description": "Optional: Disk name (exact match, e.g. 'sda' or 'nvme0n1') to return only that disk",
+						"description": "Optional: Disk name (exact match, e.g. 'sda' or 'nvme0n1') to return only that disk; a removed pool device whose last known name matches is also returned",
 						"minLength":   1,
 					},
 					"pool": map[string]interface{}{
@@ -131,8 +131,8 @@ func diskDetailRows(ctx context.Context, client *truenas.Client) (used, unused m
 }
 
 // diskType returns HDD, SSD or NVMe. The middleware types every
-// non-rotational disk as SSD, so NVMe is recognised by its name, bus or
-// driver.
+// non-rotational disk as SSD, so NVMe is recognised by its name, bus,
+// driver (disk.details) or subsystem (disk.query).
 func diskType(name string, rows ...map[string]interface{}) string {
 	if strings.HasPrefix(name, "nvme") {
 		return "NVMe"
@@ -143,7 +143,8 @@ func diskType(name string, rows ...map[string]interface{}) string {
 		}
 		bus, _ := row["bus"].(string)
 		driver, _ := row["driver"].(string)
-		if strings.EqualFold(bus, "nvme") || driver == "nvme" {
+		subsystem, _ := row["subsystem"].(string)
+		if strings.EqualFold(bus, "nvme") || driver == "nvme" || strings.EqualFold(subsystem, "nvme") {
 			return "NVMe"
 		}
 	}
@@ -489,10 +490,22 @@ func handleGetDiskHealth(ctx context.Context, client *truenas.Client, args map[s
 		poolSummaries = append(poolSummaries, summary)
 		for _, l := range topologyLeaves(p.name, p.topology) {
 			diskName, _ := l.leaf["disk"].(string)
-			var unavail map[string]interface{}
+			leafGUID, _ := l.leaf["guid"].(string)
+			q := inventory[diskName]
+			// A leaf without a disk is removed or unavailable. Its
+			// unavail_disk is the expired disk record, named as it was
+			// when last seen; Linux may have given that name to another
+			// disk since. Only a present disk with the same ZFS guid is
+			// the same disk; otherwise keep the record's own identity
+			// and do not join temperatures or the no-pool list by name.
+			var lastKnown string
 			if diskName == "" {
-				unavail, _ = l.leaf["unavail_disk"].(map[string]interface{})
-				diskName, _ = firstString("name", unavail)
+				unavail, _ := l.leaf["unavail_disk"].(map[string]interface{})
+				lastKnown, _ = firstString("name", unavail)
+				q = unavail
+				if row := inventory[lastKnown]; row != nil && leafGUID != "" && zfsGUIDString(row["zfs_guid"]) == leafGUID {
+					diskName, q, lastKnown = lastKnown, row, ""
+				}
 			}
 			entry := map[string]interface{}{"pool": p.name, "vdev_kind": l.kind}
 			if diskName != "" {
@@ -500,6 +513,9 @@ func handleGetDiskHealth(ctx context.Context, client *truenas.Client, args map[s
 				inTopology[diskName] = true
 			} else {
 				entry["name"] = nil
+				if lastKnown != "" {
+					entry["last_known_name"] = lastKnown
+				}
 			}
 			if l.vdev != "" {
 				entry["vdev"] = l.vdev
@@ -515,11 +531,11 @@ func handleGetDiskHealth(ctx context.Context, client *truenas.Client, args map[s
 			if counts, ok := leafErrors(l.leaf); ok {
 				entry["read_errors"], entry["write_errors"], entry["checksum_errors"] = counts[0], counts[1], counts[2]
 			}
-			q := inventory[diskName]
-			if q == nil {
-				q = unavail
+			typeName := diskName
+			if typeName == "" {
+				typeName = lastKnown
 			}
-			addDiskIdentity(entry, diskName, q)
+			addDiskIdentity(entry, typeName, q)
 			entries = append(entries, entry)
 		}
 	}
@@ -536,7 +552,7 @@ func handleGetDiskHealth(ctx context.Context, client *truenas.Client, args map[s
 	if name != "" {
 		kept := entries[:0]
 		for _, e := range entries {
-			if e["name"] == name {
+			if e["name"] == name || e["last_known_name"] == name {
 				kept = append(kept, e)
 			}
 		}
@@ -589,6 +605,9 @@ func handleGetDiskHealth(ctx context.Context, client *truenas.Client, args map[s
 				text, _ := firstString("formatted", a)
 				if text == "" {
 					text, _ = firstString("text", a)
+				}
+				if dismissed, _ := row["dismissed"].(bool); dismissed {
+					text = "(dismissed) " + text
 				}
 				disk := strings.TrimPrefix(dev, "/dev/")
 				alertsByDisk[disk] = append(alertsByDisk[disk], text)
@@ -689,14 +708,32 @@ func addDiskIdentity(entry map[string]interface{}, name string, q map[string]int
 	}
 }
 
+// zfsGUIDString returns a disk.query zfs_guid as a string, or "".
+func zfsGUIDString(v interface{}) string {
+	switch g := v.(type) {
+	case string:
+		return g
+	case float64:
+		return fmt.Sprintf("%.0f", g)
+	}
+	return ""
+}
+
 // diskLabel names a get_disk_health entry: the disk name, else the pool
-// device guid.
+// device guid (with the last known name of a removed disk).
 func diskLabel(e map[string]interface{}) string {
 	if n, ok := e["name"].(string); ok && n != "" {
 		return n
 	}
+	last, _ := e["last_known_name"].(string)
 	if g, ok := e["guid"].(string); ok && g != "" {
+		if last != "" {
+			return "guid " + g + " (last seen as " + last + ")"
+		}
 		return "guid " + g
+	}
+	if last != "" {
+		return "last seen as " + last
 	}
 	return "unknown device"
 }
