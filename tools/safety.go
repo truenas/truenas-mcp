@@ -122,6 +122,18 @@ var toolSafety = map[string]Safety{
 	"get_arc_metrics":     {Access: Read},
 	"get_ups_metrics":     {Access: Read},
 
+	// Network configuration. update_network_config applies at once with no
+	// rollback; update_network_interface can cut connectivity and is only
+	// kept if checked in. Both are destructive. checkin and rollback are
+	// the window's two exits and must stay fast, so they take no token.
+	"get_network_config":          {Access: Read},
+	"query_network_interfaces":    {Access: Read},
+	"get_pending_network_changes": {Access: Read},
+	"update_network_config":       {Access: Destructive, Idempotent: true},
+	"update_network_interface":    {Access: Destructive},
+	"checkin_network_changes":     {Access: Write},
+	"rollback_network_changes":    {Access: Write},
+
 	// Apps
 	"query_apps":              {Access: Read},
 	"get_app_config":          {Access: Read},

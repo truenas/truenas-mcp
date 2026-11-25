@@ -152,7 +152,7 @@ var supportedSchemaKeywords = map[string]bool{
 	"type": true, "enum": true, "const": true, "required": true,
 	"properties": true, "additionalProperties": true, "items": true,
 	"minimum": true, "maximum": true, "minLength": true, "maxLength": true,
-	"pattern": true,
+	"pattern": true, "maxItems": true,
 	// Annotations only.
 	"description": true, "default": true, "title": true, "examples": true,
 }
@@ -343,6 +343,9 @@ func schemaViolation(path *argPath, schema map[string]interface{}, v interface{}
 	case map[string]interface{}:
 		return objectViolation(path, schema, val)
 	case []interface{}:
+		if max, ok := schemaNumber(schema["maxItems"]); ok && float64(len(val)) > max {
+			return fmt.Sprintf("%s must have at most %s items", path, formatSchemaNumber(max))
+		}
 		if items, ok := schema["items"].(map[string]interface{}); ok {
 			for i, item := range val {
 				if msg := schemaViolation(path.item(i), items, item, false); msg != "" {

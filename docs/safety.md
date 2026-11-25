@@ -82,7 +82,7 @@ is set (`upgrade_app` may be named; it stays limited to dry runs).
 TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
-**Confirmation for destructive tools.** These twelve tools execute only after
+**Confirmation for destructive tools.** These fourteen tools execute only after
 confirmation. When the MCP client supports form elicitation, the server asks
 the user to approve a short preview in the client and executes only if they
 accept. Otherwise the tools execute only with a `confirmation_token` from a
@@ -102,11 +102,14 @@ preview of the same call:
 | `delete_scrub_schedule` | Removes automatic data-integrity checks |
 | `run_snapshot_task` | Starts the replication tasks bound to the snapshot task, whose retention can delete target snapshots; the task's own retention can remove old snapshots |
 | `run_replication` | Retention (`SOURCE` or `CUSTOM`) deletes target snapshots after the transfer, and `allow_from_scratch` can destroy the target dataset's data when no common snapshot exists |
+| `update_network_config` | Gateways, nameservers and hostname apply at once with no automatic rollback; a wrong gateway can cut off every remote client, including this server |
+| `update_network_interface` | Reconfigures interfaces and can cut off clients; TrueNAS rolls it back unless it is checked in (see [Network check-in window](#network-check-in-window)) |
 
 No other tool needs a token: the other write tools (`create_dataset`,
 `create_smb_share`, `create_nfs_share`, `install_app`, `start_app`,
 `download_update`, `create_scrub_schedule`, `run_scrub`, `create_snapshot`,
-`dismiss_alert`, `restore_alert`, `refresh_directory_cache`) run directly and keep their
+`dismiss_alert`, `restore_alert`, `refresh_directory_cache`,
+`checkin_network_changes`, `rollback_network_changes`) run directly and keep their
 optional `dry_run`, and read tools never take one.
 
 **Elicitation (primary path).** If the client declared the MCP form
@@ -166,7 +169,8 @@ the canonical JSON of the arguments (keys sorted; `confirmation_token`,
 execute (`stop_app`, `delete_boot_environment`, `delete_app`,
 `delete_scrub_schedule`, `upgrade_app`, `update_app`, `system_reboot`,
 `apply_update`, `configure_directory_service`, `leave_directory_service`,
-`run_snapshot_task`, `run_replication`), the token is also bound to
+`run_snapshot_task`, `run_replication`, `update_network_config`,
+`update_network_interface`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
@@ -265,10 +269,57 @@ schema), `host_path_config.acl_enable` must also be a JSON boolean.
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`)
 derived from the same table, so clients can apply their own approval prompts.
-`destructiveHint` is true for the twelve destructive tools (the ones that need a
+`destructiveHint` is true for the fourteen destructive tools (the ones that need a
 confirmation token, `update_app` included) and false for every other tool.
 Annotations were added in MCP 2025-03-26; clients that negotiate
 `2024-11-05` ignore the extra field.
+
+### Network check-in window
+
+`update_network_interface` uses the TrueNAS test-changes flow. After the
+change is approved it stages it (`interface.update`) and applies it
+(`interface.commit` with `rollback: true`). TrueNAS then waits
+`checkin_timeout_seconds` (default 60, 15 to 600) for a check-in and rolls
+the change back by itself if none arrives. The window starts after approval,
+so the confirmation prompt does not use it up.
+
+The reply says `status: "awaiting_checkin"` with `remaining_seconds`,
+`rollback_at` and the addresses now on the interface. Verify with
+`query_network_interfaces` or `get_pending_network_changes`, then call
+`checkin_network_changes` to keep the change or `rollback_network_changes`
+to undo it. Those two need no token: they only end a change that was already
+approved, and a token round trip would eat into the window.
+`get_pending_network_changes` reports `outcome` for the last change:
+`checked_in`, `rolled_back`, `changed_elsewhere` or `unknown`.
+
+If the connection drops during the commit, the server reconnects for up to
+20 seconds. When the change is waiting for check-in, it reports
+`awaiting_checkin` with `reconnected: true`. TrueNAS keeps applying the
+commit after the connection drops and arms the check-in timer only when the
+apply finishes, so while changes are pending without a timer the server
+keeps checking until the timer appears. If it does not appear within those
+20 seconds, the server reports `unknown` and rolls nothing back; call
+`get_pending_network_changes` to see the state. When nothing is pending any
+more, it reports the outcome it finds (for example `rolled_back`). If it
+cannot reconnect, it returns `connection_lost` with the rollback time:
+TrueNAS reverts the change without a check-in.
+
+`checkin_network_changes` only checks in a change this server committed. A
+change waiting for check-in from elsewhere (for example the web UI) is
+refused: check it in where it was made, or revert it with
+`rollback_network_changes`.
+
+The change is refused when interface changes are already pending (for
+example from the web UI), when that cannot be checked, and when it would
+remove the address this server is connected through. Only one
+`update_network_interface` call runs at a time. If the commit fails, the staged change is discarded.
+
+`update_network_config` has no such window. TrueNAS applies gateways,
+nameservers and the hostname immediately and never rolls them back, so the
+preview shows the previous values to restore by hand. It is refused while
+interface changes are pending (or when that cannot be checked), because an interface rollback also restores
+the IPv4 gateway. The interface tools need an API key with the
+`NETWORK_INTERFACE_WRITE` role.
 
 ## Security and output redaction
 
