@@ -98,6 +98,10 @@
     "handler": "handleGetDirectoryServiceStatus"
   },
   {
+    "name": "get_disk_health",
+    "handler": "handleGetDiskHealth"
+  },
+  {
     "name": "get_disk_metrics",
     "handler": "handleGetDiskMetrics"
   },
@@ -165,6 +169,10 @@
     "handler": "handleQueryDirectoryServices"
   },
   {
+    "name": "query_disks",
+    "handler": "handleQueryDisks"
+  },
+  {
     "name": "query_groups",
     "handler": "handleQueryGroups"
   },
@@ -187,6 +195,10 @@
   {
     "name": "query_scrub_schedules",
     "handler": "handleQueryScrubSchedules"
+  },
+  {
+    "name": "query_services",
+    "handler": "handleQueryServices"
   },
   {
     "name": "query_shares",

@@ -74,6 +74,18 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Filter by exact `name` and `builtin`. Local groups only unless `include_directory_groups` is true. `limit` defaults to 50 (maximum 1000)
   - Group names (for `query_users`) and usernames (for `query_groups`) come from one extra lookup per call; ids that could not be resolved are listed under `unresolved_group_ids` / `unresolved_member_ids`
 
+### Disks and Services
+- **query_disks** - List physical disks: name, serial, model, size, type (`HDD`, `SSD` or `NVMe`), bus and pool
+  - `usage` is `USED` (in an imported pool, including the boot pool, or in an exported pool that could be imported; `exported_pool` names it), `UNUSED`, or `UNKNOWN` when TrueNAS did not report the disk. If that lookup fails, `usage` is `UNKNOWN` and `in_use` falls back to pool membership
+  - Filter by `name`, `pool` or `unused_only`; `limit` bounds the list (default 50, maximum 1000). SED passwords and free-text descriptions are not returned
+- **get_disk_health** - One call to find a failing disk
+  - For each pool device (data pools and the boot pool): ZFS state, read/write/checksum error counts and the parent vdev. Disks in no pool are included with temperature only
+  - Temperature and critical threshold (cached by TrueNAS for up to 5 minutes) and current disk temperature alerts. An alert dismissed in the UI still counts while TrueNAS keeps reporting it, and is marked `(dismissed)`
+  - Each disk has `healthy` and `problems`; unhealthy disks come first and are named in `unhealthy`. A device that is no longer on the system has `name` null, its serial and model from the TrueNAS disk record, and `last_known_name` set to the name it had (Linux may have given that name to another disk since); it is labelled by its ZFS guid
+  - TrueNAS 25.10 has no public SMART test API, so SMART self-test results and attributes are not included
+  - Filter by `name` (also matches a removed device's `last_known_name`) or `pool`. If temperatures or alerts cannot be read, the rest is still returned with a `note`
+- **query_services** - List system services (`cifs` is SMB) with `state` (`RUNNING`, `STOPPED`, or `UNKNOWN` if TrueNAS could not read it in time), `running` and `enabled_at_boot`. `name` returns one service
+
 ### Alerts
 - **list_alerts** - List system alerts with filtering
   - **Default changed:** without arguments, only active alerts are listed and dismissed alerts are excluded (previously all alerts were listed). `include_dismissed: true` lists all alerts; `dismissed: true` lists only dismissed alerts and `dismissed: false` only active ones

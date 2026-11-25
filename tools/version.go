@@ -68,6 +68,10 @@ var toolVersion = map[string]VersionRange{
 	// Accounts
 	"query_users":  {Min: truenas.MinSupported},
 	"query_groups": {Min: truenas.MinSupported},
+	// Disks and services
+	"query_disks":     {Min: truenas.MinSupported},
+	"get_disk_health": {Min: truenas.MinSupported},
+	"query_services":  {Min: truenas.MinSupported},
 	// Alerts
 	"list_alerts":   {Min: truenas.MinSupported},
 	"dismiss_alert": {Min: truenas.MinSupported},

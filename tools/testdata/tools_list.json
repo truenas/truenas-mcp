@@ -1066,6 +1066,31 @@
     }
   },
   {
+    "name": "get_disk_health",
+    "description": "Report the health of every disk in one call, to find a disk that is failing: its ZFS device state and read/write/checksum error counts from the pool topology (data pools and the boot pool), its temperature and critical threshold, and any current disk temperature alert (an alert dismissed in the UI still counts while TrueNAS keeps reporting it, and is marked dismissed). Each disk has 'healthy' and a list of 'problems'; unhealthy disks are listed first and named in 'unhealthy'. Disks not in a pool are included with temperature only. A removed or unavailable pool device whose disk is not present has 'name' null and its serial and model from the TrueNAS disk database; 'last_known_name' is the name it had, which Linux may since have given to another disk. TrueNAS 25.10 has no public SMART test API, so SMART self-test results and attributes are not included. Temperatures are cached by TrueNAS for up to 5 minutes. Use 'name' for one disk or 'pool' for the disks of one pool.",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "description": "Optional: Disk name (exact match, e.g. 'sda' or 'nvme0n1') to return only that disk; a removed pool device whose last known name matches is also returned",
+          "minLength": 1,
+          "type": "string"
+        },
+        "pool": {
+          "description": "Optional: Return only disks of this pool (exact name, e.g. the boot pool 'boot-pool')",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "get_disk_metrics",
     "description": "Get disk performance metrics (I/O or temperature)",
     "inputSchema": {
@@ -1546,6 +1571,40 @@
     }
   },
   {
+    "name": "query_disks",
+    "description": "List physical disks: name, serial, model, size, type (HDD, SSD or NVMe), bus, the pool each belongs to, and whether it is in use. 'usage' is USED when the disk is part of an imported pool (including the boot pool) or of an exported pool that could be imported, UNUSED otherwise, and UNKNOWN when TrueNAS did not report it. Use 'name' for one disk, 'pool' for the disks of one pool, 'unused_only' for disks free to add to a pool, and 'limit' to bound the list (default: 50, maximum: 1000).",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Optional: Maximum number of disks to return (default: 50, maximum: 1000)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "description": "Optional: Disk name (exact match, e.g. 'sda' or 'nvme0n1') to return only that disk",
+          "minLength": 1,
+          "type": "string"
+        },
+        "pool": {
+          "description": "Optional: Return only disks of this pool (exact name; an exported pool also matches)",
+          "minLength": 1,
+          "type": "string"
+        },
+        "unused_only": {
+          "description": "Optional: Return only disks that are not part of any imported or exported pool (default: false). Cannot be combined with 'pool'",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "query_groups",
     "description": "Query groups. Returns name, gid, builtin and SMB flags, sudo flag, roles, and members by username (at most 100 listed per group; member_count is the full count). Local groups only unless 'include_directory_groups' is true. Use 'limit' to control result size (default: 50, maximum: 1000).",
     "inputSchema": {
@@ -1677,6 +1736,26 @@
         },
         "pool": {
           "description": "Optional: Filter by pool name (exact match)",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "query_services",
+    "description": "List system services (for example cifs for SMB, nfs, ssh, ups, snmp, ftp) with their state and whether each starts at boot. 'state' is RUNNING, STOPPED, or UNKNOWN when TrueNAS could not read it in time. Use 'name' for one service.",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "description": "Optional: Service name (exact match, e.g. 'cifs', 'nfs', 'ssh') to return only that service",
+          "minLength": 1,
           "type": "string"
         }
       },

@@ -300,7 +300,7 @@ func simplifyUser(row map[string]interface{}, groupNames map[int]string) map[str
 	copyRoles(out, row)
 
 	if g, ok := row["group"].(map[string]interface{}); ok {
-		if name := firstString(g, "bsdgrp_group", "name", "group"); name != "" {
+		if name := firstStringOf(g, "bsdgrp_group", "name", "group"); name != "" {
 			out["primary_group"] = name
 		}
 		for _, k := range []string{"bsdgrp_gid", "gid"} {
@@ -399,7 +399,7 @@ func copyRoles(out, row map[string]interface{}) {
 	out["roles"] = roles
 }
 
-func firstString(m map[string]interface{}, keys ...string) string {
+func firstStringOf(m map[string]interface{}, keys ...string) string {
 	for _, k := range keys {
 		if s, ok := m[k].(string); ok && s != "" {
 			return s
