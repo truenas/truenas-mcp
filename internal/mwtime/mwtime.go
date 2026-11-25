@@ -45,6 +45,12 @@ func Normalize(v interface{}) (string, int64) {
 	return t.Format(time.RFC3339), t.Unix()
 }
 
+// Date encodes t the way the middleware expects a datetime parameter:
+// {"$date": <ms since epoch>}.
+func Date(t time.Time) map[string]int64 {
+	return map[string]int64{"$date": t.UnixMilli()}
+}
+
 // inRange reports whether t is a plausible middleware time.
 func inRange(t time.Time) bool {
 	return !t.Before(minTime) && !t.After(time.Now().Add(maxAhead))
