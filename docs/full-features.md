@@ -2,7 +2,7 @@
 
 This document provides a comprehensive list of all available MCP tools for TrueNAS management.
 
-Tools are classified as read, write or destructive (`tools/safety.go`). Write and destructive tools are hidden and refused in `--read-only` mode (except `upgrade_app`, which stays available for `dry_run: true` previews only), and `--allow-tools` / `--deny-tools` restrict the exposed set. The twelve destructive tools (marked below) execute only after confirmation. When the MCP client supports form elicitation, the server asks the user to approve a preview in the client whose message names the tool, the target, a headline, and the key facts being approved (versions, names, changed configuration keys and storage paths, and similar), already redacted and cut at 2 KiB when needed, and executes only if they accept; the token-path dry-run preview includes the same facts as `confirm_summary`; a declined, cancelled or timed-out prompt executes nothing. Clients without elicitation use a `confirmation_token`: called without a valid one they change nothing and return a `confirmation_required` result with their dry-run preview and a single-use token, valid for 5 minutes and bound to the tool and the exact arguments; repeat the call with the same arguments plus `confirmation_token` to execute it. `--require-human-confirm` never issues or redeems a confirmation token: clients without elicitation are refused, and a client that declared it is prompted even if a token was supplied. A preview that says the operation cannot proceed returns an error and issues no token and no prompt. The token proves that a preview of these arguments happened, not that a human approved it; elicitation raises the bar but is not proof of a human either, because the capability is self-declared. `dry_run` (and the old `confirm`, which no longer executes anything) must be JSON booleans (`true` or `false`); a string such as `"true"` or a number is rejected and nothing is executed. Every other argument is checked against the tool's input schema before anything runs, too: unknown or missing required arguments, wrong JSON types (for example `"browsable": "false"`, `"create_ancestors": "false"` or `"quota": "10G"`), fractional integers, and values outside an enum or range (such as a negative `quota` or a `limit` of 0) are rejected with an error that names the argument without echoing its value; `null` on an optional argument means omitted (see [Argument validation](safety.md#safety-controls)). **Breaking change:** `"confirm": true` no longer executes a destructive tool (it gets the preview, a token and an explanation), and `update_app` is now destructive. See [Safety controls](safety.md#safety-controls).
+Tools are classified as read, write or destructive (`tools/safety.go`). Write and destructive tools are hidden and refused in `--read-only` mode (except `upgrade_app`, which stays available for `dry_run: true` previews only), and `--allow-tools` / `--deny-tools` restrict the exposed set. The fourteen destructive tools (marked below) execute only after confirmation. When the MCP client supports form elicitation, the server asks the user to approve a preview in the client whose message names the tool, the target, a headline, and the key facts being approved (versions, names, changed configuration keys and storage paths, and similar), already redacted and cut at 2 KiB when needed, and executes only if they accept; the token-path dry-run preview includes the same facts as `confirm_summary`; a declined, cancelled or timed-out prompt executes nothing. Clients without elicitation use a `confirmation_token`: called without a valid one they change nothing and return a `confirmation_required` result with their dry-run preview and a single-use token, valid for 5 minutes and bound to the tool and the exact arguments; repeat the call with the same arguments plus `confirmation_token` to execute it. `--require-human-confirm` never issues or redeems a confirmation token: clients without elicitation are refused, and a client that declared it is prompted even if a token was supplied. A preview that says the operation cannot proceed returns an error and issues no token and no prompt. The token proves that a preview of these arguments happened, not that a human approved it; elicitation raises the bar but is not proof of a human either, because the capability is self-declared. `dry_run` (and the old `confirm`, which no longer executes anything) must be JSON booleans (`true` or `false`); a string such as `"true"` or a number is rejected and nothing is executed. Every other argument is checked against the tool's input schema before anything runs, too: unknown or missing required arguments, wrong JSON types (for example `"browsable": "false"`, `"create_ancestors": "false"` or `"quota": "10G"`), fractional integers, and values outside an enum or range (such as a negative `quota` or a `limit` of 0) are rejected with an error that names the argument without echoing its value; `null` on an optional argument means omitted (see [Argument validation](safety.md#safety-controls)). **Breaking change:** `"confirm": true` no longer executes a destructive tool (it gets the preview, a token and an explanation), and `update_app` is now destructive. See [Safety controls](safety.md#safety-controls).
 
 Every tool result and error sent to the MCP client is at most 100 KiB. Larger output is redacted first, then cut, with a notice telling the model to narrow the query with `limit`, `select`, or filters. Middleware error traces are not sent to the client; `--debug` logs them to stderr (see [Security and output redaction](safety.md#security-and-output-redaction) and [Debug logging](configuration.md#debug-logging)).
 
@@ -519,6 +519,38 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Refused if the dataset does not exist or a snapshot with that name already exists on any covered dataset
   - Returns the resulting snapshot name (`dataset@name`); a recursive snapshot also lists the snapshots read back on each child
   - Unless a periodic snapshot task's retention applies (see the warnings above), the snapshot stays until it is deleted
+
+## Network Configuration
+
+- **get_network_config** - Global network settings, configured and applied
+  - Hostname, domain, IPv4 and IPv6 gateways and nameservers as saved, next to what is in effect (`applied`, from `state`)
+  - `gateway_status` per family: `applied`, `not_applied`, `dynamic` (a default route from DHCP or router advertisements, no static gateway) or `none`
+  - `default_routes` from the routing table, and `connection_local_ip`, the TrueNAS address this server is connected to
+- **query_network_interfaces** - Interfaces with configured aliases and the addresses actually on them
+  - Each applied address is marked `static`, `dynamic` (DHCP or SLAAC) or `link_local`; `this_server_connection` marks the interface this server uses
+  - `name` returns one interface. `pending_changes` shows the check-in state when the key has the role to read it
+- **get_pending_network_changes** - Whether interface changes are staged or waiting for check-in, `remaining_seconds`, and the outcome of the last change this server made
+- **update_network_config** - Change gateways, nameservers, hostname or domain (**destructive**)
+  - **Requires a `confirmation_token`**. Sends only the values that change
+  - Applies immediately with no automatic rollback; the preview lists the previous values
+  - An empty string clears a gateway or nameserver. A link-local IPv6 gateway takes the form `fe80::1%<interface>`
+  - Warns when the gateway is outside every prefix on the system, when SLAAC is on (the static gateway replaces the router-advertised route), and when the change affects this server's own connection
+  - Refused while interface changes are pending
+- **update_network_interface** - Add or remove static IPv4/IPv6 aliases and turn `ipv6_auto` on or off (**destructive**)
+  - **Requires a `confirmation_token`**. Aliases are CIDR (`2001:db8:1::10/64`); link-local and multicast addresses are refused, and SLAAC or DHCP addresses cannot be removed
+  - Stages and commits the change with a check-in window (`checkin_timeout_seconds`, default 60). Without `checkin_network_changes` in time, TrueNAS rolls it back
+  - Returns `awaiting_checkin`, `remaining_seconds`, `rollback_at` and the addresses now on the interface
+  - Refused when changes are already pending or when it would remove this server's connection address. See [Network check-in window](safety.md#network-check-in-window)
+- **checkin_network_changes** - Keep a committed interface change before the window ends; refused when nothing is waiting
+- **rollback_network_changes** - Revert pending interface changes now, committed or only staged
+
+Example: add a static IPv6 address next to SLAAC and set a default gateway.
+
+1. `update_network_interface` with `interface: "eth0"` and `add_aliases: ["2001:db8:1::10/64"]`, then confirm
+2. `query_network_interfaces name=eth0`: the new address is listed as `static` next to the `dynamic` SLAAC address
+3. `checkin_network_changes` within the window
+4. `update_network_config` with `ipv6gateway: "2001:db8:1::1"`, then confirm
+5. `get_network_config`: `gateway_status.ipv6.status` is `applied` and `default_routes` lists the gateway
 
 ## Task Management
 

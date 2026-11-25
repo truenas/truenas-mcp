@@ -784,7 +784,7 @@ func TestNetworkInterfaceRefusals(t *testing.T) {
 		{"interface": "eth0", "add_aliases": []interface{}{"2001:db8:1::10"}},
 		{"interface": "eth0", "add_aliases": []interface{}{"fe80::10/64"}},
 		{"interface": "eth0", "add_aliases": []interface{}{"192.0.2.10/25"}},
-		{"interface": "eth0", "remove_aliases": []interface{}{"198.51.100.7"}},
+		{"interface": "eth0", "remove_aliases": []interface{}{"192.0.2.99"}},
 		{"interface": "eth0", "add_aliases": []interface{}{netTestStatic6}, "checkin_timeout_seconds": 0.0},
 	} {
 		if _, err := dry(args); err == nil {
@@ -829,7 +829,7 @@ func TestNetworkInterfaceTokenBoundToCurrentConfig(t *testing.T) {
 	// The interface changes between preview and confirm.
 	sim.mu.Lock()
 	e := sim.db["eth0"]
-	e.static = append(e.static, "198.51.100.5/24")
+	e.static = append(e.static, "192.0.2.20/24")
 	sim.db["eth0"] = e
 	sim.mu.Unlock()
 	if _, err := r.CallTool(t.Context(), "update_network_interface", call); err == nil {
