@@ -27,16 +27,17 @@ You need TrueNAS 25.10 or later.
 
 ### 1. Get the binary
 
-Download the archive for your platform from the [Releases page](https://github.com/truenas/truenas-mcp/releases): macOS (Apple Silicon), Linux (x86-64) or Windows (x86-64). Put the binary on your `PATH` as `truenas-mcp`:
+Download the archive for your platform from the [Releases page](https://github.com/truenas/truenas-mcp/releases): macOS (Apple Silicon or Intel), Linux (x86-64 or ARM64) or Windows (x86-64 or ARM64). Put the binary on your `PATH` as `truenas-mcp`:
 
 ```bash
+# Use arm64 instead of amd64 on ARM machines.
 tar -xzf truenas-mcp-linux-amd64.tar.gz
 sudo install truenas-mcp-linux-amd64 /usr/local/bin/truenas-mcp
 ```
 
-On Windows, unzip `truenas-mcp-windows-amd64.zip` and use the full path to the `.exe` as the `command` in your client config. Each release has a `checksums.txt` to verify the download.
+On Windows, unzip `truenas-mcp-windows-amd64.zip` (`truenas-mcp-windows-arm64.zip` on ARM) and use the full path to the `.exe` as the `command` in your client config. Each release has a `checksums.txt` to verify the download.
 
-To build it yourself (needed on Intel Macs), you need Go 1.27.4 or later:
+To build it yourself, you need Go 1.27.4 or later:
 
 ```bash
 git clone https://github.com/truenas/truenas-mcp.git
