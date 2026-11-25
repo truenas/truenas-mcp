@@ -63,8 +63,17 @@ var toolVersion = map[string]VersionRange{
 	"create_dataset":            {Min: truenas.MinSupported},
 	"create_smb_share":          {Min: truenas.MinSupported},
 	"create_nfs_share":          {Min: truenas.MinSupported},
+	"get_share_acl":             {Min: truenas.MinSupported},
+	"get_filesystem_acl":        {Min: truenas.MinSupported},
 	"analyze_capacity":          {Min: truenas.MinSupported},
 	"get_pool_capacity_details": {Min: truenas.MinSupported},
+	// Accounts
+	"query_users":  {Min: truenas.MinSupported},
+	"query_groups": {Min: truenas.MinSupported},
+	// Disks and services
+	"query_disks":     {Min: truenas.MinSupported},
+	"get_disk_health": {Min: truenas.MinSupported},
+	"query_services":  {Min: truenas.MinSupported},
 	// Alerts
 	"list_alerts":   {Min: truenas.MinSupported},
 	"dismiss_alert": {Min: truenas.MinSupported},

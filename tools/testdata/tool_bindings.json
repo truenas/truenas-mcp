@@ -98,8 +98,16 @@
     "handler": "handleGetDirectoryServiceStatus"
   },
   {
+    "name": "get_disk_health",
+    "handler": "handleGetDiskHealth"
+  },
+  {
     "name": "get_disk_metrics",
     "handler": "handleGetDiskMetrics"
+  },
+  {
+    "name": "get_filesystem_acl",
+    "handler": "handleGetFilesystemACL"
   },
   {
     "name": "get_network_config",
@@ -120,6 +128,10 @@
   {
     "name": "get_scrub_status",
     "handler": "handleGetScrubStatus"
+  },
+  {
+    "name": "get_share_acl",
+    "handler": "handleGetShareACL"
   },
   {
     "name": "get_system_metrics",
@@ -165,6 +177,14 @@
     "handler": "handleQueryDirectoryServices"
   },
   {
+    "name": "query_disks",
+    "handler": "handleQueryDisks"
+  },
+  {
+    "name": "query_groups",
+    "handler": "handleQueryGroups"
+  },
+  {
     "name": "query_jobs",
     "handler": "handleQueryJobs"
   },
@@ -185,6 +205,10 @@
     "handler": "handleQueryScrubSchedules"
   },
   {
+    "name": "query_services",
+    "handler": "handleQueryServices"
+  },
+  {
     "name": "query_shares",
     "handler": "handleQueryShares"
   },
@@ -195,6 +219,10 @@
   {
     "name": "query_snapshots",
     "handler": "handleQuerySnapshots"
+  },
+  {
+    "name": "query_users",
+    "handler": "handleQueryUsers"
   },
   {
     "name": "query_vms",
