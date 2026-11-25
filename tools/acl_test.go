@@ -182,7 +182,67 @@ func dirStat(realpath string) map[string]interface{} {
 	return map[string]interface{}{
 		"realpath": realpath, "type": "DIRECTORY", "mode": float64(0o40770),
 		"uid": 3001.0, "gid": 4001.0, "user": "exampleuser", "group": "examplegroup", "acl": true,
+		"is_mountpoint": false,
 	}
+}
+
+func mountStat(p string) map[string]interface{} {
+	st := dirStat(p)
+	st["is_mountpoint"] = true
+	return st
+}
+
+// linkStat models 25.10 filesystem.stat of a symlink: the link is not
+// followed and realpath is fully resolved.
+func linkStat(at, target string) map[string]interface{} {
+	return map[string]interface{}{"realpath": target, "type": "SYMLINK", "mode": float64(0o120777),
+		"uid": 0.0, "gid": 0.0, "user": "root", "group": "root", "acl": false, "is_mountpoint": false}
+}
+
+// newACLFake serves filesystem.stat per path, like 25.10 does for a path
+// with no symlinks in it: /mnt/tank and /mnt/other are pool mountpoints,
+// any other path under them is a directory, and fs overrides or adds
+// entries. Paths elsewhere fail with ENOENT, so a test sees if the tool
+// stats a path outside the pools.
+func newACLFake(t *testing.T, results map[string]interface{}, fs map[string]map[string]interface{}) (*Registry, *fakeMiddleware) {
+	t.Helper()
+	fake := &fakeMiddleware{results: results}
+	fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if method != "filesystem.stat" {
+			return nil, nil, false
+		}
+		var args []string
+		if err := json.Unmarshal(params, &args); err != nil || len(args) != 1 {
+			return nil, map[string]interface{}{"code": -32602, "message": "bad params"}, true
+		}
+		p := args[0]
+		if st, ok := fs[p]; ok {
+			return st, nil, true
+		}
+		switch {
+		case p == "/mnt/tank" || p == "/mnt/other":
+			return mountStat(p), nil, true
+		case strings.HasPrefix(p, "/mnt/tank/") || strings.HasPrefix(p, "/mnt/other/"):
+			return dirStat(p), nil, true
+		}
+		return nil, map[string]interface{}{"code": -32001, "message": "[ENOENT] Path " + p + " not found"}, true
+	}
+	client, _ := newFakeClientFrom(t, fake)
+	return NewRegistry(client, nil), fake
+}
+
+// statPaths returns the paths filesystem.stat was called with, in order.
+func statPaths(t *testing.T, fake *fakeMiddleware) []string {
+	t.Helper()
+	var out []string
+	for _, c := range fake.called("filesystem.stat") {
+		var args []string
+		if err := json.Unmarshal(c.Params, &args); err != nil || len(args) != 1 {
+			t.Fatalf("stat params = %s", c.Params)
+		}
+		out = append(out, args[0])
+	}
+	return out
 }
 
 // nfs4ACL models a 25.10 filesystem.getacl NFS4 result with resolve_ids.
@@ -217,11 +277,7 @@ func nfs4ACL(simplified bool) map[string]interface{} {
 }
 
 func TestGetFilesystemACLNFS4(t *testing.T) {
-	client, fake := newFakeClientWith(t, map[string]interface{}{
-		"filesystem.stat":   dirStat("/mnt/tank/shares/docs"),
-		"filesystem.getacl": nfs4ACL(false),
-	}, nil)
-	r := NewRegistry(client, nil)
+	r, fake := newACLFake(t, map[string]interface{}{"filesystem.getacl": nfs4ACL(false)}, nil)
 	out, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/shares/docs/"})
 	if err != nil {
 		t.Fatal(err)
@@ -229,8 +285,8 @@ func TestGetFilesystemACLNFS4(t *testing.T) {
 	if final := redact.ToolOutput(out); final != out {
 		t.Errorf("redaction backstop changed the output:\nbefore: %s\nafter: %s", out, final)
 	}
-	if got, _ := json.Marshal(lastParams(t, fake, "filesystem.stat")); string(got) != `["/mnt/tank/shares/docs"]` {
-		t.Errorf("stat params = %s", got)
+	if got := strings.Join(statPaths(t, fake), " "); got != "/mnt/tank /mnt/tank/shares /mnt/tank/shares/docs" {
+		t.Errorf("stat paths = %s, want each component from the pool down", got)
 	}
 	if got, _ := json.Marshal(lastParams(t, fake, "filesystem.getacl")); string(got) != `["/mnt/tank/shares/docs",false,true]` {
 		t.Errorf("getacl params = %s, want [path, simplified=false, resolve_ids=true]", got)
@@ -288,11 +344,7 @@ func TestGetFilesystemACLNFS4(t *testing.T) {
 }
 
 func TestGetFilesystemACLSimplified(t *testing.T) {
-	client, fake := newFakeClientWith(t, map[string]interface{}{
-		"filesystem.stat":   dirStat("/mnt/tank/shares/docs"),
-		"filesystem.getacl": nfs4ACL(true),
-	}, nil)
-	r := NewRegistry(client, nil)
+	r, fake := newACLFake(t, map[string]interface{}{"filesystem.getacl": nfs4ACL(true)}, nil)
 	resp := callTool(t, r, "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/shares/docs", "simplified": true})
 	if got, _ := json.Marshal(lastParams(t, fake, "filesystem.getacl")); string(got) != `["/mnt/tank/shares/docs",true,true]` {
 		t.Errorf("getacl params = %s", got)
@@ -330,11 +382,7 @@ func TestGetFilesystemACLPOSIX(t *testing.T) {
 			map[string]interface{}{"tag": "MASK", "id": -1.0, "who": nil, "default": true, "perms": rwx},
 		},
 	}
-	client, _ := newFakeClientWith(t, map[string]interface{}{
-		"filesystem.stat":   dirStat("/mnt/tank/posix"),
-		"filesystem.getacl": acl,
-	}, nil)
-	r := NewRegistry(client, nil)
+	r, _ := newACLFake(t, map[string]interface{}{"filesystem.getacl": acl}, nil)
 	resp := callTool(t, r, "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/posix"})
 	entries := resp["entries"].([]interface{})
 	if len(entries) != 8 {
@@ -360,12 +408,10 @@ func TestGetFilesystemACLPOSIX(t *testing.T) {
 }
 
 func TestGetFilesystemACLDisabled(t *testing.T) {
-	client, _ := newFakeClientWith(t, map[string]interface{}{
-		"filesystem.stat": dirStat("/mnt/tank/plain"),
+	r, _ := newACLFake(t, map[string]interface{}{
 		"filesystem.getacl": map[string]interface{}{"path": "/mnt/tank/plain", "uid": 0.0, "gid": 0.0, "user": "root", "group": "wheel",
 			"acltype": "DISABLED", "acl": nil, "trivial": true},
 	}, nil)
-	r := NewRegistry(client, nil)
 	resp := callTool(t, r, "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/plain"})
 	if resp["acltype"] != "DISABLED" || resp["count"] != 0.0 {
 		t.Errorf("resp = %v", resp)
@@ -437,23 +483,70 @@ func TestValidateACLPathAccepts(t *testing.T) {
 }
 
 func TestGetFilesystemACLSymlinks(t *testing.T) {
-	t.Run("outside the pool is refused", func(t *testing.T) {
-		client, fake := newFakeClientWith(t, map[string]interface{}{"filesystem.stat": dirStat("/etc")}, nil)
-		r := NewRegistry(client, nil)
-		_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/escape"})
-		if err == nil || !strings.Contains(err.Error(), "resolves to /etc") {
-			t.Fatalf("err = %v", err)
+	refused := func(t *testing.T, fake *fakeMiddleware, err error, want string) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want %q", err, want)
 		}
 		if calls := fake.called("filesystem.getacl"); len(calls) != 0 {
 			t.Errorf("getacl was called: %v", calls)
 		}
+		for _, p := range statPaths(t, fake) {
+			if !strings.HasPrefix(p, "/mnt/") {
+				t.Errorf("stat reached %s outside the pools", p)
+			}
+		}
+	}
+	t.Run("last component outside the pool is refused", func(t *testing.T) {
+		r, fake := newACLFake(t, nil, map[string]map[string]interface{}{
+			"/mnt/tank/escape": linkStat("/mnt/tank/escape", "/etc"),
+		})
+		_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/escape"})
+		refused(t, fake, err, "/mnt/tank/escape resolves to /etc")
 	})
-	t.Run("inside a pool reads the target", func(t *testing.T) {
-		client, fake := newFakeClientWith(t, map[string]interface{}{
-			"filesystem.stat":   dirStat("/mnt/tank/shares/docs"),
-			"filesystem.getacl": nfs4ACL(false),
-		}, nil)
-		r := NewRegistry(client, nil)
+	t.Run("middle component outside the pool is refused", func(t *testing.T) {
+		// 25.10 stat of /mnt/tank/share/link/passwd follows link but
+		// reports realpath unchanged, so only the walk catches it.
+		r, fake := newACLFake(t, nil, map[string]map[string]interface{}{
+			"/mnt/tank/share/link":        linkStat("/mnt/tank/share/link", "/etc"),
+			"/mnt/tank/share/link/passwd": {"realpath": "/mnt/tank/share/link/passwd", "type": "FILE", "is_mountpoint": false},
+		})
+		_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/share/link/passwd"})
+		refused(t, fake, err, "/mnt/tank/share/link resolves to /etc")
+		for _, p := range statPaths(t, fake) {
+			if p == "/mnt/tank/share/link/passwd" {
+				t.Errorf("stat continued past the refused link")
+			}
+		}
+	})
+	t.Run("link to a hidden system mount is refused", func(t *testing.T) {
+		r, fake := newACLFake(t, nil, map[string]map[string]interface{}{
+			"/mnt/tank/apps": linkStat("/mnt/tank/apps", "/mnt/.ix-apps"),
+		})
+		_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/apps/app_configs"})
+		refused(t, fake, err, "resolves to /mnt/.ix-apps")
+	})
+	t.Run("link to a non-pool directory under /mnt is refused", func(t *testing.T) {
+		r, fake := newACLFake(t, nil, map[string]map[string]interface{}{
+			"/mnt/tank/scratch-link": linkStat("/mnt/tank/scratch-link", "/mnt/scratch/x"),
+			"/mnt/scratch":           dirStat("/mnt/scratch"),
+		})
+		_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/scratch-link"})
+		refused(t, fake, err, "not a pool mountpoint")
+	})
+	t.Run("symlink loop is refused", func(t *testing.T) {
+		// A real realpath never stays a link; this guards the hop cap.
+		r, fake := newACLFake(t, nil, map[string]map[string]interface{}{
+			"/mnt/tank/a": linkStat("/mnt/tank/a", "/mnt/tank/b"),
+			"/mnt/tank/b": linkStat("/mnt/tank/b", "/mnt/tank/a"),
+		})
+		_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/a"})
+		refused(t, fake, err, "too many symlinks")
+	})
+	t.Run("last component inside a pool reads the target", func(t *testing.T) {
+		r, fake := newACLFake(t, map[string]interface{}{"filesystem.getacl": nfs4ACL(false)}, map[string]map[string]interface{}{
+			"/mnt/tank/docs-link": linkStat("/mnt/tank/docs-link", "/mnt/tank/shares/docs"),
+		})
 		resp := callTool(t, r, "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/docs-link"})
 		if got, _ := json.Marshal(lastParams(t, fake, "filesystem.getacl")); string(got) != `["/mnt/tank/shares/docs",false,true]` {
 			t.Errorf("getacl params = %s", got)
@@ -461,7 +554,73 @@ func TestGetFilesystemACLSymlinks(t *testing.T) {
 		if resp["path"] != "/mnt/tank/docs-link" || resp["resolved_path"] != "/mnt/tank/shares/docs" {
 			t.Errorf("path/resolved_path = %v/%v", resp["path"], resp["resolved_path"])
 		}
+		// Owner and mode come from the target, not from the link itself.
+		if resp["type"] != "DIRECTORY" || resp["mode"] != "0770" {
+			t.Errorf("type/mode = %v/%v, want the target's", resp["type"], resp["mode"])
+		}
 	})
+	t.Run("middle component into another pool reads the target", func(t *testing.T) {
+		r, fake := newACLFake(t, map[string]interface{}{"filesystem.getacl": nfs4ACL(false)}, map[string]map[string]interface{}{
+			"/mnt/tank/projects": linkStat("/mnt/tank/projects", "/mnt/other/projects"),
+		})
+		resp := callTool(t, r, "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/projects/alpha"})
+		if got, _ := json.Marshal(lastParams(t, fake, "filesystem.getacl")); string(got) != `["/mnt/other/projects/alpha",false,true]` {
+			t.Errorf("getacl params = %s", got)
+		}
+		if resp["resolved_path"] != "/mnt/other/projects/alpha" {
+			t.Errorf("resolved_path = %v", resp["resolved_path"])
+		}
+		want := "/mnt/tank /mnt/tank/projects /mnt/other /mnt/other/projects /mnt/other/projects/alpha"
+		if got := strings.Join(statPaths(t, fake), " "); got != want {
+			t.Errorf("stat paths = %s, want %s", got, want)
+		}
+	})
+	t.Run("nested path without links passes", func(t *testing.T) {
+		r, fake := newACLFake(t, map[string]interface{}{"filesystem.getacl": nfs4ACL(false)}, nil)
+		resp := callTool(t, r, "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/shares/docs/2026/q1"})
+		if got, _ := json.Marshal(lastParams(t, fake, "filesystem.getacl")); string(got) != `["/mnt/tank/shares/docs/2026/q1",false,true]` {
+			t.Errorf("getacl params = %s", got)
+		}
+		if _, ok := resp["resolved_path"]; ok {
+			t.Errorf("resolved_path set without a symlink: %v", resp["resolved_path"])
+		}
+		if n := len(statPaths(t, fake)); n != 5 {
+			t.Errorf("stat calls = %d, want one per component", n)
+		}
+	})
+}
+
+func TestGetFilesystemACLRequiresPoolMountpoint(t *testing.T) {
+	for name, st := range map[string]map[string]interface{}{
+		"plain directory": dirStat("/mnt/scratch"),
+		"symlink":         linkStat("/mnt/scratch", "/mnt/tank"),
+		"no mount field":  {"realpath": "/mnt/scratch", "type": "DIRECTORY"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, fake := newACLFake(t, nil, map[string]map[string]interface{}{"/mnt/scratch": st})
+			_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/scratch/data"})
+			if err == nil || !strings.Contains(err.Error(), "/mnt/scratch is not a pool mountpoint") {
+				t.Fatalf("err = %v", err)
+			}
+			if got := strings.Join(statPaths(t, fake), " "); got != "/mnt/scratch" {
+				t.Errorf("stat paths = %s, want only the pool root", got)
+			}
+			if calls := fake.called("filesystem.getacl"); len(calls) != 0 {
+				t.Errorf("getacl was called: %v", calls)
+			}
+		})
+	}
+}
+
+func TestGetFilesystemACLDepthCap(t *testing.T) {
+	r, fake := newACLFake(t, nil, nil)
+	_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank" + strings.Repeat("/d", maxACLPathDepth+1)})
+	if err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("err = %v", err)
+	}
+	if n := len(fake.called("filesystem.stat")); n != 0 {
+		t.Errorf("stat calls = %d, want none", n)
+	}
 }
 
 func TestACLToolsAreReadOnly(t *testing.T) {

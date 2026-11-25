@@ -42,7 +42,7 @@ func (r *Registry) registerACLTools() {
 	r.tools["get_filesystem_acl"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "get_filesystem_acl",
-			Description: "Get the filesystem ACL of a file or directory under /mnt/<pool>: ACL type (NFS4, POSIX1E or DISABLED), owner and group (uid/gid with names), Unix mode bits, and each ACL entry (tag, who, ALLOW/DENY for NFS4, permissions, inheritance flags; access or default scope and effective permissions after the mask for POSIX). NFSv4 entries are returned in evaluation order. Only absolute paths under /mnt/<pool> are accepted; system paths, relative paths, '..' and symlinks that lead outside /mnt/<pool> are refused. Set 'simplified' to show NFSv4 permissions and flags as basic names (FULL_CONTROL, MODIFY, READ, TRAVERSE; INHERIT, NOINHERIT) where they match exactly.",
+			Description: "Get the filesystem ACL of a file or directory under /mnt/<pool>: ACL type (NFS4, POSIX1E or DISABLED), owner and group (uid/gid with names), Unix mode bits, and each ACL entry (tag, who, ALLOW/DENY for NFS4, permissions, inheritance flags; access or default scope and effective permissions after the mask for POSIX). NFSv4 entries are returned in evaluation order. Only absolute paths under a pool mountpoint (/mnt/<pool>) are accepted; system paths, relative paths, '..' and symlinks anywhere in the path that lead outside /mnt/<pool> are refused, and symlinks inside a pool are read at their target. Set 'simplified' to show NFSv4 permissions and flags as basic names (FULL_CONTROL, MODIFY, READ, TRAVERSE; INHERIT, NOINHERIT) where they match exactly.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -229,6 +229,105 @@ func validateACLPath(p string) (string, error) {
 	return p, nil
 }
 
+// Limits for resolveACLPath: path components below /mnt/<pool>, and
+// symlinks followed in total.
+const (
+	maxACLPathDepth   = 64
+	maxACLSymlinkHops = 16
+)
+
+// statACLPath returns filesystem.stat of p. It does not follow a final
+// symlink: the result then has type SYMLINK and a fully resolved realpath.
+func statACLPath(ctx context.Context, client *truenas.Client, p string) (map[string]interface{}, error) {
+	raw, err := client.Call(ctx, "filesystem.stat", p)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat %s: %w", p, err)
+	}
+	var st map[string]interface{}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, fmt.Errorf("failed to parse filesystem.stat result: %w", err)
+	}
+	return st, nil
+}
+
+// resolveACLPath walks a validated path one component at a time from
+// /mnt/<pool> down and returns the resolved target and its stat.
+//
+// A single stat of the full path is not enough: on 25.10, filesystem.stat
+// only resolves realpath when the final component is a symlink, yet it
+// follows links earlier in the path, so /mnt/<pool>/a/link/file with link
+// pointing outside the pool would pass. Here every component is stat'ed on
+// its own, so every symlink is the final component of some stat and its
+// realpath is resolved. Each symlink must resolve under /mnt/<pool> (it is
+// read at its target), and each /mnt/<pool> reached must be a mountpoint,
+// so a plain directory under /mnt is not taken for a pool.
+func resolveACLPath(ctx context.Context, client *truenas.Client, p string) (string, map[string]interface{}, error) {
+	pool, rest, _ := strings.Cut(strings.TrimPrefix(p, "/mnt/"), "/")
+	var comps []string
+	if rest != "" {
+		comps = strings.Split(rest, "/")
+	}
+	if len(comps) > maxACLPathDepth {
+		return "", nil, fmt.Errorf("path has more than %d components below /mnt/%s", maxACLPathDepth, pool)
+	}
+
+	pools := map[string]map[string]interface{}{}
+	poolRoot := func(name string) (map[string]interface{}, error) {
+		if st, ok := pools[name]; ok {
+			return st, nil
+		}
+		root := "/mnt/" + name
+		st, err := statACLPath(ctx, client, root)
+		if err != nil {
+			return nil, err
+		}
+		if typ, _ := st["type"].(string); typ != "DIRECTORY" {
+			return nil, fmt.Errorf("%s is not a pool mountpoint (type %v)", root, st["type"])
+		}
+		if mnt, _ := st["is_mountpoint"].(bool); !mnt {
+			return nil, fmt.Errorf("%s is not a pool mountpoint", root)
+		}
+		pools[name] = st
+		return st, nil
+	}
+
+	cur := "/mnt/" + pool
+	st, err := poolRoot(pool)
+	if err != nil {
+		return "", nil, err
+	}
+	hops := 0
+	for _, seg := range comps {
+		next := cur + "/" + seg
+		if st, err = statACLPath(ctx, client, next); err != nil {
+			return "", nil, err
+		}
+		for {
+			if typ, _ := st["type"].(string); typ != "SYMLINK" {
+				break
+			}
+			if hops++; hops > maxACLSymlinkHops {
+				return "", nil, fmt.Errorf("too many symlinks in %s", p)
+			}
+			real, _ := st["realpath"].(string)
+			resolved, err := validateACLPath(real)
+			if err != nil {
+				return "", nil, fmt.Errorf("%s resolves to %s, which is outside /mnt/<pool>; refusing to read its ACL", next, real)
+			}
+			name, _, _ := strings.Cut(strings.TrimPrefix(resolved, "/mnt/"), "/")
+			if _, err := poolRoot(name); err != nil {
+				return "", nil, fmt.Errorf("%s resolves to %s: %w; refusing to read its ACL", next, resolved, err)
+			}
+			next = resolved
+			if st, err = statACLPath(ctx, client, next); err != nil {
+				return "", nil, err
+			}
+		}
+		cur = next
+	}
+	return cur, st, nil
+}
+
 func handleGetFilesystemACL(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	requested, _ := args["path"].(string)
 	p, err := validateACLPath(requested)
@@ -237,24 +336,15 @@ func handleGetFilesystemACL(ctx context.Context, client *truenas.Client, args ma
 	}
 	simplified, _ := args["simplified"].(bool)
 
-	raw, err := client.Call(ctx, "filesystem.stat", p)
+	target, st, err := resolveACLPath(ctx, client, p)
 	if err != nil {
-		return "", fmt.Errorf("failed to stat %s: %w", p, err)
-	}
-	var st map[string]interface{}
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return "", fmt.Errorf("failed to parse filesystem.stat result: %w", err)
-	}
-	target := p
-	if real, _ := st["realpath"].(string); real != "" && real != p {
-		resolved, err := validateACLPath(real)
-		if err != nil {
-			return "", fmt.Errorf("%s resolves to %s, which is outside /mnt/<pool>; refusing to read its ACL", p, real)
-		}
-		target = resolved
+		return "", err
 	}
 
-	raw, err = client.Call(ctx, "filesystem.getacl", target, simplified, true)
+	// A symlink swapped in after the walk above and before getacl is not
+	// caught. That gap is acceptable for a read-only tool: getacl changes
+	// nothing and needs the same FILESYSTEM_ATTRS_READ role as stat.
+	raw, err := client.Call(ctx, "filesystem.getacl", target, simplified, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to get ACL of %s: %w", target, err)
 	}
