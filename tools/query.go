@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/truenas/truenas-mcp/internal/mwtime"
 	"github.com/truenas/truenas-mcp/mcp"
 	"github.com/truenas/truenas-mcp/truenas"
 )
@@ -53,7 +54,7 @@ func (r *Registry) registerQueryTools() {
 	r.tools["query_snapshots"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_snapshots",
-			Description: "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, sizes and dataset. Holds are included only with 'include_holds' or 'holds_only' (they cost an extra lookup per snapshot). Use 'limit' to control result size (default: 50, maximum: 1000), 'order_by' to sort.",
+			Description: "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, sizes and dataset. Holds are included only with 'include_holds' or 'holds_only' (they cost an extra lookup per snapshot). 'include_retention' adds when each snapshot becomes eligible for automatic removal and what sets that date. Use 'limit' to control result size (default: 50, maximum: 1000), 'order_by' to sort.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -82,6 +83,10 @@ func (r *Registry) registerQueryTools() {
 					"include_holds": map[string]interface{}{
 						"type":        "boolean",
 						"description": "Optional: Include each snapshot's holds (default: false; one extra lookup per snapshot on the NAS)",
+					},
+					"include_retention": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Optional: Include each snapshot's retention: the removal date set by a periodic snapshot task or a retention property, or null if none (default: false; the NAS reads snapshot tasks and user properties to work it out)",
 					},
 				},
 			},
@@ -493,6 +498,12 @@ func handleQuerySnapshots(ctx context.Context, client *truenas.Client, args map[
 	if wantHolds {
 		extra["holds"] = true
 	}
+	// On 25.10, extra.retention requires a limit or an id filter; every
+	// query below sends a limit.
+	wantRetention, _ := args["include_retention"].(bool)
+	if wantRetention {
+		extra["retention"] = true
+	}
 	options := map[string]interface{}{"extra": extra}
 
 	orderBy := "name"
@@ -558,9 +569,10 @@ func handleQuerySnapshots(ctx context.Context, client *truenas.Client, args map[
 
 	// Add metadata wrapper
 	response := map[string]interface{}{
-		"snapshots":      simplified,
-		"snapshot_count": len(simplified),
-		"holds_included": wantHolds,
+		"snapshots":          simplified,
+		"snapshot_count":     len(simplified),
+		"holds_included":     wantHolds,
+		"retention_included": wantRetention,
 	}
 	if totalKnown {
 		response["total_snapshots"] = totalSnapshots
@@ -704,12 +716,40 @@ func simplifySnapshot(snap map[string]interface{}) map[string]interface{} {
 		}
 	}
 
+	if r, ok := snap["retention"]; ok {
+		summary["retention"] = simplifySnapshotRetention(r)
+	}
+
 	// Include full snapshot ID for reference
 	if id, ok := snap["id"].(string); ok {
 		summary["full_name"] = id
 	}
 
 	return summary
+}
+
+// simplifySnapshotRetention converts the middleware's retention annotation
+// ({datetime, source, periodic_snapshot_task_id}, or null when nothing
+// schedules removal). The removal date is ISO-8601 UTC when it parses.
+func simplifySnapshotRetention(v interface{}) interface{} {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	out := map[string]interface{}{}
+	if date, ts := mwtime.Normalize(m["datetime"]); date != "" {
+		out["removal_date"] = date
+		if ts > 0 {
+			out["removal_timestamp"] = ts
+		}
+	}
+	if src, ok := m["source"].(string); ok {
+		out["source"] = src
+	}
+	if id, ok := intID(m["periodic_snapshot_task_id"]); ok {
+		out["periodic_snapshot_task_id"] = id
+	}
+	return out
 }
 
 // parseSnapshotDate attempts to extract date information from snapshot names
