@@ -7,7 +7,7 @@ An [MCP](https://modelcontextprotocol.io) server for TrueNAS. It runs on your co
 
 ## Features
 
-- **Monitoring:** system info and health, alerts, jobs, CPU, memory, disk, network, ARC and UPS metrics.
+- **Monitoring:** system info and health, disks and disk health, services, alerts, jobs, CPU, memory, disk, network, ARC and UPS metrics.
 - **Storage:** pools, datasets, snapshots, and SMB and NFS shares.
 - **Data protection:** replication and periodic snapshot task status, running either task now, and on-demand snapshots.
 - **Apps:** catalog search, install, start, stop, upgrade, update and delete.
