@@ -85,11 +85,17 @@ func (r *Registry) registerTools() {
 
 	r.registerPoolTools()
 
+	r.registerDiskTools()
+
+	r.registerServiceTools()
+
 	r.registerQueryTools()
 
 	r.registerShareTools()
 
 	r.registerVMTools()
+
+	r.registerAccountTools()
 
 	r.registerDatasetTools()
 

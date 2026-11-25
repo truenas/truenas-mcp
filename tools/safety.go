@@ -112,6 +112,15 @@ var toolSafety = map[string]Safety{
 	"analyze_capacity":          {Access: Read},
 	"get_pool_capacity_details": {Access: Read},
 
+	// Accounts
+	"query_users":  {Access: Read},
+	"query_groups": {Access: Read},
+
+	// Disks and services
+	"query_disks":     {Access: Read},
+	"get_disk_health": {Access: Read},
+	"query_services":  {Access: Read},
+
 	// Alerts
 	"list_alerts":   {Access: Read},
 	"dismiss_alert": {Access: Write, Idempotent: true},

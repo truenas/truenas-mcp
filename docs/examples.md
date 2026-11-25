@@ -27,6 +27,13 @@ This document provides example natural language queries you can use with TrueNAS
 - "Why can't exampleuser open the TeamDocs share?"
 - "Show the permissions on /mnt/tank/shares/docs"
 
+## Disks and Services
+
+- "Is any disk failing or running hot?"
+- "Which disks are not in a pool?"
+- "Which disk in tank has checksum errors, and what is its serial?"
+- "Is SSH running, and does it start at boot?"
+
 ## Snapshots
 
 - "Show me all snapshots in the tank pool"

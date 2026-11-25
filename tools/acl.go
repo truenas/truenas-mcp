@@ -279,8 +279,8 @@ func handleGetFilesystemACL(ctx context.Context, client *truenas.Client, args ma
 	if mode, ok := st["mode"].(float64); ok {
 		out["mode"] = fmt.Sprintf("%04o", int64(mode)&0o7777)
 	}
-	out["owner"] = aclPrincipal("uid", acl["uid"], st["uid"], firstString(acl["user"], st["user"], aceWho(aces, "owner@", "USER_OBJ")))
-	out["group"] = aclPrincipal("gid", acl["gid"], st["gid"], firstString(acl["group"], st["group"], aceWho(aces, "group@", "GROUP_OBJ")))
+	out["owner"] = aclPrincipal("uid", acl["uid"], st["uid"], firstNonEmptyString(acl["user"], st["user"], aceWho(aces, "owner@", "USER_OBJ")))
+	out["group"] = aclPrincipal("gid", acl["gid"], st["gid"], firstNonEmptyString(acl["group"], st["group"], aceWho(aces, "group@", "GROUP_OBJ")))
 
 	var entries []map[string]interface{}
 	var notes []string
@@ -330,7 +330,8 @@ func aclPrincipal(idKey string, aclID, statID interface{}, name string) map[stri
 	return out
 }
 
-func firstString(vals ...interface{}) string {
+// firstNonEmptyString returns the first non-empty string among vals.
+func firstNonEmptyString(vals ...interface{}) string {
 	for _, v := range vals {
 		if s, _ := v.(string); s != "" {
 			return s

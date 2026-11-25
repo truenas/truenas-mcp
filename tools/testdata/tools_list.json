@@ -1066,6 +1066,31 @@
     }
   },
   {
+    "name": "get_disk_health",
+    "description": "Report the health of every disk in one call, to find a disk that is failing: its ZFS device state and read/write/checksum error counts from the pool topology (data pools and the boot pool), its temperature and critical threshold, and any current disk temperature alert (an alert dismissed in the UI still counts while TrueNAS keeps reporting it, and is marked dismissed). Each disk has 'healthy' and a list of 'problems'; unhealthy disks are listed first and named in 'unhealthy'. Disks not in a pool are included with temperature only. A removed or unavailable pool device whose disk is not present has 'name' null and its serial and model from the TrueNAS disk database; 'last_known_name' is the name it had, which Linux may since have given to another disk. TrueNAS 25.10 has no public SMART test API, so SMART self-test results and attributes are not included. Temperatures are cached by TrueNAS for up to 5 minutes. Use 'name' for one disk or 'pool' for the disks of one pool.",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "description": "Optional: Disk name (exact match, e.g. 'sda' or 'nvme0n1') to return only that disk; a removed pool device whose last known name matches is also returned",
+          "minLength": 1,
+          "type": "string"
+        },
+        "pool": {
+          "description": "Optional: Return only disks of this pool (exact name, e.g. the boot pool 'boot-pool')",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "get_disk_metrics",
     "description": "Get disk performance metrics (I/O or temperature)",
     "inputSchema": {
@@ -1597,6 +1622,72 @@
     }
   },
   {
+    "name": "query_disks",
+    "description": "List physical disks: name, serial, model, size, type (HDD, SSD or NVMe), bus, the pool each belongs to, and whether it is in use. 'usage' is USED when the disk is part of an imported pool (including the boot pool) or of an exported pool that could be imported, UNUSED otherwise, and UNKNOWN when TrueNAS did not report it. Use 'name' for one disk, 'pool' for the disks of one pool, 'unused_only' for disks free to add to a pool, and 'limit' to bound the list (default: 50, maximum: 1000).",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Optional: Maximum number of disks to return (default: 50, maximum: 1000)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "description": "Optional: Disk name (exact match, e.g. 'sda' or 'nvme0n1') to return only that disk",
+          "minLength": 1,
+          "type": "string"
+        },
+        "pool": {
+          "description": "Optional: Return only disks of this pool (exact name; an exported pool also matches)",
+          "minLength": 1,
+          "type": "string"
+        },
+        "unused_only": {
+          "description": "Optional: Return only disks that are not part of any imported or exported pool (default: false). Cannot be combined with 'pool'",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "query_groups",
+    "description": "Query groups. Returns name, gid, builtin and SMB flags, sudo flag, roles, and members by username (at most 100 listed per group; member_count is the full count). Local groups only unless 'include_directory_groups' is true. Use 'limit' to control result size (default: 50, maximum: 1000).",
+    "inputSchema": {
+      "properties": {
+        "builtin": {
+          "description": "Optional: true for built-in groups only, false for groups created by an administrator only (default: both)",
+          "type": "boolean"
+        },
+        "include_directory_groups": {
+          "description": "Optional: Also return Active Directory / LDAP groups when a directory service is joined (default: false)",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "Optional: Maximum number of groups to return (default: 50, maximum: 1000)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "description": "Optional: Return only the group with this exact name",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "query_jobs",
     "description": "Query system jobs (running, pending, or completed tasks like replication, snapshots, scrubs, app upgrades, etc.), most recent first. Returns jobs in every state unless state is given; method narrows to one job method (e.g. app.upgrade). state is case-insensitive, including all; with no state or all the response reports state_filter \"ALL\". Reports has_more and total when the list was cut by limit; long results and error text are truncated with a flag. A job state of SUCCESS means the job finished, not that the app or service it acted on is healthy: an app embedded in a job result is a copy from when the job ended. Use tasks_get or query_apps for the current app state.",
     "inputSchema": {
@@ -1709,6 +1800,26 @@
     }
   },
   {
+    "name": "query_services",
+    "description": "List system services (for example cifs for SMB, nfs, ssh, ups, snmp, ftp) with their state and whether each starts at boot. 'state' is RUNNING, STOPPED, or UNKNOWN when TrueNAS could not read it in time. Use 'name' for one service.",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "description": "Optional: Service name (exact match, e.g. 'cifs', 'nfs', 'ssh') to return only that service",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "query_shares",
     "description": "Query SMB and NFS shares configuration. Returns allow-listed share fields (including hostsallow/hostsdeny and NFS maps); extra middleware keys such as auxsmbconf are omitted.",
     "inputSchema": {
@@ -1764,7 +1875,7 @@
   },
   {
     "name": "query_snapshots",
-    "description": "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, sizes and dataset. Holds are included only with 'include_holds' or 'holds_only' (they cost an extra lookup per snapshot). Use 'limit' to control result size (default: 50, maximum: 1000), 'order_by' to sort.",
+    "description": "Query ZFS snapshots with optional filtering and sorting. Returns simplified snapshot information with creation info, sizes and dataset. Holds are included only with 'include_holds' or 'holds_only' (they cost an extra lookup per snapshot). 'include_retention' adds when each snapshot becomes eligible for automatic removal and what sets that date. Use 'limit' to control result size (default: 50, maximum: 1000), 'order_by' to sort.",
     "inputSchema": {
       "properties": {
         "dataset": {
@@ -1777,6 +1888,10 @@
         },
         "include_holds": {
           "description": "Optional: Include each snapshot's holds (default: false; one extra lookup per snapshot on the NAS)",
+          "type": "boolean"
+        },
+        "include_retention": {
+          "description": "Optional: Include each snapshot's retention: the removal date set by a periodic snapshot task or a retention property, or null if none (default: false; the NAS reads snapshot tasks and user properties to work it out)",
           "type": "boolean"
         },
         "limit": {
@@ -1795,6 +1910,42 @@
         },
         "pool": {
           "description": "Optional: Filter snapshots by pool name",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "query_users",
+    "description": "Query user accounts. Returns username, uid, full name, builtin/immutable/locked flags, whether password login is disabled, primary and secondary groups, home, shell, SMB, 2FA and sudo flags, and roles. Never returns password hashes, 2FA secrets, SSH keys or API keys. Local accounts only unless 'include_directory_users' is true. Use 'limit' to control result size (default: 50, maximum: 1000).",
+    "inputSchema": {
+      "properties": {
+        "builtin": {
+          "description": "Optional: true for built-in system accounts only, false for accounts created by an administrator only (default: both)",
+          "type": "boolean"
+        },
+        "include_directory_users": {
+          "description": "Optional: Also return Active Directory / LDAP users when a directory service is joined (default: false)",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "Optional: Maximum number of users to return (default: 50, maximum: 1000)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "locked": {
+          "description": "Optional: Filter by locked state (default: both)",
+          "type": "boolean"
+        },
+        "username": {
+          "description": "Optional: Return only the user with this exact username",
           "type": "string"
         }
       },
