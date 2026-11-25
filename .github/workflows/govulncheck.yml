@@ -1,0 +1,34 @@
+name: govulncheck
+
+# Weekly scan so newly published Go vulnerabilities are caught even when
+# nothing is pushed. Push, PR and release runs are in build.yml and
+# release.yml.
+on:
+  schedule:
+    - cron: '0 15 * * 1' # Mondays 15:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: Run govulncheck
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
+
+    - name: Run govulncheck
+      run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      env:
+        GOTOOLCHAIN: local
