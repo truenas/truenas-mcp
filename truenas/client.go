@@ -387,7 +387,7 @@ func (c *Client) connect(ctx context.Context) error {
 			}
 		} else if hint := tlsHint(err, u.Hostname()); hint != "" {
 			err = fmt.Errorf("%w (%s)", err, hint)
-		} else if opErr := (*net.OpError)(nil); proxy != nil && errors.As(err, &opErr) && opErr.Op == "dial" {
+		} else if proxy != nil && proxyDialFailed(err) {
 			// Through a proxy, the only TCP dial is to the proxy itself.
 			err = fmt.Errorf("connecting via proxy %s from %s: proxy unreachable: %w", proxy, proxy.source, err)
 		} else if proxy != nil {
