@@ -533,7 +533,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 - **update_network_config** - Change gateways, nameservers, hostname or domain (**destructive**)
   - **Requires a `confirmation_token`**. Sends only the values that change
   - Applies immediately with no automatic rollback; the preview lists the previous values
-  - An empty string clears a gateway or nameserver. A link-local IPv6 gateway takes the form `fe80::1%<interface>`
+  - An empty string clears a gateway or nameserver. A link-local IPv6 gateway may be given as `fe80::1` or with a zone, `fe80::1%<interface>`. After the update the reply says per changed gateway whether it is applied or only saved (`status: saved_not_applied`)
   - Warns when the gateway is outside every prefix on the system, when SLAAC is on (the static gateway replaces the router-advertised route), and when the change affects this server's own connection
   - Refused while interface changes are pending
 - **update_network_interface** - Add or remove static IPv4/IPv6 aliases and turn `ipv6_auto` on or off (**destructive**)

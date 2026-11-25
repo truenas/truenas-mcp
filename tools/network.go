@@ -58,7 +58,9 @@ func (r *Registry) registerNetworkTools() {
 				"string clears a gateway or nameserver. **Applies immediately and is NOT rolled back automatically**: unlike update_network_interface there " +
 				"is no 60-second check-in window, so a wrong gateway can cut this server's connection and stay in place. The preview shows the current " +
 				"values so the change can be reverted with another call. Refused while interface changes are pending (finish them with " +
-				"checkin_network_changes or rollback_network_changes first). Verify the result with get_network_config.",
+				"checkin_network_changes or rollback_network_changes first). After the update the reply reads the configuration back: `changed_gateways` " +
+				"shows each changed gateway's configured and applied value, and `status` is saved_not_applied when a changed gateway was saved but is " +
+				"not the default route. Verify the result with get_network_config.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -275,9 +277,10 @@ func normalizeNetworkSetting(key, value string) (string, error) {
 	return addr.String(), nil
 }
 
-// interfaceIPv6Prefixes returns the IPv6 prefixes configured or applied on
-// each interface, and the interfaces with IPv6 autoconfiguration on.
-func interfaceIPv6Prefixes(ifaces []map[string]interface{}) (prefixes []netip.Prefix, slaac []string) {
+// interfacePrefixes returns the IPv4 and IPv6 prefixes configured or
+// applied on each interface, and the interfaces with IPv6
+// autoconfiguration on.
+func interfacePrefixes(ifaces []map[string]interface{}) (prefixes []netip.Prefix, slaac []string) {
 	for _, iface := range ifaces {
 		name, _ := iface["name"].(string)
 		if auto, _ := iface["ipv6_auto"].(bool); auto {
@@ -285,7 +288,7 @@ func interfaceIPv6Prefixes(ifaces []map[string]interface{}) (prefixes []netip.Pr
 		}
 		state, _ := iface["state"].(map[string]interface{})
 		for _, a := range append(parseAliases(iface["aliases"]), parseAliases(state["aliases"])...) {
-			if p, ok := a.prefix(); ok && p.Addr().Is6() {
+			if p, ok := a.prefix(); ok {
 				prefixes = append(prefixes, p.Masked())
 			}
 		}
@@ -376,7 +379,7 @@ func planUpdateNetworkConfig(ctx context.Context, client *truenas.Client, args m
 	if raw, err := client.Call(ctx, "interface.query"); err == nil {
 		_ = json.Unmarshal(raw, &ifaces)
 	}
-	prefixes, slaac := interfaceIPv6Prefixes(ifaces)
+	prefixes, slaac := interfacePrefixes(ifaces)
 
 	for _, fam := range []struct{ key, name string }{{"ipv4gateway", "IPv4"}, {"ipv6gateway", "IPv6"}} {
 		v, ok := changes[fam.key].(string)
@@ -392,16 +395,20 @@ func planUpdateNetworkConfig(ctx context.Context, client *truenas.Client, args m
 		}
 	}
 	if v, ok := changes["ipv6gateway"].(string); ok && v != "" {
-		addr, _ := netip.ParseAddr(v)
 		if len(slaac) > 0 {
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("IPv6 autoconfiguration is on for %s; TrueNAS replaces the default route learned from router advertisements with this static gateway",
 				strings.Join(slaac, ", ")))
 		}
-		switch {
-		case addr.IsLinkLocalUnicast() && addr.Zone() == "":
-			plan.Warnings = append(plan.Warnings, "A link-local IPv6 gateway without %interface may not be installable; use the form fe80::1%<interface>")
-		case !addr.IsLinkLocalUnicast() && ifaces != nil && !prefixContains(prefixes, addr):
-			plan.Warnings = append(plan.Warnings, "The IPv6 gateway is not inside any IPv6 prefix on this system's interfaces, so it may not be reachable; add an address in its subnet first (update_network_interface)")
+	}
+	for _, fam := range []struct{ key, name string }{{"ipv4gateway", "IPv4"}, {"ipv6gateway", "IPv6"}} {
+		v, _ := changes[fam.key].(string)
+		addr, err := netip.ParseAddr(v)
+		if err != nil || addr.IsLinkLocalUnicast() || ifaces == nil {
+			continue
+		}
+		if !prefixContains(prefixes, addr) {
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("The %s gateway %s is not inside any %s subnet on this system's interfaces, so it may not be reachable "+
+				"and TrueNAS may save it without applying it; add an address in its subnet first (update_network_interface)", fam.name, v, fam.name))
 		}
 	}
 	if _, ok := changes["hostname"]; ok {
@@ -464,15 +471,41 @@ func executeUpdateNetworkConfig(ctx context.Context, client *truenas.Client, _ m
 		"executed": true,
 		"changed":  keys,
 		"previous": plan.Result["previous"],
-		"message": "Saved and applied. This change has no check-in window and is not rolled back automatically. " +
-			"Compare gateway_status below; if a new gateway is not shown as applied yet, read get_network_config again in a few seconds.",
+		"message":  "Saved and applied. This change has no check-in window and is not rolled back automatically.",
 	}
-	if cfg, err := readNetworkConfig(ctx, client); err != nil {
+	cfg, err := readNetworkConfig(ctx, client)
+	if err != nil {
+		response["status"] = "saved"
 		response["verify_error"] = err.Error()
-	} else {
-		for k, v := range networkConfigView(ctx, client, cfg) {
-			response[k] = v
+		response["message"] = "Saved, but the configuration could not be read back to check that it is applied; read get_network_config. This change has no check-in window and is not rolled back automatically."
+		return marshalJSON(response)
+	}
+	view := networkConfigView(ctx, client, cfg)
+	for k, v := range view {
+		response[k] = v
+	}
+	// Report each changed gateway: applied, or saved but not in effect.
+	gws, _ := view["gateway_status"].(map[string]interface{})
+	changedGWs := map[string]interface{}{}
+	var notApplied []string
+	for _, fam := range []struct{ key, name string }{{"ipv4gateway", "ipv4"}, {"ipv6gateway", "ipv6"}} {
+		if _, ok := changes[fam.key]; !ok {
+			continue
 		}
+		st, _ := gws[fam.name].(map[string]interface{})
+		changedGWs[fam.name] = st
+		if st["status"] == "not_applied" {
+			notApplied = append(notApplied, fmt.Sprintf("%s (configured %v, applied %q)", fam.key, st["configured"], st["applied"]))
+		}
+	}
+	if len(changedGWs) > 0 {
+		response["changed_gateways"] = changedGWs
+	}
+	if len(notApplied) > 0 {
+		response["status"] = "saved_not_applied"
+		response["message"] = "Saved, but not in effect: " + strings.Join(notApplied, "; ") + ". TrueNAS keeps the configured value but did not install it as the default route " +
+			"(often because the gateway is not reachable on any interface subnet). Read get_network_config again in a few seconds; if it is still not applied, check the " +
+			"interface addresses or restore the previous value. This change has no check-in window and is not rolled back automatically."
 	}
 	return marshalJSON(response)
 }

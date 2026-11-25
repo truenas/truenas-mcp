@@ -87,19 +87,45 @@ func parseAliases(v interface{}) []ifaceAlias {
 		if (typ != "INET" && typ != "INET6") || addr == "" {
 			continue
 		}
-		bits := -1
-		switch n := m["netmask"].(type) {
-		case float64:
-			bits = int(n)
-		case string:
-			if i, err := strconv.Atoi(n); err == nil {
-				bits = i
-			}
-		}
-		if bits < 0 {
+		bits, ok := aliasNetmask(m["netmask"])
+		if !ok {
 			continue
 		}
 		out = append(out, ifaceAlias{Type: typ, Address: addr, Netmask: bits})
+	}
+	return out
+}
+
+// aliasNetmask reads an alias prefix length (a number or a numeric string).
+func aliasNetmask(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		if n >= 0 && n == float64(int(n)) {
+			return int(n), true
+		}
+	case string:
+		if i, err := strconv.Atoi(n); err == nil && i >= 0 {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// unreadableAliases lists the INET and INET6 entries of an alias list whose
+// prefix length cannot be read; parseAliases skips them.
+func unreadableAliases(v interface{}) []string {
+	list, _ := v.([]interface{})
+	var out []string
+	for _, raw := range list {
+		m, _ := raw.(map[string]interface{})
+		typ, _ := m["type"].(string)
+		addr, _ := m["address"].(string)
+		if (typ != "INET" && typ != "INET6") || addr == "" {
+			continue
+		}
+		if _, ok := aliasNetmask(m["netmask"]); !ok {
+			out = append(out, addr)
+		}
 	}
 	return out
 }
@@ -696,6 +722,12 @@ func planUpdateNetworkInterface(ctx context.Context, client *truenas.Client, arg
 
 	payload := map[string]interface{}{}
 	if !settingOf(next, false).equal(settingOf(current, false)) {
+		// The alias list is replaced as a whole: an alias that could not be
+		// read would be dropped from it.
+		if bad := unreadableAliases(iface["aliases"]); len(bad) > 0 {
+			return nil, fmt.Errorf("the prefix length of configured alias %s on %s could not be read, so replacing the alias list would drop it; "+
+				"nothing was changed. Fix the alias in the web UI first", strings.Join(bad, ", "), name)
+		}
 		payload["aliases"] = aliasPayload(next)
 	}
 	if newAuto != curAuto {

@@ -102,6 +102,9 @@ type netSim struct {
 	armPending int
 	// pendingErr fails interface.has_pending_changes.
 	pendingErr map[string]interface{}
+	// stateOverride replaces values of the applied network state, like
+	// a gateway TrueNAS saved but did not install.
+	stateOverride map[string]interface{}
 }
 
 func newNetSim() *netSim {
@@ -291,6 +294,9 @@ func (s *netSim) configLocked() map[string]interface{} {
 	}
 	if gw, _ := s.cfg["ipv6gateway"].(string); gw == "" && s.applied["eth0"].ipv6Auto {
 		state["ipv6gateway"] = netTestRAGW
+	}
+	for k, v := range s.stateOverride {
+		state[k] = v
 	}
 	out["state"] = state
 	return out
@@ -1099,5 +1105,92 @@ func TestNetworkInterfaceAliasListsAreCapped(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "at most 32 items") {
 			t.Errorf("%s: err = %v", key, err)
 		}
+	}
+}
+
+// A configured alias whose prefix length cannot be read would be dropped
+// when the alias list is replaced, so the change is refused.
+func TestNetworkInterfaceRefusesUnreadableAliasNetmask(t *testing.T) {
+	r, sim, fake := netRegistry(t)
+	fake.handle = func(method string, raw json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		res, rpcErr, ok := sim.handle(method, raw)
+		if method == "interface.query" {
+			for _, i := range res.([]interface{}) {
+				iface := i.(map[string]interface{})
+				iface["aliases"] = append(iface["aliases"].([]interface{}),
+					map[string]interface{}{"type": "INET6", "address": "2001:db8:1::20", "netmask": "not-a-number"})
+			}
+		}
+		return res, rpcErr, ok
+	}
+	for _, args := range []map[string]interface{}{
+		{"interface": "eth0", "add_aliases": []interface{}{netTestStatic6}, "dry_run": true},
+		{"interface": "eth0", "remove_aliases": []interface{}{netTestStatic4}, "dry_run": true},
+	} {
+		_, err := r.CallTool(t.Context(), "update_network_interface", args)
+		if err == nil || !strings.Contains(err.Error(), "2001:db8:1::20") || !strings.Contains(err.Error(), "could not be read") {
+			t.Errorf("%v: err = %v", args, err)
+		}
+	}
+	// An ipv6_auto-only change does not send the alias list.
+	if _, err := r.CallTool(t.Context(), "update_network_interface", map[string]interface{}{"interface": "eth0", "ipv6_auto": false, "dry_run": true}); err != nil {
+		t.Errorf("ipv6_auto-only change: %v", err)
+	}
+	if n := len(fake.called("interface.update")); n != 0 {
+		t.Errorf("interface.update sent %d times", n)
+	}
+}
+
+func TestUpdateNetworkConfigReportsAppliedPerGateway(t *testing.T) {
+	r, sim, _ := netRegistry(t)
+	// Applied.
+	out, err := r.CallTool(t.Context(), "update_network_config", approve(t, r, "update_network_config", map[string]interface{}{"ipv4gateway": "192.0.2.254"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decode(t, out)
+	gw, _ := m["changed_gateways"].(map[string]interface{})
+	if v4, _ := gw["ipv4"].(map[string]interface{}); m["status"] != "applied" || v4["status"] != "applied" || gw["ipv6"] != nil {
+		t.Errorf("applied: %s", out)
+	}
+	// Saved, but TrueNAS kept the old default route.
+	sim.mu.Lock()
+	sim.stateOverride = map[string]interface{}{"ipv4gateway": "192.0.2.254"}
+	sim.mu.Unlock()
+	out, err = r.CallTool(t.Context(), "update_network_config", approve(t, r, "update_network_config", map[string]interface{}{"ipv4gateway": "192.0.2.1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = decode(t, out)
+	gw, _ = m["changed_gateways"].(map[string]interface{})
+	v4, _ := gw["ipv4"].(map[string]interface{})
+	if m["status"] != "saved_not_applied" || v4["status"] != "not_applied" || v4["applied"] != "192.0.2.254" ||
+		!strings.Contains(m["message"].(string), "not in effect") {
+		t.Errorf("not applied: %s", out)
+	}
+}
+
+func TestUpdateNetworkConfigGatewaySubnetWarnings(t *testing.T) {
+	r, _, _ := netRegistry(t)
+	dry := func(args map[string]interface{}) string {
+		t.Helper()
+		out, err := r.CallTool(t.Context(), "update_network_config", mergeArgs(args, map[string]interface{}{"dry_run": true}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if out := dry(map[string]interface{}{"ipv4gateway": "198.51.100.1"}); !strings.Contains(out, "IPv4 gateway 198.51.100.1 is not inside any IPv4 subnet") {
+		t.Errorf("off-subnet IPv4 gateway: %s", out)
+	}
+	if out := dry(map[string]interface{}{"ipv4gateway": "192.0.2.254"}); strings.Contains(out, "not inside any") {
+		t.Errorf("on-subnet IPv4 gateway warned: %s", out)
+	}
+	if out := dry(map[string]interface{}{"ipv6gateway": "2001:db8:99::1"}); !strings.Contains(out, "IPv6 gateway 2001:db8:99::1 is not inside any IPv6 subnet") {
+		t.Errorf("off-subnet IPv6 gateway: %s", out)
+	}
+	// A zone-less link-local gateway gets neither warning.
+	if out := dry(map[string]interface{}{"ipv6gateway": netTestRAGW}); strings.Contains(out, "installable") || strings.Contains(out, "not inside any") {
+		t.Errorf("link-local gateway warned: %s", out)
 	}
 }
