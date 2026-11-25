@@ -4,6 +4,7 @@
 (*github.com/gorilla/websocket.Conn).Close
 (*github.com/gorilla/websocket.Conn).SetReadDeadline
 (*github.com/truenas/truenas-mcp/truenas.Client).Close
+(*github.com/truenas/truenas-mcp/truenas.Session).Close
 
 // fmt.Sscanf returns the item count; callers inspect the parsed values.
 fmt.Sscanf

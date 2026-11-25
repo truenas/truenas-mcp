@@ -35,7 +35,14 @@ var middlewareMethodContract = map[string]string{
 	"app.update":                      "25.10",
 	"app.upgrade":                     "25.10",
 	"app.upgrade_summary":             "25.10",
+	"api_key.create":                  "25.10",
+	"api_key.delete":                  "25.10",
+	"api_key.my_keys":                 "25.10",
+	"api_key.query":                   "25.10",
+	"api_key.update":                  "25.10",
 	"auth.login_ex":                   "25.10",
+	"auth.login_ex_continue":          "25.10",
+	"auth.logout":                     "25.10",
 	"boot.environment.destroy":        "25.10",
 	"boot.environment.query":          "25.10",
 	"catalog.get_app_details":         "25.10",
@@ -83,6 +90,7 @@ var middlewareMethodContract = map[string]string{
 	"update.download":                 "25.10",
 	"update.run":                      "25.10",
 	"update.status":                   "25.10",
+	"user.query":                      "25.10",
 	"vm.query":                        "25.10",
 }
 
@@ -91,6 +99,7 @@ var middlewareMethodContract = map[string]string{
 // these functions (they take the method from their caller).
 var methodDispatchers = map[string]bool{
 	"Call":            true,
+	"callNAS":         true, // truenas-mcp setup: callNAS(session, method, ...)
 	"CallWithTimeout": true,
 	"roundTrip":       true,
 	"queryCount":      true,
