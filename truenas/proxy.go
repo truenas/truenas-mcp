@@ -184,10 +184,18 @@ func (c *Client) ValidateProxy() error {
 	return err
 }
 
-// socksReplyRE matches the error gorilla/websocket's SOCKS5 dialer returns
-// when the proxy answers a CONNECT request with a failure reply (RFC 1928
-// section 6). The proxy was reached, and accepted any credentials, by then.
-var socksReplyRE = regexp.MustCompile(`proxy: SOCKS5 proxy at \S+ failed to connect: (.+)$`)
+// socksReplyRE matches the error the SOCKS5 dialer (golang.org/x/net/proxy,
+// used by gorilla/websocket) returns when the proxy answers a CONNECT
+// request with a failure reply (RFC 1928 section 6). The proxy was reached,
+// and accepted any credentials, by then.
+var socksReplyRE = regexp.MustCompile(`socks connect \S+ \S+: unknown error (.+)$`)
+
+// socksReplyNames maps the dialer's reply wording to the shorter RFC 1928
+// names used in our errors.
+var socksReplyNames = map[string]string{
+	"general SOCKS server failure":      "general failure",
+	"connection not allowed by ruleset": "connection forbidden",
+}
 
 // socksReplyFailure returns the SOCKS5 reply text (e.g. "host unreachable")
 // if err is a failure reply from a SOCKS5 proxy.
@@ -196,7 +204,26 @@ func socksReplyFailure(err error) (string, bool) {
 	if m == nil {
 		return "", false
 	}
-	return m[1], true
+	reason := m[1]
+	if name, ok := socksReplyNames[reason]; ok {
+		reason = name
+	} else if strings.HasPrefix(reason, "unknown code: ") {
+		reason = "unknown error"
+	}
+	return reason, true
+}
+
+// proxyDialFailed reports whether err includes a failed TCP dial. Through a
+// proxy, the only TCP dial is to the proxy itself. The SOCKS5 dialer wraps
+// that dial error in its own "socks connect" error, so look through the
+// whole chain rather than at the first *net.OpError only.
+func proxyDialFailed(err error) bool {
+	for ; err != nil; err = errors.Unwrap(err) {
+		if opErr, ok := err.(*net.OpError); ok && opErr.Op == "dial" {
+			return true
+		}
+	}
+	return false
 }
 
 // socksReplyError explains a SOCKS5 failure reply: unlike an unreachable
