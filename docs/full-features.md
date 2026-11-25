@@ -63,6 +63,16 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Automatically excludes sensitive data like display passwords for security
   - Perfect for questions like "what VMs are running?" or "show VMs with autostart enabled"
 
+### Accounts
+- **query_users** - Query user accounts
+  - Returns username, uid, full name, `builtin`, `immutable`, `locked`, `password_disabled`, `primary_group`/`primary_gid`, secondary `groups` by name, home, shell, `smb`, `two_factor_enabled`, `sudo`/`sudo_nopasswd` (whether any sudo commands are set, not the commands) and `roles`
+  - Never returns password hashes, password history, 2FA secrets, SSH keys or API keys: they are not requested and the output is built from a fixed field list
+  - Filter by exact `username`, `builtin` and `locked`. Local accounts only unless `include_directory_users` is true. `limit` defaults to 50 (maximum 1000)
+- **query_groups** - Query groups
+  - Returns name, gid, `builtin`, `immutable`, `smb`, `sudo`/`sudo_nopasswd`, `roles`, and `members` by username (up to 100 per group; `member_count` is the full count and `members_truncated` is set when names were cut)
+  - Filter by exact `name` and `builtin`. Local groups only unless `include_directory_groups` is true. `limit` defaults to 50 (maximum 1000)
+  - Group names (for `query_users`) and usernames (for `query_groups`) come from one extra lookup per call; ids that could not be resolved are listed under `unresolved_group_ids` / `unresolved_member_ids`
+
 ### Alerts
 - **list_alerts** - List system alerts with filtering
   - **Default changed:** without arguments, only active alerts are listed and dismissed alerts are excluded (previously all alerts were listed). `include_dismissed: true` lists all alerts; `dismissed: true` lists only dismissed alerts and `dismissed: false` only active ones

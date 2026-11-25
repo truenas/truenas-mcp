@@ -165,6 +165,10 @@
     "handler": "handleQueryDirectoryServices"
   },
   {
+    "name": "query_groups",
+    "handler": "handleQueryGroups"
+  },
+  {
     "name": "query_jobs",
     "handler": "handleQueryJobs"
   },
@@ -195,6 +199,10 @@
   {
     "name": "query_snapshots",
     "handler": "handleQuerySnapshots"
+  },
+  {
+    "name": "query_users",
+    "handler": "handleQueryUsers"
   },
   {
     "name": "query_vms",

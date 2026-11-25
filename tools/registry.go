@@ -91,6 +91,8 @@ func (r *Registry) registerTools() {
 
 	r.registerVMTools()
 
+	r.registerAccountTools()
+
 	r.registerDatasetTools()
 
 	r.registerSMBShareTools()
