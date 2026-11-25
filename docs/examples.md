@@ -25,6 +25,13 @@ This document provides example natural language queries you can use with TrueNAS
 - "What's taking up space in my replications dataset?"
 - "What SMB shares are configured?"
 
+## Disks and Services
+
+- "Is any disk failing or running hot?"
+- "Which disks are not in a pool?"
+- "Which disk in tank has checksum errors, and what is its serial?"
+- "Is SSH running, and does it start at boot?"
+
 ## Snapshots
 
 - "Show me all snapshots in the tank pool"
