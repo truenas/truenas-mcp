@@ -33,6 +33,8 @@ const (
 	defaultCheckinTimeout = 60
 	minCheckinTimeout     = 15
 	maxCheckinTimeout     = 600
+	// maxAliasChanges caps add_aliases and remove_aliases.
+	maxAliasChanges = 32
 )
 
 // How long, how often and with what per-try timeout the server tries to
@@ -341,7 +343,7 @@ func interfaceView(iface map[string]interface{}, localIP string) map[string]inte
 			v[k] = val
 		}
 	}
-	if ip, err := netip.ParseAddr(localIP); err == nil && ifaceHasAddr(iface, ip.WithZone("")) {
+	if ip, err := netip.ParseAddr(localIP); err == nil && ifaceHasAddr(iface, ip.Unmap().WithZone("")) {
 		v["this_server_connection"] = true
 	}
 	return v
@@ -406,11 +408,13 @@ func (r *Registry) registerNetworkInterfaceTools() {
 						"type":        "array",
 						"description": "Optional: static addresses to add, each address/prefix, e.g. 2001:db8::10/64 or 192.0.2.10/24",
 						"items":       map[string]interface{}{"type": "string"},
+						"maxItems":    maxAliasChanges,
 					},
 					"remove_aliases": map[string]interface{}{
 						"type":        "array",
 						"description": "Optional: static aliases to remove, as address/prefix or address",
 						"items":       map[string]interface{}{"type": "string"},
+						"maxItems":    maxAliasChanges,
 					},
 					"ipv6_auto": map[string]interface{}{
 						"type":        "boolean",
@@ -442,7 +446,8 @@ func (r *Registry) registerNetworkInterfaceTools() {
 			Name: "checkin_network_changes",
 			Description: "Keep the interface change committed by update_network_interface: calls interface.checkin, which cancels TrueNAS's automatic " +
 				"rollback. Call it only after verifying the new configuration, and before `remaining_seconds` (60 by default) runs out. Refused when " +
-				"nothing is waiting for check-in, including changes that are only staged. A successful call also shows that this server can still reach " +
+				"nothing is waiting for check-in, including changes that are only staged, and when the waiting change was not committed by this server " +
+				"(for example one made in the web UI). A successful call also shows that this server can still reach " +
 				"TrueNAS over the new configuration.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
@@ -579,7 +584,7 @@ func (r *Registry) handleGetPendingNetworkChanges(ctx context.Context, client *t
 			c.Outcome = resolveOutcome(ctx, client, c)
 			r.setNetOutcome(c.CommittedAt, c.Outcome)
 		}
-		if state == "awaiting_checkin" && c.Outcome == "connection_lost" {
+		if state == "awaiting_checkin" && (c.Outcome == "connection_lost" || c.Outcome == "unknown") {
 			c.Outcome = "awaiting_checkin"
 			r.setNetOutcome(c.CommittedAt, c.Outcome)
 		}
@@ -756,10 +761,11 @@ func planUpdateNetworkInterface(ctx context.Context, client *truenas.Client, arg
 			"see get_pending_network_changes, then checkin_network_changes or rollback_network_changes first")
 	}
 
-	if localErr != nil || localIP == "" {
+	localAddr, localParseErr := netip.ParseAddr(localIP)
+	localAddr = localAddr.Unmap().WithZone("")
+	if localErr != nil || localIP == "" || localParseErr != nil {
 		plan.Warnings = append(plan.Warnings, "Could not tell which TrueNAS address this server is connected to; if the change removes it, the connection drops and TrueNAS rolls back after the window")
-	} else if ip, err := netip.ParseAddr(localIP); err == nil && ifaceHasAddr(iface, ip.WithZone("")) {
-		ip = ip.WithZone("")
+	} else if ip := localAddr; ifaceHasAddr(iface, ip) {
 		if !addrRemains(ip, next, applied, current, newAuto, ipv4DHCP) {
 			plan.Blocked = append(plan.Blocked, fmt.Sprintf("this server is connected to TrueNAS through %s on %s, which this change removes: the connection would drop, "+
 				"this server could not check the change in, and TrueNAS would roll it back after %d seconds. Make this change in the web UI or connect through another address", ip, name, timeout))
@@ -913,6 +919,18 @@ func (r *Registry) executeUpdateNetworkInterface(ctx context.Context, client *tr
 	timeout, _ := plan.Result["timeout"].(int)
 	commitOpts, _ := plan.Result["commit_opts"].(map[string]interface{})
 
+	// One interface change at a time: the lock is held from the pending
+	// check through the commit, so two approved calls cannot both pass it.
+	if !r.netWriteMu.TryLock() {
+		return "", fmt.Errorf("update_network_interface was NOT executed: another interface change from this server is in progress; nothing was changed. Call get_pending_network_changes and try again")
+	}
+	defer r.netWriteMu.Unlock()
+	if pending, err := interfaceHasPendingChanges(ctx, client); err != nil {
+		return "", fmt.Errorf("update_network_interface was NOT executed: could not check for pending interface changes: %w; nothing was changed", err)
+	} else if pending {
+		return "", fmt.Errorf("update_network_interface was NOT executed: interface changes are already pending; nothing was changed. See get_pending_network_changes")
+	}
+
 	gen0, _ := client.SessionGeneration(ctx)
 	if _, err := callPlan(ctx, client, plan); err != nil {
 		return "", fmt.Errorf("interface.update failed: %w; %s; nothing was applied", err, discardStaged(ctx, client))
@@ -951,8 +969,9 @@ func (r *Registry) executeUpdateNetworkInterface(ctx context.Context, client *tr
 	if commitErr != nil {
 		change.Outcome = "connection_lost"
 		r.setNetChange(change)
+		deadline := probeDeadline(timeout)
 		var reached bool
-		remaining, reached = probeCheckinWaiting(ctx, client, timeout)
+		remaining, reached = probeCheckinWaiting(ctx, client, deadline)
 		if !reached {
 			reply := map[string]interface{}{
 				"status":      "connection_lost",
@@ -968,26 +987,42 @@ func (r *Registry) executeUpdateNetworkInterface(ctx context.Context, client *tr
 		}
 		reconnected = true
 		if remaining == nil {
-			outcome := "unknown"
-			if pending, err := interfaceHasPendingChanges(ctx, client); err == nil && pending {
-				// Staged but never committed: the commit did not run.
-				outcome = "rolled_back"
-				discardStaged(ctx, client)
-			} else if err == nil {
-				outcome = resolveOutcome(ctx, client, change)
+			// TrueNAS keeps running interface.commit after the connection
+			// drops and arms the check-in timer only once the apply has
+			// finished. Changes still pending with no timer can mean the
+			// commit is still applying, so keep looking for the timer and
+			// never roll back here.
+			var pending bool
+			var pendErr error
+			remaining, pending, pendErr = waitForCheckinTimer(ctx, client, deadline)
+			if remaining == nil {
+				outcome := "unknown"
+				msg := "The connection dropped during interface.commit. After reconnecting, interface changes are still pending but TrueNAS is not (yet) waiting for check-in, " +
+					"so the commit may still be applying. Nothing was rolled back. Call get_pending_network_changes: if it shows awaiting_checkin, verify and check in or roll back; " +
+					"a committed change rolls back on its own when its window ends."
+				if pendErr != nil {
+					msg = "The connection dropped during interface.commit and the pending state could not be read after reconnecting (" + pendErr.Error() + "). Nothing was rolled back. Call get_pending_network_changes to see the state."
+				} else if !pending {
+					outcome = resolveOutcome(ctx, client, change)
+					msg = "The connection dropped during interface.commit. After reconnecting nothing is pending or waiting for check-in (outcome " + outcome + ")."
+				}
+				r.setNetOutcome(change.CommittedAt, outcome)
+				executed := interface{}("unknown")
+				if outcome == "rolled_back" {
+					executed = false
+				}
+				reply := map[string]interface{}{
+					"status":    outcome,
+					"executed":  executed,
+					"interface": name,
+					"error":     commitErr.Error(),
+					"message":   msg,
+				}
+				if iface, err := queryInterface(ctx, client, name); err == nil {
+					reply["interface_now"] = interfaceView(iface, "")
+				}
+				return "", replyError("the outcome of interface.commit is "+outcome+" after the connection dropped; see get_pending_network_changes", reply)
 			}
-			r.setNetOutcome(change.CommittedAt, outcome)
-			reply := map[string]interface{}{
-				"status":    outcome,
-				"executed":  false,
-				"interface": name,
-				"error":     commitErr.Error(),
-				"message":   "The connection dropped during interface.commit. After reconnecting nothing is waiting for check-in, so the change is not in effect (outcome " + outcome + ").",
-			}
-			if iface, err := queryInterface(ctx, client, name); err == nil {
-				reply["interface_now"] = interfaceView(iface, "")
-			}
-			return "", replyError("interface change is not in effect after the connection dropped during interface.commit", reply)
 		}
 		change.Outcome = "awaiting_checkin"
 	} else {
@@ -1046,15 +1081,20 @@ func replyError(msg string, reply map[string]interface{}) error {
 	return &mcp.ReplyError{Message: msg, Reply: body}
 }
 
-// probeCheckinWaiting tries to reach TrueNAS again after the connection
-// dropped, for at most networkProbeBudget (and never longer than the
-// check-in window). reached is false when every try failed.
-func probeCheckinWaiting(ctx context.Context, client *truenas.Client, timeout int) (remaining *int, reached bool) {
+// probeDeadline is when the server stops trying to reach TrueNAS after
+// the connection dropped during a commit: networkProbeBudget from now,
+// and never later than the check-in window.
+func probeDeadline(timeout int) time.Time {
 	budget := networkProbeBudget
 	if w := time.Duration(timeout) * time.Second; w < budget {
 		budget = w
 	}
-	deadline := time.Now().Add(budget)
+	return time.Now().Add(budget)
+}
+
+// probeCheckinWaiting tries to reach TrueNAS again after the connection
+// dropped, until deadline. reached is false when every try failed.
+func probeCheckinWaiting(ctx context.Context, client *truenas.Client, deadline time.Time) (remaining *int, reached bool) {
 	for {
 		pctx, cancel := context.WithTimeout(ctx, networkProbeTimeout)
 		rem, err := interfaceCheckinWaiting(pctx, client)
@@ -1071,6 +1111,56 @@ func probeCheckinWaiting(ctx context.Context, client *truenas.Client, timeout in
 		case <-time.After(networkProbeInterval):
 		}
 	}
+}
+
+// waitForCheckinTimer polls after a reconnect while interface changes are
+// pending but nothing waits for check-in yet, until the timer appears,
+// nothing is pending any more, or deadline passes. remaining is nil when
+// no timer appeared; pending and pendErr are from the last read.
+func waitForCheckinTimer(ctx context.Context, client *truenas.Client, deadline time.Time) (remaining *int, pending bool, pendErr error) {
+	for {
+		pctx, cancel := context.WithTimeout(ctx, networkProbeTimeout)
+		pending, pendErr = interfaceHasPendingChanges(pctx, client)
+		if pendErr == nil && pending {
+			if rem, err := interfaceCheckinWaiting(pctx, client); err == nil && rem != nil {
+				cancel()
+				return rem, true, nil
+			}
+		}
+		cancel()
+		if pendErr == nil && !pending {
+			return nil, false, nil
+		}
+		if ctx.Err() != nil || time.Now().Add(networkProbeInterval).After(deadline) {
+			return nil, pending, pendErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, pending, pendErr
+		case <-time.After(networkProbeInterval):
+		}
+	}
+}
+
+// checkinGrace is how long after its expected rollback time a change this
+// server committed still counts as the one waiting for check-in (the
+// timer is armed when the apply finishes, after the commit was sent).
+const checkinGrace = 30 * time.Second
+
+// ownsWaitingChange reports whether the change waiting for check-in is the
+// last one this server committed: it is still unresolved and its window
+// has not ended.
+func (r *Registry) ownsWaitingChange() bool {
+	c := r.netChangeCopy()
+	if c == nil {
+		return false
+	}
+	switch c.Outcome {
+	case "awaiting_checkin", "connection_lost", "unknown":
+	default:
+		return false
+	}
+	return time.Now().Before(c.RollbackAt.Add(checkinGrace))
 }
 
 func (r *Registry) planCheckinNetworkChanges(ctx context.Context, client *truenas.Client, _ map[string]interface{}) (*writePlan, error) {
@@ -1097,6 +1187,9 @@ func (r *Registry) planCheckinNetworkChanges(ctx context.Context, client *truena
 		plan.Blocked = append(plan.Blocked, "interface changes are staged but not committed, so there is nothing to check in; checking in now would keep them saved without applying them. Use rollback_network_changes to discard them")
 	case remaining == nil:
 		plan.Blocked = append(plan.Blocked, "nothing is waiting for check-in: no committed change is pending (it may already have been checked in or rolled back; see get_pending_network_changes)")
+	case !r.ownsWaitingChange():
+		plan.Blocked = append(plan.Blocked, "the change waiting for check-in was not committed by this server (for example it was made in the web UI, or this server restarted since). "+
+			"This server only checks in its own changes: check it in where it was made, or use rollback_network_changes to revert it now; otherwise TrueNAS rolls it back when the window ends")
 	default:
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("%d seconds left before TrueNAS rolls back; after check-in there is no automatic rollback", *remaining))
 	}

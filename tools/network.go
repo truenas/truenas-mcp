@@ -357,7 +357,7 @@ func planUpdateNetworkConfig(ctx context.Context, client *truenas.Client, args m
 	}
 
 	if pending, err := interfaceHasPendingChanges(ctx, client); err != nil {
-		plan.Warnings = append(plan.Warnings, "Could not check for pending interface changes: "+err.Error())
+		return nil, fmt.Errorf("could not check for pending interface changes (TrueNAS requires the NETWORK_INTERFACE_WRITE role for this): %w", err)
 	} else if pending {
 		plan.Blocked = append(plan.Blocked, "interface changes are pending (staged, or committed and waiting for check-in); "+
 			"finish them with checkin_network_changes or rollback_network_changes first, because an interface rollback also restores the IPv4 gateway saved when they were staged")
@@ -370,6 +370,7 @@ func planUpdateNetworkConfig(ctx context.Context, client *truenas.Client, args m
 	var localAddr netip.Addr
 	if localIP != "" {
 		localAddr, _ = netip.ParseAddr(localIP)
+		localAddr = localAddr.Unmap()
 	}
 	var ifaces []map[string]interface{}
 	if raw, err := client.Call(ctx, "interface.query"); err == nil {

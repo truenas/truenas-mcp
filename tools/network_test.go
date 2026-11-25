@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -94,6 +95,13 @@ type netSim struct {
 	// staged (a validation error).
 	commitErr       map[string]interface{}
 	commitRollsBack bool
+	// armAfter, when > 0, makes interface.commit apply the change but arm
+	// the check-in timer only after that many interface.checkin_waiting
+	// reads, like a commit that is still applying.
+	armAfter   int
+	armPending int
+	// pendingErr fails interface.has_pending_changes.
+	pendingErr map[string]interface{}
 }
 
 func newNetSim() *netSim {
@@ -190,8 +198,16 @@ func (s *netSim) handle(method string, raw json.RawMessage) (interface{}, map[st
 		}
 		return out, nil, true
 	case "interface.has_pending_changes":
+		if s.pendingErr != nil {
+			return nil, s.pendingErr, true
+		}
 		return s.saved != nil, nil, true
 	case "interface.checkin_waiting":
+		if s.armPending > 0 && s.armAfter > 0 {
+			if s.armAfter--; s.armAfter == 0 {
+				s.timer, s.armPending = s.armPending, 0
+			}
+		}
 		if s.timer > 0 {
 			return s.timer, nil, true
 		}
@@ -227,7 +243,9 @@ func (s *netSim) handle(method string, raw json.RawMessage) (interface{}, map[st
 		}
 		opts, _ := params[0].(map[string]interface{})
 		s.applied = copyIfaces(s.db)
-		if rb, _ := opts["rollback"].(bool); rb {
+		if rb, _ := opts["rollback"].(bool); rb && s.armAfter > 0 {
+			s.armPending = int(opts["checkin_timeout"].(float64))
+		} else if rb {
 			s.timer = int(opts["checkin_timeout"].(float64))
 		} else {
 			s.saved = nil
@@ -837,5 +855,249 @@ func TestNetworkInterfaceTokenBoundToCurrentConfig(t *testing.T) {
 	}
 	if n := len(fake.called("interface.update")); n != 0 {
 		t.Errorf("interface.update sent %d times", n)
+	}
+}
+
+// dropCommitOnce closes the connection once, right after interface.commit
+// reached the fake (so the commit runs but its reply is lost).
+func dropCommitOnce(fake *fakeMiddleware) {
+	var once sync.Once
+	fake.drop = func(method string) bool {
+		dropped := false
+		if method == "interface.commit" {
+			once.Do(func() { dropped = true })
+		}
+		return dropped
+	}
+}
+
+// After a reconnect the commit may still be applying: changes are pending
+// but the check-in timer is not armed yet. The server must wait for the
+// timer, not roll back.
+func TestNetworkInterfaceReconnectBeforeTimerArmed(t *testing.T) {
+	withFastProbe(t)
+	r, sim, fake := netRegistry(t)
+	sim.armAfter = 3
+	dropCommitOnce(fake)
+	args := map[string]interface{}{"interface": "eth0", "add_aliases": []interface{}{netTestStatic6}}
+	out, err := r.CallTool(t.Context(), "update_network_interface", approve(t, r, "update_network_interface", args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := decode(t, out); m["status"] != "awaiting_checkin" || m["reconnected"] != true || m["remaining_seconds"] != 60.0 {
+		t.Errorf("after reconnect: %s", out)
+	}
+	if n := len(fake.called("interface.rollback")); n != 0 {
+		t.Errorf("interface.rollback sent %d times while the commit was applying", n)
+	}
+	if out, err := r.CallTool(t.Context(), "checkin_network_changes", nil); err != nil || decode(t, out)["status"] != "checked_in" {
+		t.Errorf("checkin: %v %s", err, out)
+	}
+}
+
+// If the timer never appears within the probe budget, the outcome is
+// unknown and nothing is rolled back.
+func TestNetworkInterfaceReconnectTimerNeverArmedIsUnknown(t *testing.T) {
+	withFastProbe(t)
+	r, sim, fake := netRegistry(t)
+	sim.armAfter = 1 << 30
+	dropCommitOnce(fake)
+	args := map[string]interface{}{"interface": "eth0", "add_aliases": []interface{}{netTestStatic6}}
+	_, err := r.CallTool(t.Context(), "update_network_interface", approve(t, r, "update_network_interface", args))
+	body := replyBody(t, err)
+	if body["status"] != "unknown" || body["executed"] != "unknown" || !strings.Contains(body["message"].(string), "get_pending_network_changes") ||
+		!strings.Contains(body["message"].(string), "Nothing was rolled back") {
+		t.Errorf("reply: %v", body)
+	}
+	if n := len(fake.called("interface.rollback")); n != 0 {
+		t.Errorf("interface.rollback sent %d times", n)
+	}
+	sim.mu.Lock()
+	staged := sim.saved != nil
+	sim.mu.Unlock()
+	if !staged {
+		t.Error("the pending change was discarded")
+	}
+
+	// The commit finishes later and arms its timer: the change is still
+	// this server's to check in.
+	sim.mu.Lock()
+	sim.timer, sim.armPending, sim.armAfter = sim.armPending, 0, 0
+	sim.mu.Unlock()
+	out, err := r.CallTool(t.Context(), "get_pending_network_changes", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := decode(t, out); m["state"] != "awaiting_checkin" || m["last_change"].(map[string]interface{})["outcome"] != "awaiting_checkin" {
+		t.Errorf("pending after the timer armed: %s", out)
+	}
+	if out, err := r.CallTool(t.Context(), "checkin_network_changes", nil); err != nil || decode(t, out)["status"] != "checked_in" {
+		t.Errorf("checkin: %v %s", err, out)
+	}
+}
+
+func TestUpdateNetworkConfigFailsClosedWhenPendingUnreadable(t *testing.T) {
+	r, sim, fake := netRegistry(t)
+	sim.pendingErr = map[string]interface{}{"code": 13, "message": "Not authorized"}
+	for _, args := range []map[string]interface{}{
+		{"ipv6gateway": netTestGW6, "dry_run": true},
+		{"ipv6gateway": netTestGW6},
+	} {
+		out, err := r.CallTool(t.Context(), "update_network_config", args)
+		if err == nil || !strings.Contains(err.Error(), "could not check for pending interface changes") {
+			t.Errorf("%v: err = %v, out = %s", args, err, out)
+		}
+		if strings.Contains(out, "confirmation_token") {
+			t.Errorf("%v: token issued: %s", args, out)
+		}
+	}
+	if n := len(fake.called("network.configuration.update")); n != 0 {
+		t.Errorf("update sent %d times", n)
+	}
+}
+
+// A change waiting for check-in that this server did not commit (for
+// example from the web UI) is not checked in.
+func TestCheckinRefusesChangeNotCommittedHere(t *testing.T) {
+	r, sim, fake := netRegistry(t)
+	webUI := func() {
+		sim.mu.Lock()
+		sim.saved = copyIfaces(sim.db)
+		sim.timer = 60
+		sim.mu.Unlock()
+	}
+	webUI()
+	_, err := r.CallTool(t.Context(), "checkin_network_changes", nil)
+	if body := replyBody(t, err); !strings.Contains(blockedText(body), "not committed by this server") {
+		t.Errorf("no change of ours: %v", body)
+	}
+	sim.expire()
+
+	// After this server's own change was checked in, a later change from
+	// elsewhere is still refused.
+	args := map[string]interface{}{"interface": "eth0", "add_aliases": []interface{}{netTestStatic6}}
+	if _, err := r.CallTool(t.Context(), "update_network_interface", approve(t, r, "update_network_interface", args)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.CallTool(t.Context(), "checkin_network_changes", nil); err != nil {
+		t.Fatal(err)
+	}
+	webUI()
+	_, err = r.CallTool(t.Context(), "checkin_network_changes", map[string]interface{}{"dry_run": true})
+	if body := replyBody(t, err); !strings.Contains(blockedText(body), "not committed by this server") {
+		t.Errorf("change from elsewhere after ours: %v", body)
+	}
+	if n := len(fake.called("interface.checkin")); n != 1 {
+		t.Errorf("interface.checkin sent %d times, want 1 (our own change)", n)
+	}
+}
+
+// An ipv6_auto-only change sends the same parameters whatever the aliases
+// are, so only the plan's Bind ties the token to them.
+func TestNetworkInterfaceTokenBoundToPreviousAliases(t *testing.T) {
+	r, sim, fake := netRegistry(t)
+	args := map[string]interface{}{"interface": "eth0", "ipv6_auto": false}
+	call := approve(t, r, "update_network_interface", args)
+	sim.mu.Lock()
+	for _, m := range []map[string]simIface{sim.db, sim.applied} {
+		e := m["eth0"]
+		e.static = append(append([]string{}, e.static...), "192.0.2.20/24")
+		m["eth0"] = e
+	}
+	sim.mu.Unlock()
+	if _, err := r.CallTool(t.Context(), "update_network_interface", call); err == nil {
+		t.Error("token accepted after the aliases changed")
+	}
+	if n := len(fake.called("interface.update")); n != 0 {
+		t.Errorf("interface.update sent %d times", n)
+	}
+}
+
+// The update sends only the new gateway, so only the plan's Bind ties the
+// token to the gateway shown in the preview.
+func TestUpdateNetworkConfigTokenBoundToPreviousGateway(t *testing.T) {
+	r, sim, fake := netRegistry(t)
+	args := map[string]interface{}{"ipv4gateway": "192.0.2.254"}
+	call := approve(t, r, "update_network_config", args)
+	sim.mu.Lock()
+	sim.cfg["ipv4gateway"] = "192.0.2.2"
+	sim.mu.Unlock()
+	if _, err := r.CallTool(t.Context(), "update_network_config", call); err == nil {
+		t.Error("token accepted after the gateway changed")
+	}
+	if n := len(fake.called("network.configuration.update")); n != 0 {
+		t.Errorf("update sent %d times", n)
+	}
+}
+
+func TestNetworkInterfaceOwnAddressChecks(t *testing.T) {
+	r, sim, _ := netRegistry(t)
+	dry := func(args map[string]interface{}) (string, error) {
+		return r.CallTool(t.Context(), "update_network_interface", mergeArgs(args, map[string]interface{}{"dry_run": true}))
+	}
+	setLocal := func(ip string) {
+		sim.mu.Lock()
+		sim.localIP = ip
+		sim.mu.Unlock()
+	}
+	// Connected over a SLAAC address: turning ipv6_auto off removes it.
+	setLocal(netTestSLAAC)
+	_, err := dry(map[string]interface{}{"interface": "eth0", "ipv6_auto": false})
+	if body := replyBody(t, err); body["status"] != "blocked" || !strings.Contains(blockedText(body), "connected to TrueNAS through "+netTestSLAAC) {
+		t.Errorf("SLAAC own address: %v", body)
+	}
+	// An IPv4-mapped local address is the IPv4 address.
+	setLocal("::ffff:192.0.2.10")
+	_, err = dry(map[string]interface{}{"interface": "eth0", "remove_aliases": []interface{}{netTestStatic4}})
+	if body := replyBody(t, err); body["status"] != "blocked" || !strings.Contains(blockedText(body), "connected to TrueNAS through 192.0.2.10") {
+		t.Errorf("mapped own address: %v", body)
+	}
+	// A local address that does not parse gets the same warning as none.
+	setLocal("not-an-address")
+	out, err := dry(map[string]interface{}{"interface": "eth0", "add_aliases": []interface{}{netTestStatic6}})
+	if err != nil || !strings.Contains(out, "Could not tell which TrueNAS address this server is connected to") {
+		t.Errorf("unparsable local address: %v %s", err, out)
+	}
+}
+
+func TestNetworkInterfaceUpdatesAreSerialized(t *testing.T) {
+	r, sim, fake := netRegistry(t)
+	args := map[string]interface{}{"interface": "eth0", "add_aliases": []interface{}{netTestStatic6}}
+
+	// Another update holds the lock.
+	r.netWriteMu.Lock()
+	_, err := r.CallTool(t.Context(), "update_network_interface", approve(t, r, "update_network_interface", args))
+	r.netWriteMu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "another interface change") {
+		t.Errorf("concurrent update: %v", err)
+	}
+
+	// A change staged after the plan was made is caught under the lock.
+	plan, err := planUpdateNetworkInterface(t.Context(), r.client, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sim.mu.Lock()
+	sim.saved = copyIfaces(sim.db)
+	sim.mu.Unlock()
+	if _, err := r.executeUpdateNetworkInterface(t.Context(), r.client, args, plan); err == nil || !strings.Contains(err.Error(), "already pending") {
+		t.Errorf("pending after plan: %v", err)
+	}
+	if n := len(fake.called("interface.update")); n != 0 {
+		t.Errorf("interface.update sent %d times", n)
+	}
+}
+
+func TestNetworkInterfaceAliasListsAreCapped(t *testing.T) {
+	r, _, _ := netRegistry(t)
+	many := make([]interface{}, maxAliasChanges+1)
+	for i := range many {
+		many[i] = "2001:db8:1::" + strconv.Itoa(i+16) + "/64"
+	}
+	for _, key := range []string{"add_aliases", "remove_aliases"} {
+		_, err := r.CallTool(t.Context(), "update_network_interface", map[string]interface{}{"interface": "eth0", key: many, "dry_run": true})
+		if err == nil || !strings.Contains(err.Error(), "at most 32 items") {
+			t.Errorf("%s: err = %v", key, err)
+		}
 	}
 }

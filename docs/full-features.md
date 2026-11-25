@@ -541,7 +541,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Stages and commits the change with a check-in window (`checkin_timeout_seconds`, default 60). Without `checkin_network_changes` in time, TrueNAS rolls it back
   - Returns `awaiting_checkin`, `remaining_seconds`, `rollback_at` and the addresses now on the interface
   - Refused when changes are already pending or when it would remove this server's connection address. See [Network check-in window](safety.md#network-check-in-window)
-- **checkin_network_changes** - Keep a committed interface change before the window ends; refused when nothing is waiting
+- **checkin_network_changes** - Keep a committed interface change before the window ends; refused when nothing is waiting or the waiting change was not made by this server
 - **rollback_network_changes** - Revert pending interface changes now, committed or only staged
 
 Example: add a static IPv6 address next to SLAAC and set a default gateway.

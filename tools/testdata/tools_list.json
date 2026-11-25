@@ -84,7 +84,7 @@
   },
   {
     "name": "checkin_network_changes",
-    "description": "Keep the interface change committed by update_network_interface: calls interface.checkin, which cancels TrueNAS's automatic rollback. Call it only after verifying the new configuration, and before `remaining_seconds` (60 by default) runs out. Refused when nothing is waiting for check-in, including changes that are only staged. A successful call also shows that this server can still reach TrueNAS over the new configuration.",
+    "description": "Keep the interface change committed by update_network_interface: calls interface.checkin, which cancels TrueNAS's automatic rollback. Call it only after verifying the new configuration, and before `remaining_seconds` (60 by default) runs out. Refused when nothing is waiting for check-in, including changes that are only staged, and when the waiting change was not committed by this server (for example one made in the web UI). A successful call also shows that this server can still reach TrueNAS over the new configuration.",
     "inputSchema": {
       "properties": {
         "dry_run": {
@@ -2273,6 +2273,7 @@
           "items": {
             "type": "string"
           },
+          "maxItems": 32,
           "type": "array"
         },
         "checkin_timeout_seconds": {
@@ -2304,6 +2305,7 @@
           "items": {
             "type": "string"
           },
+          "maxItems": 32,
           "type": "array"
         }
       },

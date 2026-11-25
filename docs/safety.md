@@ -293,19 +293,31 @@ approved, and a token round trip would eat into the window.
 `checked_in`, `rolled_back`, `changed_elsewhere` or `unknown`.
 
 If the connection drops during the commit, the server reconnects for up to
-20 seconds. When the change is still waiting, it reports `awaiting_checkin`
-with `reconnected: true`. When nothing is waiting any more, it reports that
-TrueNAS rolled back. If it cannot reconnect, it returns `connection_lost`
-with the rollback time: TrueNAS reverts the change without a check-in.
+20 seconds. When the change is waiting for check-in, it reports
+`awaiting_checkin` with `reconnected: true`. TrueNAS keeps applying the
+commit after the connection drops and arms the check-in timer only when the
+apply finishes, so while changes are pending without a timer the server
+keeps checking until the timer appears. If it does not appear within those
+20 seconds, the server reports `unknown` and rolls nothing back; call
+`get_pending_network_changes` to see the state. When nothing is pending any
+more, it reports the outcome it finds (for example `rolled_back`). If it
+cannot reconnect, it returns `connection_lost` with the rollback time:
+TrueNAS reverts the change without a check-in.
+
+`checkin_network_changes` only checks in a change this server committed. A
+change waiting for check-in from elsewhere (for example the web UI) is
+refused: check it in where it was made, or revert it with
+`rollback_network_changes`.
 
 The change is refused when interface changes are already pending (for
-example from the web UI), and when it would remove the address this server
-is connected through. If the commit fails, the staged change is discarded.
+example from the web UI), when that cannot be checked, and when it would
+remove the address this server is connected through. Only one
+`update_network_interface` call runs at a time. If the commit fails, the staged change is discarded.
 
 `update_network_config` has no such window. TrueNAS applies gateways,
 nameservers and the hostname immediately and never rolls them back, so the
 preview shows the previous values to restore by hand. It is refused while
-interface changes are pending, because an interface rollback also restores
+interface changes are pending (or when that cannot be checked), because an interface rollback also restores
 the IPv4 gateway. The interface tools need an API key with the
 `NETWORK_INTERFACE_WRITE` role.
 

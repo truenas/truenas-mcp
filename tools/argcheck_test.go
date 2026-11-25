@@ -522,6 +522,23 @@ func schemaKeywordProblems(path string, s map[string]interface{}) []string {
 			bad("minimum is above maximum")
 		}
 	}
+	if v, ok := s["maxItems"]; ok {
+		switch n := v.(type) {
+		case int:
+			if n < 0 {
+				bad("maxItems is negative")
+			}
+		case float64:
+			if n < 0 || n != math.Trunc(n) {
+				bad("maxItems is not a non-negative whole number")
+			}
+		default:
+			bad("maxItems has Go type %T, want int or float64", v)
+		}
+		if !has["array"] {
+			bad("maxItems on a non-array field")
+		}
+	}
 	for _, kw := range []string{"minLength", "maxLength"} {
 		v, ok := s[kw]
 		if !ok {

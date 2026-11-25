@@ -40,6 +40,9 @@ type Registry struct {
 	// (tools/network_interface.go), guarded by netMu.
 	netMu     sync.Mutex
 	netChange *networkChange
+	// netWriteMu serializes update_network_interface from its pending
+	// check through the commit.
+	netWriteMu sync.Mutex
 }
 
 type Tool struct {
