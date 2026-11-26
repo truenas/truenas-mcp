@@ -11,7 +11,7 @@ An [MCP](https://modelcontextprotocol.io) server for TrueNAS. It runs on your co
 - **Storage:** pools, datasets, snapshots, and SMB and NFS shares.
 - **Data protection:** replication and periodic snapshot task status, running either task now, on-demand snapshots, cloning a snapshot to a new dataset, and snapshot holds.
 - **Apps:** catalog search, install, start, stop, upgrade, update and delete.
-- **Maintenance:** system updates, boot environments and pool scrubs.
+- **Maintenance:** system updates, boot environments, pool scrubs, and starting, stopping and restarting services.
 - **Network:** gateways, nameservers, interface addresses and IPv6 autoconfiguration, with TrueNAS's automatic rollback for interface changes.
 - **Directory services:** Active Directory, LDAP and FreeIPA status and setup.
 - **Capacity planning:** usage analysis and growth trends.
