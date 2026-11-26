@@ -198,6 +198,17 @@ This document provides example natural language queries you can use with TrueNAS
 - "Create an NFS share with root squashing for security"
 - "Share my data directory with specific hosts only"
 
+## Changing and Deleting Shares
+
+- "Make the docs SMB share read-only (dry run first)"
+- "Rename the SMB share docs to TeamDocs"
+- "Move the docs share to /mnt/tank/shares/team"
+- "Delete the SMB share old-scans; keep the files"
+- "Restrict NFS share 1 to the 192.0.2.0/24 network"
+- "Map root to nobody on NFS share 1"
+- "Delete NFS share 2"
+- "Show the share ACL of docs, then give the staff group FULL and everyone READ"
+
 ## Task Management
 
 - "Show me all active tasks"

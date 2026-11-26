@@ -312,11 +312,11 @@ func resolveACLPath(ctx context.Context, client *truenas.Client, p string) (stri
 			real, _ := st["realpath"].(string)
 			resolved, err := validateACLPath(real)
 			if err != nil {
-				return "", nil, fmt.Errorf("%s resolves to %s, which is outside /mnt/<pool>; refusing to read its ACL", next, real)
+				return "", nil, fmt.Errorf("%s resolves to %s, which is outside /mnt/<pool>; refusing the path", next, real)
 			}
 			name, _, _ := strings.Cut(strings.TrimPrefix(resolved, "/mnt/"), "/")
 			if _, err := poolRoot(name); err != nil {
-				return "", nil, fmt.Errorf("%s resolves to %s: %w; refusing to read its ACL", next, resolved, err)
+				return "", nil, fmt.Errorf("%s resolves to %s: %w; refusing the path", next, resolved, err)
 			}
 			next = resolved
 			if st, err = statACLPath(ctx, client, next); err != nil {

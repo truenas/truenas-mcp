@@ -111,6 +111,7 @@ func (r *Registry) registerTools() {
 	r.registerSMBShareTools()
 
 	r.registerNFSShareTools()
+	r.registerShareActionTools()
 
 	r.registerACLTools()
 

@@ -1103,6 +1103,38 @@
     }
   },
   {
+    "name": "delete_nfs_share",
+    "description": "Delete one NFS share's configuration. NFS clients that have the export mounted lose access. Only the export is removed: the directory and every file in it are kept. The preview shows the share's current settings. Refused for shares on a locked dataset or whose lock state is unknown, and for shares whose path is not below /mnt/\u003cpool\u003e or is in a dataset TrueNAS manages itself. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without changing anything (default: false)",
+          "type": "boolean"
+        },
+        "share_id": {
+          "description": "Required: NFS share id (from query_shares)",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "share_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "delete_scrub_schedule",
     "description": "Remove a scrub schedule. **IMPORTANT**: Pool will no longer have automatic scrubbing. Recommend running manual scrubs monthly if schedule is deleted. Consider updating schedule instead of deleting. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
@@ -1130,6 +1162,41 @@
       "readOnlyHint": false,
       "destructiveHint": true,
       "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "delete_smb_share",
+    "description": "Delete one SMB share's configuration. SMB clients using the share are disconnected and lose access, and client paths and mapped drives to it stop working. Only the share is removed: the directory and every file in it are kept. The preview shows the share's current settings. Refused for the same shares as update_smb_share: the homes share and other reserved or administrative names, shares on a locked dataset or whose lock state is unknown, and shares whose path is not below /mnt/\u003cpool\u003e or is in a dataset TrueNAS manages itself. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without changing anything (default: false)",
+          "type": "boolean"
+        },
+        "share_id": {
+          "description": "SMB share id (from query_shares). Give exactly one of share_id or share_name",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "share_name": {
+          "description": "SMB share name (case-insensitive). Give exactly one of share_id or share_name",
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
       "openWorldHint": false
     }
   },
@@ -2619,6 +2686,98 @@
     }
   },
   {
+    "name": "set_share_acl",
+    "description": "Replace the share-level ACL of one SMB share (sharing.smb.setacl). The new ACL replaces the current one as a whole: entries not listed are removed. Each entry names its principal by who_type: 'everyone', 'user' or 'group' (a local user or group with SMB enabled; who is its name), or 'sid' (who is the SID of such a user or group, or S-1-1-0). Directory service (Active Directory, LDAP, IPA) users and groups are refused, by name or by SID, as are unknown names, non-SMB accounts, Unix-encoded SIDs (S-1-22-...) and the same principal twice. An ACL that grants FULL to nobody, that has a DENIED entry for everyone, or that has a DENIED entry for an administrative group (builtin_administrators, or any group that grants TrueNAS roles), is refused unless allow_no_full_control=true, because it can lock every user, or the administrators, out of the share. The preview shows the current share ACL and the new one. This changes only the share ACL, which applies to SMB access; the filesystem ACL of the share path is not changed (get_filesystem_acl). Refused for the same shares as update_smb_share. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "allow_no_full_control": {
+          "default": false,
+          "description": "Optional: Allow an ACL in which no entry grants FULL, or with a DENIED entry for everyone or for an administrative group (default: false). Refused when the ACL does not need it",
+          "type": "boolean"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without changing anything (default: false)",
+          "type": "boolean"
+        },
+        "entries": {
+          "description": "Required: The complete new share ACL, at least one entry",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "perm": {
+                "description": "FULL (read, write, delete, change permissions, take ownership), CHANGE (read, write, delete) or READ",
+                "enum": [
+                  "FULL",
+                  "CHANGE",
+                  "READ"
+                ],
+                "type": "string"
+              },
+              "type": {
+                "description": "ALLOWED or DENIED; a matching DENIED entry overrides ALLOWED entries",
+                "enum": [
+                  "ALLOWED",
+                  "DENIED"
+                ],
+                "type": "string"
+              },
+              "who": {
+                "description": "User name, group name or SID; omit for everyone",
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "who_type": {
+                "description": "How who names the principal",
+                "enum": [
+                  "everyone",
+                  "user",
+                  "group",
+                  "sid"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "who_type",
+              "perm",
+              "type"
+            ],
+            "type": "object"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "share_id": {
+          "description": "SMB share id (from query_shares). Give exactly one of share_id or share_name",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "share_name": {
+          "description": "SMB share name (case-insensitive). Give exactly one of share_id or share_name",
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "start_app",
     "description": "Start a stopped TrueNAS application. Job-based; use tasks_get with returned task_id to track progress. Supports dry_run to preview the action without executing it.",
     "inputSchema": {
@@ -2981,6 +3140,195 @@
       "required": [
         "interface"
       ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "update_nfs_share",
+    "description": "Change the settings of one existing NFS share: its path, comment, enabled, ro, networks, hosts, maproot_user, maproot_group, mapall_user, mapall_group or security. Only the settings given that differ from the current ones are sent. The preview shows the share's current settings, each change (old -\u003e new) and how root and other clients are mapped afterwards. A new path exports a different directory and moves no files. A share can be pointed at any ordinary dataset folder below /mnt/\u003cpool\u003e, including other users' or teams' data and home directories; ownership is not checked. Mapping every client to root (mapall_user root), keeping root as root (no_root_squash) or removing every network and host limit is allowed with an explicit warning in the preview; no extra flag is needed. Refused for shares on a locked dataset or whose lock state is unknown, and for shares whose current or new path is not below /mnt/\u003cpool\u003e (pool roots, /mnt itself, datasets TrueNAS manages itself such as the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, non-normalised paths, and paths that go through a symlink). Aliases, expose_snapshots and the global NFS service settings are not changed. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "comment": {
+          "description": "Optional: New description (\"\" clears it)",
+          "maxLength": 1024,
+          "type": "string"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without changing anything (default: false)",
+          "type": "boolean"
+        },
+        "enabled": {
+          "description": "Optional: Enable or disable the export. Disabling it cuts off every NFS client",
+          "type": "boolean"
+        },
+        "hosts": {
+          "description": "Optional: Replace the authorized hosts (IP addresses or hostnames, no quotes or spaces; [] with no networks allows every client)",
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "mapall_group": {
+          "description": "Optional: Map every client group to this group (\"\" clears it)",
+          "type": "string"
+        },
+        "mapall_user": {
+          "description": "Optional: Map every client to this user (\"\" clears it)",
+          "type": "string"
+        },
+        "maproot_group": {
+          "description": "Optional: Map root clients to this group (\"\" clears it)",
+          "type": "string"
+        },
+        "maproot_user": {
+          "description": "Optional: Map root clients to this user (\"\" clears it)",
+          "type": "string"
+        },
+        "networks": {
+          "description": "Optional: Replace the authorized networks in CIDR notation, e.g. ['192.0.2.0/24'] ([] with no hosts allows every client)",
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "path": {
+          "description": "Optional: New share path: an existing directory below /mnt/\u003cpool\u003e, given in normalised form (no trailing '/', '//', '.' or '..') and reached without symlinks. Pool roots and datasets TrueNAS manages itself are refused. No files are moved",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "ro": {
+          "description": "Optional: Export read-only",
+          "type": "boolean"
+        },
+        "security": {
+          "description": "Optional: Replace the security mechanisms ([] uses the default, SYS)",
+          "items": {
+            "enum": [
+              "SYS",
+              "KRB5",
+              "KRB5I",
+              "KRB5P"
+            ],
+            "type": "string"
+          },
+          "maxItems": 4,
+          "type": "array"
+        },
+        "share_id": {
+          "description": "Required: NFS share id (from query_shares)",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "share_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "update_smb_share",
+    "description": "Change the settings of one existing SMB share: its name, path, comment, enabled, readonly, browsable, access_based_share_enumeration, hostsallow or hostsdeny. Only the settings given that differ from the current ones are sent. The preview shows the share's current settings and each change (old -\u003e new). Renaming breaks client paths and mapped drives that use the old name; a new path serves a different directory and moves no files. A share can be pointed at any ordinary dataset folder below /mnt/\u003cpool\u003e, including other users' or teams' data and home directories; ownership is not checked. hostsallow and hostsdeny can be changed only for shares whose purpose is LEGACY_SHARE. Refused for the homes share and other reserved or administrative names (global, printers, homes, IPC$, ADMIN$, PRINT$, drive shares such as C$), for shares on a locked dataset or whose lock state is unknown, and for shares whose current or new path is not below /mnt/\u003cpool\u003e (pool roots, /mnt itself, EXTERNAL DFS proxies, datasets TrueNAS manages itself such as the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, non-normalised paths, and paths that go through a symlink). The share's purpose, options other than the host lists, audit settings, share ACL and the global SMB service settings are not changed. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "access_based_share_enumeration": {
+          "description": "Optional: List the share only to users the share ACL grants access",
+          "type": "boolean"
+        },
+        "browsable": {
+          "description": "Optional: Show the share in network browse lists",
+          "type": "boolean"
+        },
+        "comment": {
+          "description": "Optional: New description (\"\" clears it)",
+          "maxLength": 1024,
+          "type": "string"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without changing anything (default: false)",
+          "type": "boolean"
+        },
+        "enabled": {
+          "description": "Optional: Enable or disable the share. Disabling it cuts off every SMB client",
+          "type": "boolean"
+        },
+        "hostsallow": {
+          "description": "Optional: Replace the hosts or networks allowed to connect ([] allows every host)",
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "hostsdeny": {
+          "description": "Optional: Replace the hosts or networks refused ([] refuses none)",
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "new_name": {
+          "description": "Optional: New share name (max 80 characters, none of \\ / [ ] : | \u003c \u003e + = ; , * ? \"; not a reserved name; not used by another share)",
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "description": "Optional: New share path: an existing directory below /mnt/\u003cpool\u003e, given in normalised form (no trailing '/', '//', '.' or '..') and reached without symlinks. Pool roots and datasets TrueNAS manages itself are refused. No files are moved",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "readonly": {
+          "description": "Optional: Prevent SMB clients from creating or changing files",
+          "type": "boolean"
+        },
+        "share_id": {
+          "description": "SMB share id (from query_shares). Give exactly one of share_id or share_name",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "share_name": {
+          "description": "SMB share name (case-insensitive). Give exactly one of share_id or share_name",
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "annotations": {

@@ -61,6 +61,10 @@ var fakeResults = map[string]interface{}{
 	// Account write tools: the local users and groups of account_actions_test.go.
 	"user.query":  accountUserRows(),
 	"group.query": accountGroupRows(),
+	// Share write tools: the shares and share ACL of share_actions_test.go.
+	"sharing.smb.query":  shareFixtureSMBRows(),
+	"sharing.nfs.query":  shareFixtureNFSRows(),
+	"sharing.smb.getacl": shareFixtureACL(),
 }
 
 func (f *fakeMiddleware) serve(w http.ResponseWriter, r *http.Request) {
@@ -242,6 +246,9 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"checkin_network_changes": Write, "rollback_network_changes": Write,
 		"create_user": Destructive, "update_user": Destructive,
 		"create_group": Destructive, "update_group": Destructive,
+		"update_smb_share": Destructive, "delete_smb_share": Destructive,
+		"update_nfs_share": Destructive, "delete_nfs_share": Destructive,
+		"set_share_acl": Destructive,
 	}
 	for name, s := range toolSafety {
 		if got, exp := s.Access, want[name]; exp != 0 && got != exp || exp == 0 && got != Read {
@@ -254,8 +261,8 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 			destructive++
 		}
 	}
-	if destructive != 22 {
-		t.Errorf("%d destructive tools, want 22; update docs/safety.md and docs/full-features.md too", destructive)
+	if destructive != 27 {
+		t.Errorf("%d destructive tools, want 27; update docs/safety.md and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
 		if s.Overwrites {
