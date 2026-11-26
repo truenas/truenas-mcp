@@ -60,6 +60,7 @@ func issue156Registry(t *testing.T, appConfig map[string]interface{}, catalog ma
 			"replication.query":        replicationTaskFixtures()["replication.query"],
 			"pool.snapshottask.query":  replicationTaskFixtures()["pool.snapshottask.query"],
 			"pool.snapshot.query":      replicationTaskFixtures()["pool.snapshot.query"],
+			"service.query":            registryServiceFixtures(),
 		},
 		handle: func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
 			if method == "app.query" {

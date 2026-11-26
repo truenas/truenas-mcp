@@ -50,19 +50,44 @@ func simplifyService(svc map[string]interface{}) map[string]interface{} {
 	return out
 }
 
-func handleQueryServices(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+// queryServiceRows returns the service.query rows for name, or every row
+// when name is empty.
+func queryServiceRows(ctx context.Context, client *truenas.Client, name string) ([]map[string]interface{}, error) {
 	filters := []interface{}{}
-	name, _ := args["name"].(string)
 	if name != "" {
 		filters = append(filters, []interface{}{"service", "=", name})
 	}
 	raw, err := client.Call(ctx, "service.query", filters, map[string]interface{}{})
 	if err != nil {
-		return "", fmt.Errorf("failed to query services: %w", err)
+		return nil, fmt.Errorf("failed to query services: %w", err)
 	}
 	var rows []map[string]interface{}
 	if err := json.Unmarshal(raw, &rows); err != nil {
-		return "", fmt.Errorf("failed to parse services: unexpected result")
+		return nil, fmt.Errorf("failed to parse services: unexpected result")
+	}
+	return rows, nil
+}
+
+// lookupService returns the service.query row of the named service, or nil
+// when there is none.
+func lookupService(ctx context.Context, client *truenas.Client, name string) (map[string]interface{}, error) {
+	rows, err := queryServiceRows(ctx, client, name)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if row["service"] == name {
+			return row, nil
+		}
+	}
+	return nil, nil
+}
+
+func handleQueryServices(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
+	name, _ := args["name"].(string)
+	rows, err := queryServiceRows(ctx, client, name)
+	if err != nil {
+		return "", err
 	}
 	if name != "" && len(rows) == 0 {
 		return "", fmt.Errorf("service %q not found", name)
