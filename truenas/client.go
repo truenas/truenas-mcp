@@ -78,6 +78,11 @@ type Client struct {
 
 	legacyWarning sync.Once
 
+	// extraSecrets are further values (a setup password, OTP or new API
+	// key) scrubbed from server-supplied text like apiKey.
+	secretsMu    sync.Mutex
+	extraSecrets []string
+
 	// frameHook, if set, sees every decoded frame before it is routed.
 	// Tests use it to inject a panic into the read loop.
 	frameHook func(*rpcResponse)
@@ -309,6 +314,10 @@ func NewClientWithOptions(endpoint, apiKey string, tlsConfig *tls.Config, opts O
 // tlsHint suggests a fix for a certificate verification failure, or returns
 // "" if err is not one.
 func tlsHint(err error, host string) string {
+	var pinErr *PinMismatchError
+	if errors.As(err, &pinErr) {
+		return "the certificate changed since it was pinned (TRUENAS_TLS_PIN / --tls-pin); a pin stops matching whenever the certificate is replaced, reissued or renewed (even with the same key); if that was done on purpose, check the new fingerprint and update the pin, for example by running truenas-mcp setup again"
+	}
 	var hostErr x509.HostnameError
 	if errors.As(err, &hostErr) {
 		fix := "connect using a host name listed in the certificate, or install a TrueNAS certificate whose subject alternative names include " + host
@@ -983,6 +992,11 @@ func (c *Client) scrubSecrets(s string) string {
 	if c.apiKey != "" {
 		s = strings.ReplaceAll(s, c.apiKey, redact.Marker)
 	}
+	c.secretsMu.Lock()
+	for _, secret := range c.extraSecrets {
+		s = strings.ReplaceAll(s, secret, redact.Marker)
+	}
+	c.secretsMu.Unlock()
 	return redact.Text(s)
 }
 

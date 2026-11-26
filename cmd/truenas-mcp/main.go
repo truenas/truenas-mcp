@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +28,7 @@ var (
 	apiKeyFile          = flag.String("api-key-file", "", "Path to a file containing the TrueNAS API key (env TRUENAS_API_KEY_FILE)")
 	insecure            = flag.Bool("insecure", false, "Disable TLS certificate verification (UNSAFE: allows man-in-the-middle attacks; prefer --tls-ca)")
 	tlsCA               = flag.String("tls-ca", "", "Path to a PEM certificate to trust (e.g., the TrueNAS self-signed certificate)")
+	tlsPin              = flag.String("tls-pin", "", "Trust only the server certificate with this SHA-256 fingerprint (SHA256:AB:CD:...), skipping the chain and host name checks (env TRUENAS_TLS_PIN)")
 	proxyURL            = flag.String("proxy", "", "Proxy for the TrueNAS connection: http://, socks5:// or socks5h://host:port, or none to ignore proxy env vars (env TRUENAS_PROXY; overrides HTTPS_PROXY and ALL_PROXY)")
 	versionFlg          = flag.Bool("version", false, "Print version and exit")
 	debug               = flag.Bool("debug", false, "Enable debug logging")
@@ -133,6 +135,9 @@ func configureLogging() {
 
 func main() {
 	configureLogging()
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		os.Exit(runSetup(os.Args[2:], realSetupIO()))
+	}
 	flag.Parse()
 
 	if *versionFlg {
@@ -178,7 +183,10 @@ func main() {
 	// Configure TLS: certificates are verified by default. TrueNAS ships a
 	// self-signed certificate, so users must either trust it via --tls-ca
 	// or explicitly opt out of verification with --insecure.
-	tlsConfig, err := truenas.NewTLSConfig(*insecure, *tlsCA)
+	if *tlsPin == "" {
+		*tlsPin = os.Getenv("TRUENAS_TLS_PIN")
+	}
+	tlsConfig, err := serverTLSConfig(*insecure, *tlsCA, *tlsPin)
 	if err != nil {
 		log.Fatalf("Failed to configure TLS: %v", err)
 	}
@@ -242,6 +250,23 @@ func main() {
 	if err := handler.Run(context.Background()); err != nil {
 		log.Fatalf("Stdio handler error: %v", err)
 	}
+}
+
+// serverTLSConfig builds the TLS configuration from the TLS settings. A
+// pin is exclusive: combined with a CA file or --insecure it would be
+// unclear which check applies.
+func serverTLSConfig(insecure bool, caPath, pin string) (*tls.Config, error) {
+	if pin != "" {
+		if insecure || caPath != "" {
+			return nil, fmt.Errorf("--tls-pin / TRUENAS_TLS_PIN cannot be combined with --tls-ca / TRUENAS_TLS_CA or --insecure / TRUENAS_INSECURE; use only one")
+		}
+		cfg, err := truenas.NewPinnedTLSConfig(pin)
+		if err != nil {
+			return nil, fmt.Errorf("--tls-pin / TRUENAS_TLS_PIN: %w", err)
+		}
+		return cfg, nil
+	}
+	return truenas.NewTLSConfig(insecure, caPath)
 }
 
 // insecureWarning is logged at startup when TLS verification is disabled.

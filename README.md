@@ -73,7 +73,7 @@ TrueNAS uses a self-signed certificate by default. Point `TRUENAS_TLS_CA` at a c
       "command": "truenas-mcp",
       "args": ["--read-only"],
       "env": {
-        "TRUENAS_URL": "192.168.0.31",
+        "TRUENAS_URL": "192.0.2.10",
         "TRUENAS_API_USER": "truenas_admin",
         "TRUENAS_API_KEY": "your-api-key"
       }
@@ -88,7 +88,7 @@ Leave out `--read-only` to allow changes.
 
 ```bash
 claude mcp add truenas \
-  --env TRUENAS_URL=192.168.0.31 \
+  --env TRUENAS_URL=192.0.2.10 \
   --env TRUENAS_API_USER=truenas_admin \
   --env TRUENAS_API_KEY=your-api-key \
   -- truenas-mcp --read-only
