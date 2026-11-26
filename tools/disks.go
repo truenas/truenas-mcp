@@ -107,7 +107,15 @@ func queryDiskRows(ctx context.Context, client *truenas.Client) (map[string]map[
 // diskDetailRows returns the disk.details used and unused lists by disk
 // name. A disk the kernel reports without a size is in neither.
 func diskDetailRows(ctx context.Context, client *truenas.Client) (used, unused map[string]map[string]interface{}, err error) {
-	raw, err := client.Call(ctx, "disk.details", map[string]interface{}{"join_partitions": false, "type": "BOTH"})
+	return diskDetailRowsWith(ctx, client, false)
+}
+
+// diskDetailRowsWith is diskDetailRows with join_partitions set as given:
+// when true, each row's partitions list holds the partitions on the disk
+// (25.10 reads them with disk.list_partitions, the same check pool.replace
+// uses to decide that a disk is not clean).
+func diskDetailRowsWith(ctx context.Context, client *truenas.Client, joinPartitions bool) (used, unused map[string]map[string]interface{}, err error) {
+	raw, err := client.Call(ctx, "disk.details", map[string]interface{}{"join_partitions": joinPartitions, "type": "BOTH"})
 	if err != nil {
 		return nil, nil, err
 	}

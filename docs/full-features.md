@@ -116,7 +116,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 - **offline_disk** - Take one disk of a pool offline (**destructive**)
   - **Requires a `confirmation_token`** to execute; the token is bound to the pool's topology and vdev states and to the disk
   - Input: `pool`, `disk` (disk name, or the ZFS guid from `get_disk_health`). Sends `pool.offline` with the pool id and the device guid; no force option
-  - Allowed only when the pool is `ONLINE` with no resilver running, the disk and every other disk of its vdev are `ONLINE`, and the vdev still tolerates at least one failed disk afterwards (a 3-way or wider mirror, RAIDZ2 or RAIDZ3). 2-way mirrors, RAIDZ1, single-disk vdevs, dRAID, cache and spare devices, vdevs with a replacement in progress and the boot pool are refused
+  - Allowed only when the pool is `ONLINE`, reported healthy and has no resilver running, the disk and every other disk of its vdev are `ONLINE`, and the vdev still tolerates at least one failed disk afterwards (a 3-way or wider mirror, RAIDZ2 or RAIDZ3). 2-way mirrors, RAIDZ1, single-disk vdevs, dRAID, cache and spare devices, vdevs with a replacement in progress and the boot pool are refused
   - The preview shows the vdev layout before and after and the redundancy left
 - **online_disk** - Bring an `OFFLINE` disk back online (**destructive**)
   - **Requires a `confirmation_token`** to execute; the token is bound to the pool's topology and vdev states and to the disk
@@ -124,8 +124,8 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Allowed only for a device that is `OFFLINE` in the named pool and present on the system. The preview shows the vdev layout and the expected resilver (only the data written while the disk was offline)
 - **replace_disk** - Replace a pool disk with an unused disk (**destructive**)
   - **Requires a `confirmation_token`** to execute; the token is bound to the pool's topology and vdev states, the disk being replaced and the replacement disk's identity, size and unused state
-  - Input: `pool`, `disk` (disk name, or the ZFS guid of a device that is no longer present), `replacement_disk`. Sends `pool.replace` with `{"label": <guid>, "disk": <replacement>, "force": false}`; the job is tracked with `tasks_get`
-  - The replacement must be reported unused by `disk.details`, be in no imported or exported pool, not be a boot disk, have no duplicate serial and be at least as large as the disk it replaces. Everything on it is destroyed, and the preview says so
+  - Input: `pool`, `disk` (disk name, or the ZFS guid of a device that is no longer present), `replacement_disk`. Sends `pool.replace` with `{"label": <guid>, "disk": <replacement identifier>, "force": false}`, where the identifier is the replacement disk's `identifier` from `disk.details` (refused if it is empty or differs from its `disk.query` identifier); the job is tracked with `tasks_get`
+  - The replacement must be reported unused by `disk.details`, be in no imported or exported pool, not be a boot disk, have no duplicate serial, have no partitions and be at least as large as the disk it replaces. Everything on it is destroyed, and the preview says so. Swap, self-encrypting drive locking and other open use of it are not checked, and the preview says that too
   - Only disks in mirror or RAIDZ vdevs (data, special, dedup or log) are replaced. In a degraded vdev only the failed or offline disk can be replaced, and a healthy disk is not replaced while the pool is degraded. Refused while a resilver or another `pool.replace` job is running, for vdevs with a replacement in progress, and for the boot pool
   - The job finishes once the replacement has started; the resilver continues afterwards (follow it with `get_disk_health` or `query_pools`), and the old disk stays in the vdev until it completes
   - `disk.wipe`, `pool.remove`, attaching, detaching and expanding are not supported

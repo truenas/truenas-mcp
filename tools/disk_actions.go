@@ -37,7 +37,7 @@ func (r *Registry) registerDiskActionTools() {
 	r.tools["offline_disk"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "offline_disk",
-			Description: "Take one ONLINE disk of a pool offline with pool.offline, for example before pulling it. ZFS stops using the disk and the pool runs with less redundancy until online_disk brings it back. Allowed only when the pool is ONLINE with no resilver running, the disk and every other disk of its vdev are ONLINE, and the vdev keeps at least one disk's worth of redundancy afterwards: a 3-way mirror or RAIDZ2 vdev or wider qualifies, a 2-way mirror or RAIDZ1 vdev does not. Refused for single-disk (stripe) vdevs, dRAID and other vdev types, cache and spare devices, a vdev with a replacement or hot spare in progress, and the boot pool. Special, dedup and log vdevs follow the same redundancy rule as data vdevs. There is no force option. The preview shows the vdev layout and the redundancy left after the disk goes offline. Use dry_run to preview.",
+			Description: "Take one ONLINE disk of a pool offline with pool.offline, for example before pulling it. ZFS stops using the disk and the pool runs with less redundancy until online_disk brings it back. Allowed only when the pool is ONLINE, reported healthy and has no resilver running, the disk and every other disk of its vdev are ONLINE, and the vdev keeps at least one disk's worth of redundancy afterwards: a 3-way mirror or RAIDZ2 vdev or wider qualifies, a 2-way mirror or RAIDZ1 vdev does not. Refused for single-disk (stripe) vdevs, dRAID and other vdev types, cache and spare devices, a vdev with a replacement or hot spare in progress, and the boot pool. Special, dedup and log vdevs follow the same redundancy rule as data vdevs. There is no force option. The preview shows the vdev layout and the redundancy left after the disk goes offline. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -75,7 +75,7 @@ func (r *Registry) registerDiskActionTools() {
 	r.tools["replace_disk"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "replace_disk",
-			Description: "Replace a disk of a pool with an unused disk using pool.replace, which runs as a job tracked with tasks_get. TrueNAS repartitions the replacement disk, so everything on it is destroyed. ZFS then resilvers onto it and detaches the old disk when the resilver finishes. The replacement must be reported unused by TrueNAS (query_disks unused_only), be in no imported or exported pool, not be a boot disk, have no duplicate serial and be at least as large as the disk it replaces. The disk being replaced must be in a mirror or RAIDZ vdev of data, special, dedup or log devices; single-disk (stripe) vdevs, dRAID, cache and spare devices are refused. If its vdev already has a failed or offline disk, only that disk can be replaced; replacing a healthy disk is refused while any device of the pool is not ONLINE. Also refused while a resilver or another pool.replace job is running, for a vdev with a replacement or hot spare in progress, and for the boot pool. There is no force option. The preview shows both disks with their sizes and serials, the vdev layout and that the replacement disk's contents will be destroyed. Use dry_run to preview.",
+			Description: "Replace a disk of a pool with an unused disk using pool.replace, which runs as a job tracked with tasks_get. TrueNAS repartitions the replacement disk, so everything on it is destroyed. ZFS then resilvers onto it and detaches the old disk when the resilver finishes. The replacement must be reported unused by TrueNAS (query_disks unused_only), be in no imported or exported pool, not be a boot disk, have no duplicate serial, have no partitions and be at least as large as the disk it replaces; swap, self-encrypting drive locking and other open use of it are not checked. The disk being replaced must be in a mirror or RAIDZ vdev of data, special, dedup or log devices; single-disk (stripe) vdevs, dRAID, cache and spare devices are refused. If its vdev already has a failed or offline disk, only that disk can be replaced; replacing a healthy disk is refused while any device of the pool is not ONLINE. Also refused while a resilver or another pool.replace job is running, for a vdev with a replacement or hot spare in progress, and for the boot pool. There is no force option. The preview shows both disks with their sizes and serials, the vdev layout and that the replacement disk's contents will be destroyed. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -502,6 +502,9 @@ func loadPoolDiskTarget(ctx context.Context, client *truenas.Client, tool string
 		}
 		return nil, fmt.Errorf("disk '%s' is not a device of pool '%s' (get_disk_health with pool '%s' lists its disks and their guids)", disk, poolName, poolName)
 	}
+	if v.Members[i].GUID == "" {
+		return nil, fmt.Errorf("pool.query reported no ZFS guid (as a string) for disk '%s' of pool '%s', and %s names the device to TrueNAS only by its guid; nothing was changed", disk, poolName, tool)
+	}
 	return &poolDiskTarget{pool: pool, vdev: *v, member: v.Members[i], bootName: bootName, bootDisks: bootDisks, disks: disks}, nil
 }
 
@@ -532,6 +535,13 @@ func (t *poolDiskTarget) diskFact() string {
 	}
 	parts = append(parts, "guid "+m.GUID, m.Status)
 	return strings.Join(parts, ", ")
+}
+
+// staleNameNote says that the name and serial shown for the target come
+// from the pool's device path, which can be stale on older pools, while
+// the call names the device by its guid.
+func (t *poolDiskTarget) staleNameNote() string {
+	return fmt.Sprintf("The disk name and serial shown for %s are matched from the pool's device path; on older pools that path (/dev/sdX) can be stale, so the name or serial shown may not be the physical disk's. The call names the device by its ZFS guid %s, which is not affected; check the guid with get_disk_health", t.member.label(), t.member.GUID)
 }
 
 // commonDiskBlocks are the refusals every disk tool shares: devices this
@@ -600,6 +610,8 @@ func planOfflineDisk(ctx context.Context, client *truenas.Client, args map[strin
 	reasons := t.commonDiskBlocks("offline_disk")
 	if t.pool.Status != "ONLINE" {
 		reasons = append(reasons, fmt.Sprintf("pool '%s' is %s, not ONLINE; taking another disk offline while a device is already failed or offline could leave the pool without redundancy, so resolve that first (get_disk_health shows which device)", t.pool.Name, orUnknown(t.pool.Status)))
+	} else if !t.pool.Healthy {
+		reasons = append(reasons, fmt.Sprintf("pool '%s' is ONLINE but TrueNAS does not report it healthy (for example a disk with read, write or checksum errors); taking a disk offline is refused until it is, so check get_disk_health first", t.pool.Name))
 	}
 	if t.pool.Resilvering {
 		reasons = append(reasons, fmt.Sprintf("a resilver is running on pool '%s'; wait for it to finish before taking a disk offline", t.pool.Name))
@@ -645,6 +657,7 @@ func planOfflineDisk(ctx context.Context, client *truenas.Client, args map[strin
 		"ZFS stops writing to the disk; the pool shows as DEGRADED while it is offline",
 		"Bringing it back with online_disk resilvers the data written while it was offline; if the disk is replaced instead, use replace_disk",
 		"The offline state persists across reboots until the disk is brought online",
+		t.staleNameNote(),
 	}
 	plan.Result = map[string]interface{}{"pool": t.pool.Name, "guid": m.GUID, "vdev": v.Name}
 	return plan, nil
@@ -660,6 +673,13 @@ func redundancyText(n int) string {
 		return "1 more disk failure tolerated"
 	}
 	return fmt.Sprintf("%d more disk failures tolerated", n)
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }
 
 func orUnknown(s string) string {
@@ -772,6 +792,7 @@ func planOnlineDisk(ctx context.Context, client *truenas.Client, args map[string
 	warnings := []string{
 		resilver,
 		"Pool I/O may be slower while the resilver runs",
+		t.staleNameNote(),
 	}
 	if t.pool.Resilvering {
 		warnings = append(warnings, fmt.Sprintf("A resilver is already running on pool '%s'; ZFS may restart it to include this disk", t.pool.Name))
@@ -824,23 +845,32 @@ func executeOnlineDisk(ctx context.Context, client *truenas.Client, args map[str
 
 // replacementDisk is what replace_disk reads about the new disk.
 type replacementDisk struct {
-	Name        string
-	Serial      string
-	Model       string
-	Identifier  string
-	Size        int64
-	Unused      bool
-	Used        bool
-	Pool        string
-	Exported    string
-	Boot        bool
-	DupSerial   []string
-	InDiskQuery bool
+	Name       string
+	Serial     string
+	Model      string
+	Identifier string // from disk.query, bound in the token
+	// DetailIdentifier is the identifier disk.details reports, which
+	// pool.replace looks the disk up by.
+	DetailIdentifier string
+	// Partitions names the partitions disk.details (join_partitions)
+	// reports on the disk; PartitionsKnown is false when it reported none
+	// as a list.
+	Partitions      []string
+	PartitionsKnown bool
+	Size            int64
+	Unused          bool
+	Used            bool
+	Pool            string
+	Exported        string
+	Boot            bool
+	DupSerial       []string
+	InDiskQuery     bool
 }
 
 func (d replacementDisk) bind() map[string]interface{} {
 	return map[string]interface{}{
-		"name": d.Name, "serial": d.Serial, "identifier": d.Identifier, "size": d.Size,
+		"name": d.Name, "serial": d.Serial, "identifier": d.Identifier, "details_identifier": d.DetailIdentifier,
+		"partitions": d.Partitions, "partitions_known": d.PartitionsKnown, "size": d.Size,
 		"unused": d.Unused, "used": d.Used, "pool": d.Pool, "exported_pool": d.Exported,
 		"boot": d.Boot, "duplicate_serial": d.DupSerial, "known": d.InDiskQuery,
 	}
@@ -863,6 +893,9 @@ func (d replacementDisk) view() map[string]interface{} {
 	if len(d.DupSerial) > 0 {
 		v["duplicate_serial"] = d.DupSerial
 	}
+	if len(d.Partitions) > 0 {
+		v["partitions"] = d.Partitions
+	}
 	return v
 }
 
@@ -879,7 +912,7 @@ func (d replacementDisk) fact() string {
 
 func readReplacementDisk(ctx context.Context, client *truenas.Client, name string, t *poolDiskTarget) (replacementDisk, error) {
 	d := replacementDisk{Name: name, Boot: t.bootDisks[name]}
-	used, unused, err := diskDetailRows(ctx, client)
+	used, unused, err := diskDetailRowsWith(ctx, client, true)
 	if err != nil {
 		return d, fmt.Errorf("could not check that disk '%s' is unused (disk.details failed: %w); nothing was changed", name, err)
 	}
@@ -895,6 +928,19 @@ func readReplacementDisk(ctx context.Context, client *truenas.Client, name strin
 	d.Serial, _ = firstString("serial", q, detail)
 	d.Model, _ = firstString("model", q, detail)
 	d.Identifier, _ = firstString("identifier", q)
+	d.DetailIdentifier, _ = firstString("identifier", detail)
+	if parts, ok := detail["partitions"].([]interface{}); ok {
+		d.PartitionsKnown = true
+		for _, p := range parts {
+			name := "unnamed partition"
+			if row, ok := p.(map[string]interface{}); ok {
+				if n, ok := row["name"].(string); ok && n != "" {
+					name = n
+				}
+			}
+			d.Partitions = append(d.Partitions, name)
+		}
+	}
 	if n, ok := firstNumber("size", q, detail); ok {
 		d.Size = int64(n)
 	}
@@ -967,7 +1013,9 @@ func planReplaceDisk(ctx context.Context, client *truenas.Client, args map[strin
 	if m.Size > 0 && nd.Size > 0 {
 		sizeFact = fmt.Sprintf("%s replaced by %s", formatBytes(m.Size), formatBytes(nd.Size))
 	}
-	options := map[string]interface{}{"label": m.GUID, "disk": newName, "force": false}
+	// 25.10 pool.replace finds the new disk by its disk.details
+	// identifier (find_disk_from_identifier), not by its name.
+	options := map[string]interface{}{"label": m.GUID, "disk": nd.DetailIdentifier, "force": false}
 	plan := &writePlan{
 		Tool:         "replace_disk",
 		Method:       poolReplaceMethod,
@@ -1024,6 +1072,20 @@ func planReplaceDisk(ctx context.Context, client *truenas.Client, args map[strin
 	if !nd.InDiskQuery {
 		reasons = append(reasons, fmt.Sprintf("disk '%s' is not in the TrueNAS disk database yet, so its identity cannot be bound to the confirmation", newName))
 	}
+	if nd.Unused || nd.Used {
+		switch {
+		case nd.DetailIdentifier == "":
+			reasons = append(reasons, fmt.Sprintf("TrueNAS (disk.details) reports no identifier for disk '%s', which pool.replace needs to find the disk", newName))
+		case nd.DetailIdentifier != nd.Identifier:
+			reasons = append(reasons, fmt.Sprintf("disk '%s' has identifier %s in disk.details but %s in the TrueNAS disk database (disk.query), so which disk pool.replace would use cannot be confirmed", newName, nd.DetailIdentifier, orNone(nd.Identifier)))
+		}
+		switch {
+		case !nd.PartitionsKnown:
+			reasons = append(reasons, fmt.Sprintf("TrueNAS (disk.details) did not report the partitions on disk '%s', so it cannot be checked to be clean", newName))
+		case len(nd.Partitions) > 0:
+			reasons = append(reasons, fmt.Sprintf("disk '%s' has %d partition(s) (%s); TrueNAS refuses to replace with a disk that is not clean unless force is sent, which this tool never does. Wipe it first (for example from the TrueNAS web UI) if nothing on it is needed", newName, len(nd.Partitions), strings.Join(nd.Partitions, ", ")))
+		}
+	}
 	if len(nd.DupSerial) > 0 {
 		reasons = append(reasons, fmt.Sprintf("disk '%s' shares its serial with %s; TrueNAS refuses such disks without force, which this tool never sends", newName, strings.Join(nd.DupSerial, ", ")))
 	}
@@ -1046,6 +1108,8 @@ func planReplaceDisk(ctx context.Context, client *truenas.Client, args map[strin
 		resilver,
 		fmt.Sprintf("The job finishes once the replacement has started; follow the resilver with get_disk_health or query_pools. %s stays in the pool until the resilver completes, then ZFS detaches it", m.label()),
 		"Pool I/O may be slower while the resilver runs",
+		fmt.Sprintf("Not checked on '%s': swap, self-encrypting drive (SED) locking and whether anything has the disk open; make sure nothing on the system uses it", newName),
+		t.staleNameNote(),
 	}
 	if m.Status == "ONLINE" {
 		warnings = append(warnings, fmt.Sprintf("%s is healthy; it keeps serving data until the resilver completes", m.label()))
@@ -1065,6 +1129,7 @@ func planReplaceDisk(ctx context.Context, client *truenas.Client, args map[strin
 			"disk_status":             m.Status,
 			"disk_size":               sizeOrUnknown(m.Size),
 			"replacement_disk":        newName,
+			"replacement_identifier":  nd.DetailIdentifier,
 			"replacement_serial":      nilIfEmpty(nd.Serial),
 			"replacement_size":        sizeOrUnknown(nd.Size),
 			"replacement_destroyed":   true,

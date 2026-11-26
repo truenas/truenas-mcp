@@ -103,6 +103,11 @@ type diskActionFake struct {
 	used    map[string]map[string]interface{}
 	jobs    []map[string]interface{}
 	failGet map[string]bool
+	// partitions are the partitions disk.details reports per disk name
+	// when join_partitions is true.
+	partitions map[string][]interface{}
+	// noPartitionsKey drops the partitions key from disk.details rows.
+	noPartitionsKey bool
 }
 
 func newDiskActionFake() *diskActionFake {
@@ -118,13 +123,49 @@ func newDiskActionFake() *diskActionFake {
 			"sdt": {"name": "sdt", "serial": "FAKE-SERIAL-SDT"},
 			"sdv": {"name": "sdv", "size": tb8, "serial": "FAKE-SERIAL-SDV"},
 		},
-		failGet: map[string]bool{},
+		failGet:    map[string]bool{},
+		partitions: map[string][]interface{}{},
 	}
 	for _, d := range []string{"sda", "sdb", "sdc", "sdd", "sde", "sdf", "sdg", "sdh", "sdi", "sdj", "sdm", "sdn", "sdo", "nvme1n1", "nvme2n1", "sdq", "nvme0n1"} {
 		f.used[d] = map[string]interface{}{"name": d, "size": f.disks[d]["size"], "imported_zpool": f.disks[d]["pool"]}
 	}
 	f.used["sdp"] = map[string]interface{}{"name": "sdp", "size": tb8, "imported_zpool": "backup"}
+	// disk.details rows carry the identifier 25.10 derives for each disk,
+	// the same as disk.query's for a disk in the database.
+	for _, rows := range []map[string]map[string]interface{}{f.used, f.unused} {
+		for name, row := range rows {
+			if q, ok := f.disks[name]; ok {
+				row["identifier"] = q["identifier"]
+			} else {
+				row["identifier"] = "{serial_lunid}" + strings.ToUpper("FAKE-SERIAL-"+name)
+			}
+		}
+	}
 	return f
+}
+
+// detailRows is the disk.details answer: every row has a partitions
+// list, filled only when join_partitions is true, as in 25.10.
+func (f *diskActionFake) detailRows(joinPartitions bool) map[string]interface{} {
+	list := func(rows map[string]map[string]interface{}) []interface{} {
+		out := []interface{}{}
+		for name, row := range rows {
+			c := make(map[string]interface{}, len(row)+1)
+			for k, v := range row {
+				c[k] = v
+			}
+			if !f.noPartitionsKey {
+				parts := []interface{}{}
+				if joinPartitions && f.partitions[name] != nil {
+					parts = f.partitions[name]
+				}
+				c["partitions"] = parts
+			}
+			out = append(out, c)
+		}
+		return out
+	}
+	return map[string]interface{}{"used": list(f.used), "unused": list(f.unused)}
 }
 
 func (f *diskActionFake) handle(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
@@ -154,14 +195,13 @@ func (f *diskActionFake) handle(method string, params json.RawMessage) (interfac
 		}
 		return out, nil, true
 	case "disk.details":
-		used, unused := []interface{}{}, []interface{}{}
-		for _, row := range f.used {
-			used = append(used, row)
+		var join bool
+		if len(p) > 0 {
+			if opts, ok := p[0].(map[string]interface{}); ok {
+				join, _ = opts["join_partitions"].(bool)
+			}
 		}
-		for _, row := range f.unused {
-			unused = append(unused, row)
-		}
-		return map[string]interface{}{"used": used, "unused": unused}, nil, true
+		return f.detailRows(join), nil, true
 	case "core.get_jobs":
 		filters, _ := p[0].([]interface{})
 		out := []interface{}{}
@@ -387,6 +427,10 @@ func TestOfflineDiskRefusals(t *testing.T) {
 		{"spare", map[string]interface{}{"pool": "tank", "disk": "sdo"}, nil, "is a hot spare"},
 		{"pool degraded elsewhere", map[string]interface{}{"pool": "tank", "disk": "sdb"},
 			func(f *diskActionFake) { f.degrade("123", "FAULTED") }, "pool 'tank' is DEGRADED, not ONLINE"},
+		{"pool online but not healthy", map[string]interface{}{"pool": "tank", "disk": "sdb"},
+			func(f *diskActionFake) { f.pools["tank"]["healthy"] = false }, "pool 'tank' is ONLINE but TrueNAS does not report it healthy"},
+		{"pool health not reported", map[string]interface{}{"pool": "tank", "disk": "sdb"},
+			func(f *diskActionFake) { delete(f.pools["tank"], "healthy") }, "does not report it healthy"},
 		{"vdev already degraded", map[string]interface{}{"pool": "tank", "disk": "sdg"},
 			func(f *diskActionFake) { f.degrade("123", "OFFLINE") }, "raidz2-2 is already missing redundancy: sdi (OFFLINE)"},
 		{"3-way mirror with a faulted disk", map[string]interface{}{"pool": "tank", "disk": "sda"},
@@ -617,7 +661,7 @@ func TestReplaceDiskConfirmFlowTracksJob(t *testing.T) {
 		"Everything on disk 'sdk' (sdk, serial FAKE-SERIAL-SDK, 7.28 TiB) is destroyed",
 		`"replacement_destroyed":true`, `"force":false`, "full rebuild")
 	p := snapActionParams(t, fake, "pool.replace")
-	if previewText(t, p) != `[1,{"disk":"sdk","force":false,"label":"112"}]` {
+	if previewText(t, p) != `[1,{"disk":"{serial_lunid}FAKE-SERIAL-SDK","force":false,"label":"112"}]` {
 		t.Errorf("pool.replace params = %s", previewText(t, p))
 	}
 	resp := decodeObj(t, out)
@@ -669,7 +713,7 @@ func TestReplaceDiskMissingDeviceByGUID(t *testing.T) {
 	if resp := decodeObj(t, out); resp["disk"] != "guid 112 (last seen as sde)" {
 		t.Errorf("response = %v", resp)
 	}
-	if p := snapActionParams(t, fake, "pool.replace"); previewText(t, p[1]) != `{"disk":"sdk","force":false,"label":"112"}` {
+	if p := snapActionParams(t, fake, "pool.replace"); previewText(t, p[1]) != `{"disk":"{serial_lunid}FAKE-SERIAL-SDK","force":false,"label":"112"}` {
 		t.Errorf("params = %s", previewText(t, p))
 	}
 }
@@ -722,6 +766,35 @@ func TestReplaceDiskRefusals(t *testing.T) {
 			f.setLeaf("tank", "113", "status", "FAULTED")
 			f.setLeaf("tank", "110", "status", "FAULTED")
 		}, "more than it tolerates"},
+		{"vdev FAULTED within parity", "sde", "sdk", func(f *diskActionFake) {
+			faultSDE(f)
+			f.setLeaf("tank", "110", "status", "FAULTED")
+		}, "raidz1-1 is FAULTED with 1 failed or offline disk(s)"},
+		{"vdev UNAVAIL within parity", "sde", "sdk", func(f *diskActionFake) {
+			faultSDE(f)
+			f.setLeaf("tank", "110", "status", "UNAVAIL")
+		}, "raidz1-1 is UNAVAIL with 1 failed or offline disk(s)"},
+		{"one failed disk more than parity, vdev not marked faulted", "sde", "sdk", func(f *diskActionFake) {
+			faultSDE(f)
+			f.setLeaf("tank", "113", "status", "FAULTED")
+			f.setLeaf("tank", "110", "status", "DEGRADED")
+		}, "raidz1-1 is DEGRADED with 2 failed or offline disk(s)"},
+		{"replacement has partitions", "sde", "sdk", func(f *diskActionFake) {
+			faultSDE(f)
+			f.partitions["sdk"] = []interface{}{map[string]interface{}{"name": "sdk1"}, map[string]interface{}{"name": "sdk2"}}
+		}, "disk 'sdk' has 2 partition(s) (sdk1, sdk2); TrueNAS refuses to replace with a disk that is not clean"},
+		{"replacement partitions not reported", "sde", "sdk", func(f *diskActionFake) {
+			faultSDE(f)
+			f.noPartitionsKey = true
+		}, "did not report the partitions on disk 'sdk'"},
+		{"replacement identifier missing in disk.details", "sde", "sdk", func(f *diskActionFake) {
+			faultSDE(f)
+			delete(f.unused["sdk"], "identifier")
+		}, "reports no identifier for disk 'sdk'"},
+		{"replacement identifier differs from disk.query", "sde", "sdk", func(f *diskActionFake) {
+			faultSDE(f)
+			f.unused["sdk"]["identifier"] = "{serial_lunid}FAKE-SERIAL-OTHER"
+		}, "disk 'sdk' has identifier {serial_lunid}FAKE-SERIAL-OTHER in disk.details but {serial_lunid}FAKE-SERIAL-SDK in the TrueNAS disk database"},
 		{"stripe", "sdq", "sdk", nil, "has no redundancy; replace_disk only replaces disks in mirror and RAIDZ vdevs"},
 		{"single log disk", "nvme1n1", "sdk", nil, "has no redundancy"},
 		{"cache", "nvme2n1", "sdk", nil, "cache (L2ARC) device"},
@@ -808,6 +881,12 @@ func TestReplaceDiskTokenRejectedAfterStateChange(t *testing.T) {
 			f.disks["sdk"]["size"] = 1e13
 			f.unused["sdk"]["size"] = 1e13
 		}, ""},
+		{"replacement disk partitioned", func(f *diskActionFake) {
+			f.partitions["sdk"] = []interface{}{map[string]interface{}{"name": "sdk1"}}
+		}, "has 1 partition(s) (sdk1)"},
+		{"replacement identifier changed in disk.details", func(f *diskActionFake) {
+			f.unused["sdk"]["identifier"] = "{serial}FAKE-SERIAL-SDK"
+		}, "in disk.details but"},
 		{"replacement disk added to a pool", func(f *diskActionFake) {
 			delete(f.unused, "sdk")
 			f.used["sdk"] = map[string]interface{}{"name": "sdk", "size": tb8, "imported_zpool": "backup"}
@@ -897,18 +976,225 @@ func withDiskActionResults(results map[string]interface{}) map[string]interface{
 			}
 		}
 	}
-	disks, used, unused := []interface{}{}, []interface{}{}, []interface{}{}
+	disks := []interface{}{}
 	for _, row := range f.disks {
 		disks = append(disks, row)
 	}
-	for _, row := range f.used {
-		used = append(used, row)
-	}
-	for _, row := range f.unused {
-		unused = append(unused, row)
-	}
 	results["boot.get_state"] = f.boot
 	results["disk.query"] = disks
-	results["disk.details"] = map[string]interface{}{"used": used, "unused": unused}
+	results["disk.details"] = f.detailRows(true)
 	return results
+}
+
+// ---- targeting, scan states and RAIDZ3 ----
+
+func diskToolArgs(tool, disk string) map[string]interface{} {
+	args := map[string]interface{}{"pool": "tank", "disk": disk}
+	if tool == "replace_disk" {
+		args["replacement_disk"] = "sdk"
+	}
+	return args
+}
+
+// Only leaf devices of the named pool are targets: a top-level vdev guid
+// and a leaf guid of another pool are refused.
+func TestDiskToolsTargetLeavesOfThePoolOnly(t *testing.T) {
+	for _, tool := range diskActionTools {
+		for _, tc := range []struct{ name, disk string }{
+			{"mirror vdev guid", "100"},
+			{"raidz1 vdev guid", "110"},
+			{"special vdev guid", "130"},
+			{"leaf guid of pool scratch", "201"},
+			{"boot pool leaf guid", "901"},
+		} {
+			t.Run(tool+"/"+tc.name, func(t *testing.T) {
+				f := newDiskActionFake()
+				f.degrade("112", "FAULTED")
+				r, fake := f.registry(t)
+				assertRefused(t, r, fake, tool, "pool."+strings.TrimSuffix(tool, "_disk"), diskToolArgs(tool, tc.disk), "is not a device of pool 'tank'")
+				assertNoDiskWrites(t, fake)
+			})
+		}
+	}
+}
+
+// A leaf whose guid is empty or not a string is refused rather than sent
+// as an empty label.
+func TestDiskToolsRefuseLeafWithoutStringGUID(t *testing.T) {
+	for _, tool := range diskActionTools {
+		for _, tc := range []struct {
+			name string
+			guid interface{}
+		}{
+			{"empty", ""},
+			{"number", 112.0},
+			{"missing", nil},
+		} {
+			t.Run(tool+"/"+tc.name, func(t *testing.T) {
+				f := newDiskActionFake()
+				disk := "sde"
+				switch tool {
+				case "offline_disk":
+					disk = "sdb"
+					f.setLeaf("tank", "102", "guid", tc.guid)
+				case "online_disk":
+					f.setLeaf("tank", "112", "status", "OFFLINE")
+					f.setLeaf("tank", "112", "guid", tc.guid)
+				default:
+					f.degrade("112", "FAULTED")
+					f.setLeaf("tank", "112", "guid", tc.guid)
+				}
+				r, fake := f.registry(t)
+				assertRefused(t, r, fake, tool, "pool."+strings.TrimSuffix(tool, "_disk"), diskToolArgs(tool, disk), "reported no ZFS guid (as a string) for disk '"+disk+"'")
+				assertNoDiskWrites(t, fake)
+			})
+		}
+	}
+}
+
+// Only a running resilver blocks: a running scrub, or a finished or
+// cancelled resilver, does not.
+func TestDiskToolsScanStatesThatAreNotARunningResilver(t *testing.T) {
+	for _, scan := range []map[string]interface{}{
+		{"function": "SCRUB", "state": "SCANNING"},
+		{"function": "RESILVER", "state": "FINISHED"},
+		{"function": "RESILVER", "state": "CANCELED"},
+	} {
+		name := scan["function"].(string) + " " + scan["state"].(string)
+		t.Run(name+"/offline_disk", func(t *testing.T) {
+			f := newDiskActionFake()
+			f.pools["tank"]["scan"] = scan
+			r, fake := f.registry(t)
+			dry := dryRunOf(t, r, "offline_disk", map[string]interface{}{"pool": "tank", "disk": "sdb"})
+			if pool := dry["current_state"].(map[string]interface{})["pool"].(map[string]interface{}); pool["resilver_running"] != false {
+				t.Errorf("pool = %v", pool)
+			}
+			assertNoDiskWrites(t, fake)
+		})
+		t.Run(name+"/replace_disk", func(t *testing.T) {
+			f := newDiskActionFake()
+			f.degrade("112", "FAULTED")
+			f.pools["tank"]["scan"] = scan
+			r, fake := f.registry(t)
+			dry := dryRunOf(t, r, "replace_disk", map[string]interface{}{"pool": "tank", "disk": "sde", "replacement_disk": "sdk"})
+			if d := plannedDetails(t, dry); d["guid"] != "112" {
+				t.Errorf("details = %v", d)
+			}
+			assertNoDiskWrites(t, fake)
+		})
+		t.Run(name+"/online_disk", func(t *testing.T) {
+			f := newDiskActionFake()
+			f.degrade("112", "OFFLINE")
+			f.pools["tank"]["scan"] = scan
+			r, fake := f.registry(t)
+			dry := dryRunOf(t, r, "online_disk", map[string]interface{}{"pool": "tank", "disk": "sde"})
+			if strings.Contains(previewText(t, dry["warnings"]), "A resilver is already running") {
+				t.Errorf("warnings = %v", dry["warnings"])
+			}
+			assertNoDiskWrites(t, fake)
+		})
+	}
+}
+
+// A RAIDZ3 vdev tolerates three failed disks: one disk can go offline
+// with two failures still tolerated, and a disk can be replaced with two
+// others already failed.
+func TestDiskToolsRAIDZ3(t *testing.T) {
+	raidz3 := func(f *diskActionFake) {
+		v := f.leafOf("tank", "120")
+		v["type"] = "RAIDZ3"
+		v["name"] = "raidz3-2"
+		v["children"] = append(v["children"].([]interface{}), leaf("sdw", "125", "ONLINE", 0, 0, 0))
+		f.disks["sdw"] = diskRow("sdw", "FAKE-SERIAL-SDW", tb8, "tank")
+	}
+	t.Run("offline", func(t *testing.T) {
+		f := newDiskActionFake()
+		raidz3(f)
+		r, fake := f.registry(t)
+		dry := dryRunOf(t, r, "offline_disk", map[string]interface{}{"pool": "tank", "disk": "sdh"})
+		d := plannedDetails(t, dry)
+		if d["redundancy_left_after"] != 2.0 || d["tolerates_failed_disks_now"] != 3.0 || d["vdev"] != "raidz3-2" {
+			t.Errorf("details = %v", d)
+		}
+		if v := dry["current_state"].(map[string]interface{})["vdev"].(map[string]interface{}); v["tolerates_failed_disks"] != 3.0 || v["width"] != 5.0 {
+			t.Errorf("vdev = %v", v)
+		}
+		assertContainsAll(t, "preview", summaryFacts(t, dry), "redundancy left in the vdev: 2 more disk failures tolerated")
+		assertNoDiskWrites(t, fake)
+	})
+	t.Run("offline with one disk already offline", func(t *testing.T) {
+		f := newDiskActionFake()
+		raidz3(f)
+		f.degrade("121", "OFFLINE")
+		r, fake := f.registry(t)
+		assertRefused(t, r, fake, "offline_disk", "pool.offline", map[string]interface{}{"pool": "tank", "disk": "sdh"}, "pool 'tank' is DEGRADED")
+	})
+	t.Run("replace with two failed", func(t *testing.T) {
+		f := newDiskActionFake()
+		raidz3(f)
+		f.degrade("121", "FAULTED")
+		f.setLeaf("tank", "122", "status", "FAULTED")
+		f.setLeaf("tank", "120", "status", "DEGRADED")
+		r, fake := f.registry(t)
+		dry := dryRunOf(t, r, "replace_disk", map[string]interface{}{"pool": "tank", "disk": "sdg", "replacement_disk": "sdk"})
+		if d := plannedDetails(t, dry); d["tolerates_failed_disks"] != 3.0 || d["failed_disks_in_vdev"] != 2.0 {
+			t.Errorf("details = %v", d)
+		}
+		assertNoDiskWrites(t, fake)
+	})
+	t.Run("replace with four failed", func(t *testing.T) {
+		f := newDiskActionFake()
+		raidz3(f)
+		f.degrade("121", "FAULTED")
+		for _, g := range []string{"122", "123", "124"} {
+			f.setLeaf("tank", g, "status", "FAULTED")
+		}
+		f.setLeaf("tank", "120", "status", "DEGRADED")
+		r, fake := f.registry(t)
+		assertRefused(t, r, fake, "replace_disk", "pool.replace", map[string]interface{}{"pool": "tank", "disk": "sdg", "replacement_disk": "sdk"}, "with 4 failed or offline disk(s)")
+	})
+}
+
+// replace_disk sends the disk.details identifier, asks disk.details for
+// partitions, and says in the preview what it does not check.
+func TestReplaceDiskSendsIdentifierAndWarns(t *testing.T) {
+	f := newDiskActionFake()
+	f.degrade("112", "FAULTED")
+	f.disks["sdk"]["identifier"] = "{serial}FAKE-SERIAL-SDK"
+	f.unused["sdk"]["identifier"] = "{serial}FAKE-SERIAL-SDK"
+	r, fake := f.registry(t)
+	args := map[string]interface{}{"pool": "tank", "disk": "sde", "replacement_disk": "sdk"}
+	dry := dryRunOf(t, r, "replace_disk", args)
+	if d := plannedDetails(t, dry); d["replacement_identifier"] != "{serial}FAKE-SERIAL-SDK" {
+		t.Errorf("details = %v", d)
+	}
+	assertContainsAll(t, "warnings", previewText(t, dry["warnings"]),
+		"Not checked on 'sdk': swap, self-encrypting drive (SED) locking and whether anything has the disk open",
+		"The disk name and serial shown for sde are matched from the pool's device path; on older pools that path (/dev/sdX) can be stale",
+		"by its ZFS guid 112")
+	confirmAndRun(t, r, fake, "replace_disk", "pool.replace", args)
+	if p := snapActionParams(t, fake, "pool.replace"); previewText(t, p) != `[1,{"disk":"{serial}FAKE-SERIAL-SDK","force":false,"label":"112"}]` {
+		t.Errorf("pool.replace params = %s", previewText(t, p))
+	}
+	calls := fake.called("disk.details")
+	if len(calls) == 0 {
+		t.Fatal("disk.details not called")
+	}
+	for _, c := range calls {
+		if !strings.Contains(string(c.Params), `"join_partitions":true`) {
+			t.Errorf("disk.details params = %s", c.Params)
+		}
+	}
+}
+
+func TestOfflineAndOnlineDiskStaleNameNote(t *testing.T) {
+	f := newDiskActionFake()
+	r, _ := f.registry(t)
+	dry := dryRunOf(t, r, "offline_disk", map[string]interface{}{"pool": "tank", "disk": "sdb"})
+	assertContainsAll(t, "offline warnings", previewText(t, dry["warnings"]), "The disk name and serial shown for sdb", "by its ZFS guid 102")
+	f2 := newDiskActionFake()
+	f2.degrade("112", "OFFLINE")
+	r2, _ := f2.registry(t)
+	dry = dryRunOf(t, r2, "online_disk", map[string]interface{}{"pool": "tank", "disk": "sde"})
+	assertContainsAll(t, "online warnings", previewText(t, dry["warnings"]), "The disk name and serial shown for sde", "by its ZFS guid 112")
 }
