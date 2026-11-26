@@ -249,13 +249,15 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 - **update_nfs_share** - Change one NFS share (**destructive**)
   - **Requires a `confirmation_token`** to execute; the token is bound to the share's current settings (and, for a new path, to the directory's inode)
   - Input: `share_id` (required), and any of `path`, `comment`, `enabled`, `ro`, `networks`, `hosts`, `maproot_user`, `maproot_group`, `mapall_user`, `mapall_group` (`""` clears a mapping), `security`
-  - Only the settings that change are sent. The preview shows the current settings, each change, and how root and other clients are mapped afterwards, and warns when the export is left open to every host
+  - Only the settings that change are sent. The preview shows the current settings, each change, and how root and other clients are mapped afterwards. Mapping every client to root, keeping root as root (`no_root_squash`) or leaving the export open to every host is allowed without a flag, with an explicit `WARNING:` in the preview and the confirmation
   - Refuses shares on a locked dataset or whose lock state is unknown, and current or new paths with the same rules as `update_smb_share`
 - **delete_nfs_share** - Delete one NFS share (**destructive**)
   - **Requires a `confirmation_token`** to execute; the token is bound to the share's current settings
   - Input: `share_id`
   - Removes only the export; the directory and its files are kept. The preview warns that clients with the export mounted lose access. Refused for the same shares as `update_nfs_share`
 - The global SMB and NFS service settings are not changed by any of these tools
+- A share (SMB or NFS) can be pointed at any ordinary dataset folder below `/mnt/<pool>`, including other users' or teams' data; ownership is not checked
+- On a TrueNAS version other than 25.10.x, the preview of each share tool warns that the option shapes were only checked against 25.10
 
 ### Application Management
 - **install_app** - Install applications from the catalog with guided storage setup

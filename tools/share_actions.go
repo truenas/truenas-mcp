@@ -87,7 +87,7 @@ func (r *Registry) registerShareActionTools() {
 	r.tools["update_smb_share"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "update_smb_share",
-			Description: "Change the settings of one existing SMB share: its name, path, comment, enabled, readonly, browsable, access_based_share_enumeration, hostsallow or hostsdeny. Only the settings given that differ from the current ones are sent. The preview shows the share's current settings and each change (old -> new). Renaming breaks client paths and mapped drives that use the old name; a new path serves a different directory and moves no files. hostsallow and hostsdeny can be changed only for shares whose purpose is LEGACY_SHARE. Refused for the homes share and other reserved or administrative names (global, printers, homes, IPC$, ADMIN$, PRINT$, drive shares such as C$), for shares on a locked dataset or whose lock state is unknown, and for shares whose current or new path is not below /mnt/<pool> (pool roots, /mnt itself, EXTERNAL DFS proxies, datasets TrueNAS manages itself such as the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, non-normalised paths, and paths that go through a symlink). The share's purpose, options other than the host lists, audit settings, share ACL and the global SMB service settings are not changed. Use dry_run to preview.",
+			Description: "Change the settings of one existing SMB share: its name, path, comment, enabled, readonly, browsable, access_based_share_enumeration, hostsallow or hostsdeny. Only the settings given that differ from the current ones are sent. The preview shows the share's current settings and each change (old -> new). Renaming breaks client paths and mapped drives that use the old name; a new path serves a different directory and moves no files. A share can be pointed at any ordinary dataset folder below /mnt/<pool>, including other users' or teams' data and home directories; ownership is not checked. hostsallow and hostsdeny can be changed only for shares whose purpose is LEGACY_SHARE. Refused for the homes share and other reserved or administrative names (global, printers, homes, IPC$, ADMIN$, PRINT$, drive shares such as C$), for shares on a locked dataset or whose lock state is unknown, and for shares whose current or new path is not below /mnt/<pool> (pool roots, /mnt itself, EXTERNAL DFS proxies, datasets TrueNAS manages itself such as the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, non-normalised paths, and paths that go through a symlink). The share's purpose, options other than the host lists, audit settings, share ACL and the global SMB service settings are not changed. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -132,7 +132,7 @@ func (r *Registry) registerShareActionTools() {
 	r.tools["update_nfs_share"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "update_nfs_share",
-			Description: "Change the settings of one existing NFS share: its path, comment, enabled, ro, networks, hosts, maproot_user, maproot_group, mapall_user, mapall_group or security. Only the settings given that differ from the current ones are sent. The preview shows the share's current settings, each change (old -> new) and how root and other clients are mapped afterwards. A new path exports a different directory and moves no files. Refused for shares on a locked dataset or whose lock state is unknown, and for shares whose current or new path is not below /mnt/<pool> (pool roots, /mnt itself, datasets TrueNAS manages itself such as the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, non-normalised paths, and paths that go through a symlink). Aliases, expose_snapshots and the global NFS service settings are not changed. Use dry_run to preview.",
+			Description: "Change the settings of one existing NFS share: its path, comment, enabled, ro, networks, hosts, maproot_user, maproot_group, mapall_user, mapall_group or security. Only the settings given that differ from the current ones are sent. The preview shows the share's current settings, each change (old -> new) and how root and other clients are mapped afterwards. A new path exports a different directory and moves no files. A share can be pointed at any ordinary dataset folder below /mnt/<pool>, including other users' or teams' data and home directories; ownership is not checked. Mapping every client to root (mapall_user root), keeping root as root (no_root_squash) or removing every network and host limit is allowed with an explicit warning in the preview; no extra flag is needed. Refused for shares on a locked dataset or whose lock state is unknown, and for shares whose current or new path is not below /mnt/<pool> (pool roots, /mnt itself, datasets TrueNAS manages itself such as the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, non-normalised paths, and paths that go through a symlink). Aliases, expose_snapshots and the global NFS service settings are not changed. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -567,7 +567,7 @@ func planUpdateSMBShare(ctx context.Context, client *truenas.Client, args map[st
 			}
 			payload["path"] = p
 			changes = append(changes, shareChange("path", curPath, p))
-			warnings = append(warnings, fmt.Sprintf("The share will serve %s instead of %s: clients see that directory's files and permissions; no files are moved or copied", p, curPath))
+			warnings = append(warnings, fmt.Sprintf("The share will serve %s instead of %s: clients see that directory's files and permissions, whoever owns them (this can be another user's or team's data); no files are moved or copied", p, curPath))
 		}
 	}
 
@@ -651,6 +651,7 @@ func planUpdateSMBShare(ctx context.Context, client *truenas.Client, args map[st
 	}
 	warnings = append(warnings, notes...)
 	warnings = append(warnings, "TrueNAS reloads (or, for some changes, restarts) the SMB service to apply the change")
+	warnings = append(warnings, shareVersionWarnings(ctx, client)...)
 
 	shown := map[string]interface{}{}
 	for k, v := range payload {
@@ -802,11 +803,11 @@ func planDeleteSMBShare(ctx context.Context, client *truenas.Client, args map[st
 			Target:      name,
 			Details:     map[string]interface{}{"id": id, "name": name, "path": p, "data_deleted": false},
 		}},
-		Warnings: []string{
+		Warnings: append([]string{
 			fmt.Sprintf("SMB clients lose access to %s: TrueNAS disconnects clients that are using the share, and mapped drives, bookmarks and backup jobs that use it stop working", networkPath),
 			fmt.Sprintf("Only the share configuration is removed; the directory %s and every file in it are kept", p),
 			"To share the directory again, create a new share with create_smb_share",
-		},
+		}, shareVersionWarnings(ctx, client)...),
 		Blocked: smbShareRefusals(share),
 		Bind:    map[string]interface{}{"share": share},
 		ConfirmSummary: newConfirmSummary(fmt.Sprintf("Delete SMB share %s: clients lose access, files are kept", name),
@@ -866,6 +867,46 @@ func shareDeleteResult(ctx context.Context, client *truenas.Client, plan *writeP
 
 // ---- update_nfs_share ----
 
+// nfsExposureWarnings are the explicit warnings for an export that, after
+// the change, maps every client to root, keeps root as root, or has no
+// network or host limits. These are warnings only: no flag is needed, so
+// they are also shown in the confirmation. Each is given only when the
+// change touches the settings it is about.
+func nfsExposureWarnings(after map[string]interface{}, limitsChanged, mappingChanged bool) []string {
+	var out []string
+	open := len(listValue(after["networks"])) == 0 && len(listValue(after["hosts"])) == 0
+	if open && (limitsChanged || mappingChanged) {
+		out = append(out, "WARNING: the export has no network or host limits afterwards: every client that can reach the server can mount it")
+	}
+	if !mappingChanged {
+		return out
+	}
+	mapallUser, _ := after["mapall_user"].(string)
+	maprootUser, _ := after["maproot_user"].(string)
+	maprootGroup, _ := after["maproot_group"].(string)
+	switch {
+	case nfsRootIDName(mapallUser, false):
+		out = append(out, "WARNING: every client user is mapped to root (mapall_user root): anyone who can mount the export has root access to every file in it")
+	case mapallUser == "" && nfsRootIDName(maprootUser, false) && nfsRootIDName(maprootGroup, true):
+		out = append(out, "WARNING: root on a client stays root on the export (no_root_squash): a client's root user has root access to every file in it")
+	}
+	return out
+}
+
+// shareVersionWarnings warns when the connected TrueNAS is not 25.10.x:
+// the share option shapes these tools send were only checked against
+// 25.10. Nothing is said when the version is not known.
+func shareVersionWarnings(ctx context.Context, client *truenas.Client) []string {
+	if client == nil {
+		return nil
+	}
+	v, err, ok := client.SessionVersion(ctx)
+	if !ok || err != nil || v.IsZero() || (v.Major == 25 && v.Minor == 10) {
+		return nil
+	}
+	return []string{fmt.Sprintf("The share settings and option shapes these tools send were only checked against TrueNAS 25.10; the connected system runs %s, so check the result with query_shares", v)}
+}
+
 // nfsMapFields are the NFS user and group mapping settings; "" clears one.
 var nfsMapFields = []string{"maproot_user", "maproot_group", "mapall_user", "mapall_group"}
 
@@ -901,7 +942,7 @@ func planUpdateNFSShare(ctx context.Context, client *truenas.Client, args map[st
 			}
 			payload["path"] = p
 			changes = append(changes, shareChange("path", curPath, p))
-			warnings = append(warnings, fmt.Sprintf("The export will serve %s instead of %s: clients must remount it at the new path, and existing mounts of %s fail; no files are moved or copied", p, curPath, curPath))
+			warnings = append(warnings, fmt.Sprintf("The export will serve %s instead of %s, whoever owns its files (this can be another user's or team's data): clients must remount it at the new path, and existing mounts of %s fail; no files are moved or copied", p, curPath, curPath))
 		}
 	}
 	if c, ok := args["comment"].(string); ok {
@@ -988,11 +1029,8 @@ func planUpdateNFSShare(ctx context.Context, client *truenas.Client, args map[st
 	}
 	_, netChanged := payload["networks"]
 	_, hostsChanged := payload["hosts"]
-	if netChanged || hostsChanged {
-		if len(listValue(after["networks"])) == 0 && len(listValue(after["hosts"])) == 0 {
-			warnings = append(warnings, "The export has no network or host restrictions afterwards: every client that can reach the server can mount it")
-		}
-	}
+	exposure := nfsExposureWarnings(after, netChanged || hostsChanged, mappingChanged)
+	warnings = append(warnings, exposure...)
 	if mappingChanged {
 		warnings = append(warnings, "After the change: "+nfsRootMappingWarning(after))
 	}
@@ -1007,9 +1045,12 @@ func planUpdateNFSShare(ctx context.Context, client *truenas.Client, args map[st
 	warnings = append(warnings, notes...)
 	warnings = append(warnings, "TrueNAS reloads the NFS exports to apply the change")
 
+	warnings = append(warnings, shareVersionWarnings(ctx, client)...)
+
 	target := fmt.Sprintf("%d (%s)", id, curPath)
 	facts := []string{confirmFact("share id", id), confirmFact("path", curPath)}
 	facts = append(facts, changes...)
+	facts = append(facts, exposure...)
 	return &writePlan{
 		Tool:         "update_nfs_share",
 		Method:       sharingNFSUpdateMethod,
@@ -1096,11 +1137,11 @@ func planDeleteNFSShare(ctx context.Context, client *truenas.Client, args map[st
 			Target:      p,
 			Details:     map[string]interface{}{"id": id, "path": p, "data_deleted": false},
 		}},
-		Warnings: []string{
+		Warnings: append([]string{
 			fmt.Sprintf("NFS clients lose access to %s: mounts of the export fail and fstab entries or automounts that use it stop working", p),
 			fmt.Sprintf("Only the export configuration is removed; the directory %s and every file in it are kept", p),
 			"To export the directory again, create a new share with create_nfs_share",
-		},
+		}, shareVersionWarnings(ctx, client)...),
 		Blocked: nfsShareRefusals(share),
 		Bind:    map[string]interface{}{"share": share},
 		ConfirmSummary: newConfirmSummary(fmt.Sprintf("Delete NFS share %s: clients lose access, files are kept", p),
@@ -1536,6 +1577,7 @@ func planSetShareACL(ctx context.Context, client *truenas.Client, args map[strin
 			break
 		}
 	}
+	warnings = append(warnings, shareVersionWarnings(ctx, client)...)
 
 	aces := make([]interface{}, len(entries))
 	for i, e := range entries {

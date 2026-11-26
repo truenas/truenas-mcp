@@ -69,6 +69,8 @@ type shareFake struct {
 	rawAccounts bool
 	// deleteResult, when set, is what sharing.*.delete returns.
 	deleteResult interface{}
+	// version, when set, is the version system.info reports.
+	version string
 }
 
 func newShareFake() *shareFake {
@@ -201,6 +203,9 @@ func (f *shareFake) handle(method string, params json.RawMessage) (interface{}, 
 	idArg := func() int {
 		id, _ := intID(p[0])
 		return id
+	}
+	if method == "system.info" && f.version != "" {
+		return map[string]interface{}{"hostname": "nas", "version": f.version}, nil, true
 	}
 	switch method {
 	case "sharing.smb.query":
@@ -683,7 +688,7 @@ func TestUpdateNFSShareWarnings(t *testing.T) {
 	f := newShareFake()
 	r, _ := f.registry(t)
 	dry := dryRunOf(t, r, "update_nfs_share", map[string]interface{}{"share_id": 1.0, "networks": []interface{}{}, "maproot_user": "root", "maproot_group": "wheel"})
-	assertContainsAll(t, "warnings", previewText(t, dry["warnings"]), "no network or host restrictions", "no_root_squash")
+	assertContainsAll(t, "warnings", previewText(t, dry["warnings"]), "WARNING: the export has no network or host limits afterwards", "no_root_squash")
 	dry = dryRunOf(t, r, "update_nfs_share", map[string]interface{}{"share_id": 1.0, "enabled": false, "path": "/mnt/tank/shares/new"})
 	assertContainsAll(t, "warnings", previewText(t, dry["warnings"]), "lose access to the export", "clients must remount it")
 }
@@ -1305,6 +1310,85 @@ func TestShareDeleteUnexpectedResult(t *testing.T) {
 				if n := len(fake.called(tc.method)); n != 1 {
 					t.Errorf("%s sent %d time(s)", tc.method, n)
 				}
+			})
+		}
+	}
+}
+
+// Mapping every client to root, keeping root as root, or removing every
+// network and host limit is allowed with an explicit warning, which is
+// also part of the confirmation.
+func TestUpdateNFSShareExposureWarnings(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args map[string]interface{}
+		want []string
+		not  []string
+	}{
+		{"mapall root", map[string]interface{}{"share_id": 1.0, "mapall_user": "root", "mapall_group": "wheel"},
+			[]string{"WARNING: every client user is mapped to root"}, []string{"no network or host limits"}},
+		{"no_root_squash", map[string]interface{}{"share_id": 1.0, "maproot_user": "root", "maproot_group": "wheel"},
+			[]string{"WARNING: root on a client stays root on the export (no_root_squash)"}, []string{"every client user is mapped to root"}},
+		{"limits removed", map[string]interface{}{"share_id": 1.0, "networks": []interface{}{}},
+			[]string{"WARNING: the export has no network or host limits afterwards"}, []string{"mapped to root"}},
+		{"both", map[string]interface{}{"share_id": 1.0, "networks": []interface{}{}, "mapall_user": "root"},
+			[]string{"WARNING: the export has no network or host limits afterwards", "WARNING: every client user is mapped to root"}, nil},
+		{"squashed and limited", map[string]interface{}{"share_id": 1.0, "maproot_user": "nobody", "maproot_group": "nogroup", "networks": []interface{}{"192.0.2.0/25"}},
+			nil, []string{"WARNING"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShareFake()
+			if tc.name == "squashed and limited" {
+				f.nfs[1]["maproot_user"] = "root"
+			}
+			r, fake := f.registry(t)
+			preview, _ := confirmAndRun(t, r, fake, "update_nfs_share", "sharing.nfs.update", tc.args)
+			body := previewBody(t, preview)
+			summary := previewText(t, preview["preview"].(map[string]interface{})["confirm_summary"])
+			for _, w := range tc.want {
+				assertContainsAll(t, "preview", body, w)
+				assertContainsAll(t, "confirm summary", summary, w)
+			}
+			for _, w := range tc.not {
+				if strings.Contains(body, w) {
+					t.Errorf("preview has %q:\n%s", w, body)
+				}
+			}
+		})
+	}
+}
+
+// A preview on a version other than 25.10.x says the option shapes were
+// only checked against 25.10; the call is still allowed.
+func TestShareToolsWarnOnUncheckedVersion(t *testing.T) {
+	const note = "only checked against TrueNAS 25.10"
+	for _, tc := range []struct {
+		tool string
+		args map[string]interface{}
+	}{
+		{"update_smb_share", map[string]interface{}{"share_id": 1.0, "readonly": true}},
+		{"delete_smb_share", map[string]interface{}{"share_id": 1.0}},
+		{"update_nfs_share", map[string]interface{}{"share_id": 1.0, "ro": true}},
+		{"delete_nfs_share", map[string]interface{}{"share_id": 1.0}},
+		{"set_share_acl", aclArgs("docs", aclEntry("group", "staff", "FULL", "ALLOWED"))},
+	} {
+		for version, want := range map[string]bool{"25.10.0": false, "25.10.2.1": false, "26.04.0": true, "27.0.0-MASTER": true} {
+			t.Run(tc.tool+" "+version, func(t *testing.T) {
+				f := newShareFake()
+				f.version = version
+				r, fake := f.registry(t)
+				if err := r.client.RequireSupportedVersion(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				dry := dryRunOf(t, r, tc.tool, tc.args)
+				got := strings.Contains(previewText(t, dry["warnings"]), note)
+				if got != want {
+					t.Errorf("version warning shown = %v, want %v:\n%s", got, want, previewText(t, dry["warnings"]))
+				}
+				if want {
+					assertContainsAll(t, "warnings", previewText(t, dry["warnings"]), "runs "+version)
+				}
+				assertNoShareWrites(t, fake)
 			})
 		}
 	}
