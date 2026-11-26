@@ -17,8 +17,9 @@ go mod download
 make build
 
 # Build for all platforms: writes truenas-mcp-darwin-arm64,
-# truenas-mcp-darwin-amd64, truenas-mcp-linux-amd64 and
-# truenas-mcp-windows-amd64.exe to the repository root
+# truenas-mcp-darwin-amd64, truenas-mcp-linux-amd64,
+# truenas-mcp-linux-arm64, truenas-mcp-windows-amd64.exe and
+# truenas-mcp-windows-arm64.exe to the repository root
 make build-all
 ```
 
@@ -82,14 +83,14 @@ What it does, in order:
 1. Connects over `wss://` with certificate verification on. If the certificate is not trusted (TrueNAS ships a self-signed one), it stops and shows the certificate's SHA-256 fingerprint. Type `yes` to trust it, or pass `--trust-fingerprint SHA256:...` after checking it. The fingerprint is pinned and saved to `<host>.pin`.
 2. Logs in with `auth.login_ex` (`PASSWORD_PLAIN`). If the account uses two-factor authentication, it asks for the code (up to 3 tries).
 3. Checks that TrueNAS is 25.10 or later, and that the key owner exists and has a role. If the owner has `FULL_ADMIN`, you must type the user name (or pass `--yes-full-admin`). A dedicated user with a limited role, passed with `--key-owner`, is the better choice. Setup never creates users.
-4. Creates the key with `api_key.create`. If the name is taken it appends `-2`, `-3`, and so on. With `--rotate` it resets the existing key of that name instead (`api_key.update` with `reset`).
-5. Writes the key to `<config dir>/<host>.key`: the directory is mode `0700`, the file `0600`, written atomically. If saving fails, the key is deleted from TrueNAS again.
+4. Creates the key with `api_key.create`. If the name is taken it appends `-2`, `-3`, and so on. With `--rotate` it resets the existing key of that name instead (`api_key.update` with `reset`). If the key file already exists and holds a different key (its `<id>-` prefix does not match the key being reset), `--rotate` stops before changing anything unless `--force` is also given.
+5. Writes the key to `<config dir>/<host>.key`: the directory is mode `0700`, the file `0600`, written atomically. If saving fails, the key is deleted from TrueNAS again. After `--rotate` that deletes the whole key record (its old secret no longer works after the reset), so the next run creates the key rather than rotating it.
 6. Logs out, then logs in on a new connection with the new key and calls `system.info` to prove it works.
 7. Prints the file path, key name and id, how to revoke the key, and a client snippet that points `TRUENAS_API_KEY_FILE` at the file. The key itself is never printed.
 
 The default config directory is `truenas-mcp` under the user config directory (`~/.config` on Linux, `~/Library/Application Support` on macOS, `%AppData%` on Windows). `<host>` is the host name in lower case, with `_<port>` added when the port is not 443.
 
-**Password and code input.** There is no password or OTP flag. On a terminal, setup asks with a hidden prompt. Scripts and agent tools can use `TRUENAS_SETUP_PASSWORD` and `TRUENAS_SETUP_OTP`, which setup reads once and removes from its environment right away, or `--password-stdin` / `--otp-stdin`, which read one line each from stdin (password first). A wrong password is asked again once, on a terminal only. See [Setup security notes](safety.md#setup-security-notes).
+**Password and code input.** There is no password or OTP flag. On a terminal, setup asks with a hidden prompt. Scripts and agent tools can use `TRUENAS_SETUP_PASSWORD` and `TRUENAS_SETUP_OTP`, which setup reads once and removes from its environment right away, or `--password-stdin` / `--otp-stdin`, which read one line each from stdin (password first). An empty password or code line is refused without contacting TrueNAS. A wrong password is asked again once, on a terminal only. On Linux, `/proc/<pid>/environ` still shows the original values of the variables to the same user and root while setup runs, even after they are unset; where that matters, use the prompt or stdin. See [Setup security notes](safety.md#setup-security-notes).
 
 Setup flags:
 
@@ -150,8 +151,10 @@ A pin trusts exactly that certificate, whatever names it lists:
 ```
 
 `openssl x509 -noout -fingerprint -sha256 -in truenas-cert.pem` prints the
-same hex digits. When the certificate is replaced, the connection is refused
-until the pin is updated.
+same hex digits. The pin covers the whole certificate, so it stops matching
+when the certificate is replaced, reissued or renewed, even with the same key.
+The connection is then refused until the pin is updated; check the new
+fingerprint and run `truenas-mcp setup` again.
 
 Or explicitly disable verification (not recommended - allows man-in-the-middle
 attacks on your network):
