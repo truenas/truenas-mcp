@@ -90,6 +90,34 @@ func TestSetupRotateKeyFileMismatch(t *testing.T) {
 			t.Errorf("calls %v", f.methods())
 		}
 	})
+	t.Run("symlinked key file is refused", func(t *testing.T) {
+		f := newFakeSetupNAS(t, nil)
+		k := f.addKey("truenas-mcp-test-laptop", fakeUser)
+		dir := filepath.Join(t.TempDir(), "cfg")
+		p := writeHostKeyFile(t, f, dir, "x\n")
+		real := filepath.Join(dir, "real.key")
+		content := k.secret + "\n"
+		if err := os.WriteFile(real, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("real.key", p); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		r := runSetupTest(t, f, setupOpts{env: agentEnv(), dir: dir}, "--user", fakeUser, "--rotate")
+		wantCode(t, r, exitSetupIO)
+		if len(f.updates) != 0 || f.count("api_key.create") != 0 {
+			t.Errorf("TrueNAS was changed: updates %v, calls %v", f.updates, f.methods())
+		}
+		if !strings.Contains(r.stderr, "symlink") || !strings.Contains(r.stderr, "replaces the link itself, not the file it points to") || !strings.Contains(r.stderr, "--force") {
+			t.Errorf("stderr = %s", r.stderr)
+		}
+		if fi, err := os.Lstat(p); err != nil || fi.Mode()&os.ModeSymlink == 0 || readFile(t, real) != content {
+			t.Errorf("link or target changed: %v", err)
+		}
+	})
 	t.Run("matching key is rotated", func(t *testing.T) {
 		f := newFakeSetupNAS(t, nil)
 		k := f.addKey("truenas-mcp-test-laptop", fakeUser)

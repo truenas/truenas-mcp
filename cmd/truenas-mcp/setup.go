@@ -207,7 +207,13 @@ func (s *setup) run(args []string) *setupError {
 		}
 	}
 	if s.f.rotate && !s.f.force {
-		if _, err := os.Lstat(s.keyPath); err == nil {
+		if fi, err := os.Lstat(s.keyPath); err == nil {
+			// The new key is renamed over the path, which replaces a
+			// symlink itself and leaves its target holding the old,
+			// reset key. Refuse before anything changes on TrueNAS.
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return failf(exitSetupIO, "%s is a symlink; --rotate replaces the link itself, not the file it points to, which would keep the old key. Pass --force to replace the link anyway, or --config-dir to save elsewhere; nothing was changed on TrueNAS", s.keyPath)
+			}
 			s.keyFileExists = true
 			s.keyFileID = keyFileID(s.keyPath)
 		}
