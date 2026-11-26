@@ -893,12 +893,18 @@ func nfsExposureWarnings(after map[string]interface{}, limitsChanged, mappingCha
 	return out
 }
 
-// shareVersionWarnings warns when the connected TrueNAS is not 25.10.x:
-// the share option shapes these tools send were only checked against
-// 25.10. Nothing is said when the version is not known.
+// shareVersionWarnings warns when the connected TrueNAS is not 25.10.x, or
+// its version cannot be read: the share option shapes these tools send
+// were only checked against 25.10.
 func shareVersionWarnings(ctx context.Context, client *truenas.Client) []string {
-	v, ok := uncheckedVersion(ctx, client)
-	if !ok {
+	if client == nil {
+		return nil
+	}
+	v, err, ok := client.SessionVersion(ctx)
+	switch {
+	case !ok || err != nil || v.IsZero():
+		return []string{"The TrueNAS version could not be read; the share settings and option shapes these tools send were only checked against TrueNAS 25.10, so check the result with query_shares"}
+	case v.Major == 25 && v.Minor == 10:
 		return nil
 	}
 	return []string{fmt.Sprintf("The share settings and option shapes these tools send were only checked against TrueNAS 25.10; the connected system runs %s, so check the result with query_shares", v)}
@@ -1472,6 +1478,10 @@ func resolveShareACLEntries(ctx context.Context, client *truenas.Client, args ma
 						match = append(match, a)
 					}
 				}
+			}
+			if len(match) == 0 && !strings.HasPrefix(who, "S-1-5-21-") {
+				reasons = append(reasons, fmt.Sprintf("SID %s is not a local SMB user or group (of the well-known SIDs, only S-1-1-0, everyone, can be used)", who))
+				continue
 			}
 			if len(match) != 1 {
 				reasons = append(reasons, fmt.Sprintf("SID %s does not belong to exactly one local SMB user or group (directory service accounts are refused)", who))

@@ -402,6 +402,22 @@ func (g groupInfo) bind() map[string]interface{} {
 }
 
 func queryAccountUsers(ctx context.Context, client *truenas.Client, filter []interface{}) ([]userInfo, error) {
+	rows, err := queryAccountUserRows(ctx, client, filter)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]userInfo, 0, len(rows))
+	for _, row := range rows {
+		if local, _ := row["local"].(bool); local {
+			out = append(out, parseUser(row))
+		}
+	}
+	return out, nil
+}
+
+// queryAccountUserRows returns the user.query rows for filter, limited to
+// local users by the server; callers check each row themselves.
+func queryAccountUserRows(ctx context.Context, client *truenas.Client, filter []interface{}) ([]map[string]interface{}, error) {
 	raw, err := client.Call(ctx, "user.query",
 		[]interface{}{filter, []interface{}{"local", "=", true}},
 		map[string]interface{}{"select": userWriteSelect},
@@ -413,13 +429,7 @@ func queryAccountUsers(ctx context.Context, client *truenas.Client, filter []int
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, fmt.Errorf("unexpected user.query result")
 	}
-	out := make([]userInfo, 0, len(rows))
-	for _, row := range rows {
-		if local, _ := row["local"].(bool); local {
-			out = append(out, parseUser(row))
-		}
-	}
-	return out, nil
+	return rows, nil
 }
 
 func queryAccountGroups(ctx context.Context, client *truenas.Client, filter []interface{}) ([]groupInfo, error) {
@@ -572,7 +582,10 @@ func groupGIDTaken(ctx context.Context, client *truenas.Client, gid int) (bool, 
 }
 
 // primaryGroupOwners returns, for each group id, the usernames of the
-// local users whose primary group it is, sorted.
+// local users whose primary group it is, sorted. A failed lookup, or a
+// returned user that is not local or whose primary group or name cannot
+// be read, is an error: every row is meant to be an owner, so one that
+// cannot be placed stops the plan rather than being skipped.
 func primaryGroupOwners(ctx context.Context, client *truenas.Client, ids []int) (map[int][]string, error) {
 	out := map[int][]string{}
 	if len(ids) == 0 {
@@ -582,13 +595,19 @@ func primaryGroupOwners(ctx context.Context, client *truenas.Client, ids []int) 
 	for _, id := range ids {
 		want[id] = true
 	}
-	users, err := queryAccountUsers(ctx, client, []interface{}{"group.id", "in", intsAsArgs(ids)})
+	rows, err := queryAccountUserRows(ctx, client, []interface{}{"group.id", "in", intsAsArgs(ids)})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not check which users have this group as their primary group, so nothing was changed: %w", err)
 	}
-	for _, u := range users {
-		if want[u.PrimaryGroupID] {
-			out[u.PrimaryGroupID] = append(out[u.PrimaryGroupID], u.Username)
+	for _, row := range rows {
+		u := parseUser(row)
+		g, _ := row["group"].(map[string]interface{})
+		gid, ok := intID(g["id"])
+		if !ok || !u.Local || u.Username == "" {
+			return nil, fmt.Errorf("unexpected user.query result while checking primary groups (a user that is not local, or whose name or primary group cannot be read); nothing was changed")
+		}
+		if want[gid] {
+			out[gid] = append(out[gid], u.Username)
 		}
 	}
 	for id := range out {
@@ -805,7 +824,7 @@ func validateHomeParent(p string) error {
 	if rest == "" || strings.HasPrefix(rest, ".") {
 		return fmt.Errorf("home must be under a pool's /mnt/<pool> path")
 	}
-	if part, ok := managedDatasetPart(rest); ok {
+	if part, ok := managedDatasetPart(strings.ToLower(rest)); ok {
 		return fmt.Errorf("home '%s' is inside '%s', which TrueNAS manages itself", p, part)
 	}
 	return nil

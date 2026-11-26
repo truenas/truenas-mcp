@@ -21,6 +21,9 @@ type accountWriteFake struct {
 	nextUser   int
 	smbGuest   string // smb.config guest; "" serves nobody
 	smbNoGuest bool   // smb.config reports no guest field
+	// ownerLookup, when set, answers the personal-group owner lookup
+	// (user.query filtered on group.id) in place of the fixture rows.
+	ownerLookup func() (interface{}, map[string]interface{})
 }
 
 func accountUser(id, uid int, name string, group int, groups []interface{}) map[string]interface{} {
@@ -60,6 +63,18 @@ func accountUserRows() []map[string]interface{} {
 	remote := accountUser(15, 200000, "remote", 26, []interface{}{})
 	remote["local"] = false
 	return []map[string]interface{}{root, admin, svc, alice, bob, dave, eve, daemon, remote}
+}
+
+// localAccountUserRows is accountUserRows without the directory service
+// user, as a user.query filtered on local = true returns it.
+func localAccountUserRows() []map[string]interface{} {
+	var out []map[string]interface{}
+	for _, u := range accountUserRows() {
+		if u["local"] == true {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 func accountGroupRows() []map[string]interface{} {
@@ -107,6 +122,23 @@ func (f *accountWriteFake) handle(method string, params json.RawMessage) (interf
 	_ = json.Unmarshal(params, &p)
 	switch method {
 	case "user.query":
+		if ids, ok := groupIDFilter(p); ok {
+			if f.ownerLookup != nil {
+				res, e := f.ownerLookup()
+				return res, e, true
+			}
+			// As 25.10 does, the owner lookup returns only the local
+			// users whose primary group is one of ids.
+			var rows []map[string]interface{}
+			for _, u := range f.users {
+				g, _ := u["group"].(map[string]interface{})
+				id, _ := intID(g["id"])
+				if u["local"] == true && ids[id] {
+					rows = append(rows, u)
+				}
+			}
+			return rows, nil, true
+		}
 		return f.users, nil, true
 	case "group.query":
 		return f.groups, nil, true
@@ -196,6 +228,28 @@ func (f *accountWriteFake) set(user bool, name, field string, v interface{}) {
 			row[field] = v
 		}
 	}
+}
+
+// groupIDFilter returns the ids of a ["group.id", "in", ids] query filter.
+func groupIDFilter(p []interface{}) (map[int]bool, bool) {
+	if len(p) == 0 {
+		return nil, false
+	}
+	filters, _ := p[0].([]interface{})
+	for _, f := range filters {
+		cond, _ := f.([]interface{})
+		if len(cond) == 3 && cond[0] == "group.id" && cond[1] == "in" {
+			ids := map[int]bool{}
+			list, _ := cond[2].([]interface{})
+			for _, v := range list {
+				if id, ok := intID(v); ok {
+					ids[id] = true
+				}
+			}
+			return ids, true
+		}
+	}
+	return nil, false
 }
 
 func accountRegistry(t *testing.T) (*Registry, *fakeMiddleware, *accountWriteFake) {
