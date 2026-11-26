@@ -115,13 +115,17 @@ var toolSafety = map[string]Safety{
 	// Changing or deleting a share, or replacing its share ACL, can cut
 	// clients off or widen access in place, so these execute only after
 	// confirmation bound to the share's current settings.
-	"update_smb_share":          {Access: Destructive},
-	"delete_smb_share":          {Access: Destructive},
-	"update_nfs_share":          {Access: Destructive},
-	"delete_nfs_share":          {Access: Destructive},
-	"set_share_acl":             {Access: Destructive},
-	"get_share_acl":             {Access: Read},
-	"get_filesystem_acl":        {Access: Read},
+	"update_smb_share":   {Access: Destructive},
+	"delete_smb_share":   {Access: Destructive},
+	"update_nfs_share":   {Access: Destructive},
+	"delete_nfs_share":   {Access: Destructive},
+	"set_share_acl":      {Access: Destructive},
+	"get_share_acl":      {Access: Read},
+	"get_filesystem_acl": {Access: Read},
+	// Replacing a filesystem ACL can lock users out or widen access, and a
+	// recursive change rewrites every ACL below the path; it executes only
+	// after confirmation bound to the path and its current ACL.
+	"set_filesystem_acl":        {Access: Destructive},
 	"analyze_capacity":          {Access: Read},
 	"get_pool_capacity_details": {Access: Read},
 
@@ -134,6 +138,8 @@ var toolSafety = map[string]Safety{
 	"update_user":  {Access: Destructive},
 	"create_group": {Access: Destructive},
 	"update_group": {Access: Destructive},
+	"delete_user":  {Access: Destructive},
+	"delete_group": {Access: Destructive},
 
 	// Disks and services
 	"query_disks":     {Access: Read},

@@ -897,11 +897,8 @@ func nfsExposureWarnings(after map[string]interface{}, limitsChanged, mappingCha
 // the share option shapes these tools send were only checked against
 // 25.10. Nothing is said when the version is not known.
 func shareVersionWarnings(ctx context.Context, client *truenas.Client) []string {
-	if client == nil {
-		return nil
-	}
-	v, err, ok := client.SessionVersion(ctx)
-	if !ok || err != nil || v.IsZero() || (v.Major == 25 && v.Minor == 10) {
+	v, ok := uncheckedVersion(ctx, client)
+	if !ok {
 		return nil
 	}
 	return []string{fmt.Sprintf("The share settings and option shapes these tools send were only checked against TrueNAS 25.10; the connected system runs %s, so check the result with query_shares", v)}

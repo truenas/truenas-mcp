@@ -19,6 +19,7 @@ type accountWriteFake struct {
 	fail     map[string]map[string]interface{}
 	onQuery  func(method string) // runs before every user.query / group.query
 	nextUser int
+	smbGuest string // smb.config guest; "" serves nobody
 }
 
 func accountUser(id, uid int, name string, group int, groups []interface{}) map[string]interface{} {
@@ -155,6 +156,25 @@ func (f *accountWriteFake) handle(method string, params json.RawMessage) (interf
 			}
 		}
 		return nil, rpcErr("no such group"), true
+	case "user.delete", "group.delete":
+		id, _ := intID(p[0])
+		rows := &f.groups
+		if method == "user.delete" {
+			rows = &f.users
+		}
+		for i, row := range *rows {
+			if n, _ := intID(row["id"]); n == id {
+				*rows = append((*rows)[:i], (*rows)[i+1:]...)
+				return id, nil, true
+			}
+		}
+		return nil, rpcErr("no such account"), true
+	case "smb.config":
+		guest := f.smbGuest
+		if guest == "" {
+			guest = "nobody"
+		}
+		return map[string]interface{}{"guest": guest}, nil, true
 	}
 	return nil, nil, false
 }
@@ -182,7 +202,7 @@ func accountRegistry(t *testing.T) (*Registry, *fakeMiddleware, *accountWriteFak
 	return NewRegistry(client, nil), fake, af
 }
 
-var accountWriteMethods = []string{userCreateMethod, userUpdateMethod, groupCreateMethod, groupUpdateMethod}
+var accountWriteMethods = []string{userCreateMethod, userUpdateMethod, groupCreateMethod, groupUpdateMethod, userDeleteMethod, groupDeleteMethod}
 
 func assertNoAccountWrites(t *testing.T, fake *fakeMiddleware) {
 	t.Helper()

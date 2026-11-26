@@ -481,6 +481,7 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 		results[k] = v
 	}
 	withDiskActionResults(results)
+	withFilesystemACLResults(results)
 	fake := &fakeMiddleware{results: results}
 	fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
 		switch method {

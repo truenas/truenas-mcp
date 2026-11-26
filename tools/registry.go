@@ -106,6 +106,7 @@ func (r *Registry) registerTools() {
 
 	r.registerAccountTools()
 	r.registerAccountActionTools()
+	r.registerAccountDeleteTools()
 
 	r.registerDatasetTools()
 
@@ -115,6 +116,7 @@ func (r *Registry) registerTools() {
 	r.registerShareActionTools()
 
 	r.registerACLTools()
+	r.registerFilesystemACLActionTools()
 
 	r.registerAlertTools()
 

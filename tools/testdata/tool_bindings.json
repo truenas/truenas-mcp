@@ -85,6 +85,12 @@
     "execute": "executeDeleteBootEnvironment"
   },
   {
+    "name": "delete_group",
+    "handler": "(*Registry).handleDeleteGroup",
+    "plan": "planDeleteGroup",
+    "execute": "(*Registry).executeDeleteGroup"
+  },
+  {
     "name": "delete_nfs_share",
     "handler": "handleDeleteNFSShare",
     "plan": "planDeleteNFSShare",
@@ -107,6 +113,12 @@
     "handler": "handleDeleteSnapshot",
     "plan": "planDeleteSnapshot",
     "execute": "executeDeleteSnapshot"
+  },
+  {
+    "name": "delete_user",
+    "handler": "(*Registry).handleDeleteUser",
+    "plan": "planDeleteUser",
+    "execute": "(*Registry).executeDeleteUser"
   },
   {
     "name": "dismiss_alert",
@@ -339,6 +351,12 @@
   {
     "name": "search_app_catalog",
     "handler": "handleSearchAppCatalog"
+  },
+  {
+    "name": "set_filesystem_acl",
+    "handler": "(*Registry).handleSetFilesystemACL",
+    "plan": "planSetFilesystemACL",
+    "execute": "(*Registry).executeSetFilesystemACL"
   },
   {
     "name": "set_service_enabled",

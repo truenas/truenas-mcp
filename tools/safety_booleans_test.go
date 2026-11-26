@@ -10,7 +10,7 @@ import (
 const secretDryRunValue = "true-secret-must-not-be-echoed"
 
 func writeishMiddlewareMethod(method string) bool {
-	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".has_pending_changes", ".checkin_waiting", ".websocket_local_ip", ".system_routes", ".getacl", ".get_state", ".details"} {
+	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".has_pending_changes", ".checkin_waiting", ".websocket_local_ip", ".system_routes", ".getacl", ".get_state", ".details", ".stat", ".statfs", ".listdir"} {
 		if strings.HasSuffix(method, suffix) {
 			return false
 		}
@@ -79,6 +79,9 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 		"offline_disk":             {"pool": "tank", "disk": "sdb"},
 		"online_disk":              {"pool": "tank", "disk": "sdb"},
 		"replace_disk":             {"pool": "tank", "disk": "sdb", "replacement_disk": "sdk"},
+		"delete_user":              {"username": "alice"},
+		"delete_group":             {"name": "staff"},
+		"set_filesystem_acl":       {"path": "/mnt/tank/shares/docs", "entries": []interface{}{map[string]interface{}{"tag": "owner@", "type": "ALLOW", "perms": "FULL_CONTROL", "flags": "INHERIT"}}},
 	}
 	args := map[string]interface{}{}
 	for k, v := range valid[name] {
@@ -94,7 +97,7 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 // bad dry_run, and with confirm="true". Each call must error and send no
 // write to the middleware.
 func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
-	client, fake := newFakeClientWith(t, withDiskActionResults(map[string]interface{}{
+	client, fake := newFakeClientWith(t, withFilesystemACLResults(withDiskActionResults(map[string]interface{}{
 		"app.query":               []interface{}{appEntry("plex", "RUNNING")},
 		"app.upgrade_summary":     upgradeSummaryFixture("x"),
 		"catalog.get_app_details": hostPathCatalogDetails(),
@@ -118,7 +121,7 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 		"pool.snapshottask.query":  replicationTaskFixtures()["pool.snapshottask.query"],
 		"pool.snapshot.query":      replicationTaskFixtures()["pool.snapshot.query"],
 		"service.query":            registryServiceFixtures(),
-	}), nil)
+	})), nil)
 	r := NewRegistry(client, nil)
 
 	badValues := []struct {

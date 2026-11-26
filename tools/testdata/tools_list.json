@@ -1103,6 +1103,39 @@
     }
   },
   {
+    "name": "delete_group",
+    "description": "Delete one local group with group.delete. No user is deleted or changed except that the group's members lose their membership (delete_users false is sent). Files keep the group's numeric gid as their group, and filesystem ACL entries that name the gid stay. Refused for groups that are still the primary group of any user (such as the group created with a user; delete the user first, or give it another primary group with update_user), built-in groups, administrative groups (such as builtin_administrators, wheel or root), groups with gid 0, groups with TrueNAS roles or sudo, directory service groups, and groups the account this server signs in as belongs to. The preview shows the group and its members; the confirmation is bound to the group's current settings and members, so a change after the preview needs a new one. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without deleting the group (default: false)",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Required: Name of the local group to delete",
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "delete_nfs_share",
     "description": "Delete one NFS share's configuration. NFS clients that have the export mounted lose access. Only the export is removed: the directory and every file in it are kept. The preview shows the share's current settings. Refused for shares on a locked dataset or whose lock state is unknown, and for shares whose path is not below /mnt/\u003cpool\u003e or is in a dataset TrueNAS manages itself. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
@@ -1231,6 +1264,39 @@
       },
       "required": [
         "snapshot"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "delete_user",
+    "description": "Delete one local user account with user.delete. Nothing else is deleted: the user's primary group is kept (delete_group false is sent; delete it afterwards with delete_group if it is no longer needed), the home directory and every file the user owns are kept, and files keep the user's numeric uid as owner. Refused for root, admin, truenas_admin and other built-in accounts, uid 0 and the built-in administrator uid, the account this server signs in as, directory service users, users that have TrueNAS roles or sudo or belong to an administrative group (such as builtin_administrators or wheel), the SMB guest account, and users whose home directory contains a .ssh directory (user.delete always removes \u003chome\u003e/.ssh, so move it away first). The preview shows the user, its groups, what is kept and what is removed (group memberships, the SMB password entry); the confirmation is bound to the user's current settings, so a change to the user after the preview needs a new one. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without deleting the user (default: false)",
+          "type": "boolean"
+        },
+        "username": {
+          "description": "Required: Name of the local user to delete",
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "username"
       ],
       "type": "object"
     },
@@ -2769,6 +2835,155 @@
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_filesystem_acl",
+    "description": "Replace the filesystem ACL of one file or directory below /mnt/\u003cpool\u003e with filesystem.setacl, which runs as a job tracked with tasks_get. The new ACL replaces the current one as a whole, in the path's current ACL type: NFSv4 entries (tag owner@, group@, everyone@, USER or GROUP; type ALLOW or DENY; perms FULL_CONTROL, MODIFY, READ or TRAVERSE, or advanced_perms; flags INHERIT or NOINHERIT, or advanced_flags) for an NFS4 ACL, POSIX entries (tag USER_OBJ, GROUP_OBJ, OTHER, MASK, USER or GROUP; posix_perms such as 'rwx' or 'r-x'; default for inherited entries) for a POSIX1E ACL. USER and GROUP entries name a local user or group by who; directory service (Active Directory, LDAP, IPA) users and groups and unknown names are refused. Only the path itself changes unless recursive=true, which applies the ACL to every file and directory below it in the same dataset; child datasets are never changed, and the preview shows the size of the subtree (entries directly in the path, objects in use in the dataset, child datasets). Never strips an ACL, changes the owner or group, or changes the ACL type. Refused for pool roots, paths outside /mnt/\u003cpool\u003e, non-normalised paths and paths through a symlink, datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component), read-only or locked datasets, and paths whose ACL type is DISABLED. The preview shows the current ACL and the new one; the confirmation is bound to the path's identity, its dataset and its current ACL, so a change after the preview needs a new one. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without changing the ACL (default: false)",
+          "type": "boolean"
+        },
+        "entries": {
+          "description": "Required: The complete new ACL, at least one entry, in the path's ACL type (get_filesystem_acl shows it)",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "advanced_flags": {
+                "description": "NFSv4 only: the individual inheritance flags ([] for none)",
+                "items": {
+                  "enum": [
+                    "FILE_INHERIT",
+                    "DIRECTORY_INHERIT",
+                    "NO_PROPAGATE_INHERIT",
+                    "INHERIT_ONLY",
+                    "INHERITED"
+                  ],
+                  "type": "string"
+                },
+                "maxItems": 5,
+                "type": "array"
+              },
+              "advanced_perms": {
+                "description": "NFSv4 only: the individual permissions, e.g. ['READ_DATA', 'READ_ATTRIBUTES', 'READ_ACL', 'EXECUTE', 'SYNCHRONIZE']",
+                "items": {
+                  "enum": [
+                    "READ_DATA",
+                    "WRITE_DATA",
+                    "APPEND_DATA",
+                    "READ_NAMED_ATTRS",
+                    "WRITE_NAMED_ATTRS",
+                    "EXECUTE",
+                    "DELETE",
+                    "DELETE_CHILD",
+                    "READ_ATTRIBUTES",
+                    "WRITE_ATTRIBUTES",
+                    "READ_ACL",
+                    "WRITE_ACL",
+                    "WRITE_OWNER",
+                    "SYNCHRONIZE"
+                  ],
+                  "type": "string"
+                },
+                "maxItems": 14,
+                "type": "array"
+              },
+              "default": {
+                "description": "POSIX only: a default entry, inherited by new files and directories (directories only; default: false)",
+                "type": "boolean"
+              },
+              "flags": {
+                "description": "NFSv4 only: basic inheritance flags (directories only for INHERIT). Give flags or advanced_flags",
+                "enum": [
+                  "INHERIT",
+                  "NOINHERIT"
+                ],
+                "type": "string"
+              },
+              "perms": {
+                "description": "NFSv4 only: a basic permission set. Give perms or advanced_perms",
+                "enum": [
+                  "FULL_CONTROL",
+                  "MODIFY",
+                  "READ",
+                  "TRAVERSE"
+                ],
+                "type": "string"
+              },
+              "posix_perms": {
+                "description": "POSIX only: read, write and execute as three characters, e.g. 'rwx', 'r-x' or '---'",
+                "maxLength": 3,
+                "minLength": 3,
+                "type": "string"
+              },
+              "tag": {
+                "description": "NFSv4: owner@, group@, everyone@, USER or GROUP. POSIX: USER_OBJ, GROUP_OBJ, OTHER, MASK, USER or GROUP",
+                "enum": [
+                  "owner@",
+                  "group@",
+                  "everyone@",
+                  "USER",
+                  "GROUP",
+                  "USER_OBJ",
+                  "GROUP_OBJ",
+                  "OTHER",
+                  "MASK"
+                ],
+                "type": "string"
+              },
+              "type": {
+                "description": "NFSv4 only: ALLOW or DENY",
+                "enum": [
+                  "ALLOW",
+                  "DENY"
+                ],
+                "type": "string"
+              },
+              "who": {
+                "description": "Local user (tag USER) or group (tag GROUP) name; omit for the other tags",
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "tag"
+            ],
+            "type": "object"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "path": {
+          "description": "Required: Absolute path of a file or directory below /mnt/\u003cpool\u003e, e.g. /mnt/tank/shares/docs (normalised, no symlinks; not a pool root)",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "description": "Optional: Also apply the ACL to every file and directory below path in the same dataset (default: false). Child datasets are never changed. The preview shows the size of the subtree",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
       "openWorldHint": false
     }
   },
