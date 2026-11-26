@@ -72,6 +72,25 @@ func newSnapActionFake() *snapActionFake {
 	f.datasets["tank/.system"] = fsRow("tank/.system", "/mnt/tank/.system")
 	f.datasets["tank/data/.ix-apps"] = fsRow("tank/data/.ix-apps", "/mnt/tank/data/.ix-apps")
 	f.datasets["tank/ix-applications"] = fsRow("tank/ix-applications", "/mnt/tank/ix-applications")
+	// Datasets TrueNAS manages itself, set up so that each would clone
+	// normally if its managedDatasetPart guard were missing.
+	for name, mp := range map[string]string{
+		"boot-pool/ROOT/25.10":    "/mnt/boot-pool/ROOT/25.10",
+		"boot-pool/restore":       "/mnt/boot-pool/restore",
+		"freenas-boot/ROOT/13.0":  "/mnt/freenas-boot/ROOT/13.0",
+		"freenas-boot/restore":    "/mnt/freenas-boot/restore",
+		"tank/ix-apps":            "/mnt/tank/ix-apps",
+		"tank/ix-apps/app_mounts": "/mnt/tank/ix-apps/app_mounts",
+		"tank/.ix-virt":           "/mnt/tank/.ix-virt",
+		"tank/.custom":            "/mnt/tank/.custom",
+	} {
+		f.datasets[name] = fsRow(name, mp)
+	}
+	f.addSnap("boot-pool/ROOT/25.10", "b1")
+	f.addSnap("freenas-boot/ROOT/13.0", "b1")
+	f.addSnap("tank/ix-apps", "a1")
+	f.addSnap("tank/.ix-virt", "v1")
+	f.addSnap("tank/.custom", "c1")
 	return f
 }
 
@@ -273,10 +292,18 @@ func TestCloneSnapshotRefusals(t *testing.T) {
 		{"pool root", "tank/data@manual-1", "tank", "is a pool root"},
 		{"mnt path", "tank/data@manual-1", "/mnt/tank/restore/x", "not a path"},
 		{"path outside pool", "tank/data@manual-1", "/etc/x", "not a path"},
-		{"hidden dataset", "tank/data@manual-1", "tank/.system/x", "inside a hidden dataset"},
-		{"legacy apps target", "tank/data@manual-1", "tank/ix-applications/x", "legacy apps dataset ('ix-applications')"},
-		{"hidden source", "tank/.system@sys-1", "tank/restore/x", "snapshot dataset 'tank/.system' is a hidden dataset"},
-		{"hidden source below pool", "tank/data/.ix-apps@a1", "tank/restore/x", "is a hidden dataset ('.ix-apps')"},
+		{"hidden target", "tank/data@manual-1", "tank/.system/x", "target_dataset 'tank/.system/x' is inside '.system', which TrueNAS manages itself"},
+		{"dot-prefixed target", "tank/data@manual-1", "tank/.custom/x", "target_dataset 'tank/.custom/x' is inside '.custom', which TrueNAS manages itself"},
+		{"legacy apps target", "tank/data@manual-1", "tank/ix-applications/x", "target_dataset 'tank/ix-applications/x' is inside 'ix-applications', which TrueNAS manages itself"},
+		{"ix-apps target", "tank/data@manual-1", "tank/ix-apps/app_mounts/x", "target_dataset 'tank/ix-apps/app_mounts/x' is inside 'ix-apps', which TrueNAS manages itself"},
+		{"ix-virt target", "tank/data@manual-1", "tank/.ix-virt/x", "target_dataset 'tank/.ix-virt/x' is inside '.ix-virt', which TrueNAS manages itself"},
+		{"hidden source", "tank/.system@sys-1", "tank/restore/x", "snapshot dataset 'tank/.system' is inside '.system', which TrueNAS manages itself"},
+		{"hidden source below pool", "tank/data/.ix-apps@a1", "tank/restore/x", "snapshot dataset 'tank/data/.ix-apps' is inside '.ix-apps', which TrueNAS manages itself"},
+		{"dot-prefixed source", "tank/.custom@c1", "tank/restore/x", "snapshot dataset 'tank/.custom' is inside '.custom', which TrueNAS manages itself"},
+		{"boot-pool source", "boot-pool/ROOT/25.10@b1", "boot-pool/restore/x", "snapshot dataset 'boot-pool/ROOT/25.10' is inside 'boot-pool', which TrueNAS manages itself"},
+		{"freenas-boot source", "freenas-boot/ROOT/13.0@b1", "freenas-boot/restore/x", "snapshot dataset 'freenas-boot/ROOT/13.0' is inside 'freenas-boot', which TrueNAS manages itself"},
+		{"ix-apps source", "tank/ix-apps@a1", "tank/restore/x", "snapshot dataset 'tank/ix-apps' is inside 'ix-apps', which TrueNAS manages itself"},
+		{"ix-virt source", "tank/.ix-virt@v1", "tank/restore/x", "snapshot dataset 'tank/.ix-virt' is inside '.ix-virt', which TrueNAS manages itself"},
 		{"invalid target", "tank/data@manual-1", "tank/re store", "invalid target_dataset"},
 		{"dot-dot target", "tank/data@manual-1", "tank/../x", "invalid target_dataset"},
 		{"parent missing", "tank/data@manual-1", "tank/nope/x", "parent dataset 'tank/nope' does not exist"},
@@ -727,5 +754,86 @@ func TestReleaseSnapshotRefusesUnreadableCreateTxg(t *testing.T) {
 	}
 	if n := len(fake.called("pool.snapshot.release")); n != 0 {
 		t.Errorf("pool.snapshot.release sent %d time(s)", n)
+	}
+}
+
+func TestSnapshotUserrefsParsing(t *testing.T) {
+	prop := func(kv ...interface{}) map[string]interface{} {
+		p := map[string]interface{}{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			p[kv[i].(string)] = kv[i+1]
+		}
+		return map[string]interface{}{"properties": map[string]interface{}{"userrefs": p}}
+	}
+	for _, tc := range []struct {
+		name   string
+		snap   map[string]interface{}
+		want   int
+		wantOK bool
+	}{
+		{"top-level number", map[string]interface{}{"userrefs": float64(2)}, 2, true},
+		{"top-level string number", map[string]interface{}{"userrefs": "3"}, 3, true},
+		{"top-level negative", map[string]interface{}{"userrefs": float64(-1)}, 0, false},
+		{"top-level negative string", map[string]interface{}{"userrefs": "-1"}, 0, false},
+		{"parsed number", prop("parsed", float64(1), "rawvalue", "9", "value", "9"), 1, true},
+		{"parsed string number", prop("parsed", "4"), 4, true},
+		{"rawvalue fallback", prop("parsed", nil, "rawvalue", "2", "value", "9"), 2, true},
+		{"value fallback", prop("value", "5"), 5, true},
+		{"value fallback after null rawvalue", prop("parsed", nil, "rawvalue", nil, "value", "6"), 6, true},
+		{"parsed negative", prop("parsed", float64(-2)), 0, false},
+		{"rawvalue negative", prop("rawvalue", "-2"), 0, false},
+		{"dash", prop("parsed", "-", "rawvalue", "-", "value", "-"), 0, false},
+		{"fraction", prop("parsed", 1.5), 0, false},
+		{"boolean", prop("parsed", true), 0, false},
+		{"empty string", prop("rawvalue", ""), 0, false},
+		{"missing", map[string]interface{}{}, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := snapshotUserrefs(tc.snap)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("snapshotUserrefs = %d, %v; want %d, %v", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+// The hold lookup the release is checked against must be the last read
+// before pool.snapshot.release: the retention query runs before it, so the
+// gap between that read and the release is a single round trip.
+func TestReleaseSnapshotHoldLookupIsLastReadBeforeRelease(t *testing.T) {
+	f := newSnapActionFake()
+	r, fake := f.registry(t)
+	args := map[string]interface{}{"snapshot": "tank/data@held-1"}
+	first, err := r.CallTool(t.Context(), "release_snapshot", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.CallTool(t.Context(), "release_snapshot", mergeArgs(args, map[string]interface{}{"confirmation_token": replyToken(t, first)})); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	calls := append([]fakeCall(nil), fake.calls...)
+	fake.mu.Unlock()
+	release := -1
+	for i, c := range calls {
+		if c.Method == "pool.snapshot.release" {
+			release = i
+		}
+	}
+	if release < 1 {
+		t.Fatalf("pool.snapshot.release not sent: %v", calls)
+	}
+	prev := calls[release-1]
+	if prev.Method != "pool.snapshot.query" || !strings.Contains(string(prev.Params), `"holds":true`) || strings.Contains(string(prev.Params), `"retention"`) {
+		t.Errorf("call before pool.snapshot.release = %s %s; want the hold lookup", prev.Method, prev.Params)
+	}
+	sawRetention := false
+	for _, c := range calls[:release] {
+		if c.Method == "pool.snapshot.query" && strings.Contains(string(c.Params), `"retention":true`) {
+			sawRetention = true
+		}
+	}
+	if !sawRetention {
+		t.Error("no retention query was sent before the release")
 	}
 }

@@ -70,9 +70,6 @@ var clientServices = map[string]string{
 	"ups":         "NUT clients monitoring this UPS are disconnected, and no shutdown runs on power loss while the service is stopped",
 }
 
-// reloadableServices implement a real reload in middleware (25.10
-// ServiceInterface.reloadable). service.control RELOAD on any other
-// service performs a full restart.
 // serviceNameHints suggest the query_services name for a common alias.
 var serviceNameHints = map[string]string{
 	"smb": "cifs",
@@ -82,6 +79,9 @@ var serviceNameHints = map[string]string{
 // this server leaves at the 25.10 default (true).
 const haPropagateNote = "On an HA system, TrueNAS also runs the action on the standby controller (its default ha_propagate=true, which this tool does not change) when this controller is active, failover is healthy and the service may run on the standby"
 
+// reloadableServices implement a real reload in middleware (25.10
+// ServiceInterface.reloadable). service.control RELOAD on any other
+// service performs a full restart.
 var reloadableServices = map[string]bool{
 	"cifs": true, "ftp": true, "iscsitarget": true, "nfs": true, "nvmet": true, "ssh": true,
 	"idmap": true, "nscd": true, "keepalived": true, "mdns": true,

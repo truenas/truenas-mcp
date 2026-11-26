@@ -35,7 +35,7 @@ func (r *Registry) registerSnapshotActionTools() {
 	r.tools["clone_snapshot"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "clone_snapshot",
-			Description: "Clone a ZFS snapshot to a new dataset, for example to recover files from a snapshot without rolling back. The clone is writable, starts out sharing all its blocks with the snapshot and is mounted under its parent's mountpoint. While the clone exists the snapshot cannot be deleted. The target must be a new dataset in the same pool as the snapshot, below the pool root, whose parent already exists and is mounted under /mnt/<pool>. Refused if the snapshot does not exist or the target already exists. Use dry_run to preview the source, target and mountpoint.",
+			Description: "Clone a ZFS snapshot to a new dataset, for example to recover files from a snapshot without rolling back. The clone is writable, starts out sharing all its blocks with the snapshot and is mounted under its parent's mountpoint. While the clone exists the snapshot cannot be deleted. The target must be a new dataset in the same pool as the snapshot, below the pool root, whose parent already exists and is mounted under /mnt/<pool>. Refused if the snapshot does not exist or the target already exists, and if the snapshot's dataset or the target is inside a dataset TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt and other hidden datasets). Use dry_run to preview the source, target and mountpoint.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -287,8 +287,10 @@ func lookupCloneDataset(ctx context.Context, client *truenas.Client, name string
 }
 
 // validateCloneTarget checks the target dataset name on its own: a dataset
-// name (not a path) inside the source pool, below the pool root, and not in
-// a hidden system dataset such as .system.
+// name (not a path) inside the source pool, below the pool root, and not
+// inside a dataset TrueNAS manages itself (managedDatasetPart: the boot
+// pool, .system, ix-apps, ix-applications, .ix-virt and other hidden
+// datasets).
 func validateCloneTarget(target, sourcePool string) error {
 	if target == "" {
 		return fmt.Errorf("target_dataset is required")
@@ -305,25 +307,19 @@ func validateCloneTarget(target, sourcePool string) error {
 	if pool := datasetPool(target); pool != sourcePool {
 		return fmt.Errorf("target_dataset '%s' is in pool '%s', but the snapshot is in pool '%s'; ZFS clones stay in the snapshot's pool", target, pool, sourcePool)
 	}
-	for _, part := range strings.Split(target, "/")[1:] {
-		if strings.HasPrefix(part, ".") {
-			return fmt.Errorf("target_dataset '%s' is inside a hidden dataset ('%s'); TrueNAS manages those itself", target, part)
-		}
-		if part == "ix-applications" {
-			return fmt.Errorf("target_dataset '%s' is inside the legacy apps dataset ('ix-applications'); TrueNAS manages it itself", target)
-		}
+	if part, ok := managedDatasetPart(target); ok {
+		return fmt.Errorf("target_dataset '%s' is inside '%s', which TrueNAS manages itself; clone into an ordinary dataset instead", target, part)
 	}
 	return nil
 }
 
-// validateCloneSource refuses a snapshot of a hidden system dataset such as
-// .system or .ix-virt: a clone would put a writable copy of system-managed
-// data at an ordinary path.
+// validateCloneSource refuses a snapshot of a dataset TrueNAS manages
+// itself (managedDatasetPart: the boot pool, .system, ix-apps,
+// ix-applications, .ix-virt and other hidden datasets): a clone would put a
+// writable copy of system-managed data at an ordinary path.
 func validateCloneSource(dataset string) error {
-	for _, part := range strings.Split(dataset, "/")[1:] {
-		if strings.HasPrefix(part, ".") {
-			return fmt.Errorf("snapshot dataset '%s' is a hidden dataset ('%s') TrueNAS manages itself; cloning its snapshots is not supported", dataset, part)
-		}
+	if part, ok := managedDatasetPart(dataset); ok {
+		return fmt.Errorf("snapshot dataset '%s' is inside '%s', which TrueNAS manages itself; cloning its snapshots is not supported", dataset, part)
 	}
 	return nil
 }
@@ -610,6 +606,12 @@ func planReleaseSnapshot(ctx context.Context, client *truenas.Client, args map[s
 	if err != nil {
 		return nil, err
 	}
+	// The retention query runs before the hold lookup, so that the only
+	// round trip between the fresh hold read this plan is checked against
+	// and pool.snapshot.release is the release itself. pool.snapshot.release
+	// has no per-tag option, so a hold added in that last gap would still be
+	// released with the rest; it cannot be closed from here.
+	retention, retErr := snapshotRetention(ctx, client, id)
 	snap, err := lookupSnapshot(ctx, client, id)
 	if err != nil {
 		return nil, err
@@ -670,7 +672,6 @@ func planReleaseSnapshot(ctx context.Context, client *truenas.Client, args map[s
 		fmt.Sprintf("After the release, snapshot '%s' is deletable again: a manual delete, or periodic snapshot task or replication retention, can remove it", id),
 	}
 	retentionFact := "none found"
-	retention, retErr := snapshotRetention(ctx, client, id)
 	switch {
 	case retErr != nil:
 		warnings = append(warnings, "Could not check whether retention schedules this snapshot's removal (pool.snapshot.query with retention failed); once released, retention may remove it")

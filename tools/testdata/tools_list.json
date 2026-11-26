@@ -104,7 +104,7 @@
   },
   {
     "name": "clone_snapshot",
-    "description": "Clone a ZFS snapshot to a new dataset, for example to recover files from a snapshot without rolling back. The clone is writable, starts out sharing all its blocks with the snapshot and is mounted under its parent's mountpoint. While the clone exists the snapshot cannot be deleted. The target must be a new dataset in the same pool as the snapshot, below the pool root, whose parent already exists and is mounted under /mnt/\u003cpool\u003e. Refused if the snapshot does not exist or the target already exists. Use dry_run to preview the source, target and mountpoint.",
+    "description": "Clone a ZFS snapshot to a new dataset, for example to recover files from a snapshot without rolling back. The clone is writable, starts out sharing all its blocks with the snapshot and is mounted under its parent's mountpoint. While the clone exists the snapshot cannot be deleted. The target must be a new dataset in the same pool as the snapshot, below the pool root, whose parent already exists and is mounted under /mnt/\u003cpool\u003e. Refused if the snapshot does not exist or the target already exists, and if the snapshot's dataset or the target is inside a dataset TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt and other hidden datasets). Use dry_run to preview the source, target and mountpoint.",
     "inputSchema": {
       "properties": {
         "dry_run": {
