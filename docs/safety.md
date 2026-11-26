@@ -82,7 +82,7 @@ is set (`upgrade_app` may be named; it stays limited to dry runs).
 TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
-**Confirmation for destructive tools.** These twenty-seven tools execute only after
+**Confirmation for destructive tools.** These thirty tools execute only after
 confirmation. When the MCP client supports form elicitation, the server asks
 the user to approve a short preview in the client and executes only if they
 accept. Otherwise the tools execute only with a `confirmation_token` from a
@@ -117,6 +117,9 @@ preview of the same call:
 | `update_nfs_share` | Changes which hosts can mount the export, how root and other users are mapped, or which directory is exported. Confirmation is bound to the share's current settings |
 | `delete_nfs_share` | Clients with the export mounted lose access (only the export is removed; files are kept). Confirmation is bound to the share's current settings |
 | `set_share_acl` | Replaces the share-level ACL as a whole and can lock users, administrators included, out of the share (directory service accounts are refused). Confirmation is bound to the share and its current share ACL |
+| `offline_disk` | Reduces the redundancy of the disk's vdev until the disk is back online. Refused unless the vdev keeps at least one disk's worth of redundancy. Confirmation is bound to the pool topology and the disk |
+| `online_disk` | Starts a resilver of the data written while the disk was offline. Confirmation is bound to the pool topology and the disk |
+| `replace_disk` | Destroys everything on the replacement disk and starts a full resilver. Confirmation is bound to the pool topology, the disk being replaced, and the replacement disk's identity, size and unused state |
 
 No other tool needs a token: the other write tools (`create_dataset`,
 `create_smb_share`, `create_nfs_share`, `install_app`, `start_app`,
@@ -186,7 +189,8 @@ execute (`stop_app`, `delete_boot_environment`, `delete_app`,
 `update_network_interface`, `release_snapshot`, `rollback_snapshot`,
 `delete_snapshot`, `control_service`, `create_user`, `update_user`,
 `create_group`, `update_group`, `update_smb_share`, `delete_smb_share`,
-`update_nfs_share`, `delete_nfs_share`, `set_share_acl`), the token is also bound to
+`update_nfs_share`, `delete_nfs_share`, `set_share_acl`, `offline_disk`, `online_disk`,
+`replace_disk`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. For `release_snapshot` the hash also
 covers the previewed hold tags, hold count (`userrefs`) and the snapshot's
@@ -209,7 +213,15 @@ share's current settings as read from the system (and, for `set_share_acl`,
 its current share ACL and the principals named; for a new path, the
 directory's inode and device), so a share edited, recreated or locked after
 the preview, or an ACL changed in the meantime, rejects the token and
-nothing is written. The token store does not hold those
+nothing is written. For `offline_disk`, `online_disk` and `replace_disk` it
+covers the pool's status, whether a resilver is running, and its whole
+topology (every vdev's type, guid and state, and every device's guid, disk
+name and state), plus the target device's serial and size; for
+`replace_disk` also the replacement disk's name, serial, identifier and
+size, whether TrueNAS reports it unused, the pool it belongs to, and any
+running `pool.replace` job. A disk failing, going offline or coming back,
+a resilver starting, or a different disk under the same name after the
+preview rejects the token and nothing is written. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
 issued for another tool or issued for different arguments is rejected with
 an error that says why and that nothing was executed; that error result
@@ -346,7 +358,7 @@ schema), `host_path_config.acl_enable` must also be a JSON boolean.
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`)
 derived from the same table, so clients can apply their own approval prompts.
-`destructiveHint` is true for the twenty-seven destructive tools (the ones that need a
+`destructiveHint` is true for the thirty destructive tools (the ones that need a
 confirmation token, `update_app` included) and false for every other tool.
 Annotations were added in MCP 2025-03-26; clients that negotiate
 `2024-11-05` ignore the extra field.
@@ -570,6 +582,12 @@ Both tools re-plan against fresh reads right before the call and refuse a token 
 `update_nfs_share` can map every client to root (`mapall_user` root), keep a client's root as root (`no_root_squash`), or remove every network and host limit, in one call and without an extra flag, as `create_nfs_share` can. Each of these gives an explicit `WARNING:` in the preview's warnings and in the confirmation facts, so the approver sees it before anything is sent.
 
 The share tools are not limited to 25.10, but the option shapes they send (for example the SMB `options` block sent back with the host lists) were checked only against 25.10. On any other version the preview adds a warning saying so; check the result with `query_shares`.
+
+`offline_disk`, `online_disk` and `replace_disk` use the same shared plan for preview and the real call: `pool.offline` and `pool.online` with the pool id and `{"label": <device guid>}`, and `pool.replace` with the pool id and `{"label": <device guid>, "disk": <replacement>, "force": false}`. No tool accepts or sends a force option. Each reads the boot pool (`boot.get_state`), the named pool (`pool.query` with its topology and scan state) and the disk inventory (`disk.query`); a disk is named by its disk name or, for a device that is no longer present, by the ZFS guid `get_disk_health` shows. The boot pool is refused by name (`boot-pool`, `freenas-boot`, or the name `boot.get_state` reports), and so is a boot disk named as the target; if the boot pool cannot be read, the call is refused. Cache and spare devices, and vdevs with a replacement or hot spare already in progress (a `replacing-N` or `spare-N` child), are refused by every tool. Only mirror and RAIDZ vdevs are reasoned about: dRAID and other vdev types are refused. Special, dedup and log vdevs follow the same rules as data vdevs. Every state-dependent refusal is a blocked preview that still shows the pool, the vdev layout and the disk: an error with no token and no prompt.
+
+`offline_disk` takes a disk offline only when the pool is `ONLINE` with no resilver running, the disk and every other disk of its vdev are `ONLINE`, and the vdev still tolerates at least one more failed disk afterwards (a mirror of three or more disks, or RAIDZ2 or RAIDZ3). A 2-way mirror, a RAIDZ1 vdev and a single-disk (stripe) vdev are refused. The preview shows the vdev layout before and after and how many more disk failures the vdev tolerates. `online_disk` brings back only a device whose ZFS state is `OFFLINE` and that is matched to a present disk; FAULTED, REMOVED, UNAVAIL or DEGRADED devices are left to `replace_disk`. Its preview says that ZFS resilvers only the data written while the disk was offline. Both read the device back afterwards and report its state, with a note if it is not what was asked for.
+
+`replace_disk` checks the replacement disk against `disk.details`: it must be in the unused list, in no imported or exported pool, not a boot disk, in the TrueNAS disk database, without a duplicate serial, and with a known size at least that of the disk it replaces (whose size must be known too). The disk being replaced must be in a mirror or RAIDZ vdev. If any other disk of that vdev is not `ONLINE`, only a failed or offline disk can be replaced; replacing a healthy disk is refused while any device of the pool is not `ONLINE`, and a vdev with more failed disks than it tolerates is refused. It is also refused while a resilver or any other `pool.replace` job is running (`core.get_jobs`). The preview shows both disks with their serials and sizes, the vdev layout, and that the replacement disk's contents are destroyed. `pool.replace` is a job; its id is tracked as a `tasks_get` task (`replace_disk`, 24 hours). The job finishes once ZFS has started the replacement; the resilver continues afterwards and is followed with `get_disk_health` or `query_pools`. The old disk stays in the vdev until the resilver completes. As with the other destructive tools, a small window remains between the final re-plan and the middleware call, which `pool.offline`, `pool.online` and `pool.replace` cannot close because they have no compare-and-swap; TrueNAS's own checks on those calls still apply.
 
 `download_update` passes optional `train` and `version` through to `update.download`. Both must be set, or both omitted (matching 25.10's `UpdateDownloadArgs` and `plugins/update_/download.py`). When both are omitted, or both are blank or whitespace, they are treated as omitted and the middleware call still has empty parameters (`params: []`) and downloads the update offered by the configured profile, as before. When both are set, the call is `update.download` with those two positional arguments. A request for only one of them is refused. A completed download (`update_download_progress.percent == 100`) is not treated as already done if the caller asked for a different `version`.
 
