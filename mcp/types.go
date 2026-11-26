@@ -46,6 +46,20 @@ type ConfirmationTokens interface {
 	IsConfirmationToken(tok string) bool
 }
 
+// GeneratedPasswordKey is the result field that carries a password a tool
+// generated (create_user and update_user with password_mode random).
+const GeneratedPasswordKey = "generated_password"
+
+// OneTimeSecrets is implemented by registries that return a password they
+// generated exactly once. TakeOneTimeSecret reports whether s is such a
+// password that has not been returned yet, and forgets it, so a second
+// result carrying the same value is redacted. The server lets only such a
+// value through redaction, as the top-level GeneratedPasswordKey of a
+// successful tool result.
+type OneTimeSecrets interface {
+	TakeOneTimeSecret(s string) bool
+}
+
 // Elicitation is the MCP elicitation state for one tools/call. The server
 // fills it from the client's declared capabilities and, on a retry, from
 // the elicitation response and echoed request state.

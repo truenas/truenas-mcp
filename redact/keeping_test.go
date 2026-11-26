@@ -39,3 +39,29 @@ func TestToolOutputKeeping(t *testing.T) {
 		t.Error("result without the key differs from ToolOutput")
 	}
 }
+
+func TestToolOutputKeepingKeys(t *testing.T) {
+	calls := 0
+	keep := map[string]func(string) bool{
+		"confirmation_token": func(v string) bool { return v == "issued" },
+		"generated_password": func(v string) bool { calls++; return v == "pw-once" },
+	}
+	in := "{\n  \"confirmation_token\": \"issued\",\n  \"generated_password\": \"pw-once\",\n  \"user\": {\"password\": \"pw-once\", \"generated_password\": \"pw-once\"}\n}"
+	out := ToolOutputKeepingKeys(in, keep)
+	if !strings.Contains(out, `"generated_password": "pw-once"`) || strings.Count(out, "pw-once") != 1 {
+		t.Errorf("only the top-level kept password may stay visible:\n%s", out)
+	}
+	if !strings.Contains(out, `"confirmation_token": "issued"`) {
+		t.Errorf("token lost:\n%s", out)
+	}
+	if calls != 1 {
+		t.Errorf("keep called %d times, want 1", calls)
+	}
+	other := `{"generated_password":"pw-other"}`
+	if got := ToolOutputKeepingKeys(other, keep); got != ToolOutput(other) || strings.Contains(got, "pw-other") {
+		t.Errorf("unaccepted password not redacted: %s", got)
+	}
+	if got := ToolOutputKeepingKeys(in, nil); got != ToolOutput(in) {
+		t.Errorf("no keepers: got %s", got)
+	}
+}

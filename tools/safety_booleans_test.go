@@ -67,6 +67,10 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 		"set_service_enabled":      {"service": "cifs", "enable": false},
 		"update_network_config":    {"ipv6gateway": "2001:db8:1::1"},
 		"update_network_interface": {"interface": "eth0", "add_aliases": []interface{}{"2001:db8:1::10/64"}},
+		"create_user":              {"username": "carol", "full_name": "Carol"},
+		"update_user":              {"username": "alice", "full_name": "Alice B"},
+		"create_group":             {"name": "media"},
+		"update_group":             {"name": "staff", "smb": true},
 	}
 	args := map[string]interface{}{}
 	for k, v := range valid[name] {

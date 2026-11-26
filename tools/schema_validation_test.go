@@ -55,6 +55,9 @@ func schemaSample(schema map[string]interface{}, all bool) interface{} {
 		return obj
 	}
 	// string (the app-name pattern accepts it too).
+	if min, ok := testNumber(schema["minLength"]); ok && min > 1 {
+		return strings.Repeat("x", int(min))
+	}
 	return "x"
 }
 

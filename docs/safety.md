@@ -82,7 +82,7 @@ is set (`upgrade_app` may be named; it stays limited to dry runs).
 TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
-**Confirmation for destructive tools.** These eighteen tools execute only after
+**Confirmation for destructive tools.** These twenty-two tools execute only after
 confirmation. When the MCP client supports form elicitation, the server asks
 the user to approve a short preview in the client and executes only if they
 accept. Otherwise the tools execute only with a `confirmation_token` from a
@@ -108,6 +108,10 @@ preview of the same call:
 | `rollback_snapshot` | Discards everything written to the dataset since the snapshot; rolling back to an older snapshot also destroys every newer snapshot and, with `destroy_clones`, their clones |
 | `delete_snapshot` | Permanently removes a snapshot (with `recursive`, the same snapshot on every child dataset); its data can no longer be restored or replicated from it |
 | `control_service` | STOP and RESTART take a service offline and disconnect its clients (SMB, NFS, iSCSI, NVMe-oF, UPS), and RELOAD of a service that cannot reload is a restart. One tool covers every action, so START and RELOAD need confirmation too |
+| `create_user` | Adds an account that can sign in (with a random or supplied password) and joins it to groups that grant access to shares. Another user's primary group is refused as its group or in `add_groups`. Confirmation is bound to the absence of the user, the groups named and the new home directory |
+| `update_user` | Changes an account in place: its password, groups, lock state, shell or SMB access. Another user's primary group is refused in `group` and `add_groups`. Confirmation is bound to the user's current settings, including when its password last changed, and to the groups involved |
+| `create_group` | Adds a group and its members, which can grant access to shares. Confirmation is bound to the members' current settings |
+| `update_group` | Changes a group's members or SMB flag in place. Adding a user to another user's primary group (the group created with that user, for example) is refused, at the preview and again when the confirmation re-plans. Confirmation is bound to the group's current settings and the members named |
 
 No other tool needs a token: the other write tools (`create_dataset`,
 `create_smb_share`, `create_nfs_share`, `install_app`, `start_app`,
@@ -175,7 +179,8 @@ execute (`stop_app`, `delete_boot_environment`, `delete_app`,
 `apply_update`, `configure_directory_service`, `leave_directory_service`,
 `run_snapshot_task`, `run_replication`, `update_network_config`,
 `update_network_interface`, `release_snapshot`, `rollback_snapshot`,
-`delete_snapshot`, `control_service`), the token is also bound to
+`delete_snapshot`, `control_service`, `create_user`, `update_user`,
+`create_group`, `update_group`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. For `release_snapshot` the hash also
 covers the previewed hold tags, hold count (`userrefs`) and the snapshot's
@@ -188,7 +193,12 @@ snapshot, after the preview rejects the token. For `delete_snapshot` it covers t
 clones of every snapshot the call deletes. For `control_service` it
 covers the service's previewed state, boot setting and id and
 `allow_protected_service`, so a service started, stopped or re-enabled after
-the preview rejects the token. The token store does not hold those
+the preview rejects the token. For `update_user` it covers the user's
+current settings (uid, names, groups, home, shell, lock, password and SMB
+flags, roles, sudo, and when the password last changed) and the groups
+named; for `create_user` the absence of the user, the groups named and the
+state of the new home directory; for `update_group` and `create_group` the
+group's settings and the members named. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
 issued for another tool or issued for different arguments is rejected with
 an error that says why and that nothing was executed; that error result
@@ -226,6 +236,46 @@ reply, and only while it is a live token issued by this server, is exempt
 from redaction. The token is the first key of the reply, so the 100 KiB
 output cap never cuts it; if a cut ever would, the call returns an error
 without the token instead (nothing is executed).
+
+The only other exemption is the top-level `generated_password` of a
+successful `create_user` or `update_user` result with `password_mode`
+`random`. The password is generated from a cryptographically secure random
+source only when the call executes, after confirmation, so it is never in a
+preview, an elicitation message or a confirmation token. The server lets it
+through once: the registry keeps only a SHA-256 of it, for at most a
+minute, and forgets it when the result is sent, so the same value in any
+later output is redacted. A password supplied with `password_mode` `set` is
+never returned; it is redacted in debug logs like any other `password`
+value and removed from TrueNAS error messages. Like every other argument
+it is part of the argument hash a confirmation token is bound to, so the
+confirming call must repeat it unchanged.
+
+**Passwords pass through the assistant.** Not returning a password again
+does not keep it private: a password supplied with `password_mode` `set`
+is an argument the AI assistant writes, and a `random` password is in the
+result the assistant reads. Both pass through the assistant and appear in
+the MCP client's chat transcript, and in whatever the client or its
+provider keeps of it. Treat such a password as known to anyone who can read
+that transcript; use `password_mode` `disabled` and set the password in
+the TrueNAS web UI when that is not acceptable, or have the user change it
+after first sign-in.
+
+**A lost random password.** The account is created (or its password
+changed) before the result is returned. If that result never reaches the
+client, for example because the call was cancelled, timed out or the
+connection dropped, or because the result is sent after the one-minute
+window and the password is redacted, the account exists with a password
+nobody saw. It cannot be recovered; set a new one with `update_user`
+(`password_mode` `random` or `set`) or in the TrueNAS web UI.
+
+**Which accounts `update_user` can change.** Apart from its refusals
+(root, the built-in administrator accounts, other built-in accounts, the
+account this server signs in as, directory service users, and users with
+TrueNAS roles, sudo or an administrative group), any local account can be
+changed, including service accounts such as the users that replication or
+rsync tasks sign in as. That includes resetting its password, turning on
+SSH password login and changing its shell. Limit the tool with the tool
+allowlist or denylist, or read-only mode, where that is too broad.
 
 > **Breaking change (confirmation tokens):** `"confirm": true` no longer
 > executes a destructive tool. A call that sends it without a token gets the
@@ -285,7 +335,7 @@ schema), `host_path_config.acl_enable` must also be a JSON boolean.
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`)
 derived from the same table, so clients can apply their own approval prompts.
-`destructiveHint` is true for the eighteen destructive tools (the ones that need a
+`destructiveHint` is true for the twenty-two destructive tools (the ones that need a
 confirmation token, `update_app` included) and false for every other tool.
 Annotations were added in MCP 2025-03-26; clients that negotiate
 `2024-11-05` ignore the extra field.

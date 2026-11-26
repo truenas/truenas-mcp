@@ -32,6 +32,10 @@ type Registry struct {
 	// (tools/confirm_token.go), including elicit-only handles.
 	confirmTokens *confirmationTokens
 
+	// oneTimeSecrets holds generated passwords until the result that
+	// returns them (tools/onetime_secret.go).
+	oneTimeSecrets *oneTimeSecrets
+
 	// requireHumanConfirm refuses destructive tools on clients that did
 	// not declare form elicitation, instead of falling back to a token.
 	requireHumanConfirm bool
@@ -61,10 +65,11 @@ type Tool struct {
 
 func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
 	r := &Registry{
-		client:        client,
-		taskManager:   taskManager,
-		tools:         make(map[string]Tool),
-		confirmTokens: newConfirmationTokens(),
+		client:         client,
+		taskManager:    taskManager,
+		tools:          make(map[string]Tool),
+		confirmTokens:  newConfirmationTokens(),
+		oneTimeSecrets: newOneTimeSecrets(),
 	}
 	r.registerTools()
 	r.applySafety()
@@ -99,6 +104,7 @@ func (r *Registry) registerTools() {
 	r.registerVMTools()
 
 	r.registerAccountTools()
+	r.registerAccountActionTools()
 
 	r.registerDatasetTools()
 

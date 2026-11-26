@@ -575,6 +575,60 @@
     }
   },
   {
+    "name": "create_group",
+    "description": "Create a local group, optionally with members. Never grants sudo or TrueNAS roles: sudo and role arguments are refused. Refused for names that already exist and for administrative names (such as builtin_administrators, wheel or root), and for gids below 1000. Members must be existing local users; root, admin, truenas_admin and other built-in accounts, the account this server signs in as, and users with roles or sudo are refused. The preview shows the group and its members. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without creating the group (default: false)",
+          "type": "boolean"
+        },
+        "gid": {
+          "description": "Optional: gid for the new group (1000 or more). Omit to let TrueNAS choose the next free one",
+          "maximum": 2147000000,
+          "minimum": 1000,
+          "type": "integer"
+        },
+        "members": {
+          "description": "Optional: Existing local users (usernames) to add as members",
+          "items": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "name": {
+          "description": "Required: Name of the new group (letters, digits, '_', '.', '-'; not starting with '.' or '-'; at most 32 characters)",
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "smb": {
+          "default": false,
+          "description": "Optional: Make the group usable in SMB share ACLs (default: false)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "create_nfs_share",
     "description": "Create an NFS (Network File System) share for Unix/Linux file sharing. This makes a ZFS dataset accessible over the network via the NFS protocol.\n\n**WIZARD GUIDANCE FOR LLM:**\nWhen helping users create NFS shares, follow this conversation flow:\n\n**1. Dataset Selection:**\n- Ask: \"Do you want to create a new dataset or use an existing ZFS dataset?\"\n- If NEW: Use create_dataset tool first (with share_type=NFS, acltype=POSIX)\n- If EXISTING: \n  * Query available datasets first with query_datasets\n  * Present options to user (NEVER suggest pool root like 'tank' or 'flash')\n  * Use the dataset's mountpoint as the path\n  * Warn: \"Never share a pool root - always use a child dataset\"\n- After dataset creation, use its mountpoint as the path\n\n**2. Access Control:**\n- Ask: \"Read-only or read-write?\" (default: read-write)\n- Ask: \"Restrict to specific networks?\" (CIDR notation: 192.0.2.0/24)\n- Ask: \"Restrict to specific hosts?\" (IP addresses or hostnames)\n- Recommend: At least one restriction (network or host) for security\n\n**3. User Mapping (Important for Security):**\n- Ask: \"How should root access be handled?\"\n  * **maproot_user**: Map root clients to specific user (recommended: 'nobody')\n  * **maproot_group**: Map root clients to specific group (recommended: 'nogroup')\n  * Warn if not set: \"Root clients will have full root access (security risk)\"\n- Ask: \"Map all users to a specific user?\" (optional, for anonymous access)\n  * **mapall_user**: Maps all clients to one user\n  * **mapall_group**: Maps all client groups to one group\n\n**4. Security Level (Optional):**\n- Default: SYS (system authentication)\n- Advanced: KRB5, KRB5I, KRB5P (Kerberos, requires setup)\n- Usually skip unless user specifically needs Kerberos\n\n**IMPORTANT RECOMMENDATIONS:**\n- For NFS shares: share_type=NFS, acltype=POSIX (in dataset creation)\n- Compression: LZ4 recommended for balanced performance\n- Always set maproot_user='nobody' to prevent root access\n- Use network/host restrictions to limit access\n- Read-only for shared data that shouldn't be modified\n\n**SECURITY WARNINGS TO DISPLAY:**\n- If no network/host restrictions: \"Share accessible from any host\"\n- If no maproot_user: \"Root clients will have full root access\"\n- If read-write + no restrictions: \"Any host can modify/delete files\"\n- Remind: \"Ensure NFS service is running and firewall allows NFS traffic (port 2049)\"\n\n**BEFORE EXECUTING:**\n1. Use dry_run=true to preview the configuration\n2. Display complete summary including:\n   - Local path\n   - Access type (read-only/read-write)\n   - Network/host restrictions\n   - User mapping settings\n   - Security warnings if applicable\n3. Get explicit user confirmation: \"Shall I create this NFS share?\"\n4. Warn: \"This is a WRITE operation that exposes data over your network\"\n5. After creation: Provide mount command example\n\n**DRY RUN:**\nSet dry_run=true to preview what will be created without executing. Show user the preview including security warnings, then ask for confirmation.",
     "inputSchema": {
@@ -874,6 +928,109 @@
     "annotations": {
       "readOnlyHint": false,
       "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "create_user",
+    "description": "Create a local user account. password_mode chooses how it signs in: 'disabled' (the default: no password login), 'random' (TrueNAS-strength random password generated when the call executes and returned once, in the result only) or 'set' (the password argument). The primary group is a new group named after the user unless group names an existing one. Never grants sudo, TrueNAS roles or membership of built-in or administrative groups (such as builtin_administrators, wheel or root); those groups, and groups with roles or sudo, are refused as group or in add_groups, and sudo or role arguments are refused outright. Another user's primary group (such as the group created with that user) is refused as group or in add_groups, since membership grants that user's group file access. Refused for root, admin, truenas_admin, names that already exist (as a user, or as a group when group is omitted) and uids below 1000. With home, a new directory home/\u003cusername\u003e is created; it is refused if that path already exists. The preview shows every field that will be set; it never shows a password. A set or generated password passes through the AI assistant and appears in the client's chat transcript. If the result of a random-password call is lost or cancelled, the account has a password nobody saw; set a new one with update_user. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "add_groups": {
+          "description": "Optional: Existing local groups (names) to add the user to as secondary groups",
+          "items": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without creating the user (default: false)",
+          "type": "boolean"
+        },
+        "email": {
+          "description": "Optional: Email address of the user",
+          "type": "string"
+        },
+        "full_name": {
+          "description": "Required: Full name or description of the account",
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "group": {
+          "description": "Optional: Existing local group to use as the primary group. Omit to create a new group named after the user",
+          "type": "string"
+        },
+        "home": {
+          "description": "Optional: Existing directory under /mnt/\u003cpool\u003e in which to create the new home directory \u003chome\u003e/\u003cusername\u003e. Omit for no home directory",
+          "type": "string"
+        },
+        "locked": {
+          "default": false,
+          "description": "Optional: Create the account locked (default: false)",
+          "type": "boolean"
+        },
+        "password": {
+          "description": "Optional: The new password, with password_mode 'set' only. Never shown in previews, results or errors",
+          "maxLength": 256,
+          "minLength": 8,
+          "type": "string"
+        },
+        "password_mode": {
+          "default": "disabled",
+          "description": "Optional: 'disabled' (no password login, the default), 'random' (generated when the call executes, returned once in the result) or 'set' (use password)",
+          "enum": [
+            "disabled",
+            "random",
+            "set"
+          ],
+          "type": "string"
+        },
+        "shell": {
+          "description": "Optional: Login shell, a path such as /usr/bin/bash or /usr/sbin/nologin (default: the TrueNAS default)",
+          "type": "string"
+        },
+        "smb": {
+          "default": false,
+          "description": "Optional: Allow SMB authentication (default: false). Needs a password",
+          "type": "boolean"
+        },
+        "ssh_password_enabled": {
+          "default": false,
+          "description": "Optional: Allow SSH password login (default: false). Needs a password and home",
+          "type": "boolean"
+        },
+        "uid": {
+          "description": "Optional: uid for the new user (1000 or more). Omit to let TrueNAS choose the next free one",
+          "maximum": 2147000000,
+          "minimum": 1000,
+          "type": "integer"
+        },
+        "username": {
+          "description": "Required: Name of the new user (letters, digits, '_', '.', '-'; not starting with '.' or '-'; at most 32 characters)",
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "username",
+        "full_name"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
       "idempotentHint": false,
       "openWorldHint": false
     }
@@ -2666,6 +2823,63 @@
     }
   },
   {
+    "name": "update_group",
+    "description": "Change a local group: its SMB flag and its members (add_members, remove_members). Refused for built-in groups, administrative groups (such as builtin_administrators, wheel or root), groups with TrueNAS roles or sudo, and directory service groups. Never changes sudo, roles, the gid or the name. Members added or removed must be local users; root, admin, truenas_admin and other built-in accounts, the account this server signs in as, and users with roles or sudo are refused. Adding a member to a group that is another user's primary group (such as the group created with that user) is refused. The preview shows each change with the current members; the confirmation is bound to the group's current settings and members, so a change after the preview needs a new one. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "add_members": {
+          "description": "Optional: Local users (usernames) to add to the group",
+          "items": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without changing the group (default: false)",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Required: Name of the local group to change (it is not renamed)",
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "remove_members": {
+          "description": "Optional: Users (usernames) to remove from the group",
+          "items": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "smb": {
+          "description": "Optional: Make the group usable in SMB share ACLs, or not",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "update_network_config",
     "description": "Change global network settings: hostname, domain, IPv4 or IPv6 default gateway, nameserver1-3. Only the fields you pass change; an empty string clears a gateway or nameserver. **Applies immediately and is NOT rolled back automatically**: unlike update_network_interface there is no 60-second check-in window, so a wrong gateway can cut this server's connection and stay in place. The preview shows the current values so the change can be reverted with another call. Refused while interface changes are pending (finish them with checkin_network_changes or rollback_network_changes first). After the update the reply reads the configuration back: `changed_gateways` shows each changed gateway's configured and applied value, and `status` is saved_not_applied when a changed gateway was saved but is not the default route. Verify the result with get_network_config. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
@@ -2787,6 +3001,110 @@
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "update_user",
+    "description": "Change a local user account: full name, email, shell, SMB and SSH password login, locked, password (password_mode 'disabled', 'random' or 'set'; a random password is generated when the call executes and returned once, in the result only), primary group and secondary groups (add_groups, remove_groups). Refused for root, admin, truenas_admin and other built-in accounts, the account this server signs in as, directory service users, and users that have TrueNAS roles or sudo or belong to an administrative group (such as builtin_administrators or wheel). Never changes sudo, roles, the uid or the username; built-in and administrative groups, and groups with roles or sudo, are refused in group, add_groups and remove_groups. Another user's primary group (such as the group created with that user) is refused in group and add_groups; leaving one with remove_groups is allowed. home can only be set for a user without a home directory, and creates a new directory home/\u003cusername\u003e; moving an existing home directory is refused. The preview shows each change with its current value and never shows a password; the confirmation is bound to the user's current settings, so a change to the user after the preview needs a new one. Any other local account, service accounts (such as replication or rsync users) included, can have its password reset, SSH password login turned on or shell changed. A set or generated password passes through the AI assistant and appears in the client's chat transcript. If the result of a random-password call is lost or cancelled, the account has a password nobody saw; set a new one with update_user. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "add_groups": {
+          "description": "Optional: Existing local groups (names) to add the user to",
+          "items": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without changing the user (default: false)",
+          "type": "boolean"
+        },
+        "email": {
+          "description": "Optional: New email address; an empty string clears it",
+          "type": "string"
+        },
+        "full_name": {
+          "description": "Optional: New full name or description",
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "group": {
+          "description": "Optional: Existing local group to make the primary group",
+          "type": "string"
+        },
+        "home": {
+          "description": "Optional: For a user without a home directory only: existing directory under /mnt/\u003cpool\u003e in which to create the new home directory \u003chome\u003e/\u003cusername\u003e",
+          "type": "string"
+        },
+        "locked": {
+          "description": "Optional: Lock or unlock the account",
+          "type": "boolean"
+        },
+        "password": {
+          "description": "Optional: The new password, with password_mode 'set' only. Never shown in previews, results or errors",
+          "maxLength": 256,
+          "minLength": 8,
+          "type": "string"
+        },
+        "password_mode": {
+          "default": "keep",
+          "description": "Optional: 'keep' (the default: no change), 'disabled' (turn password login off), 'random' (new password generated when the call executes, returned once in the result) or 'set' (use password)",
+          "enum": [
+            "keep",
+            "disabled",
+            "random",
+            "set"
+          ],
+          "type": "string"
+        },
+        "remove_groups": {
+          "description": "Optional: Groups (names) to remove the user from",
+          "items": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "shell": {
+          "description": "Optional: New login shell, a path such as /usr/bin/bash or /usr/sbin/nologin",
+          "type": "string"
+        },
+        "smb": {
+          "description": "Optional: Allow SMB authentication. Turning it on needs a new password (password_mode 'set' or 'random')",
+          "type": "boolean"
+        },
+        "ssh_password_enabled": {
+          "description": "Optional: Allow SSH password login. Needs password login and a home directory",
+          "type": "boolean"
+        },
+        "username": {
+          "description": "Required: Name of the local user to change (it is not renamed)",
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "username"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
       "openWorldHint": false
     }
   },

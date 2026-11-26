@@ -117,9 +117,15 @@ var toolSafety = map[string]Safety{
 	"analyze_capacity":          {Access: Read},
 	"get_pool_capacity_details": {Access: Read},
 
-	// Accounts
+	// Accounts. The write tools are destructive so that they execute only
+	// after confirmation, bound to the account's current settings: a new
+	// account can sign in, and an update replaces settings in place.
 	"query_users":  {Access: Read},
 	"query_groups": {Access: Read},
+	"create_user":  {Access: Destructive},
+	"update_user":  {Access: Destructive},
+	"create_group": {Access: Destructive},
+	"update_group": {Access: Destructive},
 
 	// Disks and services
 	"query_disks":     {Access: Read},

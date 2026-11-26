@@ -128,6 +128,16 @@ This document provides example natural language queries you can use with TrueNAS
 - "What certificates are available for LDAP authentication?"
 - "Is my Active Directory connection healthy?"
 
+## Users and Groups
+
+- "Which local users have SMB access?"
+- "Create a user carol, Carol Smith, with a random password and SMB access"
+- "Create user dan with a home directory under /mnt/tank/home and add him to the staff group"
+- "Lock the user bob"
+- "Set a new random password for alice"
+- "Create a group media with members alice and bob"
+- "Remove bob from the staff group"
+
 ## System Updates
 
 - "Check if there are any TrueNAS system updates available"

@@ -1013,21 +1013,35 @@ func ToolOutput(s string) string {
 // anywhere else, or with any other value, is redacted as usual. Everything
 // else in the result is redacted exactly as by ToolOutput.
 func ToolOutputKeeping(s, key string, keep func(string) bool) string {
+	if keep == nil {
+		return ToolOutput(s)
+	}
+	return ToolOutputKeepingKeys(s, map[string]func(string) bool{key: keep})
+}
+
+// ToolOutputKeepingKeys is ToolOutputKeeping for several top-level keys,
+// each with its own keep function. keep is called at most once per key.
+func ToolOutputKeepingKeys(s string, keep map[string]func(string) bool) string {
 	v, ok := decode([]byte(s))
-	if !ok || keep == nil {
+	if !ok || len(keep) == 0 {
 		return ToolOutput(s)
 	}
 	obj, isObj := v.(map[string]interface{})
 	if !isObj {
 		return ToolOutput(s)
 	}
-	kept, isStr := obj[key].(string)
-	if !isStr || !keep(kept) {
+	kept := map[string]string{}
+	for key, fn := range keep {
+		if val, isStr := obj[key].(string); isStr && fn != nil && fn(val) {
+			kept[key] = val
+		}
+	}
+	if len(kept) == 0 {
 		return ToolOutput(s)
 	}
 	rest := make(map[string]interface{}, len(obj))
 	for k, val := range obj {
-		if k != key {
+		if _, ok := kept[k]; !ok {
 			rest[k] = val
 		}
 	}
@@ -1036,7 +1050,9 @@ func ToolOutputKeeping(s, key string, keep func(string) bool) string {
 	if !isMap {
 		return ToolOutput(s)
 	}
-	m[key] = kept
+	for k, val := range kept {
+		m[k] = val
+	}
 	enc, err := encode(m, strings.Contains(s, "\n"))
 	if err != nil {
 		return ToolOutput(s)

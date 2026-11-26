@@ -120,6 +120,9 @@ func validateArgs(name string, tool Tool, args map[string]interface{}) error {
 // arguments and the new shape tells a client with a stale schema how to fix
 // the call. Only argument names from a fixed list are echoed, never values.
 func withMigrationHint(name string, args map[string]interface{}, err error) error {
+	if _, ok := accountRefusedArgs[name]; ok {
+		return accountArgRefusal(name, args, err)
+	}
 	if name != "configure_directory_service" {
 		return err
 	}
