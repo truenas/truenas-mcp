@@ -55,6 +55,10 @@ This document provides example natural language queries you can use with TrueNAS
 - "Clone tank/data@manual-1 to tank/restore/data so I can copy a file back"
 - "Hold tank/data@manual-1 so retention does not delete it"
 - "Release the hold on tank/data@manual-1"
+- "Roll tank/data back to its latest snapshot"
+- "What would rolling tank/data back to tank/data@manual-1 destroy?"
+- "Delete tank/data@manual-1"
+- "Delete the snapshot tank/data@before-upgrade on tank/data and all its children"
 - "Run snapshot task 3 now and show me the snapshots it made"
 - "Replicate tank/data off-site now"
 
