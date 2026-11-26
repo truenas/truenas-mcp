@@ -175,7 +175,7 @@ This document provides example natural language queries you can use with TrueNAS
 
 - "Create an NFS share for my Linux servers"
 - "Set up a read-only NFS export for backups"
-- "I need an NFS share restricted to my 192.168.1.0/24 network"
+- "I need an NFS share restricted to my 192.0.2.0/24 network"
 - "Create an NFS share with root squashing for security"
 - "Share my data directory with specific hosts only"
 
