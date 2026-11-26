@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	truenasURL          = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.example.com' or 'wss://10.0.0.1/api/current')")
+	truenasURL          = flag.String("truenas-url", "", "TrueNAS hostname or WebSocket URL (e.g., 'truenas.example.com' or 'wss://192.0.2.10/api/current')")
 	apiUser             = flag.String("api-user", "", "User that owns the API key, sent to auth.login_ex (required; env TRUENAS_API_USER)")
 	apiKey              = flag.String("api-key", "", "TrueNAS API key for middleware authentication (env TRUENAS_API_KEY; visible in the process list)")
 	apiKeyFile          = flag.String("api-key-file", "", "Path to a file containing the TrueNAS API key (env TRUENAS_API_KEY_FILE)")
