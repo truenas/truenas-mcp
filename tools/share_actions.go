@@ -39,6 +39,10 @@ const (
 	maxShareCommentLen = 1024
 	// everyoneSID is the well-known SID of Everyone.
 	everyoneSID = "S-1-1-0"
+	// builtinAdminsSID is the SID of builtin_administrators (BUILTIN\Administrators).
+	builtinAdminsSID = "S-1-5-32-544"
+	// smbLegacyPurpose is the only purpose whose options include the host lists on update.
+	smbLegacyPurpose = "LEGACY_SHARE"
 )
 
 // reservedSMBShareNames are names Samba or Windows give a special meaning:
@@ -83,7 +87,7 @@ func (r *Registry) registerShareActionTools() {
 	r.tools["update_smb_share"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "update_smb_share",
-			Description: "Change the settings of one existing SMB share: its name, path, comment, enabled, readonly, browsable, access_based_share_enumeration, hostsallow or hostsdeny. Only the settings given that differ from the current ones are sent. The preview shows the share's current settings and each change (old -> new). Renaming breaks client paths and mapped drives that use the old name; a new path serves a different directory and moves no files. hostsallow and hostsdeny can be changed only for shares whose purpose has those options (LEGACY_SHARE on 25.10). Refused for the homes share and other reserved or administrative names (global, printers, homes, IPC$, ADMIN$, PRINT$, drive shares such as C$), for shares on a locked dataset or whose lock state is unknown, and for shares whose current or new path is not below /mnt/<pool> (pool roots, /mnt itself, EXTERNAL DFS proxies, datasets TrueNAS manages itself such as the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, non-normalised paths, and paths that go through a symlink). The share's purpose, options other than the host lists, audit settings, share ACL and the global SMB service settings are not changed. Use dry_run to preview.",
+			Description: "Change the settings of one existing SMB share: its name, path, comment, enabled, readonly, browsable, access_based_share_enumeration, hostsallow or hostsdeny. Only the settings given that differ from the current ones are sent. The preview shows the share's current settings and each change (old -> new). Renaming breaks client paths and mapped drives that use the old name; a new path serves a different directory and moves no files. hostsallow and hostsdeny can be changed only for shares whose purpose is LEGACY_SHARE. Refused for the homes share and other reserved or administrative names (global, printers, homes, IPC$, ADMIN$, PRINT$, drive shares such as C$), for shares on a locked dataset or whose lock state is unknown, and for shares whose current or new path is not below /mnt/<pool> (pool roots, /mnt itself, EXTERNAL DFS proxies, datasets TrueNAS manages itself such as the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, non-normalised paths, and paths that go through a symlink). The share's purpose, options other than the host lists, audit settings, share ACL and the global SMB service settings are not changed. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -178,7 +182,7 @@ func (r *Registry) registerShareActionTools() {
 	r.tools["set_share_acl"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "set_share_acl",
-			Description: "Replace the share-level ACL of one SMB share (sharing.smb.setacl). The new ACL replaces the current one as a whole: entries not listed are removed. Each entry names its principal by who_type: 'everyone', 'user' or 'group' (a user or group TrueNAS lists, with SMB enabled; who is its name), or 'sid' (who is the SID of such a user or group, or S-1-1-0). Directory service accounts that query_users and query_groups do not list are refused, as are unknown names, non-SMB accounts, Unix-encoded SIDs (S-1-22-...) and the same principal twice. An ACL that grants FULL to nobody, or that has a DENIED entry for everyone, is refused unless allow_no_full_control=true, because it can lock every user, administrators included, out of the share. The preview shows the current share ACL and the new one. This changes only the share ACL, which applies to SMB access; the filesystem ACL of the share path is not changed (get_filesystem_acl). Refused for the same shares as update_smb_share. Use dry_run to preview.",
+			Description: "Replace the share-level ACL of one SMB share (sharing.smb.setacl). The new ACL replaces the current one as a whole: entries not listed are removed. Each entry names its principal by who_type: 'everyone', 'user' or 'group' (a local user or group with SMB enabled; who is its name), or 'sid' (who is the SID of such a user or group, or S-1-1-0). Directory service (Active Directory, LDAP, IPA) users and groups are refused, by name or by SID, as are unknown names, non-SMB accounts, Unix-encoded SIDs (S-1-22-...) and the same principal twice. An ACL that grants FULL to nobody, that has a DENIED entry for everyone, or that has a DENIED entry for an administrative group (builtin_administrators, or any group that grants TrueNAS roles), is refused unless allow_no_full_control=true, because it can lock every user, or the administrators, out of the share. The preview shows the current share ACL and the new one. This changes only the share ACL, which applies to SMB access; the filesystem ACL of the share path is not changed (get_filesystem_acl). Refused for the same shares as update_smb_share. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -201,7 +205,7 @@ func (r *Registry) registerShareActionTools() {
 						},
 					},
 					"allow_no_full_control": map[string]interface{}{"type": "boolean", "default": false,
-						"description": "Optional: Allow an ACL in which no entry grants FULL, or with a DENIED entry for everyone (default: false). Refused when the ACL does not need it"},
+						"description": "Optional: Allow an ACL in which no entry grants FULL, or with a DENIED entry for everyone or for an administrative group (default: false). Refused when the ACL does not need it"},
 					"dry_run": dryRun,
 				},
 				"required": []string{"entries"},
@@ -340,7 +344,8 @@ func smbShareNameRefusal(name string) string {
 
 // sharePathRefusal is why p is not a path these tools let a share use, or
 // "". It accepts only a normalised path strictly below /mnt/<pool> that is
-// not in a dataset TrueNAS manages itself (managedDatasetPart).
+// not in a dataset TrueNAS manages itself (managedDatasetPart, in any
+// letter case).
 func sharePathRefusal(p string) string {
 	switch {
 	case p == "":
@@ -362,7 +367,9 @@ func sharePathRefusal(p string) string {
 	case sub == "":
 		return fmt.Sprintf("path %q is the root of pool '%s'; share a dataset or directory below it", p, pool)
 	}
-	if part, ok := managedDatasetPart(rest); ok {
+	// Compared in lower case, so IX-APPS or Boot-Pool on a case-insensitive
+	// pool is refused like ix-apps or boot-pool.
+	if part, ok := managedDatasetPart(strings.ToLower(rest)); ok {
 		return fmt.Sprintf("path %q is inside '%s', which TrueNAS manages itself", p, part)
 	}
 	return ""
@@ -610,10 +617,12 @@ func planUpdateSMBShare(ctx context.Context, client *truenas.Client, args map[st
 		if !given {
 			continue
 		}
-		cur, has := opts[key]
-		if !has {
-			return nil, fmt.Errorf("SMB share '%s' (purpose %v) has no %s option, so it cannot be set with this tool", name, share["purpose"], key)
+		// Only LegacyOpt accepts the host lists on update; 25.10 also
+		// returns them for other purposes, so their presence is not enough.
+		if purpose, _ := share["purpose"].(string); purpose != smbLegacyPurpose {
+			return nil, fmt.Errorf("SMB share '%s' has purpose %v; %s can be changed only for %s shares", name, share["purpose"], key, smbLegacyPurpose)
 		}
+		cur := opts[key]
 		if sameJSON(listValue(cur), list) {
 			notes = append(notes, fmt.Sprintf("%s is unchanged", key))
 			continue
@@ -1140,6 +1149,8 @@ type shareACLEntry struct {
 	Who  interface{}
 	Perm string
 	Type string
+	// admin is why the principal is an administrative group, or "".
+	admin string
 }
 
 func (e shareACLEntry) key() string { return e.SID + "|" + e.Type + "|" + e.Perm }
@@ -1218,13 +1229,25 @@ type smbAccount struct {
 	SMB   bool
 	SID   string
 	Group bool
+	// Local is true only when the row says local is true: a directory
+	// service account, or a row without the field, is not local.
+	Local bool
+	// Roles are a group's TrueNAS roles; RolesOK is false when the row
+	// has no readable roles list.
+	Roles   []string
+	RolesOK bool
 }
 
+// querySMBAccounts looks up local users or groups. The filters are
+// narrowed to local accounts; rows are still checked one by one
+// (accountSIDRefusal), so a middleware that ignores part of the filter
+// cannot let a directory service account through.
 func querySMBAccounts(ctx context.Context, client *truenas.Client, group bool, filters []interface{}) ([]smbAccount, error) {
 	var raw json.RawMessage
 	var err error
+	filters = append(append([]interface{}{}, filters...), []interface{}{"local", "=", true})
 	if group {
-		raw, err = client.Call(ctx, "group.query", filters, map[string]interface{}{"select": []interface{}{"id", "gid", "name", "smb", "sid", "local"}})
+		raw, err = client.Call(ctx, "group.query", filters, map[string]interface{}{"select": []interface{}{"id", "gid", "name", "smb", "sid", "local", "roles"}})
 	} else {
 		raw, err = client.Call(ctx, "user.query", filters, map[string]interface{}{"select": []interface{}{"id", "uid", "username", "smb", "sid", "local"}})
 	}
@@ -1245,12 +1268,16 @@ func querySMBAccounts(ctx context.Context, client *truenas.Client, group bool, f
 		if group {
 			a.Name, _ = row["name"].(string)
 			a.ID, a.IDOK = intID(row["gid"])
+			if roles, ok := row["roles"].([]interface{}); ok {
+				a.Roles, a.RolesOK = stringList(roles), true
+			}
 		} else {
 			a.Name, _ = row["username"].(string)
 			a.ID, a.IDOK = intID(row["uid"])
 		}
 		a.SMB, _ = row["smb"].(bool)
 		a.SID, _ = row["sid"].(string)
+		a.Local, _ = row["local"].(bool)
 		out = append(out, a)
 	}
 	return out, nil
@@ -1272,10 +1299,29 @@ func accountSIDRefusal(a smbAccount) string {
 		kind = "group"
 	}
 	switch {
+	case !a.Local:
+		return fmt.Sprintf("%s '%s' is not a local %s (a directory service account, or its local flag could not be read); share ACLs set with this tool use local accounts only", kind, a.Name, kind)
 	case !a.SMB:
 		return fmt.Sprintf("%s '%s' is not an SMB %s (smb is false), so it cannot be used in a share ACL", kind, a.Name, kind)
 	case a.SID == "" || unixSID(a.SID):
 		return fmt.Sprintf("%s '%s' has no SMB SID, so it cannot be used in a share ACL", kind, a.Name)
+	}
+	return ""
+}
+
+// adminGroupReason is why a is an administrative group, one a DENIED entry
+// for can lock administrators out of the share, or "". A group whose roles
+// cannot be read counts as one.
+func adminGroupReason(a smbAccount) string {
+	switch {
+	case !a.Group:
+		return ""
+	case a.SID == builtinAdminsSID || privilegedGroupNames[a.Name]:
+		return "is an administrative group"
+	case !a.RolesOK:
+		return "has roles that could not be read"
+	case len(a.Roles) > 0:
+		return fmt.Sprintf("grants TrueNAS roles (%s)", strings.Join(a.Roles, ", "))
 	}
 	return ""
 }
@@ -1314,6 +1360,7 @@ func resolveShareACLEntries(ctx context.Context, client *truenas.Client, args ma
 			return nil, nil, nil, fmt.Errorf("entries[%d].type must be ALLOWED or DENIED", i)
 		}
 		w := shareACLWho{Kind: kind}
+		admin := ""
 		switch kind {
 		case "everyone":
 			if who != "" {
@@ -1341,7 +1388,7 @@ func resolveShareACLEntries(ctx context.Context, client *truenas.Client, args ma
 			w.Name = who
 			switch {
 			case len(match) == 0:
-				reasons = append(reasons, fmt.Sprintf("%s '%s' not found (directory service accounts that query_%ss does not list are not supported)", kind, who, kind))
+				reasons = append(reasons, fmt.Sprintf("local %s '%s' not found (directory service accounts are refused)", kind, who))
 				continue
 			case len(match) > 1:
 				reasons = append(reasons, fmt.Sprintf("%s name '%s' matches %d accounts", kind, who, len(match)))
@@ -1356,6 +1403,7 @@ func resolveShareACLEntries(ctx context.Context, client *truenas.Client, args ma
 				w.ID = &id
 			}
 			w.SID = match[0].SID
+			admin = adminGroupReason(match[0])
 		case "sid":
 			if !sidPattern.MatchString(who) {
 				return nil, nil, nil, fmt.Errorf("entries[%d]: who %q is not a SID (S-1-...)", i, who)
@@ -1388,10 +1436,15 @@ func resolveShareACLEntries(ctx context.Context, client *truenas.Client, args ma
 				}
 			}
 			if len(match) != 1 {
-				reasons = append(reasons, fmt.Sprintf("SID %s does not belong to exactly one SMB user or group that query_users or query_groups lists (directory service accounts are not supported)", who))
+				reasons = append(reasons, fmt.Sprintf("SID %s does not belong to exactly one local SMB user or group (directory service accounts are refused)", who))
+				continue
+			}
+			if why := accountSIDRefusal(match[0]); why != "" {
+				reasons = append(reasons, why)
 				continue
 			}
 			w.Name = match[0].Name
+			admin = adminGroupReason(match[0])
 			if match[0].IDOK {
 				id := match[0].ID
 				w.ID = &id
@@ -1400,7 +1453,7 @@ func resolveShareACLEntries(ctx context.Context, client *truenas.Client, args ma
 			return nil, nil, nil, fmt.Errorf("entries[%d].who_type must be everyone, user, group or sid", i)
 		}
 		whos = append(whos, w)
-		entries = append(entries, shareACLEntry{SID: w.SID, Who: w.Name, Perm: perm, Type: typ})
+		entries = append(entries, shareACLEntry{SID: w.SID, Who: w.Name, Perm: perm, Type: typ, admin: admin})
 	}
 	seen := map[string]string{}
 	for _, e := range entries {
@@ -1413,7 +1466,8 @@ func resolveShareACLEntries(ctx context.Context, client *truenas.Client, args ma
 	return entries, whos, reasons, nil
 }
 
-// shareACLLockout is why acl can lock every user out of the share, or "".
+// shareACLLockout is why acl can lock every user, or the administrators,
+// out of the share, or "".
 func shareACLLockout(acl []shareACLEntry) string {
 	full := false
 	var why []string
@@ -1423,6 +1477,9 @@ func shareACLLockout(acl []shareACLEntry) string {
 		}
 		if e.Type == "DENIED" && e.SID == everyoneSID {
 			why = append(why, fmt.Sprintf("it denies %s to everyone, which overrides every ALLOWED entry", e.Perm))
+		}
+		if e.Type == "DENIED" && e.admin != "" {
+			why = append(why, fmt.Sprintf("it denies %s to group '%v', which %s, so administrators can be locked out", e.Perm, e.Who, e.admin))
 		}
 	}
 	if !full {
@@ -1460,9 +1517,9 @@ func planSetShareACL(ctx context.Context, client *truenas.Client, args map[strin
 	}
 	switch {
 	case lockout != "" && !allowNoFull:
-		blocked = append(blocked, fmt.Sprintf("the new share ACL can lock every user, administrators included, out of the share: %s; add an ALLOWED FULL entry for an administrator or group, or set allow_no_full_control=true after reviewing it", lockout))
+		blocked = append(blocked, fmt.Sprintf("the new share ACL can lock every user, or the administrators, out of the share: %s; add an ALLOWED FULL entry for an administrator or group and leave administrative groups out of DENIED entries, or set allow_no_full_control=true after reviewing it", lockout))
 	case lockout == "" && allowNoFull && len(reasons) == 0:
-		blocked = append(blocked, "allow_no_full_control is set, but the new share ACL grants FULL and denies nothing to everyone; omit it")
+		blocked = append(blocked, "allow_no_full_control is set, but the new share ACL grants FULL and denies nothing to everyone or to an administrative group; omit it")
 	case lockout != "":
 		warnings = append(warnings, "allow_no_full_control: "+lockout)
 	}

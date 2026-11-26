@@ -64,6 +64,11 @@ type shareFake struct {
 	users  []map[string]interface{}
 	groups []map[string]interface{}
 	fail   map[string]string
+	// rawAccounts makes user.query and group.query ignore their filters,
+	// so the client-side checks on each row are what refuses.
+	rawAccounts bool
+	// deleteResult, when set, is what sharing.*.delete returns.
+	deleteResult interface{}
 }
 
 func newShareFake() *shareFake {
@@ -131,8 +136,8 @@ func newShareFake() *shareFake {
 		{"id": 12.0, "uid": 3003.0, "username": "carol", "smb": true, "sid": "S-1-22-1-3003", "local": true},
 	}
 	f.groups = []map[string]interface{}{
-		{"id": 40.0, "gid": 544.0, "name": "builtin_administrators", "group": "builtin_administrators", "smb": true, "sid": adminsSID, "local": true},
-		{"id": 50.0, "gid": 3100.0, "name": "staff", "group": "staff", "smb": true, "sid": staffSID, "local": true},
+		{"id": 40.0, "gid": 544.0, "name": "builtin_administrators", "group": "builtin_administrators", "smb": true, "sid": adminsSID, "local": true, "roles": []interface{}{"FULL_ADMIN"}},
+		{"id": 50.0, "gid": 3100.0, "name": "staff", "group": "staff", "smb": true, "sid": staffSID, "local": true, "roles": []interface{}{}},
 	}
 	return f
 }
@@ -235,6 +240,9 @@ func (f *shareFake) handle(method string, params json.RawMessage) (interface{}, 
 			rows = f.nfs
 		}
 		delete(rows, idArg())
+		if f.deleteResult != nil {
+			return f.deleteResult, nil, true
+		}
 		return true, nil, true
 	case "filesystem.stat":
 		path, _ := p[0].(string)
@@ -250,7 +258,7 @@ func (f *shareFake) handle(method string, params json.RawMessage) (interface{}, 
 		}
 		out := []interface{}{}
 		for _, row := range rows {
-			if shareFilterMatch(row, filters()) {
+			if f.rawAccounts || shareFilterMatch(row, filters()) {
 				out = append(out, copyRow(row))
 			}
 		}
@@ -477,7 +485,7 @@ func TestUpdateSMBShareHostLists(t *testing.T) {
 	}
 	r, fake = newShareFake().registry(t)
 	assertRefused(t, r, fake, "update_smb_share", "sharing.smb.update", map[string]interface{}{"share_id": 1.0, "hostsallow": []interface{}{"192.0.2.10"}},
-		"has no hostsallow option")
+		"can be changed only for LEGACY_SHARE shares")
 }
 
 func TestUpdateSMBShareRefusals(t *testing.T) {
@@ -852,7 +860,7 @@ func TestSetShareACLRefusals(t *testing.T) {
 		{"non-SMB user", aclArgs("docs", full, aclEntry("user", "bob", "READ", "ALLOWED")), "is not an SMB user"},
 		{"Unix SID user", aclArgs("docs", full, aclEntry("user", "carol", "READ", "ALLOWED")), "has no SMB SID"},
 		{"Unix SID", aclArgs("docs", full, aclEntry("sid", "S-1-22-1-3003", "READ", "ALLOWED")), "Unix-encoded SID"},
-		{"unknown SID", aclArgs("docs", full, aclEntry("sid", "S-1-5-21-9-9-9-500", "READ", "ALLOWED")), "does not belong to exactly one SMB user or group"},
+		{"unknown SID", aclArgs("docs", full, aclEntry("sid", "S-1-5-21-9-9-9-500", "READ", "ALLOWED")), "does not belong to exactly one local SMB user or group"},
 		{"malformed SID", aclArgs("docs", full, aclEntry("sid", "S-1-x", "READ", "ALLOWED")), "is not a SID"},
 		{"SID with spaces", aclArgs("docs", full, aclEntry("sid", "S-1-5-32 -544", "READ", "ALLOWED")), "is not a SID"},
 		{"who for everyone", aclArgs("docs", full, aclEntry("everyone", "x", "READ", "ALLOWED")), "omit who"},
@@ -1001,10 +1009,303 @@ func TestSharePathRefusal(t *testing.T) {
 		"/mnt/boot-pool/ROOT":       "inside 'boot-pool'",
 		"/mnt/freenas-boot/x":       "inside 'freenas-boot'",
 		"/mnt/tank/a/.snap":         "inside '.snap'",
+		"/mnt/tank/IX-APPS/a":       "inside 'ix-apps'",
+		"/mnt/tank/Ix-Applications": "inside 'ix-applications'",
+		"/mnt/Boot-Pool/ROOT":       "inside 'boot-pool'",
+		"/mnt/FREENAS-BOOT/x":       "inside 'freenas-boot'",
 	} {
 		got := sharePathRefusal(p)
 		if (want == "") != (got == "") || (want != "" && !strings.Contains(got, want)) {
 			t.Errorf("sharePathRefusal(%q) = %q, want %q", p, got, want)
+		}
+	}
+}
+
+// ---- review follow-ups ----
+
+const (
+	daveSID        = "S-1-5-21-777-888-999-1104"
+	domainAdminSID = "S-1-5-21-777-888-999-512"
+)
+
+// withDirectoryAccounts adds a directory service user and group, as
+// user.query and group.query return them when a directory is joined.
+func withDirectoryAccounts(f *shareFake) {
+	f.users = append(f.users, map[string]interface{}{"id": 90.0, "uid": 1000001104.0, "username": `AD\dave`, "smb": true, "sid": daveSID, "local": false})
+	f.groups = append(f.groups, map[string]interface{}{"id": 91.0, "gid": 1000000512.0, "name": `AD\domain admins`, "group": `AD\domain admins`, "smb": true, "sid": domainAdminSID, "local": false, "roles": []interface{}{}})
+}
+
+func TestSetShareACLRefusesDirectoryAccounts(t *testing.T) {
+	full := aclEntry("group", "builtin_administrators", "FULL", "ALLOWED")
+	for _, raw := range []bool{false, true} {
+		for _, tc := range []struct {
+			name     string
+			entry    map[string]interface{}
+			filtered string
+			unfilter string
+		}{
+			{"user by name", aclEntry("user", `AD\dave`, "READ", "ALLOWED"), `local user 'AD\dave' not found`, `user 'AD\dave' is not a local user`},
+			{"group by name", aclEntry("group", `AD\domain admins`, "READ", "ALLOWED"), `local group 'AD\domain admins' not found`, `group 'AD\domain admins' is not a local group`},
+			{"user by SID", aclEntry("sid", daveSID, "READ", "ALLOWED"), "does not belong to exactly one local SMB user or group", `user 'AD\dave' is not a local user`},
+			{"group by SID", aclEntry("sid", domainAdminSID, "READ", "ALLOWED"), "does not belong to exactly one local SMB user or group", `group 'AD\domain admins' is not a local group`},
+		} {
+			t.Run(fmt.Sprintf("%s raw=%v", tc.name, raw), func(t *testing.T) {
+				f := newShareFake()
+				withDirectoryAccounts(f)
+				f.rawAccounts = raw
+				r, fake := f.registry(t)
+				want := tc.filtered
+				if raw {
+					want = tc.unfilter
+				}
+				assertRefused(t, r, fake, "set_share_acl", "sharing.smb.setacl", aclArgs("docs", full, tc.entry), want)
+				for _, m := range []string{"user.query", "group.query"} {
+					for _, c := range fake.called(m) {
+						if !strings.Contains(string(c.Params), `["local","=",true]`) {
+							t.Errorf("%s sent without the local filter: %s", m, c.Params)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// A row without a readable local flag is not taken for a local account.
+func TestSetShareACLLocalFlagMissingFailsClosed(t *testing.T) {
+	full := aclEntry("group", "builtin_administrators", "FULL", "ALLOWED")
+	for _, tc := range []struct {
+		name  string
+		entry map[string]interface{}
+		want  string
+	}{
+		{"user by name", aclEntry("user", "alice", "READ", "ALLOWED"), "user 'alice' is not a local user"},
+		{"user by SID", aclEntry("sid", aliceSID, "READ", "ALLOWED"), "user 'alice' is not a local user"},
+		{"group by name", aclEntry("group", "staff", "READ", "ALLOWED"), "group 'staff' is not a local group"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShareFake()
+			f.rawAccounts = true
+			delete(f.users[0], "local")
+			delete(f.groups[1], "local")
+			r, fake := f.registry(t)
+			assertRefused(t, r, fake, "set_share_acl", "sharing.smb.setacl", aclArgs("docs", full, tc.entry), tc.want)
+		})
+	}
+}
+
+// With filters ignored, the per-row name and smb checks still pick the
+// right account and refuse the rest.
+func TestSetShareACLClientSideAccountChecks(t *testing.T) {
+	newFake := func() *shareFake {
+		f := newShareFake()
+		f.rawAccounts = true
+		// erin has an SMB-style SID but SMB is off for her.
+		f.users = append(f.users, map[string]interface{}{"id": 13.0, "uid": 3004.0, "username": "erin", "smb": false, "sid": "S-1-5-21-111-222-333-1005", "local": true})
+		return f
+	}
+	f := newFake()
+	r, _ := f.registry(t)
+	dry := dryRunOf(t, r, "set_share_acl", aclArgs("docs", aclEntry("group", "staff", "FULL", "ALLOWED"), aclEntry("user", "alice", "READ", "ALLOWED")))
+	if got := previewText(t, plannedDetails(t, dry)["new_share_acl"]); got != `[{"perm":"FULL","sid":"S-1-5-21-111-222-333-2001","type":"ALLOWED","who":"staff"},{"perm":"READ","sid":"S-1-5-21-111-222-333-1001","type":"ALLOWED","who":"alice"}]` {
+		t.Errorf("new_share_acl = %s", got)
+	}
+	full := aclEntry("group", "staff", "FULL", "ALLOWED")
+	for _, tc := range []struct {
+		name  string
+		entry map[string]interface{}
+		want  string
+	}{
+		{"name not returned by filter", aclEntry("user", "mallory", "READ", "ALLOWED"), "local user 'mallory' not found"},
+		{"name differs in case", aclEntry("user", "Alice", "READ", "ALLOWED"), "local user 'Alice' not found"},
+		{"non-SMB SID", aclEntry("sid", "S-1-5-21-111-222-333-1005", "READ", "ALLOWED"), "does not belong to exactly one local SMB user or group"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake()
+			r, fake := f.registry(t)
+			assertRefused(t, r, fake, "set_share_acl", "sharing.smb.setacl", aclArgs("docs", full, tc.entry), tc.want)
+		})
+	}
+}
+
+func TestSetShareACLAmbiguousPrincipals(t *testing.T) {
+	full := aclEntry("group", "builtin_administrators", "FULL", "ALLOWED")
+	for _, tc := range []struct {
+		name   string
+		change func(f *shareFake)
+		entry  map[string]interface{}
+		want   string
+	}{
+		{"two users with one name", func(f *shareFake) {
+			f.users = append(f.users, map[string]interface{}{"id": 14.0, "uid": 3010.0, "username": "alice", "smb": true, "sid": "S-1-5-21-111-222-333-1010", "local": true})
+		}, aclEntry("user", "alice", "READ", "ALLOWED"), "user name 'alice' matches 2 accounts"},
+		{"two groups with one name", func(f *shareFake) {
+			f.groups = append(f.groups, map[string]interface{}{"id": 51.0, "gid": 3101.0, "name": "staff", "smb": true, "sid": "S-1-5-21-111-222-333-2002", "local": true, "roles": []interface{}{}})
+		}, aclEntry("group", "staff", "READ", "ALLOWED"), "group name 'staff' matches 2 accounts"},
+		{"SID of a user and a group", func(f *shareFake) {
+			f.groups = append(f.groups, map[string]interface{}{"id": 52.0, "gid": 3102.0, "name": "alicegrp", "smb": true, "sid": aliceSID, "local": true, "roles": []interface{}{}})
+		}, aclEntry("sid", aliceSID, "READ", "ALLOWED"), "does not belong to exactly one local SMB user or group"},
+		{"SID of two users", func(f *shareFake) {
+			f.users = append(f.users, map[string]interface{}{"id": 15.0, "uid": 3011.0, "username": "alice2", "smb": true, "sid": aliceSID, "local": true})
+		}, aclEntry("sid", aliceSID, "READ", "ALLOWED"), "does not belong to exactly one local SMB user or group"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShareFake()
+			tc.change(f)
+			r, fake := f.registry(t)
+			assertRefused(t, r, fake, "set_share_acl", "sharing.smb.setacl", aclArgs("docs", full, tc.entry), tc.want)
+		})
+	}
+}
+
+// A DENIED entry for an administrative group needs allow_no_full_control.
+func TestSetShareACLDeniedAdminGroup(t *testing.T) {
+	addGroups := func(f *shareFake) {
+		f.groups = append(f.groups,
+			map[string]interface{}{"id": 60.0, "gid": 3200.0, "name": "ops", "smb": true, "sid": "S-1-5-21-111-222-333-3200", "local": true, "roles": []interface{}{"SHARING_ADMIN"}},
+			map[string]interface{}{"id": 61.0, "gid": 3201.0, "name": "noroles", "smb": true, "sid": "S-1-5-21-111-222-333-3201", "local": true})
+	}
+	everyoneFull := aclEntry("everyone", "", "FULL", "ALLOWED")
+	for _, tc := range []struct {
+		name  string
+		entry map[string]interface{}
+		want  string
+	}{
+		{"builtin_administrators by name", aclEntry("group", "builtin_administrators", "READ", "DENIED"), "denies READ to group 'builtin_administrators', which is an administrative group"},
+		{"builtin_administrators by SID", aclEntry("sid", adminsSID, "CHANGE", "DENIED"), "denies CHANGE to group 'builtin_administrators', which is an administrative group"},
+		{"group with roles", aclEntry("group", "ops", "FULL", "DENIED"), "denies FULL to group 'ops', which grants TrueNAS roles (SHARING_ADMIN)"},
+		{"group with roles by SID", aclEntry("sid", "S-1-5-21-111-222-333-3200", "READ", "DENIED"), "which grants TrueNAS roles"},
+		{"group whose roles cannot be read", aclEntry("group", "noroles", "READ", "DENIED"), "has roles that could not be read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShareFake()
+			addGroups(f)
+			r, fake := f.registry(t)
+			args := aclArgs("docs", everyoneFull, tc.entry)
+			assertRefused(t, r, fake, "set_share_acl", "sharing.smb.setacl", args, tc.want)
+			assertRefused(t, r, fake, "set_share_acl", "sharing.smb.setacl", args, "allow_no_full_control=true")
+			// The override lets the reviewed ACL through, with the reason shown.
+			f2 := newShareFake()
+			addGroups(f2)
+			r2, fake2 := f2.registry(t)
+			preview, _ := confirmAndRun(t, r2, fake2, "set_share_acl", "sharing.smb.setacl", mergeArgs(args, map[string]interface{}{"allow_no_full_control": true}))
+			assertContainsAll(t, "preview", previewBody(t, preview), "allow_no_full_control: it denies", tc.want, "administrators can be locked out")
+		})
+	}
+	// DENIED for an ordinary group, and ALLOWED for an administrative
+	// one, need no override.
+	f := newShareFake()
+	addGroups(f)
+	r, fake := f.registry(t)
+	confirmAndRun(t, r, fake, "set_share_acl", "sharing.smb.setacl", aclArgs("docs", aclEntry("group", "ops", "FULL", "ALLOWED"), aclEntry("group", "staff", "CHANGE", "DENIED")))
+	r, fake = newShareFake().registry(t)
+	assertRefused(t, r, fake, "set_share_acl", "sharing.smb.setacl",
+		mergeArgs(aclArgs("docs", everyoneFull, aclEntry("group", "staff", "READ", "DENIED")), map[string]interface{}{"allow_no_full_control": true}), "omit it")
+}
+
+// The host lists are changed only on LEGACY_SHARE shares, even when the
+// options of another purpose list them.
+func TestUpdateSMBShareHostListsNeedLegacyPurpose(t *testing.T) {
+	for _, purpose := range []string{"DEFAULT_SHARE", "MULTIPROTOCOL_SHARE", "TIMEMACHINE_SHARE", "TIME_LOCKED_SHARE", "PRIVATE_DATASETS_SHARE"} {
+		t.Run(purpose, func(t *testing.T) {
+			f := newShareFake()
+			f.smb[1]["purpose"] = purpose
+			f.smb[1]["options"] = map[string]interface{}{"hostsallow": []interface{}{}, "hostsdeny": []interface{}{}}
+			r, fake := f.registry(t)
+			for _, key := range []string{"hostsallow", "hostsdeny"} {
+				assertRefused(t, r, fake, "update_smb_share", "sharing.smb.update",
+					map[string]interface{}{"share_id": 1.0, key: []interface{}{"192.0.2.10"}},
+					"has purpose "+purpose+"; "+key+" can be changed only for LEGACY_SHARE shares")
+			}
+		})
+	}
+}
+
+func TestShareHostListsRefuseControlCharacters(t *testing.T) {
+	for _, tc := range []struct {
+		tool, method string
+		args         map[string]interface{}
+	}{
+		{"update_smb_share", "sharing.smb.update", map[string]interface{}{"share_id": 2.0, "hostsallow": []interface{}{"192.0.2.1\x07"}}},
+		{"update_smb_share", "sharing.smb.update", map[string]interface{}{"share_id": 2.0, "hostsdeny": []interface{}{"bad\nhost"}}},
+		{"update_nfs_share", "sharing.nfs.update", map[string]interface{}{"share_id": 1.0, "hosts": []interface{}{"client\x00.example.com"}}},
+		{"update_nfs_share", "sharing.nfs.update", map[string]interface{}{"share_id": 1.0, "networks": []interface{}{"192.0.2.0/24\x7f"}}},
+	} {
+		f := newShareFake()
+		r, fake := f.registry(t)
+		assertRefused(t, r, fake, tc.tool, tc.method, tc.args, "cannot contain control characters")
+	}
+}
+
+func TestUpdateSharePathRefusesManagedDatasetsInAnyCase(t *testing.T) {
+	for _, tc := range []struct {
+		p, want string
+	}{
+		{"/mnt/tank/IX-APPS/x", "inside 'ix-apps'"},
+		{"/mnt/tank/Ix-Applications", "inside 'ix-applications'"},
+		{"/mnt/Boot-Pool/data", "inside 'boot-pool'"},
+	} {
+		f := newShareFake()
+		r, fake := f.registry(t)
+		assertRefused(t, r, fake, "update_smb_share", "sharing.smb.update", map[string]interface{}{"share_id": 1.0, "path": tc.p}, tc.want)
+		assertRefused(t, r, fake, "update_nfs_share", "sharing.nfs.update", map[string]interface{}{"share_id": 1.0, "path": tc.p}, tc.want)
+	}
+	f := newShareFake()
+	f.smb[1]["path"] = "/mnt/tank/IX-APPS/app_mounts"
+	r, fake := f.registry(t)
+	assertRefused(t, r, fake, "delete_smb_share", "sharing.smb.delete", map[string]interface{}{"share_id": 1.0}, "current path \"/mnt/tank/IX-APPS/app_mounts\" is inside 'ix-apps'")
+}
+
+// The new NFS path is bound into the token like the SMB one.
+func TestUpdateNFSShareNewPathBound(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		change  func(f *shareFake)
+		blocked string
+	}{
+		{"new path replaced", func(f *shareFake) { f.stat["/mnt/tank/shares/new"]["inode"] = 99.0 }, ""},
+		{"new path on another device", func(f *shareFake) { f.stat["/mnt/tank/shares/new"]["dev"] = 2.0 }, ""},
+		{"new path now a symlink", func(f *shareFake) {
+			f.stat["/mnt/tank/shares/new"] = map[string]interface{}{"realpath": "/mnt/tank/shares/docs", "type": "SYMLINK", "inode": 4.0, "dev": 1.0}
+		}, "symlink"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShareFake()
+			r, fake := f.registry(t)
+			args := map[string]interface{}{"share_id": 1.0, "path": "/mnt/tank/shares/new"}
+			tok := destroyPreviewToken(t, r, "update_nfs_share", args)
+			f.mutate(func() { tc.change(f) })
+			err := assertTokenRejected(t, r, fake, "update_nfs_share", "sharing.nfs.update", args, tok)
+			if tc.blocked != "" && (err == nil || !strings.Contains(err.Error(), tc.blocked)) {
+				t.Errorf("not refused for the change: err = %v", err)
+			}
+			if f.nfs[1]["path"] != "/mnt/tank/shares/data" {
+				t.Error("share written")
+			}
+		})
+	}
+}
+
+// A delete that does not return true is reported as an unknown outcome.
+func TestShareDeleteUnexpectedResult(t *testing.T) {
+	for _, res := range []interface{}{false, map[string]interface{}{"id": 1.0}, "ok"} {
+		for _, tc := range []struct {
+			tool, method string
+		}{{"delete_smb_share", "sharing.smb.delete"}, {"delete_nfs_share", "sharing.nfs.delete"}} {
+			t.Run(fmt.Sprintf("%s %v", tc.tool, res), func(t *testing.T) {
+				f := newShareFake()
+				f.deleteResult = res
+				r, fake := f.registry(t)
+				args := map[string]interface{}{"share_id": 1.0}
+				tok := destroyPreviewToken(t, r, tc.tool, args)
+				_, err := r.CallTool(t.Context(), tc.tool, mergeArgs(args, map[string]interface{}{"confirmation_token": tok}))
+				if err == nil || !strings.Contains(err.Error(), tc.method+" returned an unexpected result") || !strings.Contains(err.Error(), "query_shares before retrying") {
+					t.Errorf("err = %v", err)
+				}
+				if n := len(fake.called(tc.method)); n != 1 {
+					t.Errorf("%s sent %d time(s)", tc.method, n)
+				}
+			})
 		}
 	}
 }
