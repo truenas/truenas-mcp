@@ -61,6 +61,8 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 		"clone_snapshot":           {"snapshot": fixtureHeldSnapshot, "target_dataset": "tank/apps/jellyfin/restore"},
 		"hold_snapshot":            {"snapshot": fixtureHeldSnapshot},
 		"release_snapshot":         {"snapshot": fixtureHeldSnapshot},
+		"rollback_snapshot":        {"snapshot": fixtureHeldSnapshot},
+		"delete_snapshot":          {"snapshot": fixtureHeldSnapshot},
 		"control_service":          {"service": "cifs", "action": "RESTART"},
 		"set_service_enabled":      {"service": "cifs", "enable": false},
 		"update_network_config":    {"ipv6gateway": "2001:db8:1::1"},

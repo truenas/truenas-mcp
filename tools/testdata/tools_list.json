@@ -977,6 +977,47 @@
     }
   },
   {
+    "name": "delete_snapshot",
+    "description": "Delete a ZFS snapshot permanently. Only the named snapshot is deleted unless recursive=true, which also deletes the snapshot of the same name on every child dataset. Refused if any affected snapshot is held (hold_snapshot, or a hold set outside TrueNAS) or its hold count cannot be read, for snapshots of datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt and other hidden datasets), and for snapshots of any dataset query_datasets does not list; with recursive, this applies to every child snapshot too. A snapshot cannot be deleted while it has clones: that is refused unless defer_if_cloned=true, which marks it for deferred deletion so that ZFS deletes it when its last clone is destroyed. The preview lists every affected snapshot, its clones, and any periodic snapshot task retention that manages it. With recursive, a child snapshot of the same name created between the final check and the delete is deleted without having been previewed: TrueNAS has no compare-and-swap to prevent that. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "defer_if_cloned": {
+          "default": false,
+          "description": "Optional: For snapshots that have clones, mark them for deletion when their last clone is destroyed instead of refusing (default: false). Refused when no affected snapshot has clones",
+          "type": "boolean"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without deleting (default: false)",
+          "type": "boolean"
+        },
+        "recursive": {
+          "default": false,
+          "description": "Optional: Also delete the snapshot of the same name on every child dataset (default: false). Each one is checked and listed in the preview",
+          "type": "boolean"
+        },
+        "snapshot": {
+          "description": "Required: Full name of the snapshot to delete, 'dataset@name' (e.g. 'tank/data@manual-1')",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "dismiss_alert",
     "description": "Dismiss a system alert by UUID",
     "inputSchema": {
@@ -2205,6 +2246,47 @@
     "annotations": {
       "readOnlyHint": false,
       "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "rollback_snapshot",
+    "description": "Roll a dataset back to one of its ZFS snapshots. Everything written to the dataset since that snapshot is lost and cannot be recovered. By default the snapshot must be the dataset's newest. Rolling back to an older snapshot destroys every newer snapshot of the dataset (and any newer bookmarks) and needs allow_destroy_newer=true; it is refused if any of those snapshots is held or its hold count cannot be read, and if any has clones unless destroy_clones=true, which destroys those clones too. Clones that have their own snapshots or child datasets, or that are hidden datasets, are always refused. Only the named dataset is rolled back, not its child datasets, and clones are never force-unmounted. Refused for a pool's root dataset, for datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt and other hidden datasets) and for any dataset query_datasets does not list. If a bookmark newer than the newest snapshot exists, ZFS refuses the rollback and this tool does not destroy the bookmark. The preview lists every snapshot and clone that would be destroyed. A snapshot or clone created between the final check and the rollback (by a periodic snapshot task or replication, say) is destroyed with allow_destroy_newer or destroy_clones without having been previewed: TrueNAS has no compare-and-swap to prevent that. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "allow_destroy_newer": {
+          "default": false,
+          "description": "Optional: Allow rolling back to a snapshot that is not the newest, destroying every newer snapshot of the dataset (default: false). Refused when the snapshot is already the newest",
+          "type": "boolean"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "destroy_clones": {
+          "default": false,
+          "description": "Optional: Also destroy the clones of the newer snapshots, which the preview lists (default: false). Needs allow_destroy_newer; refused when there are no such clones",
+          "type": "boolean"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without rolling back (default: false)",
+          "type": "boolean"
+        },
+        "snapshot": {
+          "description": "Required: Full name of the snapshot to roll back to, 'dataset@name' (e.g. 'tank/data@manual-1')",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
       "idempotentHint": false,
       "openWorldHint": false
     }

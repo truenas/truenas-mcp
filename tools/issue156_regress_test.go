@@ -80,6 +80,17 @@ func issue156Registry(t *testing.T, appConfig map[string]interface{}, catalog ma
 					if s, ok := f[2].(string); ok {
 						name = s
 					}
+					// ["name", "in", [...]] (the snapshot destroy tools'
+					// listing check) gets the existing names it asks for.
+					if list, ok := f[2].([]interface{}); ok && f[1] == "in" {
+						out := []interface{}{}
+						for _, v := range list {
+							if s, _ := v.(string); existing[s] {
+								out = append(out, map[string]interface{}{"name": s})
+							}
+						}
+						return out, nil, true
+					}
 				}
 			}
 			if existing[name] {
