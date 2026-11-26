@@ -34,7 +34,7 @@ func (r *Registry) registerSnapshotDestroyTools() {
 	r.tools["rollback_snapshot"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "rollback_snapshot",
-			Description: "Roll a dataset back to one of its ZFS snapshots. Everything written to the dataset since that snapshot is lost and cannot be recovered. By default the snapshot must be the dataset's newest. Rolling back to an older snapshot destroys every newer snapshot of the dataset (and any newer bookmarks) and needs allow_destroy_newer=true; it is refused if any of those snapshots is held or its hold count cannot be read, and if any has clones unless destroy_clones=true, which destroys those clones too. Clones that have their own snapshots or child datasets, or that are hidden datasets, are always refused. Only the named dataset is rolled back, not its child datasets, and clones are never force-unmounted. Refused for a pool's root dataset and for hidden datasets TrueNAS manages (such as .system). The preview lists every snapshot and clone that would be destroyed. Use dry_run to preview.",
+			Description: "Roll a dataset back to one of its ZFS snapshots. Everything written to the dataset since that snapshot is lost and cannot be recovered. By default the snapshot must be the dataset's newest. Rolling back to an older snapshot destroys every newer snapshot of the dataset (and any newer bookmarks) and needs allow_destroy_newer=true; it is refused if any of those snapshots is held or its hold count cannot be read, and if any has clones unless destroy_clones=true, which destroys those clones too. Clones that have their own snapshots or child datasets, or that are hidden datasets, are always refused. Only the named dataset is rolled back, not its child datasets, and clones are never force-unmounted. Refused for a pool's root dataset, for datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt and other hidden datasets) and for any dataset query_datasets does not list. If a bookmark newer than the newest snapshot exists, ZFS refuses the rollback and this tool does not destroy the bookmark. The preview lists every snapshot and clone that would be destroyed. A snapshot or clone created between the final check and the rollback (by a periodic snapshot task or replication, say) is destroyed with allow_destroy_newer or destroy_clones without having been previewed: TrueNAS has no compare-and-swap to prevent that. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -54,7 +54,7 @@ func (r *Registry) registerSnapshotDestroyTools() {
 	r.tools["delete_snapshot"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "delete_snapshot",
-			Description: "Delete a ZFS snapshot permanently. Only the named snapshot is deleted unless recursive=true, which also deletes the snapshot of the same name on every child dataset. Refused if any affected snapshot is held (hold_snapshot, or a hold set outside TrueNAS) or its hold count cannot be read, and for snapshots of hidden datasets TrueNAS manages (such as .system). A snapshot cannot be deleted while it has clones: that is refused unless defer_if_cloned=true, which marks it for deferred deletion so that ZFS deletes it when its last clone is destroyed. The preview lists every affected snapshot, its clones, and any periodic snapshot task retention that manages it. Use dry_run to preview.",
+			Description: "Delete a ZFS snapshot permanently. Only the named snapshot is deleted unless recursive=true, which also deletes the snapshot of the same name on every child dataset. Refused if any affected snapshot is held (hold_snapshot, or a hold set outside TrueNAS) or its hold count cannot be read, for snapshots of datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt and other hidden datasets), and for snapshots of any dataset query_datasets does not list; with recursive, this applies to every child snapshot too. A snapshot cannot be deleted while it has clones: that is refused unless defer_if_cloned=true, which marks it for deferred deletion so that ZFS deletes it when its last clone is destroyed. The preview lists every affected snapshot, its clones, and any periodic snapshot task retention that manages it. With recursive, a child snapshot of the same name created between the final check and the delete is deleted without having been previewed: TrueNAS has no compare-and-swap to prevent that. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -299,17 +299,149 @@ func attachClones(ctx context.Context, client *truenas.Client, snaps []snapDetai
 	return lk, nil
 }
 
-// managedDatasetPart returns the component of dataset (below the pool
-// root) that makes it a dataset TrueNAS manages itself: a hidden dataset
-// such as .system or .ix-apps, or the legacy ix-applications dataset.
+// bootPoolNames and internalDatasetNames copy the 25.10 middleware's
+// internal-dataset rule: BOOT_POOL_NAME_VALID in
+// src/middlewared/middlewared/utils/__init__.py and INTERNAL_DATASETS and
+// is_internal_dataset() in
+// src/middlewared/middlewared/plugins/pool_/dataset_query_utils.py
+// (truenas/middleware, branch stable/goldeye). pool.dataset.query hides
+// these datasets, but pool.snapshot.query still lists their snapshots.
+var (
+	bootPoolNames        = []string{"freenas-boot", "boot-pool"}
+	internalDatasetNames = []string{".system", "ix-applications", "ix-apps", ".ix-virt"}
+)
+
+// managedDatasetPart returns what makes dataset one TrueNAS manages
+// itself, or false. It applies the middleware's is_internal_dataset() rule
+// exactly: every dataset of a boot pool (freenas-boot, boot-pool), and any
+// name containing "/" followed by one of internalDatasetNames (.system,
+// ix-applications, ix-apps, .ix-virt) as a plain substring, as the
+// middleware matches it. On top of that, any component below the pool root
+// that starts with "." (a hidden dataset) counts too.
 func managedDatasetPart(dataset string) (string, bool) {
+	for _, b := range bootPoolNames {
+		if dataset == b || strings.HasPrefix(dataset, b+"/") {
+			return b, true
+		}
+	}
+	for _, i := range internalDatasetNames {
+		if strings.Contains(dataset, "/"+i) {
+			return i, true
+		}
+	}
 	parts := strings.Split(dataset, "/")
 	for _, part := range parts[1:] {
-		if strings.HasPrefix(part, ".") || part == "ix-applications" {
+		if strings.HasPrefix(part, ".") {
 			return part, true
 		}
 	}
 	return "", false
+}
+
+// unlistedDatasets returns the datasets in names that pool.dataset.query
+// does not list, sorted. The middleware hides the datasets it manages from
+// pool.dataset.query, so this keeps following its rule if that list grows.
+func unlistedDatasets(ctx context.Context, client *truenas.Client, names []string) ([]string, error) {
+	want := map[string]bool{}
+	list := []interface{}{}
+	for _, n := range names {
+		if !want[n] {
+			want[n] = true
+			list = append(list, n)
+		}
+	}
+	if len(list) == 0 {
+		return nil, nil
+	}
+	raw, err := client.Call(ctx, "pool.dataset.query",
+		[]interface{}{[]interface{}{"name", "in", list}},
+		map[string]interface{}{
+			"select": []interface{}{"id", "name"},
+			"extra": map[string]interface{}{
+				"retrieve_children":   false,
+				"properties":          []interface{}{},
+				"retrieve_user_props": false,
+			},
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check that query_datasets lists %s: %w", strings.Join(names, ", "), err)
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("unexpected pool.dataset.query result")
+	}
+	listed := map[string]bool{}
+	for _, row := range rows {
+		if name, _ := row["name"].(string); want[name] {
+			listed[name] = true
+		}
+	}
+	var out []string
+	for n := range want {
+		if !listed[n] {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// snapshotNames lists snapshot ids through pool.snapshot.query's
+// names-only path: select ["name"] with only name, pool and dataset
+// filters. On 25.10 that path iterates only the datasets a "dataset" or
+// "pool" "=" filter names (a "dataset" filter without its children) and
+// reads no holds or properties, where any other query lists every snapshot
+// on the system with them. minTxg, when not zero, is passed as
+// extra.min_txg, so ZFS skips snapshots created before that txg. keep
+// filters the ids again here, so a middleware that ignores part of the
+// filter cannot add snapshots; callers read each kept snapshot's details
+// with lookupSnapDetail, whose single "id =" filter 25.10 also answers
+// without listing every snapshot.
+func snapshotNames(ctx context.Context, client *truenas.Client, filters []interface{}, minTxg uint64, keep func(id string) bool) ([]string, error) {
+	opts := map[string]interface{}{"select": []interface{}{"name"}}
+	if minTxg > 0 {
+		opts["extra"] = map[string]interface{}{"min_txg": minTxg}
+	}
+	raw, err := client.Call(ctx, "pool.snapshot.query", filters, opts)
+	if err != nil {
+		return nil, err
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("unexpected pool.snapshot.query result")
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, row := range rows {
+		id, _ := row["name"].(string)
+		if id == "" {
+			id, _ = row["id"].(string)
+		}
+		if id == "" || seen[id] || strings.Count(id, "@") != 1 || !keep(id) {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// snapDetails reads the details of each id with lookupSnapDetail. A
+// snapshot that no longer exists is left out.
+func snapDetails(ctx context.Context, client *truenas.Client, ids []string) ([]snapDetail, error) {
+	out := make([]snapDetail, 0, len(ids))
+	for _, id := range ids {
+		s, err := lookupSnapDetail(ctx, client, id)
+		if err != nil {
+			return nil, err
+		}
+		if s != nil {
+			out = append(out, *s)
+		}
+	}
+	return out, nil
 }
 
 func snapIDs(snaps []snapDetail) []string {
@@ -361,25 +493,41 @@ func listOrNone(items []string) string {
 
 // ---- rollback_snapshot ----
 
-// listDatasetSnapshots returns every snapshot of dataset (not of its
-// children), oldest first by createtxg. Snapshots whose createtxg cannot
-// be read sort first; the planner refuses them.
-func listDatasetSnapshots(ctx context.Context, client *truenas.Client, dataset string) ([]snapDetail, error) {
-	snaps, err := querySnapshotDetails(ctx, client, []interface{}{[]interface{}{"dataset", "=", dataset}},
-		func(s snapDetail) bool { return s.Dataset == dataset && strings.HasPrefix(s.ID, dataset+"@") })
+// newerSnapshots returns the snapshots of target's dataset (not of its
+// children) created after target, oldest first by createtxg, and the ids
+// among them whose createtxg cannot be read. Candidates come from the
+// names-only query of the dataset with extra.min_txg set to target's
+// createtxg; each is then read by id and kept only when its createtxg is
+// greater than target's.
+func newerSnapshots(ctx context.Context, client *truenas.Client, target snapDetail) ([]snapDetail, []string, error) {
+	dataset := target.Dataset
+	ids, err := snapshotNames(ctx, client, []interface{}{[]interface{}{"dataset", "=", dataset}}, target.Txg,
+		func(id string) bool { return strings.HasPrefix(id, dataset+"@") && id != target.ID })
 	if err != nil {
-		return nil, fmt.Errorf("failed to list the snapshots of %s: %w", dataset, err)
+		return nil, nil, fmt.Errorf("failed to list the snapshots of %s: %w", dataset, err)
 	}
-	sort.SliceStable(snaps, func(i, j int) bool {
-		if snaps[i].TxgOK != snaps[j].TxgOK {
-			return !snaps[i].TxgOK
+	snaps, err := snapDetails(ctx, client, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	var newer []snapDetail
+	var unreadable []string
+	for _, s := range snaps {
+		switch {
+		case s.Dataset != dataset:
+		case !s.TxgOK:
+			unreadable = append(unreadable, s.ID)
+		case s.Txg > target.Txg:
+			newer = append(newer, s)
 		}
-		if snaps[i].Txg != snaps[j].Txg {
-			return snaps[i].Txg < snaps[j].Txg
+	}
+	sort.SliceStable(newer, func(i, j int) bool {
+		if newer[i].Txg != newer[j].Txg {
+			return newer[i].Txg < newer[j].Txg
 		}
-		return snaps[i].ID < snaps[j].ID
+		return newer[i].ID < newer[j].ID
 	})
-	return snaps, nil
+	return newer, unreadable, nil
 }
 
 // cloneDependents returns why each clone cannot be destroyed by this tool:
@@ -420,13 +568,13 @@ func cloneDependents(ctx context.Context, client *truenas.Client, clones []strin
 		if children > 0 {
 			reasons = append(reasons, fmt.Sprintf("clone '%s' has %d child dataset(s)", c, children))
 		}
-		snaps, err := querySnapshotDetails(ctx, client, []interface{}{[]interface{}{"dataset", "=", c}},
-			func(s snapDetail) bool { return strings.HasPrefix(s.ID, c+"@") })
+		snaps, err := snapshotNames(ctx, client, []interface{}{[]interface{}{"dataset", "=", c}}, 0,
+			func(id string) bool { return strings.HasPrefix(id, c+"@") })
 		if err != nil {
 			return nil, fmt.Errorf("failed to check snapshots of clone %s: %w", c, err)
 		}
 		if len(snaps) > 0 {
-			reasons = append(reasons, fmt.Sprintf("clone '%s' has %d snapshot(s) of its own (%s)", c, len(snaps), strings.Join(snapIDs(snaps), ", ")))
+			reasons = append(reasons, fmt.Sprintf("clone '%s' has %d snapshot(s) of its own (%s)", c, len(snaps), strings.Join(snaps, ", ")))
 		}
 	}
 	return reasons, nil
@@ -446,28 +594,27 @@ func planRollbackSnapshot(ctx context.Context, client *truenas.Client, args map[
 		return nil, fmt.Errorf("dataset '%s' is inside '%s', which TrueNAS manages itself; rolling back its snapshots is not supported; nothing was changed", dataset, part)
 	}
 
-	snaps, err := listDatasetSnapshots(ctx, client, dataset)
+	unlisted, err := unlistedDatasets(ctx, client, []string{dataset})
 	if err != nil {
 		return nil, err
 	}
-	targetIdx := -1
-	for i, s := range snaps {
-		if s.ID == id {
-			targetIdx = i
-		}
+	if len(unlisted) > 0 {
+		return nil, fmt.Errorf("dataset '%s' is not listed by query_datasets (pool.dataset.query hides the datasets TrueNAS manages itself); rolling back its snapshots is not supported; nothing was changed", dataset)
 	}
-	if targetIdx < 0 {
+	t, err := lookupSnapDetail(ctx, client, id)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
 		return nil, fmt.Errorf("snapshot '%s' not found", id)
 	}
-	target := snaps[targetIdx]
+	target := *t
 
 	options := map[string]interface{}{"recursive": false, "recursive_clones": false, "force": false, "recursive_rollback": false}
-	bind := map[string]interface{}{"snapshots": snapBinds(snaps)}
+	bind := map[string]interface{}{"snapshot": target.bind()}
 	current := map[string]interface{}{
-		"snapshot":       target.state(),
-		"dataset":        dataset,
-		"snapshot_count": len(snaps),
-		"newest":         snaps[len(snaps)-1].ID,
+		"snapshot": target.state(),
+		"dataset":  dataset,
 	}
 	summary := newConfirmSummary(
 		fmt.Sprintf("Roll back %s to %s: everything written since the snapshot is lost", dataset, id),
@@ -486,22 +633,20 @@ func planRollbackSnapshot(ctx context.Context, client *truenas.Client, args map[
 			ConfirmSummary: summary,
 		}
 	}
+	if !target.TxgOK {
+		return blocked(fmt.Sprintf("could not read the createtxg of %s, so the snapshots newer than it cannot be determined and the confirmation cannot be bound to them; nothing was rolled back", id)), nil
+	}
 
-	var unreadable []string
-	for _, s := range snaps {
-		if !s.TxgOK {
-			unreadable = append(unreadable, s.ID)
-		}
+	newer, unreadable, err := newerSnapshots(ctx, client, target)
+	if err != nil {
+		return nil, err
 	}
 	if len(unreadable) > 0 {
 		return blocked(fmt.Sprintf("could not read the createtxg of %s, so the snapshots newer than '%s' cannot be determined and the confirmation cannot be bound to them; nothing was rolled back", strings.Join(unreadable, ", "), id)), nil
 	}
-
-	var newer []snapDetail
-	for _, s := range snaps[targetIdx+1:] {
-		if s.Txg > target.Txg {
-			newer = append(newer, s)
-		}
+	current["newest"] = id
+	if len(newer) > 0 {
+		current["newest"] = newer[len(newer)-1].ID
 	}
 	lk, err := attachClones(ctx, client, newer)
 	if err != nil {
@@ -640,6 +785,10 @@ func executeRollbackSnapshot(ctx context.Context, client *truenas.Client, args m
 	id := plan.TargetName
 	dataset, _ := plan.Result["dataset"].(string)
 	if _, err := callPlan(ctx, client, plan); err != nil {
+		destroyed, _ := plan.Result["destroyed"].([]string)
+		if len(destroyed) == 0 && strings.Contains(err.Error(), "more recent snapshots or bookmarks exist") {
+			return "", fmt.Errorf("failed to roll back %s to %s: %w; no snapshot newer than %s was listed at the preview, so a bookmark newer than it (or a snapshot taken since the preview) is blocking the rollback. ZFS can roll back past a newer bookmark only by destroying it, which this tool does not do for the newest snapshot; remove the bookmark outside this tool, or clone the snapshot with clone_snapshot to recover files instead; check query_snapshots before retrying", dataset, id, err, id)
+		}
 		return "", fmt.Errorf("failed to roll back %s to %s: %w; check query_snapshots before retrying", dataset, id, err)
 	}
 	response := map[string]interface{}{
@@ -650,16 +799,20 @@ func executeRollbackSnapshot(ctx context.Context, client *truenas.Client, args m
 		"clones_destroyed":    plan.Result["clones"],
 	}
 	msg := fmt.Sprintf("Rolled back %s to %s", dataset, id)
-	snaps, err := listDatasetSnapshots(ctx, client, dataset)
+	target, err := lookupSnapDetail(ctx, client, id)
+	var newer []snapDetail
+	if err == nil && target != nil && target.TxgOK {
+		newer, _, err = newerSnapshots(ctx, client, *target)
+	}
 	switch {
 	case err != nil:
 		response["note"] = "The rollback finished, but the snapshots could not be read back: " + boundedErr(err)
-	case len(snaps) == 0 || snaps[len(snaps)-1].ID != id:
-		newest := "none"
-		if len(snaps) > 0 {
-			newest = snaps[len(snaps)-1].ID
-		}
-		response["note"] = fmt.Sprintf("The rollback finished, but %s is not the newest snapshot when read back (newest: %s); check query_snapshots", id, newest)
+	case target == nil:
+		response["note"] = fmt.Sprintf("The rollback finished, but %s does not exist when read back; check query_snapshots", id)
+	case !target.TxgOK:
+		response["note"] = fmt.Sprintf("The rollback finished, but the createtxg of %s could not be read back, so whether it is the newest snapshot is unknown; check query_snapshots", id)
+	case len(newer) > 0:
+		response["note"] = fmt.Sprintf("The rollback finished, but %s is not the newest snapshot when read back (newest: %s); check query_snapshots", id, newer[len(newer)-1].ID)
 	default:
 		response["newest_snapshot"] = id
 	}
@@ -670,33 +823,30 @@ func executeRollbackSnapshot(ctx context.Context, client *truenas.Client, args m
 // ---- delete_snapshot ----
 
 // snapshotRetentions returns the simplified retention annotation of each
-// id that has one. extra.retention needs an id filter on 25.10.
+// id that has one. extra.retention needs an id filter on 25.10, and only a
+// single "id =" filter keeps pool.snapshot.query from listing every
+// snapshot on the system, so each id is read on its own.
 func snapshotRetentions(ctx context.Context, client *truenas.Client, ids []string) (map[string]interface{}, error) {
-	list := make([]interface{}, len(ids))
-	want := make(map[string]bool, len(ids))
-	for i, id := range ids {
-		list[i] = id
-		want[id] = true
-	}
-	raw, err := client.Call(ctx, "pool.snapshot.query",
-		[]interface{}{[]interface{}{"id", "in", list}},
-		map[string]interface{}{"extra": map[string]interface{}{"retention": true, "properties": []interface{}{"createtxg"}}},
-	)
-	if err != nil {
-		return nil, err
-	}
-	var rows []map[string]interface{}
-	if err := json.Unmarshal(raw, &rows); err != nil {
-		return nil, fmt.Errorf("unexpected pool.snapshot.query result")
-	}
 	out := map[string]interface{}{}
-	for _, row := range rows {
-		id, _ := row["id"].(string)
-		if !want[id] {
-			continue
+	for _, id := range ids {
+		raw, err := client.Call(ctx, "pool.snapshot.query",
+			[]interface{}{[]interface{}{"id", "=", id}},
+			map[string]interface{}{"extra": map[string]interface{}{"retention": true, "properties": []interface{}{"createtxg"}}},
+		)
+		if err != nil {
+			return nil, err
 		}
-		if r := simplifySnapshotRetention(row["retention"]); r != nil {
-			out[id] = r
+		var rows []map[string]interface{}
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return nil, fmt.Errorf("unexpected pool.snapshot.query result")
+		}
+		for _, row := range rows {
+			if rid, _ := row["id"].(string); rid != id {
+				continue
+			}
+			if r := simplifySnapshotRetention(row["retention"]); r != nil {
+				out[id] = r
+			}
 		}
 	}
 	return out, nil
@@ -737,16 +887,34 @@ func planDeleteSnapshot(ctx context.Context, client *truenas.Client, args map[st
 	}
 	affected := []snapDetail{*target}
 	if recursive {
-		children, err := querySnapshotDetails(ctx, client,
-			[]interface{}{[]interface{}{"snapshot_name", "=", name}, []interface{}{"dataset", "^", dataset + "/"}},
-			func(s snapDetail) bool {
-				return s.Name == name && strings.HasPrefix(s.Dataset, dataset+"/") && s.ID == s.Dataset+"@"+name
+		pool, _, _ := strings.Cut(dataset, "/")
+		childIDs, err := snapshotNames(ctx, client,
+			[]interface{}{[]interface{}{"pool", "=", pool}, []interface{}{"name", "^", dataset + "/"}}, 0,
+			func(id string) bool {
+				ds, n, _ := strings.Cut(id, "@")
+				return n == name && strings.HasPrefix(ds, dataset+"/")
 			})
 		if err != nil {
 			return nil, fmt.Errorf("failed to list the child snapshots of %s: %w", id, err)
 		}
-		sort.Slice(children, func(i, j int) bool { return children[i].ID < children[j].ID })
-		affected = append(affected, children...)
+		children, err := snapDetails(ctx, client, childIDs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read the child snapshots of %s: %w", id, err)
+		}
+		for _, c := range children {
+			if c.Name == name && strings.HasPrefix(c.Dataset, dataset+"/") && c.ID == c.Dataset+"@"+name {
+				affected = append(affected, c)
+			}
+		}
+		sort.Slice(affected[1:], func(i, j int) bool { return affected[1+i].ID < affected[1+j].ID })
+	}
+	affectedDatasets := make([]string, len(affected))
+	for i, s := range affected {
+		affectedDatasets[i] = s.Dataset
+	}
+	unlisted, err := unlistedDatasets(ctx, client, affectedDatasets)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := attachClones(ctx, client, affected); err != nil {
 		return nil, err
@@ -798,6 +966,9 @@ func planDeleteSnapshot(ctx context.Context, client *truenas.Client, args map[st
 	}
 	if len(managed) > 0 {
 		reasons = append(reasons, fmt.Sprintf("the recursive delete would include snapshots of datasets TrueNAS manages itself: %s; delete the other snapshots without recursive instead", strings.Join(managed, ", ")))
+	}
+	if len(unlisted) > 0 {
+		reasons = append(reasons, fmt.Sprintf("dataset(s) %s are not listed by query_datasets (pool.dataset.query hides the datasets TrueNAS manages itself); deleting their snapshots is not supported", strings.Join(unlisted, ", ")))
 	}
 	if len(held) > 0 {
 		reasons = append(reasons, fmt.Sprintf("snapshot(s) are held or may be held: %s; a held snapshot cannot be deleted until every hold is released (release_snapshot releases a 'truenas' hold; other holds are managed where they were set)", strings.Join(held, "; ")))
@@ -930,7 +1101,7 @@ func executeDeleteSnapshot(ctx context.Context, client *truenas.Client, args map
 		"deleted":   true,
 		"deferred":  deferred,
 	}
-	var remaining []string
+	var remaining []snapDetail
 	var readErr error
 	for _, sid := range ids {
 		s, err := lookupSnapDetail(ctx, client, sid)
@@ -939,22 +1110,58 @@ func executeDeleteSnapshot(ctx context.Context, client *truenas.Client, args map
 			break
 		}
 		if s != nil {
-			remaining = append(remaining, sid)
+			remaining = append(remaining, *s)
+		}
+	}
+	if readErr == nil && deferred && len(remaining) > 0 {
+		_, readErr = attachClones(ctx, client, remaining)
+	}
+	// With defer, only a remaining snapshot that still has clones is
+	// pending deletion because of them. One without clones should be gone;
+	// if it is held (a hold added after the preview), ZFS deletes it only
+	// when its last hold is released, so it is reported as remaining.
+	var pending, left, leftHeld []string
+	for _, s := range remaining {
+		switch {
+		case deferred && len(s.Clones) > 0:
+			pending = append(pending, s.ID)
+		case deferred && s.held():
+			leftHeld = append(leftHeld, s.ID)
+			left = append(left, s.ID)
+		default:
+			left = append(left, s.ID)
 		}
 	}
 	msg := fmt.Sprintf("Deleted %s", strings.Join(ids, ", "))
+	var notes []string
 	switch {
 	case readErr != nil:
-		response["note"] = "The delete finished, but the snapshots could not be read back: " + boundedErr(readErr)
-	case len(remaining) > 0 && deferred:
-		response["pending_deletion"] = remaining
-		msg = fmt.Sprintf("Deleted the snapshots without clones; %s are marked for deletion and are removed when their last clone is destroyed", strings.Join(remaining, ", "))
-		if len(remaining) == len(ids) {
-			msg = fmt.Sprintf("%s are marked for deletion and are removed when their last clone is destroyed", strings.Join(remaining, ", "))
+		notes = append(notes, "The delete finished, but the snapshots could not be read back: "+boundedErr(readErr))
+	default:
+		if len(pending) > 0 {
+			response["pending_deletion"] = pending
+			msg = fmt.Sprintf("Deleted the other snapshots; %s are marked for deletion and are removed when their last clone is destroyed", strings.Join(pending, ", "))
+			if len(pending) == len(ids) {
+				msg = fmt.Sprintf("%s are marked for deletion and are removed when their last clone is destroyed", strings.Join(pending, ", "))
+			}
 		}
-	case len(remaining) > 0:
-		response["remaining"] = remaining
-		response["note"] = fmt.Sprintf("TrueNAS reported success, but %s still exist when read back; check query_snapshots", strings.Join(remaining, ", "))
+		if len(left) > 0 {
+			response["remaining"] = left
+			if len(pending) == 0 {
+				msg = fmt.Sprintf("TrueNAS reported success, but %s still exist", strings.Join(left, ", "))
+			}
+			why := ""
+			if deferred {
+				why = " and have no clones, so they are not pending deletion because of clones"
+			}
+			notes = append(notes, fmt.Sprintf("TrueNAS reported success, but %s still exist when read back%s; check query_snapshots", strings.Join(left, ", "), why))
+		}
+		if len(leftHeld) > 0 {
+			notes = append(notes, fmt.Sprintf("%s are held (a hold may have been added after the preview); with defer, ZFS deletes a held snapshot only when its last hold is released", strings.Join(leftHeld, ", ")))
+		}
+	}
+	if len(notes) > 0 {
+		response["note"] = strings.Join(notes, "; ")
 	}
 	response["message"] = msg
 	return marshalJSON(response)

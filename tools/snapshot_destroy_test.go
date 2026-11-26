@@ -28,6 +28,69 @@ type snapDestroyFake struct {
 	// ignoreFilters answers queries with every row, like a middleware
 	// that ignores part of a filter.
 	ignoreFilters bool
+	// listAll makes pool.dataset.query list every dataset, including the
+	// ones the middleware hides, so a test can check the name-based guard
+	// on its own; hidden hides more datasets from it.
+	listAll bool
+	hidden  map[string]bool
+	// bookmarks is the createtxg of the newest bookmark of each dataset.
+	bookmarks map[string]int
+	// hideTxg leaves createtxg out of the detail rows of these snapshots
+	// (the names-only path still filters them by it).
+	hideTxg map[string]bool
+	// fullScans records each pool.snapshot.query call that would make
+	// 25.10 list every snapshot on the system.
+	fullScans []string
+	// beforeDelete runs inside pool.snapshot.delete before it acts: a
+	// change made between the final re-plan and the middleware call.
+	beforeDelete func()
+}
+
+// fakeInternalDataset mirrors is_internal_dataset() in the 25.10
+// middleware (pool_/dataset_query_utils.py), which pool.dataset.query
+// applies and pool.snapshot.query does not.
+func fakeInternalDataset(name string) bool {
+	for _, b := range []string{"freenas-boot", "boot-pool"} {
+		if name == b || strings.HasPrefix(name, b+"/") {
+			return true
+		}
+	}
+	for _, i := range []string{".system", "ix-applications", "ix-apps", ".ix-virt"} {
+		if strings.Contains(name, "/"+i) {
+			return true
+		}
+	}
+	return false
+}
+
+// snapshotFullScan reports whether a pool.snapshot.query call makes 25.10
+// list every snapshot on the system: one that is not the names-only path
+// (select ["name"] with only name, pool and dataset filters) and does not
+// have a single "id =" or "name =" filter.
+func snapshotFullScan(filters []interface{}, opts map[string]interface{}) bool {
+	if namesOnlyQuery(filters, opts) {
+		return false
+	}
+	if len(filters) == 1 {
+		if arr, _ := filters[0].([]interface{}); len(arr) == 3 && (arr[0] == "id" || arr[0] == "name") && arr[1] == "=" {
+			return false
+		}
+	}
+	return true
+}
+
+func namesOnlyQuery(filters []interface{}, opts map[string]interface{}) bool {
+	sel, _ := opts["select"].([]interface{})
+	if len(sel) != 1 || sel[0] != "name" {
+		return false
+	}
+	for _, f := range filters {
+		arr, _ := f.([]interface{})
+		if len(arr) != 3 || (arr[0] != "name" && arr[0] != "pool" && arr[0] != "dataset") {
+			return false
+		}
+	}
+	return true
 }
 
 func newSnapDestroyFake() *snapDestroyFake {
@@ -36,6 +99,9 @@ func newSnapDestroyFake() *snapDestroyFake {
 		datasets:  map[string]map[string]interface{}{},
 		retention: map[string]interface{}{},
 		fail:      map[string]map[string]interface{}{},
+		hidden:    map[string]bool{},
+		bookmarks: map[string]int{},
+		hideTxg:   map[string]bool{},
 	}
 	for _, ds := range []string{"tank", "tank/data", "tank/data/child", "tank/data/child/grand", "tank/other"} {
 		f.addDataset(ds, "")
@@ -239,6 +305,9 @@ func (f *snapDestroyFake) handle(method string, params json.RawMessage) (interfa
 	}
 	switch method {
 	case "pool.snapshot.query":
+		if snapshotFullScan(filters, opts) {
+			f.fullScans = append(f.fullScans, string(params))
+		}
 		extra, _ := opts["extra"].(map[string]interface{})
 		if extra["retention"] == true {
 			if !filterHasID(filters) {
@@ -249,6 +318,40 @@ func (f *snapDestroyFake) handle(method string, params json.RawMessage) (interfa
 			}
 		}
 		out := []interface{}{}
+		if namesOnlyQuery(filters, opts) {
+			// The names-only path: "dataset"/"pool" "=" filters pick the
+			// datasets iterated (a pool filter's value and its children,
+			// a dataset filter's value alone), extra.min_txg skips older
+			// snapshots, and only the name is returned.
+			var datasets []string
+			recursive := true
+			var other []interface{}
+			for _, fl := range filters {
+				arr := fl.([]interface{})
+				if (arr[0] == "pool" || arr[0] == "dataset") && arr[1] == "=" {
+					datasets = []string{fmt.Sprint(arr[2])}
+					if arr[0] == "dataset" {
+						recursive = false
+					}
+					continue
+				}
+				other = append(other, fl)
+			}
+			minTxg, _ := extra["min_txg"].(float64)
+			for id, s := range f.snapshots {
+				ds := s["dataset"].(string)
+				in := datasets == nil
+				for _, d := range datasets {
+					in = in || ds == d || recursive && strings.HasPrefix(ds, d+"/")
+				}
+				t, _ := snapshotTxg(s)
+				if !f.ignoreFilters && (!in || float64(t) < minTxg || !destroyMatches(s, other)) {
+					continue
+				}
+				out = append(out, map[string]interface{}{"name": id})
+			}
+			return out, nil, true
+		}
 		for id, s := range f.snapshots {
 			if !f.ignoreFilters && !destroyMatches(s, filters) {
 				continue
@@ -259,11 +362,14 @@ func (f *snapDestroyFake) handle(method string, params json.RawMessage) (interfa
 					row[k] = v
 				}
 			}
+			if f.hideTxg[id] {
+				delete(row, "createtxg")
+			}
 			props := map[string]interface{}{}
 			all, _ := s["properties"].(map[string]interface{})
 			wanted, _ := extra["properties"].([]interface{})
 			for _, w := range wanted {
-				if name, _ := w.(string); all[name] != nil {
+				if name, _ := w.(string); all[name] != nil && !(name == "createtxg" && f.hideTxg[id]) {
 					props[name] = all[name]
 				}
 			}
@@ -277,7 +383,7 @@ func (f *snapDestroyFake) handle(method string, params json.RawMessage) (interfa
 	case "pool.dataset.query":
 		out := []interface{}{}
 		for name, d := range f.datasets {
-			if strings.Contains(name, "/.") {
+			if !f.listAll && (fakeInternalDataset(name) || f.hidden[name]) {
 				continue // internal datasets are not listed
 			}
 			if f.ignoreFilters || destroyMatches(d, filters) {
@@ -299,6 +405,9 @@ func (f *snapDestroyFake) handle(method string, params json.RawMessage) (interfa
 				newer = append(newer, sid)
 			}
 		}
+		if bm, ok := f.bookmarks[target["dataset"].(string)]; ok && bm > int(txg) && o["recursive"] != true && o["recursive_clones"] != true {
+			return nil, rpcErr("Failed to rollback snapshot: cannot rollback to '" + id + "': more recent snapshots or bookmarks exist\nuse '-r' to force deletion of the following snapshots and bookmarks:\n" + target["dataset"].(string) + "#bm"), true
+		}
 		if len(newer) > 0 && o["recursive"] != true && o["recursive_clones"] != true {
 			return nil, rpcErr("Failed to rollback snapshot: more recent snapshots or bookmarks exist; use '-r' to force deletion"), true
 		}
@@ -319,6 +428,9 @@ func (f *snapDestroyFake) handle(method string, params json.RawMessage) (interfa
 	case "pool.snapshot.delete":
 		id, _ := p[0].(string)
 		o, _ := p[1].(map[string]interface{})
+		if f.beforeDelete != nil {
+			f.beforeDelete()
+		}
 		if f.snapshots[id] == nil {
 			return nil, rpcErr("[ENOENT] snapshot does not exist"), true
 		}
@@ -332,7 +444,7 @@ func (f *snapDestroyFake) handle(method string, params json.RawMessage) (interfa
 			}
 		}
 		for _, sid := range ids {
-			if n, _ := snapshotUserrefs(f.snapshots[sid]); n > 0 {
+			if n, _ := snapshotUserrefs(f.snapshots[sid]); n > 0 && o["defer"] != true {
 				return nil, rpcErr("[EFAULT] dataset is busy"), true
 			}
 			if len(f.clonesOf(sid)) > 0 && o["defer"] != true {
@@ -340,8 +452,10 @@ func (f *snapDestroyFake) handle(method string, params json.RawMessage) (interfa
 			}
 		}
 		if !f.noop {
+			// With defer, a held snapshot or one with clones is only
+			// marked for deletion.
 			for _, sid := range ids {
-				if len(f.clonesOf(sid)) == 0 {
+				if n, _ := snapshotUserrefs(f.snapshots[sid]); len(f.clonesOf(sid)) == 0 && n == 0 {
 					delete(f.snapshots, sid)
 				}
 			}
@@ -478,7 +592,7 @@ func TestRollbackSnapshotDryRun(t *testing.T) {
 		t.Errorf("dry run flags = %v", resp)
 	}
 	cur := resp["current_state"].(map[string]interface{})
-	if cur["dataset"] != "tank/data" || cur["newest"] != "tank/data@s3" || cur["snapshot_count"] != 3.0 {
+	if cur["dataset"] != "tank/data" || cur["newest"] != "tank/data@s3" {
 		t.Errorf("current_state = %v", cur)
 	}
 	if got := previewText(t, cur["newer_snapshots"]); !strings.Contains(got, "tank/data@s2") || !strings.Contains(got, "tank/data@s3") {
@@ -644,8 +758,8 @@ func TestRollbackSnapshotRefusesClonesWithDependents(t *testing.T) {
 			f.addDataset("tank/restore/sub", "")
 		}, "clone 'tank/restore' has 1 child dataset(s)"},
 		{"hidden clone", func(f *snapDestroyFake) {
-			f.addClone("tank/data@s2", "tank/.hidden/c", true, true)
-		}, "clone 'tank/.hidden/c' is not listed by query_datasets"},
+			f.addClone("tank/data@s2", "tank/.ix-virt/c", true, true)
+		}, "clone 'tank/.ix-virt/c' is not listed by query_datasets"},
 		{"clone known only from the clones property", func(f *snapDestroyFake) {
 			f.addClone("tank/data@s3", "tank/elsewhere", false, true)
 		}, "clone 'tank/elsewhere' is not listed by query_datasets"},
@@ -693,12 +807,19 @@ func TestRollbackSnapshotArgumentRefusals(t *testing.T) {
 }
 
 func TestRollbackSnapshotRefusesUnreadableCreateTxg(t *testing.T) {
-	f := newSnapDestroyFake()
-	delete(f.snapshots["tank/data@s2"], "createtxg")
-	delete(f.props("tank/data@s2"), "createtxg")
-	r, fake := f.registry(t)
-	assertRefused(t, r, fake, "rollback_snapshot", "pool.snapshot.rollback", map[string]interface{}{"snapshot": "tank/data@s3"},
-		"could not read the createtxg of tank/data@s2")
+	for _, tc := range []struct{ name, unreadable, target string }{
+		{"target", "tank/data@s3", "tank/data@s3"},
+		{"newer snapshot", "tank/data@s2", "tank/data@s1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSnapDestroyFake()
+			f.hideTxg[tc.unreadable] = true
+			r, fake := f.registry(t)
+			assertRefused(t, r, fake, "rollback_snapshot", "pool.snapshot.rollback",
+				map[string]interface{}{"snapshot": tc.target, "allow_destroy_newer": tc.target != tc.unreadable},
+				"could not read the createtxg of "+tc.unreadable)
+		})
+	}
 }
 
 // The token is bound to the dataset's snapshot list and the state of the
@@ -718,8 +839,6 @@ func TestRollbackSnapshotTokenRejectedAfterStateChange(t *testing.T) {
 			func(f *snapDestroyFake) { f.setTxg("tank/data@s3", 400) }, ""},
 		{"target recreated", map[string]interface{}{"snapshot": "tank/data@s3"},
 			func(f *snapDestroyFake) { f.setTxg("tank/data@s3", 400) }, ""},
-		{"older snapshot deleted", map[string]interface{}{"snapshot": "tank/data@s3"},
-			func(f *snapDestroyFake) { delete(f.snapshots, "tank/data@s1") }, ""},
 		{"hold on a newer snapshot", map[string]interface{}{"snapshot": "tank/data@s1", "allow_destroy_newer": true},
 			func(f *snapDestroyFake) { f.hold("tank/data@s2", "truenas") }, "are held or may be held"},
 		{"clone of a newer snapshot", map[string]interface{}{"snapshot": "tank/data@s1", "allow_destroy_newer": true},
@@ -764,13 +883,13 @@ func TestRollbackSnapshotPlanBindsState(t *testing.T) {
 		t.Fatal("plan hash is not stable")
 	}
 	for name, m := range map[string]func(f *snapDestroyFake){
-		"snapshot added":      func(f *snapDestroyFake) { f.addSnap("tank/data", "s0", 90) },
-		"older createtxg":     func(f *snapDestroyFake) { f.setTxg("tank/data@s1", 99) },
-		"newer createtxg":     func(f *snapDestroyFake) { f.setTxg("tank/data@s3", 301) },
-		"newer userrefs":      func(f *snapDestroyFake) { f.setUserrefs("tank/data@s3", 1) },
-		"newer hold tag":      func(f *snapDestroyFake) { f.hold("tank/data@s2", "truenas") },
-		"newer clone added":   func(f *snapDestroyFake) { f.addClone("tank/data@s3", "tank/restore2", true, false) },
-		"clone property only": func(f *snapDestroyFake) { f.addClone("tank/data@s2", "tank/restore3", false, true) },
+		"newer snapshot added": func(f *snapDestroyFake) { f.addSnap("tank/data", "s4", 400) },
+		"older createtxg":      func(f *snapDestroyFake) { f.setTxg("tank/data@s1", 99) },
+		"newer createtxg":      func(f *snapDestroyFake) { f.setTxg("tank/data@s3", 301) },
+		"newer userrefs":       func(f *snapDestroyFake) { f.setUserrefs("tank/data@s3", 1) },
+		"newer hold tag":       func(f *snapDestroyFake) { f.hold("tank/data@s2", "truenas") },
+		"newer clone added":    func(f *snapDestroyFake) { f.addClone("tank/data@s3", "tank/restore2", true, false) },
+		"clone property only":  func(f *snapDestroyFake) { f.addClone("tank/data@s2", "tank/restore3", false, true) },
 	} {
 		if hash(m) == base {
 			t.Errorf("plan hash ignores %s", name)
@@ -1248,7 +1367,7 @@ func TestSnapshotDestroyToolsRefilterQueryResults(t *testing.T) {
 
 	resp := callTool(t, r, "rollback_snapshot", map[string]interface{}{"snapshot": "tank/data@s3", "dry_run": true})
 	cur := resp["current_state"].(map[string]interface{})
-	if cur["snapshot_count"] != 3.0 || cur["newest"] != "tank/data@s3" {
+	if cur["newest"] != "tank/data@s3" || previewText(t, cur["newer_snapshots"]) != "[]" {
 		t.Errorf("rollback counted other datasets' snapshots: %v", cur)
 	}
 
@@ -1288,5 +1407,193 @@ func TestSnapshotDestroyExecuteRefusesBlockedPlan(t *testing.T) {
 	}
 	if len(fake.called("pool.snapshot.delete"))+len(fake.called("pool.snapshot.rollback")) != 0 {
 		t.Error("blocked plan sent a write")
+	}
+}
+
+// ---- managed and unlisted datasets ----
+
+// addManagedFixtures adds snapshots on datasets the 25.10 middleware hides
+// from pool.dataset.query: the boot pool and ix-apps.
+func (f *snapDestroyFake) addManagedFixtures() {
+	for _, ds := range []string{"boot-pool", "boot-pool/ROOT", "boot-pool/ROOT/25.10.0", "freenas-boot", "freenas-boot/ROOT", "freenas-boot/ROOT/default",
+		"tank/ix-apps", "tank/ix-apps/app_configs", "tank/ix-apps/app_configs/foo", "tank/.ix-virt", "tank/ix-applications"} {
+		f.addDataset(ds, "")
+	}
+	f.addSnap("boot-pool/ROOT/25.10.0", "pristine", 10)
+	f.addSnap("boot-pool", "x", 11)
+	f.addSnap("freenas-boot/ROOT/default", "pristine", 12)
+	f.addSnap("tank/ix-apps", "u1", 13)
+	f.addSnap("tank/ix-apps/app_configs/foo", "u1", 14)
+	f.addSnap("tank/.ix-virt", "v1", 15)
+}
+
+// The name-based guard mirrors the middleware's internal-dataset rule. The
+// fake lists every dataset here (listAll), so only that guard can refuse.
+func TestSnapshotDestroyToolsRefuseManagedDatasets(t *testing.T) {
+	for _, tc := range []struct {
+		tool, snapshot, want string
+	}{
+		{"rollback_snapshot", "boot-pool/ROOT/25.10.0@pristine", "inside 'boot-pool', which TrueNAS manages itself"},
+		{"rollback_snapshot", "freenas-boot/ROOT/default@pristine", "inside 'freenas-boot', which TrueNAS manages itself"},
+		{"rollback_snapshot", "tank/ix-apps/app_configs/foo@u1", "inside 'ix-apps', which TrueNAS manages itself"},
+		{"rollback_snapshot", "tank/ix-apps@u1", "inside 'ix-apps', which TrueNAS manages itself"},
+		{"rollback_snapshot", "tank/.ix-virt@v1", "inside '.ix-virt', which TrueNAS manages itself"},
+		{"delete_snapshot", "tank/ix-apps@u1", "inside 'ix-apps', which TrueNAS manages itself"},
+		{"delete_snapshot", "tank/ix-apps/app_configs/foo@u1", "inside 'ix-apps', which TrueNAS manages itself"},
+		{"delete_snapshot", "boot-pool/ROOT/25.10.0@pristine", "inside 'boot-pool', which TrueNAS manages itself"},
+		{"delete_snapshot", "boot-pool@x", "inside 'boot-pool', which TrueNAS manages itself"},
+	} {
+		t.Run(tc.tool+" "+tc.snapshot, func(t *testing.T) {
+			f := newSnapDestroyFake()
+			f.addManagedFixtures()
+			f.listAll = true
+			r, fake := f.registry(t)
+			method := "pool.snapshot.rollback"
+			if tc.tool == "delete_snapshot" {
+				method = "pool.snapshot.delete"
+			}
+			assertRefused(t, r, fake, tc.tool, method, map[string]interface{}{"snapshot": tc.snapshot}, tc.want)
+		})
+	}
+}
+
+// A recursive delete from the pool root that would reach tank/ix-apps@x is
+// refused. Each case wants its own guard's message: the name guard's even
+// when pool.dataset.query lists ix-apps, and the listing guard's when it
+// does not (as on 25.10).
+func TestDeleteSnapshotRecursiveRefusesIxApps(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		listAll bool
+		want    string
+	}{
+		{"name guard", true, "tank/ix-apps@x (in 'ix-apps')"},
+		{"listing guard", false, "dataset(s) tank/ix-apps are not listed by query_datasets"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSnapDestroyFake()
+			f.addDataset("tank/ix-apps", "")
+			f.addSnap("tank", "x", 500)
+			f.addSnap("tank/data", "x", 500)
+			f.addSnap("tank/ix-apps", "x", 500)
+			f.listAll = tc.listAll
+			r, fake := f.registry(t)
+			assertRefused(t, r, fake, "delete_snapshot", "pool.snapshot.delete", map[string]interface{}{"snapshot": "tank@x", "recursive": true}, tc.want)
+		})
+	}
+}
+
+// A dataset pool.dataset.query does not list is refused, whatever its
+// name: the target of a rollback or delete, and any child a recursive
+// delete would reach.
+func TestSnapshotDestroyToolsRefuseUnlistedDatasets(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool, method, hidden string
+		args                       map[string]interface{}
+		want                       string
+	}{
+		{"rollback target", "rollback_snapshot", "pool.snapshot.rollback", "tank/data",
+			map[string]interface{}{"snapshot": "tank/data@s3"}, "dataset 'tank/data' is not listed by query_datasets"},
+		{"delete target", "delete_snapshot", "pool.snapshot.delete", "tank/data",
+			map[string]interface{}{"snapshot": "tank/data@s2"}, "dataset(s) tank/data are not listed by query_datasets"},
+		{"recursive delete child", "delete_snapshot", "pool.snapshot.delete", "tank/data/child/grand",
+			map[string]interface{}{"snapshot": "tank/data@s2", "recursive": true}, "dataset(s) tank/data/child/grand are not listed by query_datasets"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSnapDestroyFake()
+			f.hidden[tc.hidden] = true
+			r, fake := f.registry(t)
+			assertRefused(t, r, fake, tc.tool, tc.method, tc.args, tc.want)
+		})
+	}
+}
+
+// A hold tag counts even when userrefs reads 0.
+func TestDeleteSnapshotRefusesHoldTagWithZeroUserrefs(t *testing.T) {
+	f := newSnapDestroyFake()
+	f.hold("tank/data@s2", "truenas")
+	f.setUserrefs("tank/data@s2", 0)
+	r, fake := f.registry(t)
+	assertRefused(t, r, fake, "delete_snapshot", "pool.snapshot.delete", map[string]interface{}{"snapshot": "tank/data@s2"}, "tank/data@s2 (holds: truenas)")
+	if !(snapDetail{RefsOK: true, Tags: []string{"truenas"}}).held() {
+		t.Error("held() ignores hold tags when userrefs is 0")
+	}
+}
+
+// No query lists every snapshot on the system: snapshot lists use the
+// names-only path filtered by dataset or pool, and details, holds and
+// retention use a single "id =" filter.
+func TestSnapshotDestroyToolsAvoidFullSnapshotListing(t *testing.T) {
+	for _, tc := range []struct {
+		tool, method string
+		args         map[string]interface{}
+	}{
+		{"rollback_snapshot", "pool.snapshot.rollback", map[string]interface{}{"snapshot": "tank/data@s1", "allow_destroy_newer": true, "destroy_clones": true}},
+		{"rollback_snapshot", "pool.snapshot.rollback", map[string]interface{}{"snapshot": "tank/data@s3"}},
+		{"delete_snapshot", "pool.snapshot.delete", map[string]interface{}{"snapshot": "tank/data@s2", "recursive": true}},
+		{"delete_snapshot", "pool.snapshot.delete", map[string]interface{}{"snapshot": "tank@root-1", "recursive": true}},
+		{"delete_snapshot", "pool.snapshot.delete", map[string]interface{}{"snapshot": "tank/data@s1"}},
+	} {
+		t.Run(fmt.Sprint(tc.tool, tc.args), func(t *testing.T) {
+			f := newSnapDestroyFake()
+			f.addClone("tank/data@s2", "tank/restore", true, true)
+			if tc.tool == "delete_snapshot" {
+				f = newSnapDestroyFake()
+			}
+			r, fake := f.registry(t)
+			confirmAndRun(t, r, fake, tc.tool, tc.method, tc.args)
+			if len(f.fullScans) != 0 {
+				t.Errorf("pool.snapshot.query listed every snapshot %d time(s):\n%s", len(f.fullScans), strings.Join(f.fullScans, "\n"))
+			}
+			names := 0
+			for _, c := range fake.called("pool.snapshot.query") {
+				if strings.Contains(string(c.Params), `"select":["name"]`) {
+					names++
+				}
+			}
+			if tc.args["snapshot"] != "tank/data@s1" || tc.tool == "rollback_snapshot" {
+				if names == 0 {
+					t.Error("no names-only snapshot query was sent")
+				}
+			}
+		})
+	}
+}
+
+// After a deferred delete, only snapshots that still have clones are
+// pending_deletion; a leftover without clones (here held after the final
+// re-plan) is reported as remaining.
+func TestDeleteSnapshotDeferredLeftoverWithoutClones(t *testing.T) {
+	f := newSnapDestroyFake()
+	f.addClone("tank/data/child@s2", "tank/restore", true, false)
+	f.beforeDelete = func() { f.hold("tank/data/child/grand@s2", "other") }
+	r, fake := f.registry(t)
+	_, out := confirmAndRun(t, r, fake, "delete_snapshot", "pool.snapshot.delete", map[string]interface{}{"snapshot": "tank/data@s2", "recursive": true, "defer_if_cloned": true})
+	resp := decodeObj(t, out)
+	if got := previewText(t, resp["pending_deletion"]); got != `["tank/data/child@s2"]` {
+		t.Errorf("pending_deletion = %s", got)
+	}
+	if got := previewText(t, resp["remaining"]); got != `["tank/data/child/grand@s2"]` {
+		t.Errorf("remaining = %s", got)
+	}
+	if note, _ := resp["note"].(string); !strings.Contains(note, "have no clones") || !strings.Contains(note, "tank/data/child/grand@s2 are held") {
+		t.Errorf("note = %q", note)
+	}
+}
+
+// A newer bookmark blocks rolling back to the newest snapshot; the error
+// says so.
+func TestRollbackSnapshotNewerBookmarkHint(t *testing.T) {
+	f := newSnapDestroyFake()
+	f.bookmarks["tank/data"] = 350
+	r, fake := f.registry(t)
+	args := map[string]interface{}{"snapshot": "tank/data@s3"}
+	tok := destroyPreviewToken(t, r, "rollback_snapshot", args)
+	_, err := r.CallTool(t.Context(), "rollback_snapshot", mergeArgs(args, map[string]interface{}{"confirmation_token": tok}))
+	if err == nil || !strings.Contains(err.Error(), "a bookmark newer than it") || !strings.Contains(err.Error(), "this tool does not do for the newest snapshot") {
+		t.Errorf("err = %v", err)
+	}
+	if n := len(fake.called("pool.snapshot.rollback")); n != 1 {
+		t.Errorf("pool.snapshot.rollback calls = %d", n)
 	}
 }

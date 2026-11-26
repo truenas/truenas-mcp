@@ -317,7 +317,7 @@ func validateCloneTarget(target, sourcePool string) error {
 }
 
 // validateCloneSource refuses a snapshot of a hidden system dataset such as
-// .system or .ix-apps: a clone would put a writable copy of system-managed
+// .system or .ix-virt: a clone would put a writable copy of system-managed
 // data at an ordinary path.
 func validateCloneSource(dataset string) error {
 	for _, part := range strings.Split(dataset, "/")[1:] {
