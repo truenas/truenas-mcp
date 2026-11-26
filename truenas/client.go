@@ -779,6 +779,15 @@ func (c *Client) Authenticate(ctx context.Context) error {
 	return err
 }
 
+// APIUser returns the username this client logs in as with auth.login_ex
+// (the owner of its API key). It is "" for a nil client.
+func (c *Client) APIUser() string {
+	if c == nil {
+		return ""
+	}
+	return c.apiUser
+}
+
 // SessionGeneration connects and logs in if needed, then returns the login
 // generation of the current session. It changes on every reconnect or new
 // login, so callers can key per-session caches by it.

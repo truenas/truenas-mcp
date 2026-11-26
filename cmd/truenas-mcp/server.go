@@ -212,8 +212,11 @@ func (h *StdioHandler) interrupted(ctx context.Context, name string, started boo
 // then cut to maxToolOutputBytes so a secret cannot survive as a fragment
 // at the cut. The one redaction exception is the top-level
 // confirmation_token of a destructive tool's reply, and only when the
-// registry confirms it issued that token (see redact.ToolOutputKeeping). A
-// *mcp.ReplyError is an error whose content is its JSON reply.
+// registry confirms it issued that token (see redact.ToolOutputKeeping),
+// and the top-level generated_password of a successful result, only when
+// the registry confirms it generated that password and has not returned
+// it before (mcp.OneTimeSecrets). A *mcp.ReplyError is an error whose
+// content is its JSON reply.
 func (h *StdioHandler) callResult(result string, err error) *sdk.CallToolResult {
 	var keep func(string) bool
 	if tokens, ok := h.registry.(mcp.ConfirmationTokens); ok {
@@ -221,28 +224,70 @@ func (h *StdioHandler) callResult(result string, err error) *sdk.CallToolResult 
 	}
 	var reply *mcp.ReplyError
 	if errors.As(err, &reply) {
-		return keptTokenResult(reply.Reply, keep, true)
+		return keptTokenResult(reply.Reply, keep, nil, true)
 	}
 	if err != nil {
 		return toolResult("", err)
 	}
-	return keptTokenResult(result, keep, false)
+	var take func(string) bool
+	if secrets, ok := h.registry.(mcp.OneTimeSecrets); ok {
+		take = secrets.TakeOneTimeSecret
+	}
+	return keptTokenResult(result, keep, take, false)
 }
 
-// keptTokenResult redacts s with the confirmation_token exemption and caps
-// it. The reply encodes its keys in sorted order, so confirmation_token
-// comes first and is never cut. Should the cut still remove any part of a
-// kept token, the call fails closed: the client gets an error without the
-// token instead of a reply it cannot use.
-func keptTokenResult(s string, keep func(string) bool, isError bool) *sdk.CallToolResult {
-	text := capToolOutput(redact.ToolOutputKeeping(s, confirmationTokenKey, keep))
+// keptTokenResult redacts s with the confirmation_token exemption (and,
+// when take accepts it, the generated_password exemption) and caps it. The
+// reply encodes its keys in sorted order, so confirmation_token comes first
+// and is never cut. Should the cut still remove any part of a kept token,
+// the call fails closed: the client gets an error without the token
+// instead of a reply it cannot use. take consumes the password, so it is
+// called at most once.
+func keptTokenResult(s string, keep, take func(string) bool, isError bool) *sdk.CallToolResult {
+	password := keptValue(s, mcp.GeneratedPasswordKey, take)
+	keepers := map[string]func(string) bool{}
+	if keep != nil {
+		keepers[confirmationTokenKey] = keep
+	}
+	if password != "" {
+		keepers[mcp.GeneratedPasswordKey] = func(v string) bool { return v == password }
+	}
+	text := capToolOutput(redact.ToolOutputKeepingKeys(s, keepers))
 	if tok := keptToken(s, keep); tok != "" && !strings.Contains(text, tok) {
 		return &sdk.CallToolResult{
 			Content: []sdk.Content{&sdk.TextContent{Text: "Error: " + confirmationTooLargeMessage}},
 			IsError: true,
 		}
 	}
+	if password != "" && !strings.Contains(text, password) {
+		return &sdk.CallToolResult{
+			Content: []sdk.Content{&sdk.TextContent{Text: "Error: " + passwordTooLargeMessage}},
+			IsError: true,
+		}
+	}
 	return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: text}}, IsError: isError}
+}
+
+// passwordTooLargeMessage replaces a result whose generated password the
+// output cap would cut.
+const passwordTooLargeMessage = "the change was made, but the result was too large to return with the generated password, " +
+	"so the password is not shown and cannot be recovered. Set a new one with update_user"
+
+// keptValue returns the top-level string field key of s when accept
+// accepts it, else "". accept is called at most once.
+func keptValue(s, key string, accept func(string) bool) string {
+	if accept == nil {
+		return ""
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal([]byte(s), &top) != nil {
+		return ""
+	}
+	var v string
+	if json.Unmarshal(top[key], &v) != nil || v == "" || !accept(v) {
+		return ""
+	}
+	return v
 }
 
 // confirmationTooLargeMessage replaces a confirmation reply whose token the
@@ -253,18 +298,7 @@ const confirmationTooLargeMessage = "the confirmation reply was too large to ret
 // keptToken returns the top-level confirmation_token of s when keep accepts
 // it, else "".
 func keptToken(s string, keep func(string) bool) string {
-	if keep == nil {
-		return ""
-	}
-	var top map[string]json.RawMessage
-	if json.Unmarshal([]byte(s), &top) != nil {
-		return ""
-	}
-	var tok string
-	if json.Unmarshal(top[confirmationTokenKey], &tok) != nil || tok == "" || !keep(tok) {
-		return ""
-	}
-	return tok
+	return keptValue(s, confirmationTokenKey, keep)
 }
 
 // confirmationTokenKey is the result field that carries a confirmation
