@@ -537,8 +537,14 @@ const fixtureTaskDataset = "tank/apps/jellyfin/data"
 // replicationTaskFixtures are replication.query and pool.snapshottask.query
 // results for the registry-wide safety tests: task 1 of each kind, runnable.
 func replicationTaskFixtures() map[string]interface{} {
+	held := snap(fixtureTaskDataset, "held-1")
+	held["holds"] = map[string]interface{}{"truenas": 1.0}
 	return map[string]interface{}{
 		"replication.query":       []interface{}{pushReplicationFixture()},
 		"pool.snapshottask.query": []interface{}{snapshotTaskFixture(1, fixtureTaskDataset, false, []interface{}{}, nil)},
+		"pool.snapshot.query":     []interface{}{held},
 	}
 }
+
+// fixtureHeldSnapshot is the held snapshot in replicationTaskFixtures.
+const fixtureHeldSnapshot = fixtureTaskDataset + "@held-1"

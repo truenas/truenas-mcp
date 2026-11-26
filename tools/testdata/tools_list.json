@@ -103,6 +103,38 @@
     }
   },
   {
+    "name": "clone_snapshot",
+    "description": "Clone a ZFS snapshot to a new dataset, for example to recover files from a snapshot without rolling back. The clone is writable, starts out sharing all its blocks with the snapshot and is mounted under its parent's mountpoint. While the clone exists the snapshot cannot be deleted. The target must be a new dataset in the same pool as the snapshot, below the pool root, whose parent already exists and is mounted under /mnt/\u003cpool\u003e. Refused if the snapshot does not exist or the target already exists. Use dry_run to preview the source, target and mountpoint.",
+    "inputSchema": {
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without cloning (default: false)",
+          "type": "boolean"
+        },
+        "snapshot": {
+          "description": "Required: Full snapshot name to clone, 'dataset@name' (e.g. 'tank/data@manual-1')",
+          "type": "string"
+        },
+        "target_dataset": {
+          "description": "Required: Name of the new dataset to create, in the same pool as the snapshot (e.g. 'tank/restore/data'). A dataset name, not a /mnt path; its parent must already exist",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot",
+        "target_dataset"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "configure_directory_service",
     "description": "Configure and join a directory service (Active Directory, LDAP, or IPA) with TrueNAS directoryservices.update (TrueNAS 25.10 or later). Setting enable=true joins the domain automatically the first time. The arguments are the fields of that API call. Omitted optional fields keep their current value. A secret sent as [REDACTED] (as query_directory_services shows it) keeps its stored value only when its account, server and directory are unchanged; otherwise the call is refused.\n\n**To enable or change a service, service_type, credential, configuration and enable are all required, and configuration must match service_type. The old flat arguments (type, server, bindname, netbiosname, ssl, domain, ...) no longer exist: put them in credential and configuration as below.**\n\n**To disable the configured service, send only enable=false** (no service_type, credential or configuration): the settings are kept and domain authentication stops until it is enabled again. When service_type is sent with enable=false, a KERBEROS_USER credential is rejected for ACTIVEDIRECTORY and IPA (TrueNAS does not store it); use KERBEROS_PRINCIPAL.\n\n**Credential (credential_type and its fields):**\n\nActive Directory and IPA (Kerberos only; the first join needs KERBEROS_USER with domain admin rights):\n- KERBEROS_USER: {credential_type: \"KERBEROS_USER\", username: \"admin\", password: \"pass\"}\n- KERBEROS_PRINCIPAL: {credential_type: \"KERBEROS_PRINCIPAL\", principal: \"host/truenas@EXAMPLE.COM\"} (the principal must already be in a keytab on TrueNAS)\n\nLDAP (also accepts the Kerberos types above, which need kerberos_realm to be set):\n- LDAP_PLAIN: {credential_type: \"LDAP_PLAIN\", binddn: \"cn=admin,dc=example,dc=com\", bindpw: \"pass\"}\n- LDAP_ANONYMOUS: {credential_type: \"LDAP_ANONYMOUS\"}\n- LDAP_MTLS: {credential_type: \"LDAP_MTLS\", client_certificate: \"name of a certificate on TrueNAS\"}\n\n**Configuration (fields per service_type; * = required):**\n- ACTIVEDIRECTORY: hostname*, domain*, site, computer_account_ou, use_default_domain, enable_trusted_domains, trusted_domains, idmap\n  e.g. {hostname: \"truenas\", domain: \"corp.example.com\"}\n- IPA: target_server*, hostname*, domain*, basedn*, smb_domain, validate_certificates\n  e.g. {target_server: \"ipa.example.com\", hostname: \"truenas\", domain: \"example.com\", basedn: \"dc=example,dc=com\"}\n- LDAP: server_urls* (ldap:// or ldaps:// URIs), basedn*, starttls, validate_certificates, schema (RFC2307 or RFC2307BIS), search_bases, attribute_maps, auxiliary_parameters\n  e.g. {server_urls: [\"ldaps://ldap.example.com\"], basedn: \"dc=example,dc=com\"}\nidmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed to TrueNAS unchanged; see the TrueNAS API docs for directoryservices.update for their fields.\n\n**Security:**\n- Credentials are stored in TrueNAS configuration\n- Use Kerberos principals with keytabs instead of passwords for production\n- Dry-run shows the exact payload that would be sent with every secret value masked (password, bindpw, ldap_user_dn_password in idmap and trusted_domains, ...); credential_type and username stay visible\n\n**Returns:** task_id for tracking the long-running domain join job (2-10 minutes typical) **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
@@ -1362,6 +1394,33 @@
     }
   },
   {
+    "name": "hold_snapshot",
+    "description": "Place a hold on a ZFS snapshot so it cannot be deleted, manually or by periodic snapshot task or replication retention, until the hold is released with release_snapshot. TrueNAS adds the hold tag 'truenas'. Only the named snapshot is held, not snapshots of child datasets. If the snapshot already has the 'truenas' hold, nothing changes and the call succeeds. The preview shows the snapshot and its current holds. Use dry_run to preview.",
+    "inputSchema": {
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without holding (default: false)",
+          "type": "boolean"
+        },
+        "snapshot": {
+          "description": "Required: Full snapshot name to hold, 'dataset@name' (e.g. 'tank/data@manual-1')",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "install_app",
     "description": "Install a TrueNAS application using schema-driven configuration.\n\n**IMPORTANT: ALL TRUENAS APPS ARE COMPLEX**\nEvery app requires configuration across multiple groups (currently 6, but may vary):\n1. App Configuration (timezone, app-specific settings)\n2. User and Group Configuration (run_as user/group IDs)\n3. Network Configuration (ports and networking)\n4. Storage Configuration (volumes and datasets)\n5. Labels Configuration (metadata labels)\n6. Resources Configuration (CPU, memory, GPU)\n\n**UNIVERSAL WIZARD - SECTION-BY-SECTION CONFIGURATION:**\n\n**STEP 1: Get App Schema**\n1. Call get_app_catalog_details(app_name, train)\n2. Review schema.groups array (iterate through ALL groups, don't assume count)\n3. Check schema.group_count to know how many groups to configure\n4. Review schema.questions_by_group (shows questions for each group)\n5. Use the schema's own defaults for run-as and resources when they are present; omit them when the schema has none\n\n**STEP 2: Understand Common Patterns**\n\nAll apps follow these patterns:\n\n• **Timezone** (Group 1):\n  - Variable: TZ\n  - Type: enum with 600+ timezones\n  - Recommendation: Use \"Etc/UTC\" or user's timezone\n\n• **User/Group** (Group 2):\n  - Variable: run_as\n  - Structure: {user: \u003cuid\u003e, group: \u003cgid\u003e}\n  - Defaults: take user and group from the app schema when present; omit them when the schema has none\n\n• **Network** (Group 3):\n  - Variable: network\n  - Ports: {bind_mode: \"published\", port_number: \u003cport\u003e, host_ips: []}\n  - Common ports: web_port, api_port, sync_port, etc.\n  - bind_mode: \"published\" (external) or \"exposed\" (internal) or \"\" (none)\n\n• **Storage** (Group 4) - CRITICAL:\n  - Variable: storage\n  - ALWAYS use: {\"type\": \"host_path\", \"host_path_config\": {\"path\": \"/mnt/...\", \"acl_enable\": false}}\n  - NEVER use: {\"type\": \"ix_volume\", ...}\n  - Common volumes: config, cache, data, transcodes\n  - Pattern: /mnt/\u003cpool\u003e/apps/\u003cappname\u003e/\u003cvolume\u003e\n\n• **Labels** (Group 5):\n  - Variable: labels\n  - Structure: [{key: \"name\", value: \"value\"}]\n  - Usually optional (empty array)\n\n• **Resources** (Group 6):\n  - Variable: resources\n  - Structure: {limits: {cpus: \u003cschema default\u003e, memory: \u003cschema default\u003e}, gpus: {...}}\n  - Defaults: take CPU and memory limits from the app schema when present; omit them when the schema has none\n\n**STEP 3: Plan Storage (CRITICAL - Do This First)**\n\n1. Identify storage volumes from schema:\n   - Look in schema.questions_by_group[\"Storage Configuration\"]\n   - Find variables like: config, cache, data, transcodes, additional_storage\n   - Each has type enum: [\"host_path\", \"ix_volume\", ...]\n\n2. Call query_pools() to find available pools\n\n3. Recommend dataset structure:\n   - Format: \u003cpool\u003e/apps/\u003cappname\u003e/\u003cvolume\u003e\n   - Example: tank/apps/jellyfin/config\n\n4. Present plan to user:\n   \"I'll create the following datasets for Jellyfin:\n    - tank/apps/jellyfin/config (10GB)\n    - tank/apps/jellyfin/cache (50GB)\n    - tank/apps/jellyfin/transcodes (temporary, no dataset needed)\"\n\n**STEP 4: Create Datasets**\n\nFor each permanent storage volume (not temporary/tmpfs):\n1. Call create_dataset with:\n   - name: \"\u003cpool\u003e/apps/\u003cappname\u003e/\u003cvolume\u003e\"\n   - type: \"FILESYSTEM\"\n   - share_type: \"APPS\"\n   - compression: \"LZ4\"\n   - quota: \u003csize_in_bytes\u003e (optional)\n2. Confirm creation\n3. Recommended quotas:\n   - config: 10GB (10737418240)\n   - cache: 50GB (53687091200)\n   - data: 1TB+ (varies by app)\n\n**STEP 5: Build Configuration by Group**\n\nGo through each group and build configuration:\n\n**Group 1 - App Configuration:**\n{\n  \"TZ\": \"Etc/UTC\",\n  \"\u003cappname\u003e\": {\n    // App-specific settings from schema\n    \"additional_envs\": []\n  }\n}\n\n**Group 2 - User/Group:**\n{\n  \"run_as\": {\n    \"user\":  // from the app schema default, when present\n    \"group\": // from the app schema default, when present\n  }\n}\n\n**Group 3 - Network:**\n{\n  \"network\": {\n    \"web_port\": {\n      \"bind_mode\": \"published\",\n      \"port_number\": 30013,\n      \"host_ips\": []\n    },\n    \"host_network\": false\n  }\n}\n\n**Group 4 - Storage (CRITICAL):**\n{\n  \"storage\": {\n    \"config\": {\n      \"type\": \"host_path\",\n      \"host_path_config\": {\n        \"path\": \"/mnt/tank/apps/jellyfin/config\",\n        \"acl_enable\": false\n      }\n    },\n    \"cache\": {\n      \"type\": \"host_path\",\n      \"host_path_config\": {\n        \"path\": \"/mnt/tank/apps/jellyfin/cache\",\n        \"acl_enable\": false\n      }\n    },\n    \"transcodes\": {\n      \"type\": \"temporary\"\n    },\n    \"additional_storage\": []\n  }\n}\n\n**Group 5 - Labels:**\n{\n  \"labels\": []\n}\n\n**Group 6 - Resources:**\n{\n  \"resources\": {\n    \"limits\": {\n      \"cpus\":   // from the app schema default, when present\n      \"memory\": // from the app schema default, when present\n    },\n    \"gpus\": {}\n  }\n}\n\n**STEP 6: Assemble Complete Values Object**\n\nCombine all groups into single values object:\n{\n  \"TZ\": \"Etc/UTC\",\n  \"jellyfin\": {...},\n  \"run_as\": {...},\n  \"network\": {...},\n  \"storage\": {...},\n  \"labels\": [...],\n  \"resources\": {...}\n}\n\n**STEP 7: Validate Configuration**\n\n1. All storage volumes use type=\"host_path\"\n2. All paths start with /mnt/\n3. All required groups present\n4. Port numbers in valid range (1-65535)\n5. User/group IDs are valid (\u003e= 0)\n\n**STEP 8: Dry-Run Preview**\n\nCall install_app with dry_run=true:\ninstall_app(\n  app_name=\"jellyfin\",\n  catalog_app=\"jellyfin\",\n  train=\"community\",\n  values={...complete config...},\n  dry_run=true\n)\n\nReview:\n- Datasets exist?\n- Configuration valid?\n- Warnings or errors?\n\n**STEP 9: Execute Installation**\n\nIf dry-run successful, call with dry_run=false:\ninstall_app(\n  app_name=\"jellyfin\",\n  catalog_app=\"jellyfin\",\n  train=\"community\",\n  values={...complete config...},\n  dry_run=false\n)\n\nReturns task_id for tracking progress with tasks_get.\n\n**CRITICAL SAFETY RULES:**\n- ALWAYS use \"type\": \"host_path\" for storage\n- NEVER use \"type\": \"ix_volume\"\n- ALWAYS create datasets before installation\n- ALWAYS validate paths start with /mnt/\n- ALWAYS use dry-run before final installation\n\n**ERROR RECOVERY:**\n- Missing datasets: Create with create_dataset\n- ix_volume detected: Convert to host_path format\n- Invalid structure: Review schema and rebuild section\n- Validation failed: Check error message for exact location",
     "inputSchema": {
@@ -2020,6 +2079,37 @@
     "annotations": {
       "readOnlyHint": false,
       "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "release_snapshot",
+    "description": "Release the holds on a ZFS snapshot. TrueNAS removes every hold tag on the snapshot, not only the 'truenas' tag hold_snapshot adds. Afterwards the snapshot is deletable again: a manual delete, or periodic snapshot task or replication retention, can remove it. Only the named snapshot is released, not snapshots of child datasets. The preview lists the holds and any retention that schedules the snapshot's removal. Refused if the snapshot has no holds. Destructive: needs confirmation. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without releasing (default: false)",
+          "type": "boolean"
+        },
+        "snapshot": {
+          "description": "Required: Full snapshot name to release, 'dataset@name' (e.g. 'tank/data@manual-1')",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
       "idempotentHint": true,
       "openWorldHint": false
     }

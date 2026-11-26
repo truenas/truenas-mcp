@@ -19,6 +19,11 @@
     "plan": "(*Registry).planCheckinNetworkChanges"
   },
   {
+    "name": "clone_snapshot",
+    "handler": "handleCloneSnapshot",
+    "plan": "planCloneSnapshot"
+  },
+  {
     "name": "configure_directory_service",
     "handler": "(*Registry).handleConfigureDirectoryServiceWithDryRun",
     "plan": "planConfigureDirectoryService",
@@ -142,6 +147,11 @@
     "handler": "handleGetUpsMetrics"
   },
   {
+    "name": "hold_snapshot",
+    "handler": "handleHoldSnapshot",
+    "plan": "planHoldSnapshot"
+  },
+  {
     "name": "install_app",
     "handler": "(*Registry).handleInstallAppWithDryRun",
     "plan": "planInstallApp"
@@ -232,6 +242,12 @@
     "name": "refresh_directory_cache",
     "handler": "(*Registry).handleRefreshDirectoryCacheWithDryRun",
     "plan": "planRefreshDirectoryCache"
+  },
+  {
+    "name": "release_snapshot",
+    "handler": "handleReleaseSnapshot",
+    "plan": "planReleaseSnapshot",
+    "execute": "executeReleaseSnapshot"
   },
   {
     "name": "restore_alert",
