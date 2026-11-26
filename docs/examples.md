@@ -50,6 +50,9 @@ This document provides example natural language queries you can use with TrueNAS
 - "Which periodic snapshot task feeds replication task 1?"
 - "Does my recursive snapshot task on tank/data cover every child dataset?"
 - "Snapshot tank/data before I change it"
+- "Clone tank/data@manual-1 to tank/restore/data so I can copy a file back"
+- "Hold tank/data@manual-1 so retention does not delete it"
+- "Release the hold on tank/data@manual-1"
 - "Run snapshot task 3 now and show me the snapshots it made"
 - "Replicate tank/data off-site now"
 
