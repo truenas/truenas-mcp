@@ -26,6 +26,8 @@ This document provides example natural language queries you can use with TrueNAS
 - "What SMB shares are configured?"
 - "Why can't exampleuser open the TeamDocs share?"
 - "Show the permissions on /mnt/tank/shares/docs"
+- "Give the staff group modify access to /mnt/tank/shares/docs, keeping the owner's full control (preview first)"
+- "Apply that ACL to everything under /mnt/tank/shares/docs, and show me how much it touches first"
 
 ## Disks and Services
 
@@ -140,6 +142,8 @@ This document provides example natural language queries you can use with TrueNAS
 - "Set a new random password for alice"
 - "Create a group media with members alice and bob"
 - "Remove bob from the staff group"
+- "Delete the user carol; keep her home directory and primary group"
+- "Delete the group media"
 
 ## System Updates
 
