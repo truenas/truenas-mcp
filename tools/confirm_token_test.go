@@ -40,7 +40,7 @@ func tokenArgs(base map[string]interface{}, extra map[string]interface{}) map[st
 	return out
 }
 
-// The twenty-seven destructive tools, update_app included, are gated by a
+// The thirty destructive tools, update_app included, are gated by a
 // confirmation token.
 func TestConfirmTokenDestructiveTools(t *testing.T) {
 	want := []string{"system_reboot", "apply_update", "delete_boot_environment", "delete_app", "stop_app",
@@ -48,7 +48,8 @@ func TestConfirmTokenDestructiveTools(t *testing.T) {
 		"run_snapshot_task", "run_replication", "update_network_config", "update_network_interface", "release_snapshot",
 		"control_service", "rollback_snapshot", "delete_snapshot",
 		"create_user", "update_user", "create_group", "update_group",
-		"update_smb_share", "delete_smb_share", "update_nfs_share", "delete_nfs_share", "set_share_acl"}
+		"update_smb_share", "delete_smb_share", "update_nfs_share", "delete_nfs_share", "set_share_acl",
+		"offline_disk", "online_disk", "replace_disk"}
 	n := 0
 	for _, s := range toolSafety {
 		if s.Access == Destructive {

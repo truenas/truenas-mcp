@@ -249,6 +249,7 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"update_smb_share": Destructive, "delete_smb_share": Destructive,
 		"update_nfs_share": Destructive, "delete_nfs_share": Destructive,
 		"set_share_acl": Destructive,
+		"offline_disk":  Destructive, "online_disk": Destructive, "replace_disk": Destructive,
 	}
 	for name, s := range toolSafety {
 		if got, exp := s.Access, want[name]; exp != 0 && got != exp || exp == 0 && got != Read {
@@ -261,8 +262,8 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 			destructive++
 		}
 	}
-	if destructive != 27 {
-		t.Errorf("%d destructive tools, want 27; update docs/safety.md and docs/full-features.md too", destructive)
+	if destructive != 30 {
+		t.Errorf("%d destructive tools, want 30; update docs/safety.md and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
 		if s.Overwrites {
@@ -603,7 +604,7 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		}},
 	}
 	allowed := func(method string) bool {
-		for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", "upgrade_summary", ".pool_choices", ".available", ".get_app_details"} {
+		for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".get_state", ".details", ".get_jobs"} {
 			if strings.HasSuffix(method, suffix) {
 				return true
 			}

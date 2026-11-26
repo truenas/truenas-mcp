@@ -87,6 +87,9 @@ var toolVersion = map[string]VersionRange{
 	// Disks and services
 	"query_disks":         {Min: truenas.MinSupported},
 	"get_disk_health":     {Min: truenas.MinSupported},
+	"offline_disk":        {Min: truenas.MinSupported},
+	"online_disk":         {Min: truenas.MinSupported},
+	"replace_disk":        {Min: truenas.MinSupported},
 	"query_services":      {Min: truenas.MinSupported},
 	"control_service":     {Min: truenas.MinSupported},
 	"set_service_enabled": {Min: truenas.MinSupported},
