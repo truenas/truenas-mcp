@@ -85,10 +85,22 @@
     "execute": "executeDeleteBootEnvironment"
   },
   {
+    "name": "delete_nfs_share",
+    "handler": "handleDeleteNFSShare",
+    "plan": "planDeleteNFSShare",
+    "execute": "executeDeleteNFSShare"
+  },
+  {
     "name": "delete_scrub_schedule",
     "handler": "(*Registry).handleDeleteScrubScheduleWithDryRun",
     "plan": "planDeleteScrubSchedule",
     "execute": "executeDeleteScrubSchedule"
+  },
+  {
+    "name": "delete_smb_share",
+    "handler": "handleDeleteSMBShare",
+    "plan": "planDeleteSMBShare",
+    "execute": "executeDeleteSMBShare"
   },
   {
     "name": "delete_snapshot",
@@ -316,6 +328,12 @@
     "plan": "planSetServiceEnabled"
   },
   {
+    "name": "set_share_acl",
+    "handler": "handleSetShareACL",
+    "plan": "planSetShareACL",
+    "execute": "executeSetShareACL"
+  },
+  {
     "name": "start_app",
     "handler": "(*Registry).handleStartAppWithDryRun",
     "plan": "planStartApp"
@@ -371,6 +389,18 @@
     "handler": "(*Registry).handleUpdateNetworkInterfaceWithDryRun",
     "plan": "planUpdateNetworkInterface",
     "execute": "(*Registry).executeUpdateNetworkInterface"
+  },
+  {
+    "name": "update_nfs_share",
+    "handler": "handleUpdateNFSShare",
+    "plan": "planUpdateNFSShare",
+    "execute": "executeUpdateNFSShare"
+  },
+  {
+    "name": "update_smb_share",
+    "handler": "handleUpdateSMBShare",
+    "plan": "planUpdateSMBShare",
+    "execute": "executeUpdateSMBShare"
   },
   {
     "name": "update_status",

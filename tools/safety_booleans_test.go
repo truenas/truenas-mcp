@@ -10,7 +10,7 @@ import (
 const secretDryRunValue = "true-secret-must-not-be-echoed"
 
 func writeishMiddlewareMethod(method string) bool {
-	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".has_pending_changes", ".checkin_waiting", ".websocket_local_ip", ".system_routes"} {
+	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".has_pending_changes", ".checkin_waiting", ".websocket_local_ip", ".system_routes", ".getacl"} {
 		if strings.HasSuffix(method, suffix) {
 			return false
 		}
@@ -71,6 +71,11 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 		"update_user":              {"username": "alice", "full_name": "Alice B"},
 		"create_group":             {"name": "media"},
 		"update_group":             {"name": "staff", "smb": true},
+		"update_smb_share":         {"share_id": 1.0, "comment": "Team documents"},
+		"delete_smb_share":         {"share_id": 1.0},
+		"update_nfs_share":         {"share_id": 1.0, "comment": "Data"},
+		"delete_nfs_share":         {"share_id": 1.0},
+		"set_share_acl":            {"share_id": 1.0, "entries": []interface{}{map[string]interface{}{"who_type": "everyone", "perm": "FULL", "type": "ALLOWED"}}},
 	}
 	args := map[string]interface{}{}
 	for k, v := range valid[name] {
