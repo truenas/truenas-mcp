@@ -108,6 +108,10 @@ func TestKeyFileID(t *testing.T) {
 	for content, want := range map[string]int{
 		"11-abc\n": 11, "123456-x": 123456, "-1-x": 0, "abc": 0, "12": 0, "": 0,
 		"99999999999999999999-x": 0,
+		// At most 18 digits: 19 could overflow int.
+		"999999999999999999-x":  999999999999999999,
+		"9223372036854775818-x": 0,
+		"1000000000000000000-x": 0,
 	} {
 		p := filepath.Join(dir, "k")
 		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
@@ -119,6 +123,15 @@ func TestKeyFileID(t *testing.T) {
 	}
 	if got := keyFileID(filepath.Join(dir, "missing")); got != 0 {
 		t.Errorf("missing file: %d", got)
+	}
+	// Only a regular file is read, not a symlink to one.
+	if err := os.WriteFile(filepath.Join(dir, "real"), []byte("12-abc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(dir, "link")); err == nil {
+		if got := keyFileID(filepath.Join(dir, "link")); got != 0 {
+			t.Errorf("symlink: %d, want 0", got)
+		}
 	}
 }
 
@@ -215,6 +228,11 @@ func TestSetupBoolFlagValueNotEchoed(t *testing.T) {
 		{"--host", "192.0.2.10", "--otp-stdin=" + fakeOTP},
 		{"--user", "u", "--otp-stdin=" + fakeOTP},
 		{"--force=" + fakePassword},
+		// Bad flag syntax: the flag package would echo the argument.
+		{"---password-stdin=" + fakePassword},
+		{"----password-stdin=" + fakePassword},
+		{"--=" + fakePassword},
+		{"-=" + fakePassword},
 	} {
 		r := runSetupTest(t, nil, setupOpts{}, args...)
 		wantCode(t, r, exitSetupUsage)

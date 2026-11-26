@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/truenas/truenas-mcp/redact"
@@ -207,13 +208,18 @@ func linkStat(at, target string) map[string]interface{} {
 // with no symlinks in it: /mnt/tank and /mnt/other are pool mountpoints,
 // any other path under them is a directory, and fs overrides or adds
 // entries. Paths elsewhere fail with ENOENT, so a test sees if the tool
-// stats a path outside the pools.
+// stats a path outside the pools. After maxACLFakeStats calls every stat
+// fails, so a walk that never ends fails its test instead of hanging.
 func newACLFake(t *testing.T, results map[string]interface{}, fs map[string]map[string]interface{}) (*Registry, *fakeMiddleware) {
 	t.Helper()
 	fake := &fakeMiddleware{results: results}
+	var stats atomic.Int64
 	fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
 		if method != "filesystem.stat" {
 			return nil, nil, false
+		}
+		if stats.Add(1) > maxACLFakeStats {
+			return nil, map[string]interface{}{"code": -32001, "message": "fake stat call budget exhausted"}, true
 		}
 		var args []string
 		if err := json.Unmarshal(params, &args); err != nil || len(args) != 1 {
@@ -234,6 +240,11 @@ func newACLFake(t *testing.T, results map[string]interface{}, fs map[string]map[
 	client, _ := newFakeClientFrom(t, fake)
 	return NewRegistry(client, nil), fake
 }
+
+// maxACLFakeStats bounds filesystem.stat calls per newACLFake, well above
+// what any bounded walk needs (maxACLPathDepth components plus
+// maxACLSymlinkHops links, each with a pool root).
+const maxACLFakeStats = 4 * (maxACLPathDepth + maxACLSymlinkHops)
 
 // statPaths returns the paths filesystem.stat was called with, in order.
 func statPaths(t *testing.T, fake *fakeMiddleware) []string {
@@ -524,11 +535,26 @@ func TestGetFilesystemACLSymlinks(t *testing.T) {
 		}
 	})
 	t.Run("link to a hidden system mount is refused", func(t *testing.T) {
+		// On a real system /mnt/.ix-apps is a mountpoint, so only the
+		// path check on the link target refuses it.
 		r, fake := newACLFake(t, nil, map[string]map[string]interface{}{
-			"/mnt/tank/apps": linkStat("/mnt/tank/apps", "/mnt/.ix-apps"),
+			"/mnt/tank/apps":            linkStat("/mnt/tank/apps", "/mnt/.ix-apps"),
+			"/mnt/.ix-apps":             mountStat("/mnt/.ix-apps"),
+			"/mnt/.ix-apps/app_configs": dirStat("/mnt/.ix-apps/app_configs"),
 		})
 		_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/apps/app_configs"})
-		refused(t, fake, err, "resolves to /mnt/.ix-apps")
+		refused(t, fake, err, "/mnt/tank/apps resolves to /mnt/.ix-apps, which is outside /mnt/<pool>")
+	})
+	t.Run("link with a dot-dot target is refused", func(t *testing.T) {
+		// The pool part of these targets is a real pool, so only the
+		// path check on the link target refuses them.
+		for _, target := range []string{"/mnt/tank/../../etc", "../../etc"} {
+			r, fake := newACLFake(t, nil, map[string]map[string]interface{}{
+				"/mnt/tank/up": linkStat("/mnt/tank/up", target),
+			})
+			_, err := r.CallTool(t.Context(), "get_filesystem_acl", map[string]interface{}{"path": "/mnt/tank/up/passwd"})
+			refused(t, fake, err, "/mnt/tank/up resolves to "+target+", which is outside /mnt/<pool>")
+		}
 	})
 	t.Run("link to a non-pool directory under /mnt is refused", func(t *testing.T) {
 		r, fake := newACLFake(t, nil, map[string]map[string]interface{}{
@@ -599,6 +625,10 @@ func TestGetFilesystemACLRequiresPoolMountpoint(t *testing.T) {
 		"plain directory": dirStat("/mnt/scratch"),
 		"symlink":         linkStat("/mnt/scratch", "/mnt/tank"),
 		"no mount field":  {"realpath": "/mnt/scratch", "type": "DIRECTORY"},
+		// is_mountpoint alone is not enough: the pool root must be a
+		// directory.
+		"mountpoint that is a file":    {"realpath": "/mnt/scratch", "type": "FILE", "is_mountpoint": true},
+		"mountpoint that is a symlink": {"realpath": "/mnt/scratch", "type": "SYMLINK", "is_mountpoint": true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, fake := newACLFake(t, nil, map[string]map[string]interface{}{"/mnt/scratch": st})

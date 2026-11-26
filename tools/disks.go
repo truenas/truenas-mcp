@@ -708,15 +708,12 @@ func addDiskIdentity(entry map[string]interface{}, name string, q map[string]int
 	}
 }
 
-// zfsGUIDString returns a disk.query zfs_guid as a string, or "".
+// zfsGUIDString returns a disk.query zfs_guid as a string, or "". 25.10
+// sends guids as strings; a JSON number cannot hold every 64-bit guid
+// exactly, so any other type never matches.
 func zfsGUIDString(v interface{}) string {
-	switch g := v.(type) {
-	case string:
-		return g
-	case float64:
-		return fmt.Sprintf("%.0f", g)
-	}
-	return ""
+	g, _ := v.(string)
+	return g
 }
 
 // diskLabel names a get_disk_health entry: the disk name, else the pool

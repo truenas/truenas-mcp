@@ -143,14 +143,23 @@ func syncDir(dir string) {
 }
 
 // keyFileID returns the key id from the "<id>-" prefix of the key file at
-// path, or 0 when it cannot be read or has no such prefix. Only the prefix
-// is kept; the bytes read are wiped.
+// path, or 0 when it is not a regular file, cannot be read or has no such
+// prefix. The prefix is at most 18 digits, so it always fits in an int.
+// Only the prefix is kept; the bytes read are wiped.
 func keyFileID(path string) int {
+	// Check the type before opening: opening a FIFO would block.
+	before, err := os.Lstat(path)
+	if err != nil || !before.Mode().IsRegular() {
+		return 0
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return 0
 	}
 	defer f.Close()
+	if after, err := f.Stat(); err != nil || !os.SameFile(before, after) {
+		return 0
+	}
 	buf := make([]byte, 21)
 	n, _ := io.ReadFull(f, buf)
 	defer wipe(buf)
@@ -158,7 +167,7 @@ func keyFileID(path string) int {
 	for i := 0; i < n; i++ {
 		c := buf[i]
 		switch {
-		case c >= '0' && c <= '9' && i < 19:
+		case c >= '0' && c <= '9' && i < 18:
 			id = id*10 + int(c-'0')
 		case c == '-' && i > 0:
 			return id

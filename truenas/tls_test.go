@@ -195,6 +195,8 @@ func TestTLSHint(t *testing.T) {
 		{x509.HostnameError{Certificate: &x509.Certificate{DNSNames: []string{"a.example"}}, Host: "b.example"}, "b.example", "subject alternative names include b.example"},
 		{fmt.Errorf("tls: %w", x509.UnknownAuthorityError{}), "192.0.2.10", "--tls-ca <cert.pem>"},
 		{errors.New("dial tcp 192.0.2.10:443: connection refused"), "192.0.2.10", ""},
+		{&PinMismatchError{Got: "ab:cd"}, "192.0.2.10", "update the pin, for example by running truenas-mcp setup again"},
+		{fmt.Errorf("dial: %w", &PinMismatchError{Got: "ab:cd"}), "192.0.2.10", "replaced, reissued or renewed"},
 	} {
 		got := tlsHint(tc.err, tc.host)
 		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {

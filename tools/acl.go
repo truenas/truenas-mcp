@@ -344,6 +344,9 @@ func handleGetFilesystemACL(ctx context.Context, client *truenas.Client, args ma
 	// A symlink swapped in after the walk above and before getacl is not
 	// caught. That gap is acceptable for a read-only tool: getacl changes
 	// nothing and needs the same FILESYSTEM_ATTRS_READ role as stat.
+	// A symlink's resolved target is stat'ed as a whole, not walked again
+	// component by component: 25.10 resolves every component of realpath,
+	// and a link changed in between is the same race as above.
 	raw, err := client.Call(ctx, "filesystem.getacl", target, simplified, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to get ACL of %s: %w", target, err)

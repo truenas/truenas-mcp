@@ -74,7 +74,13 @@ func leaf(disk, guid, status string, r, w, c float64) map[string]interface{} {
 }
 
 func tankPoolFixture() map[string]interface{} {
-	removed := leaf("", "1005", "REMOVED", 0, 0, 0)
+	return tankPoolFixtureRemovedGUID("1005")
+}
+
+// tankPoolFixtureRemovedGUID is tankPoolFixture with the REMOVED device's
+// guid set to removedGUID.
+func tankPoolFixtureRemovedGUID(removedGUID string) map[string]interface{} {
+	removed := leaf("", removedGUID, "REMOVED", 0, 0, 0)
 	removed["unavail_disk"] = map[string]interface{}{"name": "sde", "serial": "FAKE-SERIAL-0005", "model": "FAKE HDD 8TB", "passwd": sentinelDiskPasswd}
 	return map[string]interface{}{
 		"name": "tank", "status": "DEGRADED", "healthy": false,
@@ -108,7 +114,10 @@ type diskFakeOpts struct {
 	// the REMOVED tank device, with this zfs_guid ("" for none).
 	reusedName     bool
 	reusedNameGUID string
-	dismissed      bool
+	// emptyGUIDs sends "" as both the REMOVED device's guid and the
+	// reused-name disk's zfs_guid.
+	emptyGUIDs bool
+	dismissed  bool
 }
 
 func diskFake(t *testing.T, opts diskFakeOpts) (*Registry, *fakeMiddleware) {
@@ -121,7 +130,7 @@ func diskFake(t *testing.T, opts diskFakeOpts) (*Registry, *fakeMiddleware) {
 			rows := diskQueryFixtures()
 			if opts.reusedName {
 				var guid interface{}
-				if opts.reusedNameGUID != "" {
+				if opts.reusedNameGUID != "" || opts.emptyGUIDs {
 					guid = opts.reusedNameGUID
 				}
 				rows = append(rows, map[string]interface{}{
@@ -138,7 +147,11 @@ func diskFake(t *testing.T, opts diskFakeOpts) (*Registry, *fakeMiddleware) {
 		case "pool.query":
 			filters, _ := p[0].([]interface{})
 			out := []interface{}{}
-			if row := tankPoolFixture(); jobMatchesFilters(row, filters) {
+			row := tankPoolFixture()
+			if opts.emptyGUIDs {
+				row = tankPoolFixtureRemovedGUID("")
+			}
+			if jobMatchesFilters(row, filters) {
 				out = append(out, row)
 			}
 			return out, nil, true
@@ -511,6 +524,48 @@ func TestGetDiskHealthRemovedDeviceSameGUID(t *testing.T) {
 	}
 	if _, ok := disks[""]; ok {
 		t.Errorf("unnamed device left: %v", disks[""])
+	}
+}
+
+// Two empty guids are not a match: a REMOVED device with no guid never
+// joins the present disk that reused its name, even when that disk has an
+// empty zfs_guid too.
+func TestGetDiskHealthRemovedDeviceEmptyGUIDs(t *testing.T) {
+	r, _ := diskFake(t, diskFakeOpts{reusedName: true, emptyGUIDs: true})
+	resp := callTool(t, r, "get_disk_health", map[string]interface{}{})
+	if resp["count"] != 8.0 {
+		t.Errorf("count = %v, want 8 (6 pool devices + sdg + sde)", resp["count"])
+	}
+	disks := disksByName(t, resp)
+	removed := disks[""]
+	if removed["zfs_status"] != "REMOVED" || removed["last_known_name"] != "sde" || removed["serial"] != "FAKE-SERIAL-0005" {
+		t.Errorf("removed device = %v", removed)
+	}
+	if _, ok := removed["temperature_c"]; ok {
+		t.Errorf("removed device has a temperature from the disk now named sde: %v", removed)
+	}
+	if sde := disks["sde"]; sde == nil || sde["pool"] != nil || sde["serial"] != "OTHER-DISK-0009" {
+		t.Errorf("present sde = %v", sde)
+	}
+}
+
+// Only string guids match. A numeric zfs_guid cannot carry every 64-bit
+// guid exactly, so it is never turned into a guid string.
+func TestZFSGUIDStringOnlyStrings(t *testing.T) {
+	for _, tc := range []struct {
+		in   interface{}
+		want string
+	}{
+		{"18446744073709551615", "18446744073709551615"},
+		{"", ""},
+		{nil, ""},
+		{1005.0, ""},
+		{float64(1 << 60), ""},
+		{json.Number("1005"), ""},
+	} {
+		if got := zfsGUIDString(tc.in); got != tc.want {
+			t.Errorf("zfsGUIDString(%#v) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

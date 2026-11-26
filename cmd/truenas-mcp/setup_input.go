@@ -178,7 +178,10 @@ func fprint(w io.Writer, args ...interface{})                 { _, _ = fmt.Fprin
 // checkBoolFlagValues refuses a value given to a boolean flag with "=" that
 // is not a boolean, such as --password-stdin=<password>, before the flag
 // package would echo the value in its error. Parsing stops at "--" and at
-// the first argument that is not a flag, as in the flag package.
+// the first argument that is not a flag, as in the flag package. An
+// argument the flag package rejects as bad syntax (three or more dashes,
+// or "=" right after the dashes) is refused here too, because its error
+// would echo the whole argument.
 func checkBoolFlagValues(fs *flag.FlagSet, args []string) *setupError {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -186,6 +189,9 @@ func checkBoolFlagValues(fs *flag.FlagSet, args []string) *setupError {
 			return nil
 		}
 		name := strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-")
+		if name == "" || name[0] == '-' || name[0] == '=' {
+			return failf(exitSetupUsage, "bad flag syntax in argument %d; the argument was not shown", i+1)
+		}
 		eq := strings.IndexByte(name, '=')
 		if eq < 0 {
 			if fl := fs.Lookup(name); fl != nil && !isBoolFlag(fl) {
