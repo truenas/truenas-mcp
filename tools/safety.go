@@ -104,7 +104,7 @@ var toolSafety = map[string]Safety{
 	"create_snapshot":           {Access: Write},
 	"clone_snapshot":            {Access: Write},
 	"hold_snapshot":             {Access: Write, Idempotent: true},
-	"release_snapshot":          {Access: Destructive, Idempotent: true},
+	"release_snapshot":          {Access: Destructive},
 	"query_shares":              {Access: Read},
 	"query_vms":                 {Access: Read},
 	"create_dataset":            {Access: Write},

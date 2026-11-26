@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -9,8 +10,10 @@ import (
 
 // snapActionFake answers the snapshot and dataset methods clone_snapshot,
 // hold_snapshot and release_snapshot use, from mutable fixtures, the way
-// 25.10 does: hold of an already-held snapshot fails (ZFS EEXIST), and
-// release of a snapshot without holds is a silent no-op.
+// 25.10 does: hold of an already-held snapshot fails (ZFS EEXIST), release
+// of a snapshot without holds is a silent no-op, and release drops every
+// hold. Snapshot rows keep native properties under "properties"; a query
+// returns only the ones it asks for in extra.properties.
 type snapActionFake struct {
 	mu        sync.Mutex
 	snapshots map[string]map[string]interface{} // id -> row (holds as a map)
@@ -64,6 +67,11 @@ func newSnapActionFake() *snapActionFake {
 	f.addSnap("tank/data", "two-holds", "backup", "truenas")
 	f.addSnap("tank/secure", "s1")
 	f.addSnap("tank", "root-1")
+	f.addSnap("tank/.system", "sys-1")
+	f.addSnap("tank/data/.ix-apps", "a1")
+	f.datasets["tank/.system"] = fsRow("tank/.system", "/mnt/tank/.system")
+	f.datasets["tank/data/.ix-apps"] = fsRow("tank/data/.ix-apps", "/mnt/tank/data/.ix-apps")
+	f.datasets["tank/ix-applications"] = fsRow("tank/ix-applications", "/mnt/tank/ix-applications")
 	return f
 }
 
@@ -75,7 +83,18 @@ func (f *snapActionFake) addSnap(dataset, name string, tags ...string) {
 		holds[t] = 1.0
 	}
 	row["holds"] = holds
+	row["properties"] = map[string]interface{}{
+		"createtxg": map[string]interface{}{"value": "100", "rawvalue": "100", "parsed": "100"},
+	}
 	f.snapshots[dataset+"@"+name] = row
+	f.setUserrefs(dataset+"@"+name, len(tags))
+}
+
+// setUserrefs sets the native hold count, as 25.10 reports it. Callers in
+// a test hold f.mu when the registry may be running.
+func (f *snapActionFake) setUserrefs(id string, n int) {
+	props := f.snapshots[id]["properties"].(map[string]interface{})
+	props["userrefs"] = map[string]interface{}{"value": fmt.Sprint(n), "rawvalue": fmt.Sprint(n), "parsed": float64(n), "source": "NONE"}
 }
 
 func (f *snapActionFake) holdTags(id string) []string {
@@ -116,10 +135,19 @@ func (f *snapActionFake) registry(t *testing.T) (*Registry, *fakeMiddleware) {
 				}
 				row := map[string]interface{}{}
 				for k, v := range s {
-					if k != "holds" || extra["holds"] == true {
+					if k != "holds" && k != "properties" || k == "holds" && extra["holds"] == true {
 						row[k] = v
 					}
 				}
+				props := map[string]interface{}{}
+				all, _ := s["properties"].(map[string]interface{})
+				wanted, _ := extra["properties"].([]interface{})
+				for _, w := range wanted {
+					if name, _ := w.(string); all[name] != nil {
+						props[name] = all[name]
+					}
+				}
+				row["properties"] = props
 				if extra["retention"] == true {
 					row["retention"] = f.retention[id]
 				}
@@ -154,6 +182,7 @@ func (f *snapActionFake) registry(t *testing.T) (*Registry, *fakeMiddleware) {
 				return nil, map[string]interface{}{"code": -32001, "message": "Failed to hold snapshot: tag already exists on this dataset"}, true
 			}
 			holds["truenas"] = 1.0
+			f.setUserrefs(id, len(holds))
 			return nil, nil, true
 		case "pool.snapshot.release":
 			id, _ := p[0].(string)
@@ -161,6 +190,7 @@ func (f *snapActionFake) registry(t *testing.T) (*Registry, *fakeMiddleware) {
 				return nil, map[string]interface{}{"code": -32001, "message": "Failed to release snapshot: dataset does not exist"}, true
 			}
 			f.snapshots[id]["holds"] = map[string]interface{}{}
+			f.setUserrefs(id, 0)
 			return nil, nil, true
 		}
 		return nil, nil, false
@@ -244,6 +274,9 @@ func TestCloneSnapshotRefusals(t *testing.T) {
 		{"mnt path", "tank/data@manual-1", "/mnt/tank/restore/x", "not a path"},
 		{"path outside pool", "tank/data@manual-1", "/etc/x", "not a path"},
 		{"hidden dataset", "tank/data@manual-1", "tank/.system/x", "inside a hidden dataset"},
+		{"legacy apps target", "tank/data@manual-1", "tank/ix-applications/x", "legacy apps dataset ('ix-applications')"},
+		{"hidden source", "tank/.system@sys-1", "tank/restore/x", "snapshot dataset 'tank/.system' is a hidden dataset"},
+		{"hidden source below pool", "tank/data/.ix-apps@a1", "tank/restore/x", "is a hidden dataset ('.ix-apps')"},
 		{"invalid target", "tank/data@manual-1", "tank/re store", "invalid target_dataset"},
 		{"dot-dot target", "tank/data@manual-1", "tank/../x", "invalid target_dataset"},
 		{"parent missing", "tank/data@manual-1", "tank/nope/x", "parent dataset 'tank/nope' does not exist"},
@@ -397,15 +430,15 @@ func TestHoldSnapshotRefusalsAndErrors(t *testing.T) {
 
 func TestReleaseSnapshotConfirmFlow(t *testing.T) {
 	f := newSnapActionFake()
-	f.retention["tank/data@two-holds"] = map[string]interface{}{
+	f.retention["tank/data@held-1"] = map[string]interface{}{
 		"datetime": map[string]interface{}{"$date": 1767225600000.0}, "source": "periodic_snapshot_task", "periodic_snapshot_task_id": 3.0,
 	}
 	r, fake := f.registry(t)
-	args := map[string]interface{}{"snapshot": "tank/data@two-holds"}
+	args := map[string]interface{}{"snapshot": "tank/data@held-1"}
 	preview, out := confirmAndRun(t, r, fake, "release_snapshot", "pool.snapshot.release", args)
 
 	body := previewText(t, preview["preview"])
-	for _, want := range []string{"deletable again", "backup, truenas", "periodic snapshot task 3", "2026-01-01T00:00:00Z"} {
+	for _, want := range []string{"deletable again", "'truenas' hold on snapshot 'tank/data@held-1', its only hold", "periodic snapshot task 3", "2026-01-01T00:00:00Z"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("preview missing %q:\n%s", want, body)
 		}
@@ -417,14 +450,14 @@ func TestReleaseSnapshotConfirmFlow(t *testing.T) {
 
 	p := snapActionParams(t, fake, "pool.snapshot.release")
 	opts, _ := p[1].(map[string]interface{})
-	if len(p) != 2 || p[0] != "tank/data@two-holds" || opts["recursive"] != false || len(opts) != 1 {
+	if len(p) != 2 || p[0] != "tank/data@held-1" || opts["recursive"] != false || len(opts) != 1 {
 		t.Errorf("release params = %v, want [id, {recursive: false}]", p)
 	}
 	resp := decodeObj(t, out)
-	if resp["released"] != true || resp["deletable"] != true || previewText(t, resp["holds_released"]) != `["backup","truenas"]` {
+	if resp["released"] != true || resp["deletable"] != true || previewText(t, resp["holds_released"]) != `["truenas"]` {
 		t.Errorf("response = %v", resp)
 	}
-	if tags := f.holdTags("tank/data@two-holds"); len(tags) != 0 {
+	if tags := f.holdTags("tank/data@held-1"); len(tags) != 0 {
 		t.Errorf("holds after release = %v", tags)
 	}
 }
@@ -484,6 +517,7 @@ func TestReleaseSnapshotHoldGoneBeforeConfirm(t *testing.T) {
 	tok := replyToken(t, first)
 	f.mu.Lock()
 	f.snapshots["tank/data@held-1"]["holds"] = map[string]interface{}{}
+	f.setUserrefs("tank/data@held-1", 0)
 	f.mu.Unlock()
 	if _, err := r.CallTool(t.Context(), "release_snapshot", mergeArgs(args, map[string]interface{}{"confirmation_token": tok})); err == nil || !strings.Contains(err.Error(), "has no holds") {
 		t.Errorf("err = %v", err)
@@ -521,7 +555,7 @@ func TestSnapshotActionToolsSafety(t *testing.T) {
 	for name, want := range map[string]Safety{
 		"clone_snapshot":   {Access: Write},
 		"hold_snapshot":    {Access: Write, Idempotent: true},
-		"release_snapshot": {Access: Destructive, Idempotent: true},
+		"release_snapshot": {Access: Destructive},
 	} {
 		if got := safetyOf(name); got != want {
 			t.Errorf("%s safety = %+v, want %+v", name, got, want)
@@ -532,5 +566,166 @@ func TestSnapshotActionToolsSafety(t *testing.T) {
 		if hasParam(r.tools[name], "recursive") {
 			t.Errorf("%s declares recursive; recursive holds, releases and clones are not supported", name)
 		}
+	}
+}
+
+// release_snapshot releases every hold at once, so it must refuse unless
+// the 'truenas' hold is provably the only one. Each case is refused for
+// preview, dry run and confirmation alike, and nothing is released.
+func TestReleaseSnapshotRefusesForeignHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(f *snapActionFake)
+		id    string
+		want  string
+	}{
+		{"foreign tag", nil, "tank/data@two-holds", "has 1 hold(s) not placed by TrueNAS (tag(s) backup)"},
+		{"foreign tag only", nil, "tank/data@other-hold", "has 1 hold(s) not placed by TrueNAS (tag(s) backup)"},
+		{"unlisted hold", func(f *snapActionFake) { f.setUserrefs("tank/data@held-1", 2) }, "tank/data@held-1", "has 1 hold(s) not placed by TrueNAS and not listed (userrefs 2, listed 1)"},
+		{"unlisted hold without tags", func(f *snapActionFake) { f.setUserrefs("tank/data@manual-1", 1) }, "tank/data@manual-1", "not listed (userrefs 1, listed 0)"},
+		{"userrefs missing", func(f *snapActionFake) {
+			delete(f.snapshots["tank/data@held-1"]["properties"].(map[string]interface{}), "userrefs")
+		}, "tank/data@held-1", "could not read the hold count (userrefs)"},
+		{"userrefs garbled", func(f *snapActionFake) {
+			f.snapshots["tank/data@held-1"]["properties"].(map[string]interface{})["userrefs"] = map[string]interface{}{"value": "-", "rawvalue": "-", "parsed": nil}
+		}, "tank/data@held-1", "could not read the hold count (userrefs)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSnapActionFake()
+			if tc.setup != nil {
+				tc.setup(f)
+			}
+			r, fake := f.registry(t)
+			for _, extra := range []map[string]interface{}{{}, {"dry_run": true}, {"confirmation_token": "x"}} {
+				out, err := r.CallTool(t.Context(), "release_snapshot", mergeArgs(map[string]interface{}{"snapshot": tc.id}, extra))
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("%v: err = %v, want %q", extra, err, tc.want)
+				}
+				if err != nil && !strings.Contains(err.Error(), "managed outside this tool") {
+					t.Errorf("%v: refusal does not say other holds are managed elsewhere: %v", extra, err)
+				}
+				if strings.Contains(out, `"confirmation_token": "`) {
+					t.Errorf("%v: token issued", extra)
+				}
+			}
+			if n := len(fake.called("pool.snapshot.release")); n != 0 {
+				t.Errorf("refused release sent pool.snapshot.release %d time(s)", n)
+			}
+		})
+	}
+}
+
+// A token is bound to the previewed hold state: a hold added after the
+// preview, listed or not, rejects it even before the foreign-hold refusal.
+func TestReleaseSnapshotTokenRejectedAfterHoldAdded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		add  func(f *snapActionFake)
+	}{
+		{"listed tag", func(f *snapActionFake) {
+			f.snapshots["tank/data@held-1"]["holds"].(map[string]interface{})["backup"] = 1.0
+			f.setUserrefs("tank/data@held-1", 2)
+		}},
+		{"unlisted hold", func(f *snapActionFake) { f.setUserrefs("tank/data@held-1", 2) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSnapActionFake()
+			r, fake := f.registry(t)
+			args := map[string]interface{}{"snapshot": "tank/data@held-1"}
+			first, err := r.CallTool(t.Context(), "release_snapshot", args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tok := replyToken(t, first)
+			f.mu.Lock()
+			tc.add(f)
+			f.mu.Unlock()
+			_, err = r.CallTool(t.Context(), "release_snapshot", mergeArgs(args, map[string]interface{}{"confirmation_token": tok}))
+			if err == nil || !strings.Contains(err.Error(), "issued for a different planned operation") {
+				t.Errorf("token not rejected by its plan binding: err = %v", err)
+			}
+			if err == nil || !strings.Contains(err.Error(), "not placed by TrueNAS") {
+				t.Errorf("not refused for the added hold: err = %v", err)
+			}
+			if n := len(fake.called("pool.snapshot.release")); n != 0 {
+				t.Errorf("pool.snapshot.release sent %d time(s)", n)
+			}
+		})
+	}
+}
+
+// A snapshot deleted and recreated under the same name with a hold has a
+// new createtxg; a token from the old one must not release it.
+func TestReleaseSnapshotTokenRejectedAfterRecreate(t *testing.T) {
+	f := newSnapActionFake()
+	r, fake := f.registry(t)
+	args := map[string]interface{}{"snapshot": "tank/data@held-1"}
+	first, err := r.CallTool(t.Context(), "release_snapshot", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := replyToken(t, first)
+	f.mu.Lock()
+	f.snapshots["tank/data@held-1"]["createtxg"] = "200"
+	f.snapshots["tank/data@held-1"]["properties"].(map[string]interface{})["createtxg"] = map[string]interface{}{"value": "200", "rawvalue": "200", "parsed": "200"}
+	f.mu.Unlock()
+	_, err = r.CallTool(t.Context(), "release_snapshot", mergeArgs(args, map[string]interface{}{"confirmation_token": tok}))
+	if err == nil || !strings.Contains(err.Error(), "issued for a different planned operation") {
+		t.Errorf("token for the old snapshot was not rejected: err = %v", err)
+	}
+	if n := len(fake.called("pool.snapshot.release")); n != 0 {
+		t.Errorf("pool.snapshot.release sent %d time(s)", n)
+	}
+}
+
+// The plan binding covers each part of the hold state separately.
+func TestReleaseSnapshotPlanBindsHoldState(t *testing.T) {
+	hash := func(mutate func(f *snapActionFake)) [32]byte {
+		t.Helper()
+		f := newSnapActionFake()
+		if mutate != nil {
+			mutate(f)
+		}
+		r, _ := f.registry(t)
+		plan, err := planReleaseSnapshot(t.Context(), r.client, map[string]interface{}{"snapshot": "tank/data@held-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := plan.planHash()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	base := hash(nil)
+	if base != hash(nil) {
+		t.Fatal("plan hash is not stable")
+	}
+	for name, m := range map[string]func(f *snapActionFake){
+		"tags": func(f *snapActionFake) {
+			f.snapshots["tank/data@held-1"]["holds"].(map[string]interface{})["backup"] = 1.0
+		},
+		"userrefs":  func(f *snapActionFake) { f.setUserrefs("tank/data@held-1", 2) },
+		"createtxg": func(f *snapActionFake) { f.snapshots["tank/data@held-1"]["createtxg"] = "200" },
+	} {
+		if hash(m) == base {
+			t.Errorf("plan hash ignores %s", name)
+		}
+	}
+}
+
+// Without a createtxg the token cannot be bound to this snapshot, so the
+// release is refused rather than confirmed by name alone.
+func TestReleaseSnapshotRefusesUnreadableCreateTxg(t *testing.T) {
+	f := newSnapActionFake()
+	delete(f.snapshots["tank/data@held-1"], "createtxg")
+	delete(f.snapshots["tank/data@held-1"]["properties"].(map[string]interface{}), "createtxg")
+	r, fake := f.registry(t)
+	_, err := r.CallTool(t.Context(), "release_snapshot", map[string]interface{}{"snapshot": "tank/data@held-1"})
+	if err == nil || !strings.Contains(err.Error(), "could not read the createtxg") {
+		t.Errorf("err = %v", err)
+	}
+	if n := len(fake.called("pool.snapshot.release")); n != 0 {
+		t.Errorf("pool.snapshot.release sent %d time(s)", n)
 	}
 }

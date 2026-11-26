@@ -554,17 +554,18 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 - **clone_snapshot** - Clone a snapshot to a new dataset, for example to recover files without rolling back
   - Input: `snapshot` (`dataset@name`) and `target_dataset` (a new dataset name, not a `/mnt` path). Sends `pool.snapshot.clone` with `snapshot` and `dataset_dst` only
   - A write tool: it runs without a confirmation token unless `dry_run` is set. The preview shows the source snapshot, the target and the target's mountpoint (or `/dev/zvol` device for a zvol snapshot)
-  - Refused if the snapshot does not exist, the target already exists, is in another pool, is the pool root, is a path, or is inside a hidden dataset such as `.system`; if the target's parent does not exist (the clone does not create parents), is a zvol, is locked, or is not mounted at or below `/mnt/<pool>`; or if the source dataset is locked
+  - Refused if the snapshot does not exist, the target already exists, is in another pool, is the pool root, is a path, or is inside a hidden dataset such as `.system` or the legacy `ix-applications` dataset; if the snapshot is of a hidden dataset; if the target's parent does not exist (the clone does not create parents), is a zvol, is locked, or is not mounted at or below `/mnt/<pool>`; or if the source dataset is locked
   - While the clone exists the snapshot cannot be deleted
 - **hold_snapshot** - Place a hold on a snapshot so it cannot be deleted
   - Input: `snapshot` (`dataset@name`). Sends `pool.snapshot.hold` with `{"recursive": false}`; TrueNAS adds the tag `truenas`
   - The preview shows the snapshot and its current holds. If the `truenas` hold is already there, nothing is sent and the result says `already_held: true`
   - While held, a manual delete and periodic snapshot task or replication retention fail until the hold is released
-- **release_snapshot** - Release the holds on a snapshot (**destructive**)
+- **release_snapshot** - Release the `truenas` hold on a snapshot (**destructive**)
   - **Requires a `confirmation_token`** to execute; without one returns a preview and a token and changes nothing
-  - Input: `snapshot` (`dataset@name`). Sends `pool.snapshot.release` with `{"recursive": false}`, which removes every hold tag on the snapshot
-  - The preview and confirmation say the snapshot becomes deletable again, list its holds, and show any retention that schedules its removal
-  - Refused (no token) if the snapshot has no holds
+  - Input: `snapshot` (`dataset@name`). Sends `pool.snapshot.release` with `{"recursive": false}`, which removes every hold on the snapshot, so it only runs when `truenas` is the only one
+  - The preview and confirmation say the snapshot becomes deletable again, name the hold, and show any retention that schedules its removal
+  - Refused (no token) if the snapshot has no holds, has a hold with another tag, has more holds (`userrefs`) than tags listed, or its hold count cannot be read; other holds must be managed outside this tool
+  - The token is bound to the previewed holds, hold count and `createtxg`: a hold added or the snapshot recreated after the preview rejects it
 
 ## Network Configuration
 

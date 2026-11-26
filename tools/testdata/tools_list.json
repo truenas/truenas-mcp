@@ -2085,7 +2085,7 @@
   },
   {
     "name": "release_snapshot",
-    "description": "Release the holds on a ZFS snapshot. TrueNAS removes every hold tag on the snapshot, not only the 'truenas' tag hold_snapshot adds. Afterwards the snapshot is deletable again: a manual delete, or periodic snapshot task or replication retention, can remove it. Only the named snapshot is released, not snapshots of child datasets. The preview lists the holds and any retention that schedules the snapshot's removal. Refused if the snapshot has no holds. Destructive: needs confirmation. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "description": "Release the 'truenas' hold that hold_snapshot places on a ZFS snapshot. Afterwards the snapshot is deletable again: a manual delete, or periodic snapshot task or replication retention, can remove it. Only the named snapshot is released, not snapshots of child datasets. TrueNAS releases every hold on a snapshot at once, so this is refused if the snapshot has any other hold (for example one set with 'zfs hold' or by a backup tool), or if its hold count cannot be read; such holds must be managed outside this tool. Also refused if the snapshot has no holds. The preview lists the hold and any retention that schedules the snapshot's removal. Destructive: needs confirmation. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
       "properties": {
         "confirmation_token": {
@@ -2110,7 +2110,7 @@
     "annotations": {
       "readOnlyHint": false,
       "destructiveHint": true,
-      "idempotentHint": true,
+      "idempotentHint": false,
       "openWorldHint": false
     }
   },

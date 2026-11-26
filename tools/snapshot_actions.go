@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/truenas/truenas-mcp/mcp"
@@ -72,7 +73,7 @@ func (r *Registry) registerSnapshotActionTools() {
 	r.tools["release_snapshot"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "release_snapshot",
-			Description: "Release the holds on a ZFS snapshot. TrueNAS removes every hold tag on the snapshot, not only the 'truenas' tag hold_snapshot adds. Afterwards the snapshot is deletable again: a manual delete, or periodic snapshot task or replication retention, can remove it. Only the named snapshot is released, not snapshots of child datasets. The preview lists the holds and any retention that schedules the snapshot's removal. Refused if the snapshot has no holds. Destructive: needs confirmation.",
+			Description: "Release the 'truenas' hold that hold_snapshot places on a ZFS snapshot. Afterwards the snapshot is deletable again: a manual delete, or periodic snapshot task or replication retention, can remove it. Only the named snapshot is released, not snapshots of child datasets. TrueNAS releases every hold on a snapshot at once, so this is refused if the snapshot has any other hold (for example one set with 'zfs hold' or by a backup tool), or if its hold count cannot be read; such holds must be managed outside this tool. Also refused if the snapshot has no holds. The preview lists the hold and any retention that schedules the snapshot's removal. Destructive: needs confirmation.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -117,12 +118,14 @@ func parseSnapshotID(raw string) (string, string, error) {
 }
 
 // lookupSnapshot returns the snapshot id with its holds, or nil when it does
-// not exist. Holds come from extra.holds: on 25.10 every tag, on 27 only
-// the 'truenas' tag.
+// not exist. Holds come from extra.holds, which the public model declares
+// with only the 'truenas' tag (25.10 may list others, 27 does not), so the
+// native userrefs property (the snapshot's total hold count) is requested
+// too; see snapshotUserrefs.
 func lookupSnapshot(ctx context.Context, client *truenas.Client, id string) (map[string]interface{}, error) {
 	raw, err := client.Call(ctx, "pool.snapshot.query",
 		[]interface{}{[]interface{}{"id", "=", id}},
-		map[string]interface{}{"extra": map[string]interface{}{"holds": true, "properties": []interface{}{"createtxg"}}},
+		map[string]interface{}{"extra": map[string]interface{}{"holds": true, "properties": []interface{}{"createtxg", "userrefs"}}},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up snapshot %s: %w", id, err)
@@ -150,14 +153,59 @@ func snapshotHoldTags(snap map[string]interface{}) []string {
 	return tags
 }
 
+// snapshotUserrefs returns the snapshot's userrefs property: the number of
+// holds ZFS has on it, whatever their tags. It is read from a top-level
+// userrefs or from properties.userrefs (parsed, rawvalue or value). ok is
+// false when it is missing or not a non-negative whole number.
+func snapshotUserrefs(snap map[string]interface{}) (n int, ok bool) {
+	v, found := snap["userrefs"]
+	if !found {
+		props, _ := snap["properties"].(map[string]interface{})
+		p, _ := props["userrefs"].(map[string]interface{})
+		for _, k := range []string{"parsed", "rawvalue", "value"} {
+			if pv, has := p[k]; has && pv != nil {
+				v, found = pv, true
+				break
+			}
+		}
+	}
+	if !found {
+		return 0, false
+	}
+	switch x := v.(type) {
+	case float64:
+		if x >= 0 && x == float64(int(x)) {
+			return int(x), true
+		}
+	case string:
+		if i, err := strconv.Atoi(x); err == nil && i >= 0 {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// snapshotCreateTxg returns the snapshot's createtxg as a decimal string,
+// or "" when it cannot be read.
+func snapshotCreateTxg(snap map[string]interface{}) string {
+	if n, ok := snapshotTxg(snap); ok {
+		return fmt.Sprint(n)
+	}
+	return ""
+}
+
 func snapshotState(id string, snap map[string]interface{}, tags []string) map[string]interface{} {
-	return map[string]interface{}{
+	st := map[string]interface{}{
 		"snapshot":    id,
 		"dataset":     snap["dataset"],
 		"createtxg":   snap["createtxg"],
 		"holds":       tags,
 		"holds_count": len(tags),
 	}
+	if n, ok := snapshotUserrefs(snap); ok {
+		st["userrefs"] = n
+	}
+	return st
 }
 
 // snapshotRetention returns the middleware's retention annotation for id
@@ -261,6 +309,21 @@ func validateCloneTarget(target, sourcePool string) error {
 		if strings.HasPrefix(part, ".") {
 			return fmt.Errorf("target_dataset '%s' is inside a hidden dataset ('%s'); TrueNAS manages those itself", target, part)
 		}
+		if part == "ix-applications" {
+			return fmt.Errorf("target_dataset '%s' is inside the legacy apps dataset ('ix-applications'); TrueNAS manages it itself", target)
+		}
+	}
+	return nil
+}
+
+// validateCloneSource refuses a snapshot of a hidden system dataset such as
+// .system or .ix-apps: a clone would put a writable copy of system-managed
+// data at an ordinary path.
+func validateCloneSource(dataset string) error {
+	for _, part := range strings.Split(dataset, "/")[1:] {
+		if strings.HasPrefix(part, ".") {
+			return fmt.Errorf("snapshot dataset '%s' is a hidden dataset ('%s') TrueNAS manages itself; cloning its snapshots is not supported", dataset, part)
+		}
 	}
 	return nil
 }
@@ -279,6 +342,9 @@ func planCloneSnapshot(ctx context.Context, client *truenas.Client, args map[str
 	target, _ := args["target_dataset"].(string)
 	target = strings.TrimSpace(target)
 	pool := datasetPool(srcDataset)
+	if err := validateCloneSource(srcDataset); err != nil {
+		return nil, err
+	}
 	if err := validateCloneTarget(target, pool); err != nil {
 		return nil, err
 	}
@@ -553,26 +619,55 @@ func planReleaseSnapshot(ctx context.Context, client *truenas.Client, args map[s
 	}
 	tags := snapshotHoldTags(snap)
 	current := snapshotState(id, snap, tags)
-
-	if len(tags) == 0 {
+	userrefs, refsOK := snapshotUserrefs(snap)
+	txg := snapshotCreateTxg(snap)
+	// The token is bound to the hold state and identity the preview saw:
+	// a hold added, or the snapshot recreated under the same name, after
+	// the preview rejects the token.
+	bind := map[string]interface{}{"holds": tags, "userrefs": userrefs, "userrefs_ok": refsOK, "createtxg": txg}
+	summary := newConfirmSummary(
+		fmt.Sprintf("Release the '%s' hold on %s: the snapshot becomes deletable again", truenasHoldTag, id),
+		confirmFact("snapshot", id),
+	)
+	blockedPlan := func(reason string) *writePlan {
 		return &writePlan{
-			Tool:         "release_snapshot",
-			Method:       snapshotReleaseMethod,
-			CallParams:   []interface{}{id, map[string]interface{}{"recursive": false}},
-			ParamNames:   []string{"id", "options"},
-			TargetName:   id,
-			CurrentState: current,
-			Blocked:      []string{fmt.Sprintf("snapshot '%s' has no holds; there is nothing to release", id)},
-			ConfirmSummary: newConfirmSummary(
-				fmt.Sprintf("Release the holds on %s: the snapshot becomes deletable again", id),
-				confirmFact("snapshot", id),
-			),
-		}, nil
+			Tool:           "release_snapshot",
+			Method:         snapshotReleaseMethod,
+			CallParams:     []interface{}{id, map[string]interface{}{"recursive": false}},
+			ParamNames:     []string{"id", "options"},
+			TargetName:     id,
+			CurrentState:   current,
+			Blocked:        []string{reason},
+			Bind:           bind,
+			ConfirmSummary: summary,
+		}
+	}
+
+	// pool.snapshot.release releases every hold on the snapshot, and the
+	// holds list may not show tags other than 'truenas'. Release only
+	// when the 'truenas' hold is provably the only one.
+	var foreign []string
+	for _, t := range tags {
+		if t != truenasHoldTag {
+			foreign = append(foreign, t)
+		}
+	}
+	const elsewhere = "release_snapshot releases only the '" + truenasHoldTag + "' hold, and TrueNAS would release every hold at once, so other holds must be managed outside this tool where they were set; nothing was released"
+	switch {
+	case !refsOK:
+		return blockedPlan(fmt.Sprintf("could not read the hold count (userrefs) of snapshot '%s', so holds not placed by TrueNAS cannot be ruled out; %s", id, elsewhere)), nil
+	case len(foreign) > 0:
+		return blockedPlan(fmt.Sprintf("snapshot '%s' has %d hold(s) not placed by TrueNAS (tag(s) %s); %s", id, len(foreign), strings.Join(foreign, ", "), elsewhere)), nil
+	case userrefs > len(tags):
+		return blockedPlan(fmt.Sprintf("snapshot '%s' has %d hold(s) not placed by TrueNAS and not listed (userrefs %d, listed %d); %s", id, userrefs-len(tags), userrefs, len(tags), elsewhere)), nil
+	case len(tags) == 0:
+		return blockedPlan(fmt.Sprintf("snapshot '%s' has no holds; there is nothing to release", id)), nil
+	case txg == "":
+		return blockedPlan(fmt.Sprintf("could not read the createtxg of snapshot '%s', so the confirmation cannot be bound to this snapshot; nothing was released", id)), nil
 	}
 
 	warnings := []string{
 		fmt.Sprintf("After the release, snapshot '%s' is deletable again: a manual delete, or periodic snapshot task or replication retention, can remove it", id),
-		fmt.Sprintf("TrueNAS removes every hold tag on the snapshot (%s), not only the '%s' tag hold_snapshot adds; TrueNAS 27 lists only the '%s' tag, and other tags, if any, are released too", strings.Join(tags, ", "), truenasHoldTag, truenasHoldTag),
 	}
 	retentionFact := "none found"
 	retention, retErr := snapshotRetention(ctx, client, id)
@@ -604,16 +699,17 @@ func planReleaseSnapshot(ctx context.Context, client *truenas.Client, args map[s
 		CurrentState: current,
 		Actions: []PlannedAction{{
 			Step:        1,
-			Description: fmt.Sprintf("Release every hold on snapshot '%s' (%s); the snapshot becomes deletable again. Child datasets' snapshots are not released", id, strings.Join(tags, ", ")),
+			Description: fmt.Sprintf("Release the '%s' hold on snapshot '%s', its only hold; the snapshot becomes deletable again. Child datasets' snapshots are not released", truenasHoldTag, id),
 			Operation:   "release",
 			Target:      id,
 			Details:     map[string]interface{}{"holds": tags, "recursive": false},
 		}},
 		Warnings: warnings,
+		Bind:     bind,
 		ConfirmSummary: newConfirmSummary(
-			fmt.Sprintf("Release the holds on %s: the snapshot becomes deletable again", id),
+			fmt.Sprintf("Release the '%s' hold on %s: the snapshot becomes deletable again", truenasHoldTag, id),
 			confirmFact("snapshot", id),
-			confirmFact("holds released", strings.Join(tags, ", ")),
+			confirmFact("hold released", strings.Join(tags, ", ")),
 			confirmFact("retention", retentionFact),
 		),
 		Result: map[string]interface{}{"holds": tags},
@@ -648,7 +744,7 @@ func executeReleaseSnapshot(ctx context.Context, client *truenas.Client, args ma
 		"holds_released": plan.Result["holds"],
 		"deletable":      true,
 	}
-	msg := fmt.Sprintf("Released the holds on %s: the snapshot is deletable again, manually or by retention", id)
+	msg := fmt.Sprintf("Released the '%s' hold on %s: the snapshot is deletable again, manually or by retention", truenasHoldTag, id)
 	snap, err := lookupSnapshot(ctx, client, id)
 	switch {
 	case err != nil:
@@ -656,10 +752,15 @@ func executeReleaseSnapshot(ctx context.Context, client *truenas.Client, args ma
 	case snap == nil:
 		response["note"] = fmt.Sprintf("%s was not found when read back; it may already have been deleted", id)
 	default:
-		if left := snapshotHoldTags(snap); len(left) > 0 {
+		left := snapshotHoldTags(snap)
+		refs, refsOK := snapshotUserrefs(snap)
+		if len(left) > 0 || (refsOK && refs > 0) {
 			response["deletable"] = false
 			response["holds_remaining"] = left
-			msg = fmt.Sprintf("Released holds on %s, but it still has hold(s) %s and cannot be deleted yet", id, strings.Join(left, ", "))
+			if refsOK {
+				response["userrefs"] = refs
+			}
+			msg = fmt.Sprintf("Released the '%s' hold on %s, but it still has a hold (listed: %s; userrefs %d) and cannot be deleted yet", truenasHoldTag, id, strings.Join(left, ", "), refs)
 		}
 	}
 	response["message"] = msg

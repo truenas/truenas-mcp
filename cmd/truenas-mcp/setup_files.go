@@ -157,6 +157,9 @@ func keyFileID(path string) int {
 		return 0
 	}
 	defer f.Close()
+	// Re-check after opening: the path may have been swapped (for a
+	// symlink or another file) between Lstat and Open. Read only if the
+	// opened file is the regular file Lstat saw.
 	if after, err := f.Stat(); err != nil || !os.SameFile(before, after) {
 		return 0
 	}
