@@ -207,6 +207,18 @@
     "handler": "handleListDirectoryCertificates"
   },
   {
+    "name": "offline_disk",
+    "handler": "handleOfflineDisk",
+    "plan": "planOfflineDisk",
+    "execute": "executeOfflineDisk"
+  },
+  {
+    "name": "online_disk",
+    "handler": "handleOnlineDisk",
+    "plan": "planOnlineDisk",
+    "execute": "executeOnlineDisk"
+  },
+  {
     "name": "query_apps",
     "handler": "handleQueryApps"
   },
@@ -284,6 +296,12 @@
     "handler": "handleReleaseSnapshot",
     "plan": "planReleaseSnapshot",
     "execute": "executeReleaseSnapshot"
+  },
+  {
+    "name": "replace_disk",
+    "handler": "(*Registry).handleReplaceDisk",
+    "plan": "planReplaceDisk",
+    "execute": "(*Registry).executeReplaceDisk"
   },
   {
     "name": "restore_alert",

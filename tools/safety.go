@@ -138,7 +138,14 @@ var toolSafety = map[string]Safety{
 	// Disks and services
 	"query_disks":     {Access: Read},
 	"get_disk_health": {Access: Read},
-	"query_services":  {Access: Read},
+	// Taking a disk offline or replacing it reduces a vdev's redundancy
+	// or destroys the replacement disk's contents; bringing one online
+	// starts a resilver. All three execute only after confirmation bound
+	// to the pool topology and the disks involved.
+	"offline_disk":   {Access: Destructive},
+	"online_disk":    {Access: Destructive},
+	"replace_disk":   {Access: Destructive},
+	"query_services": {Access: Read},
 	// control_service is one tool for every verb, so it takes the class
 	// of its most disruptive ones (STOP, RESTART, and RELOAD that falls
 	// back to a restart).

@@ -10,7 +10,7 @@ import (
 const secretDryRunValue = "true-secret-must-not-be-echoed"
 
 func writeishMiddlewareMethod(method string) bool {
-	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".has_pending_changes", ".checkin_waiting", ".websocket_local_ip", ".system_routes", ".getacl"} {
+	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".has_pending_changes", ".checkin_waiting", ".websocket_local_ip", ".system_routes", ".getacl", ".get_state", ".details"} {
 		if strings.HasSuffix(method, suffix) {
 			return false
 		}
@@ -76,6 +76,9 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 		"update_nfs_share":         {"share_id": 1.0, "comment": "Data"},
 		"delete_nfs_share":         {"share_id": 1.0},
 		"set_share_acl":            {"share_id": 1.0, "entries": []interface{}{map[string]interface{}{"who_type": "everyone", "perm": "FULL", "type": "ALLOWED"}}},
+		"offline_disk":             {"pool": "tank", "disk": "sdb"},
+		"online_disk":              {"pool": "tank", "disk": "sdb"},
+		"replace_disk":             {"pool": "tank", "disk": "sdb", "replacement_disk": "sdk"},
 	}
 	args := map[string]interface{}{}
 	for k, v := range valid[name] {
@@ -91,7 +94,7 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 // bad dry_run, and with confirm="true". Each call must error and send no
 // write to the middleware.
 func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
-	client, fake := newFakeClientWith(t, map[string]interface{}{
+	client, fake := newFakeClientWith(t, withDiskActionResults(map[string]interface{}{
 		"app.query":               []interface{}{appEntry("plex", "RUNNING")},
 		"app.upgrade_summary":     upgradeSummaryFixture("x"),
 		"catalog.get_app_details": hostPathCatalogDetails(),
@@ -115,7 +118,7 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 		"pool.snapshottask.query":  replicationTaskFixtures()["pool.snapshottask.query"],
 		"pool.snapshot.query":      replicationTaskFixtures()["pool.snapshot.query"],
 		"service.query":            registryServiceFixtures(),
-	}, nil)
+	}), nil)
 	r := NewRegistry(client, nil)
 
 	badValues := []struct {

@@ -1878,6 +1878,82 @@
     }
   },
   {
+    "name": "offline_disk",
+    "description": "Take one ONLINE disk of a pool offline with pool.offline, for example before pulling it. ZFS stops using the disk and the pool runs with less redundancy until online_disk brings it back. Allowed only when the pool is ONLINE, reported healthy and has no resilver running, the disk and every other disk of its vdev are ONLINE, and the vdev keeps at least one disk's worth of redundancy afterwards: a 3-way mirror or RAIDZ2 vdev or wider qualifies, a 2-way mirror or RAIDZ1 vdev does not. Refused for single-disk (stripe) vdevs, dRAID and other vdev types, cache and spare devices, a vdev with a replacement or hot spare in progress, and the boot pool. Special, dedup and log vdevs follow the same redundancy rule as data vdevs. There is no force option. The preview shows the vdev layout and the redundancy left after the disk goes offline. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "disk": {
+          "description": "Required: The disk to take offline: its name as get_disk_health or query_disks shows it (e.g. 'sdb'), or its ZFS device guid from get_disk_health",
+          "minLength": 1,
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without taking the disk offline (default: false)",
+          "type": "boolean"
+        },
+        "pool": {
+          "description": "Required: Name of the pool the disk belongs to, as query_pools lists it (e.g. 'tank'). The boot pool is refused",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "pool",
+        "disk"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "online_disk",
+    "description": "Bring a disk that is OFFLINE in a pool back online with pool.online. ZFS then resilvers the data written to its vdev while the disk was offline. Allowed only for a disk whose ZFS state is OFFLINE in the named pool and that is present on the system; disks in any other state (FAULTED, REMOVED, UNAVAIL, DEGRADED) are refused, and so are a vdev with a replacement or hot spare in progress and the boot pool. There is no force option. The preview shows the vdev layout and the expected resilver. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "disk": {
+          "description": "Required: The OFFLINE disk to bring online: its name as get_disk_health or query_disks shows it (e.g. 'sdb'), or its ZFS device guid from get_disk_health",
+          "minLength": 1,
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without bringing the disk online (default: false)",
+          "type": "boolean"
+        },
+        "pool": {
+          "description": "Required: Name of the pool the disk belongs to, as query_pools lists it (e.g. 'tank'). The boot pool is refused",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "pool",
+        "disk"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "query_apps",
     "description": "Query installed applications with their status, versions, and available updates. upgrade_available tells whether an upgrade exists; latest_version is the newest catalog version (always set, in catalog form, not comparable to human_version)",
     "inputSchema": {
@@ -2417,6 +2493,50 @@
       },
       "required": [
         "snapshot"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "replace_disk",
+    "description": "Replace a disk of a pool with an unused disk using pool.replace, which runs as a job tracked with tasks_get. TrueNAS repartitions the replacement disk, so everything on it is destroyed. ZFS then resilvers onto it and detaches the old disk when the resilver finishes. The replacement must be reported unused by TrueNAS (query_disks unused_only), be in no imported or exported pool, not be a boot disk, have no duplicate serial, have no partitions and be at least as large as the disk it replaces; swap, self-encrypting drive locking and other open use of it are not checked. The disk being replaced must be in a mirror or RAIDZ vdev of data, special, dedup or log devices; single-disk (stripe) vdevs, dRAID, cache and spare devices are refused. If its vdev already has a failed or offline disk, only that disk can be replaced; replacing a healthy disk is refused while any device of the pool is not ONLINE. Also refused while a resilver or another pool.replace job is running, for a vdev with a replacement or hot spare in progress, and for the boot pool. There is no force option. The preview shows both disks with their sizes and serials, the vdev layout and that the replacement disk's contents will be destroyed. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "disk": {
+          "description": "Required: The disk to replace: its name as get_disk_health shows it (e.g. 'sdb'), or its ZFS device guid from get_disk_health, which is the only way to name a disk that is no longer present",
+          "minLength": 1,
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without replacing the disk (default: false)",
+          "type": "boolean"
+        },
+        "pool": {
+          "description": "Required: Name of the pool the disk belongs to, as query_pools lists it (e.g. 'tank'). The boot pool is refused",
+          "minLength": 1,
+          "type": "string"
+        },
+        "replacement_disk": {
+          "description": "Required: Name of the unused disk to put in its place, as query_disks with unused_only lists it (e.g. 'sdk'). Everything on it is destroyed",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "pool",
+        "disk",
+        "replacement_disk"
       ],
       "type": "object"
     },
