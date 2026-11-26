@@ -233,6 +233,7 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"create_dataset": Write, "create_smb_share": Write, "create_nfs_share": Write,
 		"create_scrub_schedule": Write, "run_scrub": Write, "dismiss_alert": Write, "restore_alert": Write,
 		"create_snapshot": Write, "clone_snapshot": Write, "hold_snapshot": Write, "release_snapshot": Destructive,
+		"rollback_snapshot": Destructive, "delete_snapshot": Destructive,
 		"control_service": Destructive, "set_service_enabled": Write,
 		"update_network_config": Destructive, "update_network_interface": Destructive,
 		"checkin_network_changes": Write, "rollback_network_changes": Write,
@@ -248,8 +249,8 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 			destructive++
 		}
 	}
-	if destructive != 16 {
-		t.Errorf("%d destructive tools, want 16; update docs/safety.md and docs/full-features.md too", destructive)
+	if destructive != 18 {
+		t.Errorf("%d destructive tools, want 18; update docs/safety.md and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
 		if s.Overwrites {

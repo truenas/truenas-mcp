@@ -81,6 +81,7 @@ func (r *Registry) registerTools() {
 	r.registerReplicationTools()
 	r.registerReplicationRunTools()
 	r.registerSnapshotActionTools()
+	r.registerSnapshotDestroyTools()
 
 	r.registerDirectoryServiceTools()
 

@@ -79,6 +79,12 @@
     "execute": "executeDeleteScrubSchedule"
   },
   {
+    "name": "delete_snapshot",
+    "handler": "handleDeleteSnapshot",
+    "plan": "planDeleteSnapshot",
+    "execute": "executeDeleteSnapshot"
+  },
+  {
     "name": "dismiss_alert",
     "handler": "handleDismissAlertWithDryRun",
     "plan": "planDismissAlert"
@@ -264,6 +270,12 @@
     "name": "rollback_network_changes",
     "handler": "(*Registry).handleRollbackNetworkChangesWithDryRun",
     "plan": "(*Registry).planRollbackNetworkChanges"
+  },
+  {
+    "name": "rollback_snapshot",
+    "handler": "handleRollbackSnapshot",
+    "plan": "planRollbackSnapshot",
+    "execute": "executeRollbackSnapshot"
   },
   {
     "name": "run_replication",
