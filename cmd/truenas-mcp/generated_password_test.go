@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -82,6 +83,55 @@ func TestUnissuedGeneratedPasswordIsRedacted(t *testing.T) {
 		text, _ := callText(t, reg)
 		if strings.Contains(text, unissuedPassword) || strings.Contains(text, livePassword) || !strings.Contains(text, redact.Marker) {
 			t.Errorf("%s: password not redacted:\n%s", name, text)
+		}
+	}
+}
+
+// bigPasswordRegistry returns a successful result with a generated
+// password and an oversized field. With padFirst the padding is in a
+// top-level key that sorts before generated_password, so the output cap
+// would cut the password.
+type bigPasswordRegistry struct {
+	passwordRegistry
+	padFirst bool
+}
+
+func (r bigPasswordRegistry) CallTool(context.Context, string, map[string]interface{}) (string, error) {
+	pad := strings.Repeat("x", 2*maxToolOutputBytes)
+	reply := map[string]interface{}{
+		"created":            true,
+		"generated_password": r.password,
+		"user":               map[string]interface{}{"username": "carol", "notes": pad},
+	}
+	if r.padFirst {
+		reply["changes"] = pad
+	}
+	b, err := json.MarshalIndent(reply, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// The output cap never returns part of a generated password: a password
+// that sorts before the cut is kept whole, and a result whose password
+// the cut would remove fails with an error that shows none of it.
+func TestGeneratedPasswordSurvivesOutputCap(t *testing.T) {
+	text, isError := callText(t, bigPasswordRegistry{passwordRegistry: newPasswordRegistry(livePassword, false)})
+	if len(text) > maxToolOutputBytes || !strings.HasSuffix(text, toolOutputTruncationNotice) {
+		t.Errorf("result not capped (len %d)", len(text))
+	}
+	if isError || strings.Count(text, livePassword) != 1 || !strings.Contains(text, `"generated_password": "`+livePassword+`"`) {
+		t.Errorf("capped result lost the password (isError=%v):\n%.300s", isError, text)
+	}
+
+	text, isError = callText(t, bigPasswordRegistry{passwordRegistry: newPasswordRegistry(livePassword, false), padFirst: true})
+	if !isError || text != "Error: "+passwordTooLargeMessage {
+		t.Errorf("a result whose password would be cut did not fail closed (isError=%v):\n%.300s", isError, text)
+	}
+	for i := 0; i+6 <= len(livePassword); i++ {
+		if strings.Contains(text, livePassword[i:i+6]) {
+			t.Errorf("fail-safe reply carries a fragment of the password: %q", livePassword[i:i+6])
 		}
 	}
 }
