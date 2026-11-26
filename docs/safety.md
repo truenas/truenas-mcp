@@ -108,10 +108,10 @@ preview of the same call:
 | `rollback_snapshot` | Discards everything written to the dataset since the snapshot; rolling back to an older snapshot also destroys every newer snapshot and, with `destroy_clones`, their clones |
 | `delete_snapshot` | Permanently removes a snapshot (with `recursive`, the same snapshot on every child dataset); its data can no longer be restored or replicated from it |
 | `control_service` | STOP and RESTART take a service offline and disconnect its clients (SMB, NFS, iSCSI, NVMe-oF, UPS), and RELOAD of a service that cannot reload is a restart. One tool covers every action, so START and RELOAD need confirmation too |
-| `create_user` | Adds an account that can sign in (with a random or supplied password) and joins it to groups that grant access to shares. Confirmation is bound to the absence of the user, the groups named and the new home directory |
-| `update_user` | Changes an account in place: its password, groups, lock state, shell or SMB access. Confirmation is bound to the user's current settings, including when its password last changed, and to the groups involved |
+| `create_user` | Adds an account that can sign in (with a random or supplied password) and joins it to groups that grant access to shares. Another user's primary group is refused as its group or in `add_groups`. Confirmation is bound to the absence of the user, the groups named and the new home directory |
+| `update_user` | Changes an account in place: its password, groups, lock state, shell or SMB access. Another user's primary group is refused in `group` and `add_groups`. Confirmation is bound to the user's current settings, including when its password last changed, and to the groups involved |
 | `create_group` | Adds a group and its members, which can grant access to shares. Confirmation is bound to the members' current settings |
-| `update_group` | Changes a group's members or SMB flag in place. Confirmation is bound to the group's current settings and the members named |
+| `update_group` | Changes a group's members or SMB flag in place. Adding a user to another user's primary group (the group created with that user, for example) is refused, at the preview and again when the confirmation re-plans. Confirmation is bound to the group's current settings and the members named |
 
 No other tool needs a token: the other write tools (`create_dataset`,
 `create_smb_share`, `create_nfs_share`, `install_app`, `start_app`,

@@ -187,7 +187,7 @@ func (r *Registry) registerAccountActionTools() {
 	r.tools["create_user"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "create_user",
-			Description: "Create a local user account. password_mode chooses how it signs in: 'disabled' (the default: no password login), 'random' (TrueNAS-strength random password generated when the call executes and returned once, in the result only) or 'set' (the password argument). The primary group is a new group named after the user unless group names an existing one. Never grants sudo, TrueNAS roles or membership of built-in or administrative groups (such as builtin_administrators, wheel or root); those groups, and groups with roles or sudo, are refused as group or in add_groups, and sudo or role arguments are refused outright. Refused for root, admin, truenas_admin, names that already exist (as a user, or as a group when group is omitted) and uids below 1000. With home, a new directory home/<username> is created; it is refused if that path already exists. The preview shows every field that will be set; it never shows a password.",
+			Description: "Create a local user account. password_mode chooses how it signs in: 'disabled' (the default: no password login), 'random' (TrueNAS-strength random password generated when the call executes and returned once, in the result only) or 'set' (the password argument). The primary group is a new group named after the user unless group names an existing one. Never grants sudo, TrueNAS roles or membership of built-in or administrative groups (such as builtin_administrators, wheel or root); those groups, and groups with roles or sudo, are refused as group or in add_groups, and sudo or role arguments are refused outright. Another user's primary group (such as the group created with that user) is refused as group or in add_groups, since membership grants that user's group file access. Refused for root, admin, truenas_admin, names that already exist (as a user, or as a group when group is omitted) and uids below 1000. With home, a new directory home/<username> is created; it is refused if that path already exists. The preview shows every field that will be set; it never shows a password.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -217,7 +217,7 @@ func (r *Registry) registerAccountActionTools() {
 	r.tools["update_user"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "update_user",
-			Description: "Change a local user account: full name, email, shell, SMB and SSH password login, locked, password (password_mode 'disabled', 'random' or 'set'; a random password is generated when the call executes and returned once, in the result only), primary group and secondary groups (add_groups, remove_groups). Refused for root, admin, truenas_admin and other built-in accounts, the account this server signs in as, directory service users, and users that have TrueNAS roles or sudo or belong to an administrative group (such as builtin_administrators or wheel). Never changes sudo, roles, the uid or the username; built-in and administrative groups, and groups with roles or sudo, are refused in group, add_groups and remove_groups. home can only be set for a user without a home directory, and creates a new directory home/<username>; moving an existing home directory is refused. The preview shows each change with its current value and never shows a password; the confirmation is bound to the user's current settings, so a change to the user after the preview needs a new one.",
+			Description: "Change a local user account: full name, email, shell, SMB and SSH password login, locked, password (password_mode 'disabled', 'random' or 'set'; a random password is generated when the call executes and returned once, in the result only), primary group and secondary groups (add_groups, remove_groups). Refused for root, admin, truenas_admin and other built-in accounts, the account this server signs in as, directory service users, and users that have TrueNAS roles or sudo or belong to an administrative group (such as builtin_administrators or wheel). Never changes sudo, roles, the uid or the username; built-in and administrative groups, and groups with roles or sudo, are refused in group, add_groups and remove_groups. Another user's primary group (such as the group created with that user) is refused in group and add_groups; leaving one with remove_groups is allowed. home can only be set for a user without a home directory, and creates a new directory home/<username>; moving an existing home directory is refused. The preview shows each change with its current value and never shows a password; the confirmation is bound to the user's current settings, so a change to the user after the preview needs a new one.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -268,7 +268,7 @@ func (r *Registry) registerAccountActionTools() {
 	r.tools["update_group"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "update_group",
-			Description: "Change a local group: its SMB flag and its members (add_members, remove_members). Refused for built-in groups, administrative groups (such as builtin_administrators, wheel or root), groups with TrueNAS roles or sudo, and directory service groups. Never changes sudo, roles, the gid or the name. Members added or removed must be local users; root, admin, truenas_admin and other built-in accounts, the account this server signs in as, and users with roles or sudo are refused. The preview shows each change with the current members; the confirmation is bound to the group's current settings and members, so a change after the preview needs a new one.",
+			Description: "Change a local group: its SMB flag and its members (add_members, remove_members). Refused for built-in groups, administrative groups (such as builtin_administrators, wheel or root), groups with TrueNAS roles or sudo, and directory service groups. Never changes sudo, roles, the gid or the name. Members added or removed must be local users; root, admin, truenas_admin and other built-in accounts, the account this server signs in as, and users with roles or sudo are refused. Adding a member to a group that is another user's primary group (such as the group created with that user) is refused. The preview shows each change with the current members; the confirmation is bound to the group's current settings and members, so a change after the preview needs a new one.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -559,7 +559,46 @@ func groupGIDTaken(ctx context.Context, client *truenas.Client, gid int) (bool, 
 	return false, nil
 }
 
+// primaryGroupOwners returns, for each group id, the usernames of the
+// local users whose primary group it is, sorted.
+func primaryGroupOwners(ctx context.Context, client *truenas.Client, ids []int) (map[int][]string, error) {
+	out := map[int][]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	want := map[int]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	users, err := queryAccountUsers(ctx, client, []interface{}{"group.id", "in", intsAsArgs(ids)})
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range users {
+		if want[u.PrimaryGroupID] {
+			out[u.PrimaryGroupID] = append(out[u.PrimaryGroupID], u.Username)
+		}
+	}
+	for id := range out {
+		sort.Strings(out[id])
+	}
+	return out, nil
+}
+
 // ---- refusal rules ----
+
+// personalGroupRefusal says why username may not be added to g, or "":
+// g is the primary group of another user (such as the group created with
+// that user), and membership would give username that user's group file
+// access.
+func personalGroupRefusal(g groupInfo, owners []string, username string) string {
+	for _, o := range owners {
+		if o != username {
+			return fmt.Sprintf("group '%s' is the primary group of user '%s'; these tools never add another account to a user's personal group, since that grants its file access (change it in the TrueNAS web UI)", g.Name, o)
+		}
+	}
+	return ""
+}
 
 // privilegedGroupReason says why g is an administrative group, or "".
 func privilegedGroupReason(g groupInfo) string {
@@ -967,6 +1006,14 @@ func planCreateUser(ctx context.Context, client *truenas.Client, args map[string
 	if err != nil {
 		return nil, err
 	}
+	var ownerIDs []int
+	for _, g := range groups {
+		ownerIDs = append(ownerIDs, g.ID)
+	}
+	owners, err := primaryGroupOwners(ctx, client, ownerIDs)
+	if err != nil {
+		return nil, err
+	}
 	payload := map[string]interface{}{
 		"username":               username,
 		"full_name":              fullName,
@@ -986,6 +1033,9 @@ func planCreateUser(ctx context.Context, client *truenas.Client, args map[string
 			return nil, fmt.Errorf("group '%s' not found as a local group", groupName)
 		}
 		if why := groupChangeRefusal(g); why != "" {
+			blocked = append(blocked, why)
+		}
+		if why := personalGroupRefusal(g, owners[g.ID], username); why != "" {
 			blocked = append(blocked, why)
 		}
 		payload["group"] = g.ID
@@ -1014,6 +1064,9 @@ func planCreateUser(ctx context.Context, client *truenas.Client, args map[string
 		if why := groupChangeRefusal(g); why != "" {
 			blocked = append(blocked, why)
 		}
+		if why := personalGroupRefusal(g, owners[g.ID], username); why != "" {
+			blocked = append(blocked, why)
+		}
 		secondary = append(secondary, g.ID)
 		secondaryText = append(secondaryText, name)
 		groupBinds[g.Name] = g.bind()
@@ -1034,6 +1087,7 @@ func planCreateUser(ctx context.Context, client *truenas.Client, args map[string
 	}
 	bind := map[string]interface{}{
 		"login_mode": mode, "username_free": len(existing) == 0, "groups": groupBinds,
+		"primary_group_owners": owners,
 	}
 	homeText := "none (" + defaultHomePath + ")"
 	if hasHome {
@@ -1257,6 +1311,14 @@ func planUpdateUser(ctx context.Context, client *truenas.Client, args map[string
 	if err != nil {
 		return nil, err
 	}
+	var ownerIDs []int
+	for _, g := range named {
+		ownerIDs = append(ownerIDs, g.ID)
+	}
+	owners, err := primaryGroupOwners(ctx, client, ownerIDs)
+	if err != nil {
+		return nil, err
+	}
 	groupNames := map[int]string{}
 	for id, g := range current {
 		groupNames[id] = g.Name
@@ -1356,6 +1418,9 @@ func planUpdateUser(ctx context.Context, client *truenas.Client, args map[string
 		}
 		groupBinds[g.Name] = g.bind()
 		if g.ID != u.PrimaryGroupID {
+			if why := personalGroupRefusal(g, owners[g.ID], username); why != "" {
+				blocked = append(blocked, why)
+			}
 			payload["group"] = g.ID
 			change("primary_group", groupNames[u.PrimaryGroupID], g.Name)
 		}
@@ -1378,6 +1443,9 @@ func planUpdateUser(ctx context.Context, client *truenas.Client, args map[string
 		case member[g.ID]:
 			notes = append(notes, fmt.Sprintf("'%s' is already a member of '%s'", username, name))
 		default:
+			if why := personalGroupRefusal(g, owners[g.ID], username); why != "" {
+				blocked = append(blocked, why)
+			}
 			newGroups = append(newGroups, g.ID)
 			member[g.ID] = true
 			changes = append(changes, fmt.Sprintf("add to group: %s", name))
@@ -1407,6 +1475,7 @@ func planUpdateUser(ctx context.Context, client *truenas.Client, args map[string
 		payload["groups"] = intsAsArgs(newGroups)
 	}
 	bind["groups"] = groupBinds
+	bind["primary_group_owners"] = owners
 	currentGroupBinds := map[string]interface{}{}
 	for _, g := range current {
 		currentGroupBinds[fmt.Sprint(g.ID)] = g.bind()
@@ -1803,6 +1872,10 @@ func planUpdateGroup(ctx context.Context, client *truenas.Client, args map[strin
 	if err != nil {
 		return nil, err
 	}
+	owners, err := primaryGroupOwners(ctx, client, []int{g.ID})
+	if err != nil {
+		return nil, err
+	}
 
 	member := map[int]bool{}
 	for _, id := range g.Users {
@@ -1821,6 +1894,9 @@ func planUpdateGroup(ctx context.Context, client *truenas.Client, args map[strin
 		if member[u.ID] {
 			notes = append(notes, fmt.Sprintf("'%s' is already a member", n))
 			continue
+		}
+		if why := personalGroupRefusal(g, owners[g.ID], n); why != "" {
+			blocked = append(blocked, why)
 		}
 		newUsers = append(newUsers, u.ID)
 		member[u.ID] = true
@@ -1885,7 +1961,7 @@ func planUpdateGroup(ctx context.Context, client *truenas.Client, args map[strin
 		}},
 		Warnings:       notes,
 		Blocked:        blocked,
-		Bind:           map[string]interface{}{"group": g.bind(), "members": userBinds},
+		Bind:           map[string]interface{}{"group": g.bind(), "members": userBinds, "primary_group_owners": owners[g.ID]},
 		ConfirmSummary: newConfirmSummary(fmt.Sprintf("Change group %s", name), facts...),
 		Result:         map[string]interface{}{"usernames": usernames, "changes": changes},
 	}, nil
