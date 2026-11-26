@@ -41,6 +41,12 @@
     "plan": "planCreateDataset"
   },
   {
+    "name": "create_group",
+    "handler": "(*Registry).handleCreateGroup",
+    "plan": "planCreateGroup",
+    "execute": "(*Registry).executeCreateGroup"
+  },
+  {
     "name": "create_nfs_share",
     "handler": "handleCreateNFSShare",
     "plan": "planCreateNFSShare"
@@ -59,6 +65,12 @@
     "name": "create_snapshot",
     "handler": "(*Registry).handleCreateSnapshotWithDryRun",
     "plan": "planCreateSnapshot"
+  },
+  {
+    "name": "create_user",
+    "handler": "(*Registry).handleCreateUser",
+    "plan": "planCreateUser",
+    "execute": "(*Registry).executeCreateUser"
   },
   {
     "name": "delete_app",
@@ -343,6 +355,12 @@
     "execute": "(*Registry).executeUpdateApp"
   },
   {
+    "name": "update_group",
+    "handler": "(*Registry).handleUpdateGroup",
+    "plan": "planUpdateGroup",
+    "execute": "(*Registry).executeUpdateGroup"
+  },
+  {
     "name": "update_network_config",
     "handler": "handleUpdateNetworkConfigWithDryRun",
     "plan": "planUpdateNetworkConfig",
@@ -357,6 +375,12 @@
   {
     "name": "update_status",
     "handler": "handleUpdateStatus"
+  },
+  {
+    "name": "update_user",
+    "handler": "(*Registry).handleUpdateUser",
+    "plan": "planUpdateUser",
+    "execute": "(*Registry).executeUpdateUser"
   },
   {
     "name": "upgrade_app",

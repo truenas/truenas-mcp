@@ -61,7 +61,9 @@ var middlewareMethodContract = map[string]string{
 	"directoryservices.update":        "25.10",
 	"filesystem.getacl":               "25.10",
 	"filesystem.stat":                 "25.10",
+	"group.create":                    "25.10",
 	"group.query":                     "25.10",
+	"group.update":                    "25.10",
 	"interface.checkin":               "25.10",
 	"interface.checkin_waiting":       "25.10",
 	"interface.commit":                "25.10",
@@ -107,7 +109,9 @@ var middlewareMethodContract = map[string]string{
 	"update.download":                 "25.10",
 	"update.run":                      "25.10",
 	"update.status":                   "25.10",
+	"user.create":                     "25.10",
 	"user.query":                      "25.10",
+	"user.update":                     "25.10",
 	"vm.query":                        "25.10",
 }
 
