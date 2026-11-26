@@ -1,7 +1,9 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +37,8 @@ type svcActionFake struct {
 	jobError   string
 	jobMethod  string // method reported by core.get_jobs; default service.control
 	jobPending bool   // the job never finishes
+	jobGone    bool   // core.get_jobs no longer lists any job
+	onGetJobs  func() // called (with mu held) on each core.get_jobs
 	noReadback bool   // service.update stores nothing
 }
 
@@ -132,8 +136,14 @@ func (f *svcActionFake) handler(method string, params json.RawMessage) (interfac
 		f.jobs[f.nextJob] = job
 		return f.nextJob, nil, true
 	case "core.get_jobs":
+		if f.onGetJobs != nil {
+			f.onGetJobs()
+		}
 		filters, _ := p[0].([]interface{})
 		out := []interface{}{}
+		if f.jobGone {
+			return out, nil, true
+		}
 		for _, j := range f.jobs {
 			if jobMatchesFilters(j, filters) {
 				out = append(out, j)
@@ -255,6 +265,10 @@ func TestControlServiceDryRun(t *testing.T) {
 	}
 	if w := previewText(t, resp["warnings"]); !strings.Contains(w, "still starts at boot") {
 		t.Errorf("warnings = %s", w)
+	}
+	details, _ := actions[0].(map[string]interface{})["details"].(map[string]interface{})
+	if ha, _ := details["ha"].(string); !strings.Contains(ha, "standby controller") {
+		t.Errorf("planned action details = %v", details)
 	}
 }
 
@@ -521,16 +535,106 @@ func TestControlServiceJobStillRunning(t *testing.T) {
 	}
 }
 
-// A job id that now belongs to a different job is not taken as the result.
-func TestControlServiceJobIdentity(t *testing.T) {
-	fastServiceJobWait(t, time.Second)
+// A job that can no longer be identified is reported as unknown, never as
+// running or done, and is not tracked as a task: its id may now belong to
+// another job.
+func TestControlServiceJobLost(t *testing.T) {
+	fastServiceJobWait(t, 2*time.Second)
+	for _, tc := range []struct {
+		name  string
+		setup func(f *svcActionFake, fake *fakeMiddleware)
+		want  string
+	}{
+		{"other method", func(f *svcActionFake, _ *fakeMiddleware) { f.jobMethod = "pool.scrub.scrub" }, "is not a service.control job"},
+		// Without the empty-row guard this would index rows[0] of an
+		// empty list.
+		{"no longer listed", func(f *svcActionFake, _ *fakeMiddleware) { f.jobPending, f.jobGone = true, true }, "is no longer listed"},
+		{"new session", func(f *svcActionFake, fake *fakeMiddleware) {
+			// The second core.get_jobs drops the connection, so the
+			// client logs in again (a new session generation) and
+			// the job id can no longer be trusted.
+			f.jobPending = true
+			n := 0
+			fake.drop = func(method string) bool {
+				if method != "core.get_jobs" {
+					return false
+				}
+				n++
+				return n == 2
+			}
+		}, "connection to TrueNAS was re-established"},
+	} {
+		for _, withTasks := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/tasks=%v", tc.name, withTasks), func(t *testing.T) {
+				f := newSvcActionFake()
+				r, fake := f.registry(t, withTasks)
+				tc.setup(f, fake)
+				_, out := confirmAndRun(t, r, fake, "control_service", "service.control", ctl("cifs", "RESTART"))
+				resp := decodeObj(t, out)
+				msg, _ := resp["message"].(string)
+				if resp["status"] != "unknown" || resp["result"] != nil || !strings.Contains(msg, tc.want) {
+					t.Errorf("response = %v", resp)
+				}
+				if _, ok := resp["task_id"]; ok {
+					t.Errorf("a lost job was tracked as a task: %v", resp)
+				}
+				if withTasks {
+					if list, _, _ := r.taskManager.List("", 10); len(list) != 0 {
+						t.Errorf("tasks = %d, want 0", len(list))
+					}
+				}
+			})
+		}
+	}
+}
+
+// A wait cut short by cancellation does not create a task.
+func TestControlServiceNoTaskAfterCancel(t *testing.T) {
+	fastServiceJobWait(t, 5*time.Second)
 	f := newSvcActionFake()
-	f.jobMethod = "pool.scrub.scrub"
-	r, fake := f.registry(t, false)
-	_, out := confirmAndRun(t, r, fake, "control_service", "service.control", ctl("cifs", "RESTART"))
+	f.jobPending = true
+	r, _ := f.registry(t, true)
+	plan, err := planControlService(t.Context(), r.client, ctl("cifs", "RESTART"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.onGetJobs = cancel
+	out, err := r.executeControlService(ctx, r.client, ctl("cifs", "RESTART"), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp := decodeObj(t, out)
-	if resp["status"] != "running" || !strings.Contains(resp["message"].(string), "is not a service.control job") {
-		t.Errorf("response = %v", resp)
+	if resp["status"] != "running" {
+		t.Errorf("status = %v", resp["status"])
+	}
+	if _, ok := resp["task_id"]; ok {
+		t.Errorf("task created after cancellation: %v", resp)
+	}
+	if list, _, _ := r.taskManager.List("", 10); len(list) != 0 {
+		t.Errorf("tasks = %d, want 0", len(list))
+	}
+}
+
+// 'smb' is not a service.query row; the refusal points to 'cifs'.
+func TestServiceNameHint(t *testing.T) {
+	f := newSvcActionFake()
+	r, _ := f.registry(t, false)
+	for _, call := range []struct {
+		tool string
+		args map[string]interface{}
+	}{
+		{"control_service", ctl("smb", "RESTART")},
+		{"set_service_enabled", map[string]interface{}{"service": "smb", "enable": false}},
+	} {
+		_, err := r.CallTool(t.Context(), call.tool, call.args)
+		if err == nil || !strings.Contains(err.Error(), "unknown service 'smb'") || !strings.Contains(err.Error(), "did you mean 'cifs'?") {
+			t.Errorf("%s: err = %v", call.tool, err)
+		}
+	}
+	if _, err := r.CallTool(t.Context(), "control_service", ctl("nosuch", "RESTART")); err == nil || strings.Contains(err.Error(), "did you mean") {
+		t.Errorf("nosuch: err = %v", err)
 	}
 }
 
@@ -603,10 +707,10 @@ func TestSetServiceEnabledRefusals(t *testing.T) {
 		want string
 	}{
 		{"unknown", map[string]interface{}{"service": "nosuch", "enable": true}, "unknown service 'nosuch'"},
-		{"self dependency", map[string]interface{}{"service": "http", "enable": false, "allow_protected_service": true}, "service 'http' is refused"},
+		{"self dependency", map[string]interface{}{"service": "http", "enable": false}, "service 'http' is refused"},
 		{"self dependency enable", map[string]interface{}{"service": "http", "enable": true}, "service 'http' is refused"},
 		{"ssh disable", map[string]interface{}{"service": "ssh", "enable": false}, "service 'ssh' provides SSH sessions"},
-		{"sssd disable", map[string]interface{}{"service": "sssd", "enable": false}, "needs allow_protected_service=true"},
+		{"sssd disable", map[string]interface{}{"service": "sssd", "enable": false}, "Change it in the TrueNAS web UI"},
 		{"idmap disable", map[string]interface{}{"service": "idmap", "enable": false}, "service 'idmap' provides"},
 		{"nscd disable", map[string]interface{}{"service": "nscd", "enable": false}, "service 'nscd' provides"},
 		{"keepalived disable", map[string]interface{}{"service": "keepalived", "enable": false}, "service 'keepalived' provides"},
@@ -628,24 +732,41 @@ func TestSetServiceEnabledRefusals(t *testing.T) {
 	}
 }
 
-func TestSetServiceEnabledProtectedOverride(t *testing.T) {
+// set_service_enabled has no confirmation step, so it has no override for
+// disabling a protected service at boot: allow_protected_service is not in
+// its schema, is rejected as an unknown argument, and the plan ignores it.
+func TestSetServiceEnabledProtectedNoOverride(t *testing.T) {
 	f := newSvcActionFake()
 	r, fake := f.registry(t, false)
-	args := map[string]interface{}{"service": "ssh", "enable": false, "allow_protected_service": true}
-	dry := callTool(t, r, "set_service_enabled", mergeArgs(args, map[string]interface{}{"dry_run": true}))
-	cur := dry["current_state"].(map[string]interface{})
-	if cur["allow_protected_service"] != true || cur["protected"] != true {
-		t.Errorf("current_state = %v", cur)
+	props := r.tools["set_service_enabled"].Definition.InputSchema["properties"].(map[string]interface{})
+	if _, ok := props["allow_protected_service"]; ok {
+		t.Error("set_service_enabled still offers allow_protected_service")
 	}
-	if w := previewText(t, dry["warnings"]); !strings.Contains(w, "allow_protected_service is set") {
-		t.Errorf("warnings = %s", w)
+	args := map[string]interface{}{"service": "ssh", "enable": false}
+	for _, dry := range []bool{true, false} {
+		_, err := r.CallTool(t.Context(), "set_service_enabled", mergeArgs(args, map[string]interface{}{"dry_run": dry}))
+		if err == nil || !strings.Contains(err.Error(), "Change it in the TrueNAS web UI") {
+			t.Errorf("dry_run=%v: err = %v", dry, err)
+		}
 	}
-	resp := callTool(t, r, "set_service_enabled", args)
-	if resp["changed"] != true || resp["enabled_at_boot"] != false {
-		t.Errorf("response = %v", resp)
+	withOverride := mergeArgs(args, map[string]interface{}{"allow_protected_service": true})
+	if _, err := r.CallTool(t.Context(), "set_service_enabled", withOverride); err == nil || !strings.Contains(err.Error(), `unknown argument "allow_protected_service"`) {
+		t.Errorf("override argument: err = %v", err)
 	}
-	if n := len(fake.called("service.update")); n != 1 {
+	plan, err := planSetServiceEnabled(t.Context(), r.client, withOverride)
+	if err != nil || len(plan.Blocked) == 0 {
+		t.Errorf("plan with override: err = %v, blocked = %v", err, plan)
+	}
+	if n := len(fake.called("service.update")); n != 0 {
 		t.Errorf("service.update calls = %d", n)
+	}
+	if f.get("ssh", "enable") != true {
+		t.Error("ssh was disabled at boot")
+	}
+	// Enabling a protected service at boot is not refused.
+	f.set("ssh", "enable", false)
+	if resp := callTool(t, r, "set_service_enabled", map[string]interface{}{"service": "ssh", "enable": true}); resp["changed"] != true {
+		t.Errorf("enable ssh: %v", resp)
 	}
 }
 

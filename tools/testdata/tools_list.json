@@ -331,7 +331,7 @@
   },
   {
     "name": "control_service",
-    "description": "Start, stop, restart or reload a system service (as listed by query_services, for example cifs for SMB, nfs, iscsitarget, ups, snmp, ftp, ssh) and wait for the result. Does not change whether the service starts at boot (set_service_enabled). STOP and RESTART of cifs, nfs, iscsitarget, nvmet and ups disconnect their clients; RELOAD of a service that cannot reload is a restart. STOP and RESTART of ssh (and other services that provide access or authentication) are refused unless allow_protected_service is true. Refused for services not listed by query_services and for the web server this server connects through. Also refused when it would change nothing (START of a RUNNING service, STOP or RELOAD of a STOPPED one). The preview shows the current state and boot setting. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "description": "Start, stop, restart or reload a system service (as listed by query_services, for example cifs for SMB, nfs, iscsitarget, ups, snmp, ftp, ssh) and wait for the result. Does not change whether the service starts at boot (set_service_enabled). STOP and RESTART of cifs, nfs, iscsitarget, nvmet and ups disconnect their clients; RELOAD of a service that cannot reload is a restart. STOP and RESTART of ssh (and a RELOAD of a protected service that TrueNAS performs as a restart) are refused unless allow_protected_service is true. Refused for services not listed by query_services and for the web server this server connects through. Also refused when it would change nothing (START of a RUNNING service, STOP or RELOAD of a STOPPED one). On an HA system TrueNAS also runs the action on the standby controller for services that may run there. The preview shows the current state and boot setting. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
       "properties": {
         "action": {
@@ -346,7 +346,7 @@
         },
         "allow_protected_service": {
           "default": false,
-          "description": "Optional: Allow STOP or RESTART of a service that provides access or authentication (ssh, sssd, idmap, nscd, keepalived), which can lock users out (default: false)",
+          "description": "Optional: Allow STOP or RESTART (or a RELOAD that TrueNAS performs as a restart) of a service that provides access, such as ssh, which can lock users out (default: false)",
           "type": "boolean"
         },
         "confirmation_token": {
@@ -2348,14 +2348,9 @@
   },
   {
     "name": "set_service_enabled",
-    "description": "Set whether a system service (as listed by query_services) starts at boot. Does not start or stop it now; use control_service for that. Disabling ssh (or another service that provides access or authentication) at boot is refused unless allow_protected_service is true. Refused for services not listed by query_services and for the web server this server connects through. If the service already has the requested setting, nothing is changed. The preview shows the current state and boot setting.",
+    "description": "Set whether a system service (as listed by query_services) starts at boot. Does not start or stop it now; use control_service for that. Disabling ssh (or another service that provides access or authentication) at boot is always refused; change that in the TrueNAS web UI. Refused for services not listed by query_services and for the web server this server connects through. If the service already has the requested setting, nothing is changed. The preview shows the current state and boot setting.",
     "inputSchema": {
       "properties": {
-        "allow_protected_service": {
-          "default": false,
-          "description": "Optional: Allow disabling at boot a service that provides access or authentication (ssh, sssd, idmap, nscd, keepalived) (default: false)",
-          "type": "boolean"
-        },
         "dry_run": {
           "default": false,
           "description": "Optional: Preview without changing the setting (default: false)",

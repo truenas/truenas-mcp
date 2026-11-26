@@ -5,6 +5,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -46,10 +47,12 @@ var selfDependentServices = map[string]string{
 }
 
 // protectedServices cut off access or authentication when they stop.
-// STOP and RESTART (and a RELOAD that TrueNAS performs as a restart), and
-// disabling them at boot, need allow_protected_service. On 25.10 only ssh
-// is a service.query row; the others are listed in case a release exposes
-// them.
+// control_service STOP and RESTART (and a RELOAD that TrueNAS performs as
+// a restart) need allow_protected_service. set_service_enabled refuses to
+// disable them at boot outright: it has no confirmation step, so an
+// override there would be granted by the same call that uses it. On 25.10
+// only ssh is a service.query row; the others are listed in case a release
+// exposes them.
 var protectedServices = map[string]string{
 	"ssh":        "SSH sessions and remote shell access to this system",
 	"sssd":       "LDAP and FreeIPA logins (directory service authentication)",
@@ -70,6 +73,15 @@ var clientServices = map[string]string{
 // reloadableServices implement a real reload in middleware (25.10
 // ServiceInterface.reloadable). service.control RELOAD on any other
 // service performs a full restart.
+// serviceNameHints suggest the query_services name for a common alias.
+var serviceNameHints = map[string]string{
+	"smb": "cifs",
+}
+
+// haPropagateNote describes service.control's ha_propagate option, which
+// this server leaves at the 25.10 default (true).
+const haPropagateNote = "On an HA system, TrueNAS also runs the action on the standby controller (its default ha_propagate=true, which this tool does not change) when this controller is active, failover is healthy and the service may run on the standby"
+
 var reloadableServices = map[string]bool{
 	"cifs": true, "ftp": true, "iscsitarget": true, "nfs": true, "nvmet": true, "ssh": true,
 	"idmap": true, "nscd": true, "keepalived": true, "mdns": true,
@@ -86,7 +98,7 @@ func (r *Registry) registerServiceActionTools() {
 	r.tools["control_service"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "control_service",
-			Description: "Start, stop, restart or reload a system service (as listed by query_services, for example cifs for SMB, nfs, iscsitarget, ups, snmp, ftp, ssh) and wait for the result. Does not change whether the service starts at boot (set_service_enabled). STOP and RESTART of cifs, nfs, iscsitarget, nvmet and ups disconnect their clients; RELOAD of a service that cannot reload is a restart. STOP and RESTART of ssh (and other services that provide access or authentication) are refused unless allow_protected_service is true. Refused for services not listed by query_services and for the web server this server connects through. Also refused when it would change nothing (START of a RUNNING service, STOP or RELOAD of a STOPPED one). The preview shows the current state and boot setting.",
+			Description: "Start, stop, restart or reload a system service (as listed by query_services, for example cifs for SMB, nfs, iscsitarget, ups, snmp, ftp, ssh) and wait for the result. Does not change whether the service starts at boot (set_service_enabled). STOP and RESTART of cifs, nfs, iscsitarget, nvmet and ups disconnect their clients; RELOAD of a service that cannot reload is a restart. STOP and RESTART of ssh (and a RELOAD of a protected service that TrueNAS performs as a restart) are refused unless allow_protected_service is true. Refused for services not listed by query_services and for the web server this server connects through. Also refused when it would change nothing (START of a RUNNING service, STOP or RELOAD of a STOPPED one). On an HA system TrueNAS also runs the action on the standby controller for services that may run there. The preview shows the current state and boot setting.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -96,7 +108,7 @@ func (r *Registry) registerServiceActionTools() {
 						"enum":        serviceControlVerbs,
 						"description": "Required: START, STOP, RESTART or RELOAD",
 					},
-					"allow_protected_service": overrideSchema("Optional: Allow STOP or RESTART of a service that provides access or authentication (ssh, sssd, idmap, nscd, keepalived), which can lock users out (default: false)"),
+					"allow_protected_service": overrideSchema("Optional: Allow STOP or RESTART (or a RELOAD that TrueNAS performs as a restart) of a service that provides access, such as ssh, which can lock users out (default: false)"),
 					"dry_run":                 map[string]interface{}{"type": "boolean", "description": "Optional: Preview without changing the service (default: false)", "default": false},
 				},
 				"required": []string{"service", "action"},
@@ -110,7 +122,7 @@ func (r *Registry) registerServiceActionTools() {
 	r.tools["set_service_enabled"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "set_service_enabled",
-			Description: "Set whether a system service (as listed by query_services) starts at boot. Does not start or stop it now; use control_service for that. Disabling ssh (or another service that provides access or authentication) at boot is refused unless allow_protected_service is true. Refused for services not listed by query_services and for the web server this server connects through. If the service already has the requested setting, nothing is changed. The preview shows the current state and boot setting.",
+			Description: "Set whether a system service (as listed by query_services) starts at boot. Does not start or stop it now; use control_service for that. Disabling ssh (or another service that provides access or authentication) at boot is always refused; change that in the TrueNAS web UI. Refused for services not listed by query_services and for the web server this server connects through. If the service already has the requested setting, nothing is changed. The preview shows the current state and boot setting.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -119,8 +131,7 @@ func (r *Registry) registerServiceActionTools() {
 						"type":        "boolean",
 						"description": "Required: true to start the service at boot, false not to",
 					},
-					"allow_protected_service": overrideSchema("Optional: Allow disabling at boot a service that provides access or authentication (ssh, sssd, idmap, nscd, keepalived) (default: false)"),
-					"dry_run":                 map[string]interface{}{"type": "boolean", "description": "Optional: Preview without changing the setting (default: false)", "default": false},
+					"dry_run": map[string]interface{}{"type": "boolean", "description": "Optional: Preview without changing the setting (default: false)", "default": false},
 				},
 				"required": []string{"service", "enable"},
 			},
@@ -181,7 +192,11 @@ func resolveService(ctx context.Context, client *truenas.Client, args map[string
 		return serviceSnapshot{}, err
 	}
 	if row == nil {
-		return serviceSnapshot{}, fmt.Errorf("unknown service '%s': it is not listed by query_services; nothing was changed", name)
+		hint := ""
+		if alt, ok := serviceNameHints[name]; ok {
+			hint = fmt.Sprintf(" (did you mean '%s'?)", alt)
+		}
+		return serviceSnapshot{}, fmt.Errorf("unknown service '%s': it is not listed by query_services%s; nothing was changed", name, hint)
 	}
 	s := serviceSnapshot{Name: name, ID: row["id"]}
 	s.State, _ = row["state"].(string)
@@ -192,13 +207,12 @@ func resolveService(ctx context.Context, client *truenas.Client, args map[string
 	return s, nil
 }
 
-func serviceBind(s serviceSnapshot, override bool) map[string]interface{} {
+func serviceBind(s serviceSnapshot) map[string]interface{} {
 	return map[string]interface{}{
-		"id":                      s.ID,
-		"state":                   s.State,
-		"enable":                  s.Enable,
-		"enable_known":            s.EnableSet,
-		"allow_protected_service": override,
+		"id":           s.ID,
+		"state":        s.State,
+		"enable":       s.Enable,
+		"enable_known": s.EnableSet,
 	}
 }
 
@@ -227,7 +241,7 @@ func planControlService(ctx context.Context, client *truenas.Client, args map[st
 	current := svc.currentState()
 	current["action"] = verb
 	current["allow_protected_service"] = override
-	details := map[string]interface{}{"verb": verb, "service": name, "silent": false}
+	details := map[string]interface{}{"verb": verb, "service": name, "silent": false, "ha": haPropagateNote}
 
 	var blocked, warnings []string
 	why, protected := protectedServices[name]
@@ -291,11 +305,17 @@ func planControlService(ctx context.Context, client *truenas.Client, args map[st
 		}},
 		Warnings:       warnings,
 		Blocked:        blocked,
-		Bind:           serviceBind(svc, override),
+		Bind:           controlBind(svc, override),
 		EstimatedTime:  &EstimatedTime{MinSeconds: 1, MaxSeconds: 120, Note: "TrueNAS gives up on a service action after 120 seconds"},
 		ConfirmSummary: newConfirmSummary(fmt.Sprintf("%s service %s", verbTitle(verb), name), facts...),
 		Result:         map[string]interface{}{"verb": verb},
 	}, nil
+}
+
+func controlBind(s serviceSnapshot, override bool) map[string]interface{} {
+	b := serviceBind(s)
+	b["allow_protected_service"] = override
+	return b
 }
 
 func verbTitle(verb string) string {
@@ -351,6 +371,14 @@ func (r *Registry) executeControlService(ctx context.Context, client *truenas.Cl
 			msg += ": " + boundedErr(waitErr)
 		} else {
 			msg += fmt.Sprintf(" within %s", serviceJobWait)
+		}
+		var lost *serviceJobLostError
+		if errors.As(waitErr, &lost) {
+			// The job id may now belong to another job, so it is
+			// neither reported as running nor tracked as a task.
+			response["status"] = "unknown"
+			response["message"] = msg + ". Check query_services before retrying"
+			return marshalJSON(response)
 		}
 		response["status"] = "running"
 		if r.taskManager != nil && ctx.Err() == nil {
@@ -409,11 +437,22 @@ func (r *Registry) executeControlService(ctx context.Context, client *truenas.Cl
 	return marshalJSON(response)
 }
 
+// serviceJobLostError means the job can no longer be identified: its row
+// is gone or runs another method, or the login session changed (job ids
+// restart with middleware). Its outcome is unknown.
+type serviceJobLostError struct{ msg string }
+
+func (e *serviceJobLostError) Error() string { return e.msg }
+
+func jobLost(format string, a ...interface{}) error {
+	return &serviceJobLostError{msg: fmt.Sprintf(format, a...)}
+}
+
 // waitForServiceJob polls core.get_jobs for jobID until it ends, wait
 // passes or ctx ends. It returns the finished job row, or nil with the
 // reason it stopped looking. A row that is gone or runs another method, or
-// a new login session (job ids restart with middleware), ends the wait:
-// the id may now belong to another job.
+// a new login session, ends the wait with a *serviceJobLostError: the id
+// may now belong to another job.
 func waitForServiceJob(ctx context.Context, client *truenas.Client, jobID int, wait, every time.Duration) (map[string]interface{}, error) {
 	gen, genErr := client.SessionGeneration(ctx)
 	deadline := time.Now().Add(wait)
@@ -426,18 +465,18 @@ func waitForServiceJob(ctx context.Context, client *truenas.Client, jobID int, w
 		}
 		if err == nil && genErr == nil {
 			if now, gerr := client.SessionGeneration(ctx); gerr == nil && now != gen {
-				return nil, fmt.Errorf("the connection to TrueNAS was re-established, so job %d can no longer be identified", jobID)
+				return nil, jobLost("the connection to TrueNAS was re-established, so job %d can no longer be identified", jobID)
 			}
 		}
 		switch {
 		case err != nil:
 			lastErr = err
 		case len(rows) == 0:
-			return nil, fmt.Errorf("job %d is no longer listed (TrueNAS may have restarted)", jobID)
+			return nil, jobLost("job %d is no longer listed (TrueNAS may have restarted)", jobID)
 		default:
 			job := rows[0]
 			if m, _ := job["method"].(string); m != serviceControlMethod {
-				return nil, fmt.Errorf("job %d is not a %s job (TrueNAS may have restarted)", jobID, serviceControlMethod)
+				return nil, jobLost("job %d is not a %s job (TrueNAS may have restarted)", jobID, serviceControlMethod)
 			}
 			switch job["state"] {
 			case "SUCCESS", "FAILED", "ABORTED":
@@ -463,14 +502,12 @@ func planSetServiceEnabled(ctx context.Context, client *truenas.Client, args map
 	if !ok {
 		return nil, fmt.Errorf("enable is required and must be true or false")
 	}
-	override, _ := args["allow_protected_service"].(bool)
 	svc, err := resolveService(ctx, client, args)
 	if err != nil {
 		return nil, err
 	}
 	name := svc.Name
 	current := svc.currentState()
-	current["allow_protected_service"] = override
 	why, protected := protectedServices[name]
 	if protected {
 		current["protected"] = true
@@ -484,7 +521,7 @@ func planSetServiceEnabled(ctx context.Context, client *truenas.Client, args map
 		ParamNames:   []string{"id_or_name", "service_update"},
 		TargetName:   name,
 		CurrentState: current,
-		Bind:         serviceBind(svc, override),
+		Bind:         serviceBind(svc),
 		Result:       map[string]interface{}{"enable": enable},
 	}
 	if svc.EnableSet && svc.Enable == enable {
@@ -506,11 +543,10 @@ func planSetServiceEnabled(ctx context.Context, client *truenas.Client, args map
 		Details:     map[string]interface{}{"service": name, "enable": enable},
 	}}
 	if !enable && protected {
-		if !override {
-			plan.Blocked = []string{fmt.Sprintf("service '%s' provides %s; disabling it at boot could lock users out after a reboot, so it needs allow_protected_service=true; nothing was changed", name, why)}
-			return plan, nil
-		}
-		plan.Warnings = append(plan.Warnings, fmt.Sprintf("allow_protected_service is set: after the next reboot '%s' does not start, so %s is unavailable until it is started", name, why))
+		// No override: this tool has no confirmation step, so the call
+		// that asked for an override would also be the one that uses it.
+		plan.Blocked = []string{fmt.Sprintf("service '%s' provides %s; disabling it at boot could lock users out after a reboot, so this tool refuses it. Change it in the TrueNAS web UI instead; nothing was changed", name, why)}
+		return plan, nil
 	}
 	if msg, ok := clientServices[name]; ok && !enable {
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("After the next reboot '%s' stays stopped until it is started: %s", name, strings.ToLower(msg[:1])+msg[1:]))

@@ -96,16 +96,17 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
 - **query_services** - List system services (`cifs` is SMB) with `state` (`RUNNING`, `STOPPED`, or `UNKNOWN` if TrueNAS could not read it in time), `running` and `enabled_at_boot`. `name` returns one service
 - **control_service** - Start, stop, restart or reload a service and wait for the result (**destructive**)
   - **Requires a `confirmation_token`** to execute, for every action; without one returns a preview and a token and changes nothing
-  - Input: `service` (as `query_services` lists it) and `action` (`START`, `STOP`, `RESTART` or `RELOAD`). Sends the `service.control` job with `{"silent": false}`, so a failed action fails the job instead of returning `false`, then waits up to 150 seconds for it (TrueNAS gives up after 120). A job that has not finished by then is reported as `running` with a `task_id` for `tasks_get`
+  - Input: `service` (as `query_services` lists it) and `action` (`START`, `STOP`, `RESTART` or `RELOAD`). Sends the `service.control` job with `{"silent": false}`, so a failed action fails the job instead of returning `false`, then waits up to 150 seconds for it (TrueNAS gives up after 120). A job that has not finished by then is reported as `running` with a `task_id` for `tasks_get`. A job that is no longer listed, runs a different method, or can no longer be identified after a reconnect is reported as `unknown`, with no task; check `query_services` before retrying
+  - On an HA system, TrueNAS also runs the action on the standby controller when this controller is active, failover is healthy and the service may run on the standby (the 25.10 default `ha_propagate: true`, which this tool does not change)
   - The preview shows the current `state` and `enabled_at_boot`. STOP and RESTART of `cifs`, `nfs`, `iscsitarget`, `nvmet` and `ups` warn that connected clients are disrupted. RELOAD of a service TrueNAS cannot reload (for example `ups` or `snmp`) is a restart, and the preview says so; it is checked and warned like a RESTART
-  - STOP and RESTART of `ssh`, `sssd`, `idmap`, `nscd` and `keepalived` (whichever `query_services` lists; on 25.10 only `ssh`) are refused unless `allow_protected_service` is true; the preview and confirmation show the flag. RELOAD of `ssh` is allowed
-  - Always refused: services `query_services` does not list, and `http` (the web server this server connects through). Also refused when nothing would change: START of a RUNNING service, STOP or RELOAD of a STOPPED one
+  - STOP and RESTART of `ssh` (and a RELOAD of a protected service that TrueNAS performs as a restart) are refused unless `allow_protected_service` is true; the preview and confirmation show the flag. RELOAD of `ssh` is a real reload and is allowed
+  - Always refused: services `query_services` does not list (`smb` suggests `cifs`), and `http` (the web server this server connects through). Also refused when nothing would change: START of a RUNNING service, STOP or RELOAD of a STOPPED one
   - The token is bound to the previewed state, boot setting and `allow_protected_service`: a service started, stopped or re-enabled after the preview rejects it
   - Does not change whether the service starts at boot
 - **set_service_enabled** - Set whether a service starts at boot
   - Input: `service` and `enable` (boolean). Sends `service.update` with `{"enable": ...}` and reads the setting back
   - A write tool: it runs without a confirmation token unless `dry_run` is set. The preview shows the current `state` and `enabled_at_boot`; nothing is started or stopped now (use `control_service`)
-  - Disabling `ssh`, `sssd`, `idmap`, `nscd` or `keepalived` at boot is refused unless `allow_protected_service` is true; unknown services and `http` are refused. If the service already has the requested setting, nothing is sent and the result says `changed: false`
+  - Disabling `ssh` at boot is always refused, with no override, because this tool has no confirmation step; change it in the TrueNAS web UI. Unknown services and `http` are refused. If the service already has the requested setting, nothing is sent and the result says `changed: false`
 
 ### Alerts
 - **list_alerts** - List system alerts with filtering
