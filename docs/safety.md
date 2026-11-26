@@ -82,7 +82,7 @@ is set (`upgrade_app` may be named; it stays limited to dry runs).
 TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
-**Confirmation for destructive tools.** These twenty-two tools execute only after
+**Confirmation for destructive tools.** These twenty-seven tools execute only after
 confirmation. When the MCP client supports form elicitation, the server asks
 the user to approve a short preview in the client and executes only if they
 accept. Otherwise the tools execute only with a `confirmation_token` from a
@@ -112,6 +112,11 @@ preview of the same call:
 | `update_user` | Changes an account in place: its password, groups, lock state, shell or SMB access. Another user's primary group is refused in `group` and `add_groups`. Confirmation is bound to the user's current settings, including when its password last changed, and to the groups involved |
 | `create_group` | Adds a group and its members, which can grant access to shares. Confirmation is bound to the members' current settings |
 | `update_group` | Changes a group's members or SMB flag in place. Adding a user to another user's primary group (the group created with that user, for example) is refused, at the preview and again when the confirmation re-plans. Confirmation is bound to the group's current settings and the members named |
+| `update_smb_share` | A rename breaks client paths and mapped drives, a new path serves a different directory, and `readonly`, `enabled` or host lists change who can reach the data. Confirmation is bound to the share's current settings |
+| `delete_smb_share` | Disconnects clients and removes their access (only the share configuration is removed; files are kept). Confirmation is bound to the share's current settings |
+| `update_nfs_share` | Changes which hosts can mount the export, how root and other users are mapped, or which directory is exported. Confirmation is bound to the share's current settings |
+| `delete_nfs_share` | Clients with the export mounted lose access (only the export is removed; files are kept). Confirmation is bound to the share's current settings |
+| `set_share_acl` | Replaces the share-level ACL as a whole and can lock users, administrators included, out of the share. Confirmation is bound to the share and its current share ACL |
 
 No other tool needs a token: the other write tools (`create_dataset`,
 `create_smb_share`, `create_nfs_share`, `install_app`, `start_app`,
@@ -180,7 +185,8 @@ execute (`stop_app`, `delete_boot_environment`, `delete_app`,
 `run_snapshot_task`, `run_replication`, `update_network_config`,
 `update_network_interface`, `release_snapshot`, `rollback_snapshot`,
 `delete_snapshot`, `control_service`, `create_user`, `update_user`,
-`create_group`, `update_group`), the token is also bound to
+`create_group`, `update_group`, `update_smb_share`, `delete_smb_share`,
+`update_nfs_share`, `delete_nfs_share`, `set_share_acl`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. For `release_snapshot` the hash also
 covers the previewed hold tags, hold count (`userrefs`) and the snapshot's
@@ -198,7 +204,12 @@ current settings (uid, names, groups, home, shell, lock, password and SMB
 flags, roles, sudo, and when the password last changed) and the groups
 named; for `create_user` the absence of the user, the groups named and the
 state of the new home directory; for `update_group` and `create_group` the
-group's settings and the members named. The token store does not hold those
+group's settings and the members named. For the share tools it covers the
+share's current settings as read from the system (and, for `set_share_acl`,
+its current share ACL and the principals named; for a new path, the
+directory's inode and device), so a share edited, recreated or locked after
+the preview, or an ACL changed in the meantime, rejects the token and
+nothing is written. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
 issued for another tool or issued for different arguments is rejected with
 an error that says why and that nothing was executed; that error result
@@ -335,7 +346,7 @@ schema), `host_path_config.acl_enable` must also be a JSON boolean.
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`)
 derived from the same table, so clients can apply their own approval prompts.
-`destructiveHint` is true for the twenty-two destructive tools (the ones that need a
+`destructiveHint` is true for the twenty-seven destructive tools (the ones that need a
 confirmation token, `update_app` included) and false for every other tool.
 Annotations were added in MCP 2025-03-26; clients that negotiate
 `2024-11-05` ignore the extra field.
@@ -553,6 +564,8 @@ The `update_app` confirmation prompt lists the top-level keys that change and th
 Both tools re-plan against fresh reads right before the call and refuse a token whose bound state changed, but a small window remains between that final re-plan and the middleware call, and it cannot be closed client-side because `pool.snapshot.rollback` and `pool.snapshot.delete` have no compare-and-swap. A snapshot created in that window on the dataset (by a periodic snapshot task or an incoming replication, for example) is destroyed by a rollback with `allow_destroy_newer` (`rollback -r`) without having been previewed, and a clone of a newer snapshot created in that window is destroyed by a rollback with `destroy_clones` (`rollback -R`). Likewise a child snapshot of the same name created in that window is deleted by a recursive `delete_snapshot`. Without those options ZFS itself refuses instead. The tool descriptions say this too.
 
 `control_service` and `set_service_enabled` use the same shared plan for preview and the real call (`service.control` with the verb, the service name and `{"silent": false}`, and `service.update` with the name and `{"enable": ...}`). Both read the service from `service.query` first and refuse a name it does not list, so internal service objects that `service.control` would otherwise accept (on 25.10 these include `sssd`, `idmap`, `nscd`, `keepalived` and the `http` web server) cannot be reached by name. `http` is refused outright for every action and override, because the TrueNAS API this server talks to is served through it. Services that provide access or authentication (on 25.10 only `ssh` is listed by `service.query`; the server also protects `sssd`, `idmap`, `nscd` and `keepalived` in case a release lists them) are refused, as a blocked preview with no token, for STOP and RESTART and for a RELOAD that TrueNAS performs as a restart, unless `allow_protected_service` is true; the flag is part of the argument hash and of the plan binding, and the preview and confirmation show it. `set_service_enabled` refuses to disable them at boot with no override at all: it is a write tool with no confirmation step, so an override there would be granted by the same call that uses it. The refusal points to the TrueNAS web UI. STOP and RESTART of `cifs`, `nfs`, `iscsitarget`, `nvmet` and `ups` warn that connected clients are disrupted. `control_service` is refused when it would change nothing (START of a RUNNING service, STOP or RELOAD of a STOPPED one). It waits for the job: a `FAILED` or `ABORTED` job, or a `SUCCESS` whose result is `false`, is an error; a job that does not finish within 150 seconds is reported as `running` (with a `task_id` when task tracking is on), and a job that is no longer listed, runs a different method, or can no longer be identified after a reconnect is reported as `unknown` (with no task, since its id may now belong to another job), rather than as success or failure. `service.control` is sent without `ha_propagate`, so the 25.10 default (`true`) applies: on an HA system with healthy failover, the active controller also runs the action on the standby for services that may run there. `set_service_enabled` reads the setting back and fails if it does not match.
+
+`update_smb_share`, `delete_smb_share`, `update_nfs_share`, `delete_nfs_share` and `set_share_acl` use the same shared plan for preview and the real call (`sharing.smb.update` and `sharing.nfs.update` with the share id and only the changed fields, `sharing.smb.delete` and `sharing.nfs.delete` with the share id, and `sharing.smb.setacl` with the share name and the full new ACL). Each reads the share by id (or, for SMB, by name) first and works on exactly one share per call. A share's current and new path must be a normalised directory below `/mnt/<pool>`, reached without symlinks, and not a pool root, `/mnt` itself, an EXTERNAL DFS proxy or a managed dataset (`boot-pool`, `freenas-boot`, `.system`, `ix-applications`, `ix-apps`, `.ix-virt` or any dot-prefixed component); a share that is already on such a path is refused for every action, deletion included, and is left to the TrueNAS web UI. Reserved and administrative SMB share names (`global`, `printers`, `homes`, `IPC$`, `ADMIN$`, `PRINT$`, drive shares such as `C$`) and the homes share are refused as a target and as a new name, and a share whose `locked` flag is true, or not reported, is refused. A delete removes only the share configuration and never the directory or its files; its preview warns that clients lose access. `set_share_acl` changes only the share ACL (`sharing.smb.getacl` / `setacl`), not the filesystem ACL of the path, and refuses an empty ACL (which TrueNAS would reset to its default) and an ACL with no ALLOWED FULL entry, or with a DENIED entry for everyone, unless `allow_no_full_control` is true; the flag is part of the argument hash and shown in the preview and confirmation. Principals are resolved to SIDs from `user.query` and `group.query`, so only local accounts with SMB enabled (and everyone, `S-1-1-0`) are accepted. Each tool reads the share back afterwards and reports a mismatch. The global SMB and NFS service settings are not changed.
 
 `download_update` passes optional `train` and `version` through to `update.download`. Both must be set, or both omitted (matching 25.10's `UpdateDownloadArgs` and `plugins/update_/download.py`). When both are omitted, or both are blank or whitespace, they are treated as omitted and the middleware call still has empty parameters (`params: []`) and downloads the update offered by the configured profile, as before. When both are set, the call is `update.download` with those two positional arguments. A request for only one of them is refused. A completed download (`update_download_progress.percent == 100`) is not treated as already done if the caller asked for a different `version`.
 
