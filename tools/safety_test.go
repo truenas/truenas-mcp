@@ -65,6 +65,8 @@ var fakeResults = map[string]interface{}{
 	"sharing.smb.query":  shareFixtureSMBRows(),
 	"sharing.nfs.query":  shareFixtureNFSRows(),
 	"sharing.smb.getacl": shareFixtureACL(),
+	// delete_user reads the SMB guest account.
+	"smb.config": map[string]interface{}{"guest": "nobody"},
 }
 
 func (f *fakeMiddleware) serve(w http.ResponseWriter, r *http.Request) {
@@ -246,10 +248,11 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"checkin_network_changes": Write, "rollback_network_changes": Write,
 		"create_user": Destructive, "update_user": Destructive,
 		"create_group": Destructive, "update_group": Destructive,
+		"delete_user": Destructive, "delete_group": Destructive,
 		"update_smb_share": Destructive, "delete_smb_share": Destructive,
 		"update_nfs_share": Destructive, "delete_nfs_share": Destructive,
-		"set_share_acl": Destructive,
-		"offline_disk":  Destructive, "online_disk": Destructive, "replace_disk": Destructive,
+		"set_share_acl": Destructive, "set_filesystem_acl": Destructive,
+		"offline_disk": Destructive, "online_disk": Destructive, "replace_disk": Destructive,
 	}
 	for name, s := range toolSafety {
 		if got, exp := s.Access, want[name]; exp != 0 && got != exp || exp == 0 && got != Read {
@@ -262,8 +265,8 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 			destructive++
 		}
 	}
-	if destructive != 30 {
-		t.Errorf("%d destructive tools, want 30; update docs/safety.md and docs/full-features.md too", destructive)
+	if destructive != 33 {
+		t.Errorf("%d destructive tools, want 33; update docs/safety.md and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
 		if s.Overwrites {

@@ -75,6 +75,7 @@ var toolVersion = map[string]VersionRange{
 	"set_share_acl":             {Min: truenas.MinSupported},
 	"get_share_acl":             {Min: truenas.MinSupported},
 	"get_filesystem_acl":        {Min: truenas.MinSupported},
+	"set_filesystem_acl":        {Min: truenas.MinSupported},
 	"analyze_capacity":          {Min: truenas.MinSupported},
 	"get_pool_capacity_details": {Min: truenas.MinSupported},
 	// Accounts
@@ -84,6 +85,8 @@ var toolVersion = map[string]VersionRange{
 	"update_user":  {Min: truenas.MinSupported},
 	"create_group": {Min: truenas.MinSupported},
 	"update_group": {Min: truenas.MinSupported},
+	"delete_user":  {Min: truenas.MinSupported},
+	"delete_group": {Min: truenas.MinSupported},
 	// Disks and services
 	"query_disks":         {Min: truenas.MinSupported},
 	"get_disk_health":     {Min: truenas.MinSupported},

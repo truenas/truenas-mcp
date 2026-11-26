@@ -82,7 +82,7 @@ is set (`upgrade_app` may be named; it stays limited to dry runs).
 TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
-**Confirmation for destructive tools.** These thirty tools execute only after
+**Confirmation for destructive tools.** These thirty-three tools execute only after
 confirmation. When the MCP client supports form elicitation, the server asks
 the user to approve a short preview in the client and executes only if they
 accept. Otherwise the tools execute only with a `confirmation_token` from a
@@ -112,11 +112,14 @@ preview of the same call:
 | `update_user` | Changes an account in place: its password, groups, lock state, shell or SMB access. Another user's primary group is refused in `group` and `add_groups`. Confirmation is bound to the user's current settings, including when its password last changed, and to the groups involved |
 | `create_group` | Adds a group and its members, which can grant access to shares. Confirmation is bound to the members' current settings |
 | `update_group` | Changes a group's members or SMB flag in place. Adding a user to another user's primary group (the group created with that user, for example) is refused, at the preview and again when the confirmation re-plans. Confirmation is bound to the group's current settings and the members named |
+| `delete_user` | Removes an account; files it owns keep its numeric uid, which a later account with that uid inherits. Its primary group and home directory are kept. Confirmation is bound to the user's current settings, its groups, the SMB guest account and whether `<home>/.ssh` exists |
+| `delete_group` | Removes a group; members lose the access it grants and files keep its numeric gid. No user is deleted, and a group that is still some user's primary group is refused. Confirmation is bound to the group's current settings, its members and the users that have it as primary group |
 | `update_smb_share` | A rename breaks client paths and mapped drives, a new path serves a different directory, and `readonly`, `enabled` or host lists change who can reach the data. Confirmation is bound to the share's current settings |
 | `delete_smb_share` | Disconnects clients and removes their access (only the share configuration is removed; files are kept). Confirmation is bound to the share's current settings |
 | `update_nfs_share` | Changes which hosts can mount the export, how root and other users are mapped, or which directory is exported. Confirmation is bound to the share's current settings |
 | `delete_nfs_share` | Clients with the export mounted lose access (only the export is removed; files are kept). Confirmation is bound to the share's current settings |
 | `set_share_acl` | Replaces the share-level ACL as a whole and can lock users, administrators included, out of the share (directory service accounts are refused). Confirmation is bound to the share and its current share ACL |
+| `set_filesystem_acl` | Replaces a path's filesystem ACL as a whole and can lock users out or widen access; with `recursive`, every ACL below the path in its dataset is replaced. Confirmation is bound to the path's identity, its dataset, its current ACL and the principals named |
 | `offline_disk` | Reduces the redundancy of the disk's vdev until the disk is back online. Refused unless the vdev keeps at least one disk's worth of redundancy. Confirmation is bound to the pool topology and the disk |
 | `online_disk` | Starts a resilver of the data written while the disk was offline. Confirmation is bound to the pool topology and the disk |
 | `replace_disk` | Destroys everything on the replacement disk and starts a full resilver. Confirmation is bound to the pool topology, the disk being replaced, and the replacement disk's identity, size and unused state |
@@ -190,7 +193,7 @@ execute (`stop_app`, `delete_boot_environment`, `delete_app`,
 `delete_snapshot`, `control_service`, `create_user`, `update_user`,
 `create_group`, `update_group`, `update_smb_share`, `delete_smb_share`,
 `update_nfs_share`, `delete_nfs_share`, `set_share_acl`, `offline_disk`, `online_disk`,
-`replace_disk`), the token is also bound to
+`replace_disk`, `delete_user`, `delete_group`, `set_filesystem_acl`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. For `release_snapshot` the hash also
 covers the previewed hold tags, hold count (`userrefs`) and the snapshot's
@@ -221,7 +224,17 @@ name and state), plus the target device's serial and size; for
 both `disk.query` and `disk.details`), partitions and size, whether TrueNAS reports it unused, the pool it belongs to, and any
 running `pool.replace` job. A disk failing, going offline or coming back,
 a resilver starting, or a different disk under the same name after the
-preview rejects the token and nothing is written. The token store does not hold those
+preview rejects the token and nothing is written. For `delete_user` it covers
+the user's settings (as for `update_user`), its groups, the SMB guest account
+and whether `<home>/.ssh` exists; for `delete_group` the group's settings,
+its members and the users that have it as primary group. For
+`set_filesystem_acl` it covers the path's realpath, type, inode, device,
+mount id, owner, group and mode, the dataset and mount it is on
+(`filesystem.statfs` source, mountpoint, filesystem id and flags, and the
+dataset's lock state), its current ACL (type, entries, flags, owner), the
+local users and groups named, and, for a recursive change, the child
+datasets below the path. The entry and object counts shown in a recursive
+preview are not bound. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
 issued for another tool or issued for different arguments is rejected with
 an error that says why and that nothing was executed; that error result
@@ -358,7 +371,7 @@ schema), `host_path_config.acl_enable` must also be a JSON boolean.
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`)
 derived from the same table, so clients can apply their own approval prompts.
-`destructiveHint` is true for the thirty destructive tools (the ones that need a
+`destructiveHint` is true for the thirty-three destructive tools (the ones that need a
 confirmation token, `update_app` included) and false for every other tool.
 Annotations were added in MCP 2025-03-26; clients that negotiate
 `2024-11-05` ignore the extra field.
@@ -582,6 +595,10 @@ Both tools re-plan against fresh reads right before the call and refuse a token 
 `update_nfs_share` can map every client to root (`mapall_user` root), keep a client's root as root (`no_root_squash`), or remove every network and host limit, in one call and without an extra flag, as `create_nfs_share` can. Each of these gives an explicit `WARNING:` in the preview's warnings and in the confirmation facts, so the approver sees it before anything is sent.
 
 The share tools are not limited to 25.10, but the option shapes they send (for example the SMB `options` block sent back with the host lists) were checked only against 25.10. On any other version the preview adds a warning saying so; check the result with `query_shares`.
+
+`delete_user` and `delete_group` use the same shared plan for preview and the real call: `user.delete` with the user id and `{"delete_group": false}`, and `group.delete` with the group id and `{"delete_users": false}`. On 25.10 `delete_group` defaults to true for `user.delete`, which would delete the user's primary group when no other user has it; it is always sent as false, and `delete_users` is sent as false although it is the default. Neither tool accepts either option. Both read the account with `user.query` / `group.query` filtered to local accounts and apply the refusal rules of `update_user` and `update_group`. `user.delete` itself has side effects these tools cannot turn off, so `delete_user` refuses the cases where they would touch more than the account: it always removes `<home>/.ssh` (checked with `filesystem.stat`; a user whose home directory has one is refused), and it resets the SMB service's guest account to `nobody` when it names the user (read from `smb.config`; that user is refused, and an unreadable `smb.config` fails the plan). It also removes the user's SMB password entry, its web UI settings and its group memberships, and reloads the SSH and user services; the preview lists them. `group.delete` moves users whose primary group it is to `nogroup`, so `delete_group` refuses such a group; it also deletes the group's SMB group mapping, which the preview says for an SMB group. TrueNAS refuses to delete a group that a privilege uses; `delete_group` refuses groups that grant roles before that. Both read the account back afterwards and report it if it is still listed.
+
+`set_filesystem_acl` uses the same shared plan for preview and the real call: `filesystem.setacl` with one argument, `{"path", "dacl", "options": {"stripacl": false, "recursive": <recursive>, "traverse": false, "canonicalize": true, "validate_effective_acl": true}, "uid": -1, "gid": -1, "acltype": <current type>}`. It walks the path one component at a time as `get_filesystem_acl` does and refuses a path that is not its own real path. It reads the dataset the path is on from `filesystem.statfs` (refusing a non-ZFS filesystem, a dataset of another pool, a managed dataset by name, and a read-only mount) and its lock state, and the lock state of every dataset below it, from `pool.dataset.query`; a path inside a locked dataset, or one whose lock state is not reported, is refused. The current ACL is read with `filesystem.getacl` (not simplified); the new entries must be in the same ACL type, and type `DISABLED` is refused. `USER` and `GROUP` entries name local accounts, resolved to their uid or gid with `user.query` and `group.query` filtered to local accounts, so directory service principals and unknown names are refused; `who` is not sent. POSIX ACLs need exactly one `USER_OBJ`, `GROUP_OBJ` and `OTHER` entry, and a `MASK` when they name users or groups, for the access ACL and for the default ACL if any default entry is given. An NFSv4 ACL with no `ALLOW` entry that grants `FULL_CONTROL` or `WRITE_ACL` (`DENY` entries do not count) is allowed with a warning; the file's owner and root can still change the ACL afterwards. A recursive change gives everything below the path the ACL inherited from the new one, so it is refused when nothing is inheritable: no NFSv4 entry with `FILE_INHERIT` or `DIRECTORY_INHERIT`, or no POSIX default entry (TrueNAS refuses the POSIX case too). A recursive change reads `filesystem.listdir` with `count: true` for the entries directly in the path and shows `files - free_files` from `filesystem.statfs` as the objects in use in the dataset; if the count cannot be read, the change is refused. `filesystem.setacl` is a job; its id is tracked as a `tasks_get` task (`set_filesystem_acl`, 24 hours). As with the other destructive tools, a small window remains between the final re-plan and the middleware call, which `filesystem.setacl` cannot close because it has no compare-and-swap; TrueNAS's own path checks (paths under `/mnt` only, no pool mountpoints, no locked or read-only datasets) still apply. The request shape was checked only against 25.10; on any other version the preview adds a warning saying so; check the result with `get_filesystem_acl`.
 
 `offline_disk`, `online_disk` and `replace_disk` use the same shared plan for preview and the real call: `pool.offline` and `pool.online` with the pool id and `{"label": <device guid>}`, and `pool.replace` with the pool id and `{"label": <device guid>, "disk": <replacement disk identifier>, "force": false}`. The `disk` value is the replacement disk's `identifier` from the `disk.details` row the checks used (for example `{serial_lunid}...`), not its name: 25.10 `pool.replace` looks the disk up by identifier in `disk.details`. No tool accepts or sends a force option. Each reads the boot pool (`boot.get_state`), the named pool (`pool.query` with its topology and scan state) and the disk inventory (`disk.query`); a disk is named by its disk name or, for a device that is no longer present, by the ZFS guid `get_disk_health` shows. The boot pool is refused by name (`boot-pool`, `freenas-boot`, or the name `boot.get_state` reports), and so is a boot disk named as the target; if the boot pool cannot be read, the call is refused. Cache and spare devices, and vdevs with a replacement or hot spare already in progress (a `replacing-N` or `spare-N` child), are refused by every tool. Only mirror and RAIDZ vdevs are reasoned about: dRAID and other vdev types are refused. Special, dedup and log vdevs follow the same rules as data vdevs. A device whose ZFS guid is missing, empty or not a string is refused, since the device is named to TrueNAS only by its guid. Only leaf devices of the named pool match: a top-level vdev guid or a device of another pool is refused. Every state-dependent refusal is a blocked preview that still shows the pool, the vdev layout and the disk: an error with no token and no prompt. The disk name and serial shown for the target come from the pool's device path, which can be stale on older pools; every preview says so and that the call names the device by its guid.
 

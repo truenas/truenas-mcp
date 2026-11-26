@@ -79,9 +79,10 @@ var (
 // hashes, password history, SSH keys and API keys are not requested.
 var userWriteSelect = append(append([]interface{}{}, userQuerySelect...), "email", "last_password_change")
 
-// accountRefusedArgs are arguments the account tools refuse by name, with
-// the reason. They are not in the schemas, so validateArgs rejects them;
-// accountArgRefusal replaces that generic error with the reason.
+// accountRefusedArgs are arguments the account tools (and
+// set_filesystem_acl) refuse by name, with the reason. They are not in
+// the schemas, so validateArgs rejects them; accountArgRefusal replaces
+// that generic error with the reason.
 var accountRefusedArgs = func() map[string]map[string]string {
 	const (
 		sudo      = "these tools never grant sudo; sudo commands are managed in the TrueNAS web UI"
@@ -121,9 +122,20 @@ var accountRefusedArgs = func() map[string]map[string]string {
 		"users":    "use add_members and remove_members",
 		"new_name": "renaming a group is not supported by update_group",
 	})
+	deleteUser := map[string]string{
+		"delete_group": "the user's primary group is always kept (delete_group false); delete it afterwards with delete_group",
+		"delete_home":  "the home directory is never deleted by these tools",
+		"uid":          "name the user by username", "id": "name the user by username",
+	}
+	deleteGroup := map[string]string{
+		"delete_users": "users whose primary group this is are never deleted (delete_users false)",
+		"gid":          "name the group by name", "id": "name the group by name",
+	}
 	return map[string]map[string]string{
 		"create_user": createUser, "update_user": updateUser,
 		"create_group": createGroup, "update_group": updateGroup,
+		"delete_user": deleteUser, "delete_group": deleteGroup,
+		"set_filesystem_acl": filesystemACLRefusedArgs,
 	}
 }()
 
