@@ -33,6 +33,8 @@ This document provides example natural language queries you can use with TrueNAS
 - "Which disks are not in a pool?"
 - "Which disk in tank has checksum errors, and what is its serial?"
 - "Is SSH running, and does it start at boot?"
+- "Restart the SMB service (preview first)"
+- "Stop the FTP service and make sure it does not start at boot"
 
 ## Snapshots
 

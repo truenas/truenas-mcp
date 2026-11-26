@@ -61,6 +61,8 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 		"clone_snapshot":           {"snapshot": fixtureHeldSnapshot, "target_dataset": "tank/apps/jellyfin/restore"},
 		"hold_snapshot":            {"snapshot": fixtureHeldSnapshot},
 		"release_snapshot":         {"snapshot": fixtureHeldSnapshot},
+		"control_service":          {"service": "cifs", "action": "RESTART"},
+		"set_service_enabled":      {"service": "cifs", "enable": false},
 		"update_network_config":    {"ipv6gateway": "2001:db8:1::1"},
 		"update_network_interface": {"interface": "eth0", "add_aliases": []interface{}{"2001:db8:1::10/64"}},
 	}
@@ -101,6 +103,7 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 		"replication.query":        replicationTaskFixtures()["replication.query"],
 		"pool.snapshottask.query":  replicationTaskFixtures()["pool.snapshottask.query"],
 		"pool.snapshot.query":      replicationTaskFixtures()["pool.snapshot.query"],
+		"service.query":            registryServiceFixtures(),
 	}, nil)
 	r := NewRegistry(client, nil)
 

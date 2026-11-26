@@ -82,7 +82,7 @@ is set (`upgrade_app` may be named; it stays limited to dry runs).
 TRUENAS_MCP_ALLOW_TOOLS=query_apps,start_app,stop_app,tasks_get ./truenas-mcp
 ```
 
-**Confirmation for destructive tools.** These fifteen tools execute only after
+**Confirmation for destructive tools.** These sixteen tools execute only after
 confirmation. When the MCP client supports form elicitation, the server asks
 the user to approve a short preview in the client and executes only if they
 accept. Otherwise the tools execute only with a `confirmation_token` from a
@@ -105,11 +105,12 @@ preview of the same call:
 | `update_network_config` | Gateways, nameservers and hostname apply at once with no automatic rollback; a wrong gateway can cut off every remote client, including this server |
 | `update_network_interface` | Reconfigures interfaces and can cut off clients; TrueNAS rolls it back unless it is checked in (see [Network check-in window](#network-check-in-window)) |
 | `release_snapshot` | Removes the `truenas` hold, so the snapshot is deletable again: a manual delete, or periodic snapshot task or replication retention, can then remove it. Refused if the snapshot has any other hold |
+| `control_service` | STOP and RESTART take a service offline and disconnect its clients (SMB, NFS, iSCSI, NVMe-oF, UPS), and RELOAD of a service that cannot reload is a restart. One tool covers every action, so START and RELOAD need confirmation too |
 
 No other tool needs a token: the other write tools (`create_dataset`,
 `create_smb_share`, `create_nfs_share`, `install_app`, `start_app`,
 `download_update`, `create_scrub_schedule`, `run_scrub`, `create_snapshot`,
-`clone_snapshot`, `hold_snapshot`, `dismiss_alert`, `restore_alert`, `refresh_directory_cache`,
+`clone_snapshot`, `hold_snapshot`, `set_service_enabled`, `dismiss_alert`, `restore_alert`, `refresh_directory_cache`,
 `checkin_network_changes`, `rollback_network_changes`) run directly and keep their
 optional `dry_run`, and read tools never take one.
 
@@ -171,12 +172,15 @@ execute (`stop_app`, `delete_boot_environment`, `delete_app`,
 `delete_scrub_schedule`, `upgrade_app`, `update_app`, `system_reboot`,
 `apply_update`, `configure_directory_service`, `leave_directory_service`,
 `run_snapshot_task`, `run_replication`, `update_network_config`,
-`update_network_interface`, `release_snapshot`), the token is also bound to
+`update_network_interface`, `release_snapshot`, `control_service`), the token is also bound to
 a hash of the planned middleware method and parameters, so it cannot
 execute a different planned operation. For `release_snapshot` the hash also
 covers the previewed hold tags, hold count (`userrefs`) and the snapshot's
 `createtxg`, so a hold added after the preview, or the snapshot being
-recreated under the same name, rejects the token. The token store does not hold those
+recreated under the same name, rejects the token. For `control_service` it
+covers the service's previewed state, boot setting and id and
+`allow_protected_service`, so a service started, stopped or re-enabled after
+the preview rejects the token. The token store does not hold those
 parameters. A token that is unknown, expired, already used,
 issued for another tool or issued for different arguments is rejected with
 an error that says why and that nothing was executed; that error result
@@ -273,7 +277,7 @@ schema), `host_path_config.acl_enable` must also be a JSON boolean.
 [tool annotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false`)
 derived from the same table, so clients can apply their own approval prompts.
-`destructiveHint` is true for the fifteen destructive tools (the ones that need a
+`destructiveHint` is true for the sixteen destructive tools (the ones that need a
 confirmation token, `update_app` included) and false for every other tool.
 Annotations were added in MCP 2025-03-26; clients that negotiate
 `2024-11-05` ignore the extra field.
@@ -481,6 +485,8 @@ The `update_app` confirmation prompt lists the top-level keys that change and th
 `run_snapshot_task`, `run_replication` and `create_snapshot` use the same shared plan for preview and the real call (`pool.snapshottask.run`, `replication.run` with only the task id, and `pool.snapshot.create` with `dataset`, `name` and `recursive`). A preview that says the run cannot proceed (a disabled or missing snapshot task, a replication task that is running or on hold or, on 25.10, disabled, a snapshot name that already exists) is an error and issues no token. `run_replication` returns the job id at once and tracks it with `WithExpectedMethod` (`replication.run`); when the job finishes, `tasks_get` reports whether anything was transferred, read from the job's final progress text. Only a missing or empty progress text is reported as "nothing transferred"; text it cannot parse is reported as "could not determine what was transferred". `pool.snapshottask.run` creates no job (it queues the task and returns null), so `run_snapshot_task` follows the task's own state for up to two minutes, then reads the task's `last_snapshot` and the snapshots on the covered datasets back from the middleware; if the run has not finished by then, it says the run was queued and points to `query_snapshot_tasks` instead of reporting success or failure. A disabled replication task is refused on 25.10, where `replication.run` refuses it too.
 
 `clone_snapshot`, `hold_snapshot` and `release_snapshot` use the same shared plan for preview and the real call (`pool.snapshot.clone` with `snapshot` and `dataset_dst`, and `pool.snapshot.hold` and `pool.snapshot.release` with the snapshot id and `{"recursive": false}`). None of them takes a `recursive` argument: only the named snapshot is held, released or cloned. `clone_snapshot` is refused (as an error, on the dry run too) unless the snapshot exists and is not of a hidden dataset such as `.system`, the target is a new dataset name (not a `/mnt` path) in the same pool, below the pool root and outside hidden datasets such as `.system` and the legacy `ix-applications` dataset, and its parent already exists, is an unlocked filesystem and is mounted at or below `/mnt/<pool>`; a locked source dataset is refused too. The preview shows the source snapshot, the target and the mountpoint the clone will get. `hold_snapshot` shows the snapshot and its current holds; if the snapshot already has the `truenas` tag it sends nothing and reports `already_held: true`, so repeating it is safe (ZFS itself would fail a second hold with the same tag). `release_snapshot` is destructive: its preview and confirmation say that the snapshot becomes deletable again, name the hold and show any retention that schedules the snapshot's removal (`extra.retention`). `pool.snapshot.release` removes every hold on the snapshot, not only `truenas`, and `pool.snapshot.query` may list only the `truenas` tag (TrueNAS 27 always does). So the tool also reads the native `userrefs` property (the total hold count) and releases only when `truenas` is provably the only hold: it is refused (no token) if any other tag is listed, if `userrefs` is greater than the number of tags listed, or if `userrefs` cannot be read. Other holds must be managed outside this tool, where they were set. A snapshot with no holds is refused too, and so is a confirmed call whose hold state or `createtxg` changed after the preview.
+
+`control_service` and `set_service_enabled` use the same shared plan for preview and the real call (`service.control` with the verb, the service name and `{"silent": false}`, and `service.update` with the name and `{"enable": ...}`). Both read the service from `service.query` first and refuse a name it does not list, so internal service objects that `service.control` would otherwise accept (on 25.10 these include `sssd`, `idmap`, `nscd`, `keepalived` and the `http` web server) cannot be reached by name. `http` is refused outright for every action and override, because the TrueNAS API this server talks to is served through it. Services that provide access or authentication (on 25.10 only `ssh` is listed by `service.query`; the server also protects `sssd`, `idmap`, `nscd` and `keepalived` in case a release lists them) are refused, as a blocked preview with no token, for STOP and RESTART and for a RELOAD that TrueNAS performs as a restart, unless `allow_protected_service` is true; the flag is part of the argument hash and of the plan binding, and the preview and confirmation show it. `set_service_enabled` refuses to disable them at boot with no override at all: it is a write tool with no confirmation step, so an override there would be granted by the same call that uses it. The refusal points to the TrueNAS web UI. STOP and RESTART of `cifs`, `nfs`, `iscsitarget`, `nvmet` and `ups` warn that connected clients are disrupted. `control_service` is refused when it would change nothing (START of a RUNNING service, STOP or RELOAD of a STOPPED one). It waits for the job: a `FAILED` or `ABORTED` job, or a `SUCCESS` whose result is `false`, is an error; a job that does not finish within 150 seconds is reported as `running` (with a `task_id` when task tracking is on), and a job that is no longer listed, runs a different method, or can no longer be identified after a reconnect is reported as `unknown` (with no task, since its id may now belong to another job), rather than as success or failure. `service.control` is sent without `ha_propagate`, so the 25.10 default (`true`) applies: on an HA system with healthy failover, the active controller also runs the action on the standby for services that may run there. `set_service_enabled` reads the setting back and fails if it does not match.
 
 `download_update` passes optional `train` and `version` through to `update.download`. Both must be set, or both omitted (matching 25.10's `UpdateDownloadArgs` and `plugins/update_/download.py`). When both are omitted, or both are blank or whitespace, they are treated as omitted and the middleware call still has empty parameters (`params: []`) and downloads the update offered by the configured profile, as before. When both are set, the call is `update.download` with those two positional arguments. A request for only one of them is refused. A completed download (`update_download_progress.percent == 100`) is not treated as already done if the caller asked for a different `version`.
 

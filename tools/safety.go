@@ -123,6 +123,11 @@ var toolSafety = map[string]Safety{
 	"query_disks":     {Access: Read},
 	"get_disk_health": {Access: Read},
 	"query_services":  {Access: Read},
+	// control_service is one tool for every verb, so it takes the class
+	// of its most disruptive ones (STOP, RESTART, and RELOAD that falls
+	// back to a restart).
+	"control_service":     {Access: Destructive},
+	"set_service_enabled": {Access: Write, Idempotent: true},
 
 	// Alerts
 	"list_alerts":   {Access: Read},

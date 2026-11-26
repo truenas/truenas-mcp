@@ -472,6 +472,7 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 		"directoryservices.status": map[string]interface{}{"type": "ACTIVEDIRECTORY", "status": "HEALTHY", "status_msg": nil},
 		"update.status":            updateStatusAvailable("25.10.1"),
 		"core.get_jobs":            []interface{}{},
+		"service.query":            registryServiceFixtures(),
 		"alert.list": []interface{}{
 			map[string]interface{}{"uuid": "alert-1", "level": "WARNING", "dismissed": false, "formatted": "disk"},
 		},

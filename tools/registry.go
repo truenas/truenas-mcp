@@ -89,6 +89,7 @@ func (r *Registry) registerTools() {
 	r.registerDiskTools()
 
 	r.registerServiceTools()
+	r.registerServiceActionTools()
 
 	r.registerQueryTools()
 

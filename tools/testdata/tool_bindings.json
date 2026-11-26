@@ -30,6 +30,12 @@
     "execute": "(*Registry).executeConfigureDirectoryService"
   },
   {
+    "name": "control_service",
+    "handler": "(*Registry).handleControlServiceWithDryRun",
+    "plan": "planControlService",
+    "execute": "(*Registry).executeControlService"
+  },
+  {
     "name": "create_dataset",
     "handler": "handleCreateDataset",
     "plan": "planCreateDataset"
@@ -279,6 +285,11 @@
   {
     "name": "search_app_catalog",
     "handler": "handleSearchAppCatalog"
+  },
+  {
+    "name": "set_service_enabled",
+    "handler": "handleSetServiceEnabled",
+    "plan": "planSetServiceEnabled"
   },
   {
     "name": "start_app",
