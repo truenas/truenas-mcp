@@ -115,6 +115,13 @@ type setup struct {
 	envPassword, envOTP []byte
 	stdinUsed           bool
 
+	// keyFileExists is set when --rotate runs without --force and the key
+	// file already exists; keyFileID is the key id from its "<id>-"
+	// prefix, or 0 when the file does not start with one.
+	keyFileExists bool
+	keyFileID     int
+	rotated       bool // an existing key was reset (not created)
+
 	endpointHost string // host as given, for the client snippet
 	keyPath      string
 	pinPath      string
@@ -165,6 +172,9 @@ func runSetup(args []string, sio *setupIO) int {
 
 func (s *setup) run(args []string) *setupError {
 	fset := newSetupFlagSet(&s.f, s.io.stderr)
+	if err := checkBoolFlagValues(fset, args); err != nil {
+		return err
+	}
 	if err := fset.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return &setupError{code: exitSetupOK}
@@ -194,6 +204,12 @@ func (s *setup) run(args []string) *setupError {
 	if !s.f.force && !s.f.rotate {
 		if _, err := os.Lstat(s.keyPath); err == nil {
 			return failf(exitSetupIO, "%s already exists; pass --force to replace it, or --rotate to reset the key it belongs to", s.keyPath)
+		}
+	}
+	if s.f.rotate && !s.f.force {
+		if _, err := os.Lstat(s.keyPath); err == nil {
+			s.keyFileExists = true
+			s.keyFileID = keyFileID(s.keyPath)
 		}
 	}
 
@@ -413,13 +429,13 @@ func (s *setup) connectError(err error) *setupError {
 	var pe *truenas.PinMismatchError
 	if errors.As(err, &pe) {
 		if s.f.trustFingerprint != "" {
-			return failf(exitSetupTLS, "the server presented %s, which does not match --trust-fingerprint %s; refusing to connect", pe.Got, s.f.trustFingerprint)
+			return failf(exitSetupTLS, "the server presented %s, which does not match --trust-fingerprint %s; refusing to connect. If the TrueNAS certificate was reissued or replaced, check the new fingerprint and run setup again with it", pe.Got, s.f.trustFingerprint)
 		}
-		return failf(exitSetupTLS, "the server presented %s, which does not match the pin saved in %s; refusing to connect. If the certificate was replaced on purpose, check the new fingerprint, delete that file and run setup again", pe.Got, s.pinPath)
+		return failf(exitSetupTLS, "the server presented %s, which does not match the pin saved in %s; refusing to connect. The pin is for one certificate, so it stops matching when the certificate is reissued or renewed, even with the same key. If that was done on purpose, check the new fingerprint, delete that file and run setup again", pe.Got, s.pinPath)
 	}
 	var ue *truenas.UntrustedCertError
 	if errors.As(err, &ue) {
-		return failf(exitSetupTLS, "the TrueNAS certificate is not trusted: %s (fingerprint %s)", ue.Err, ue.Fingerprint())
+		return failf(exitSetupTLS, "the TrueNAS certificate is not trusted: %s (fingerprint %s)", printable(ue.Err.Error()), ue.Fingerprint())
 	}
 	if truenas.IsTLSError(err) {
 		return failf(exitSetupTLS, "%s", err)
@@ -448,7 +464,7 @@ func (s *setup) confirmCertificate(ue *truenas.UntrustedCertError) *setupError {
 	fp := ue.Fingerprint()
 	w := s.io.stderr
 	fprintln(w, "The TrueNAS certificate is not trusted by this computer:")
-	fprintf(w, "  reason:      %s\n", ue.Err)
+	fprintf(w, "  reason:      %s\n", printable(ue.Err.Error()))
 	describeCert(w, ue.Leaf)
 	fprintf(w, "  fingerprint: %s\n", fp)
 	fprintln(w, "Compare the fingerprint with the certificate the TrueNAS web UI uses (for example: openssl x509 -noout -fingerprint -sha256 -in <certificate file>) before trusting it.")
@@ -543,6 +559,9 @@ func (s *setup) password() ([]byte, bool, *setupError) {
 			return nil, false, failf(exitSetupAuth, "--password-stdin: could not read the password: %s", err)
 		}
 		s.stdinUsed = true
+		if len(b) == 0 {
+			return nil, false, failf(exitSetupAuth, "--password-stdin: the password line is empty; nothing was sent to TrueNAS")
+		}
 		return b, false, nil
 	case len(s.envPassword) > 0:
 		b := append([]byte(nil), s.envPassword...)
@@ -570,6 +589,9 @@ func (s *setup) otp(try int) ([]byte, *setupError) {
 				return nil, failf(exitSetupOTP, "the two-factor code was rejected and --otp-stdin has no further line")
 			}
 			return nil, failf(exitSetupOTP, "--otp-stdin: could not read the two-factor code: %s", err)
+		}
+		if len(b) == 0 {
+			return nil, failf(exitSetupOTP, "--otp-stdin: the two-factor code line is empty")
 		}
 		return b, nil
 	case len(s.envOTP) > 0:
@@ -861,11 +883,19 @@ func (s *setup) createKey(owner, loginName string) (*apiKeyEntry, *setupError) {
 			if k.Username != owner {
 				return nil, failf(exitSetupPermission, "the API key %q belongs to %s, not %s; --rotate only resets a key owned by the key owner", s.f.name, printable(k.Username), owner)
 			}
+			if s.keyFileExists && s.keyFileID != k.ID {
+				return nil, failf(exitSetupIO, "%s does not hold the API key %q (id %d) that --rotate would reset; it may be the only copy of another key. Pass --force to replace it anyway, or --config-dir to save elsewhere; nothing was changed on TrueNAS", s.keyPath, s.f.name, k.ID)
+			}
 			raw, cerr := s.callNAS(s.sess, "api_key.update", k.ID, map[string]interface{}{"reset": true, "expires_at": s.expiresParam()})
 			if cerr != nil {
-				return nil, s.keyCallError(cerr, "reset")
+				return nil, s.keyCallError(cerr, "reset", s.uncertainReset(k))
 			}
-			return s.parseKey(raw)
+			key, perr := s.parseKey(raw, s.uncertainReset(k))
+			s.rotated = perr == nil
+			return key, perr
+		}
+		if s.keyFileExists {
+			return nil, failf(exitSetupIO, "no API key named %s exists, so --rotate would create one and replace %s, which holds another key; pass --force to replace it anyway, or --config-dir to save elsewhere; nothing was changed on TrueNAS", s.f.name, s.keyPath)
 		}
 		fprintf(s.io.stderr, "No API key named %s exists yet; creating it.\n", s.f.name)
 	}
@@ -892,24 +922,42 @@ func (s *setup) createKey(owner, loginName string) (*apiKeyEntry, *setupError) {
 				blindRetries++
 				continue
 			}
-			return nil, s.keyCallError(cerr, "create")
+			return nil, s.keyCallError(cerr, "create", s.uncertainCreate(name, owner))
 		}
-		return s.parseKey(raw)
+		return s.parseKey(raw, s.uncertainCreate(name, owner))
 	}
 	return nil, failf(exitSetupFailure, "API key names %s to %s-%d are all taken; pass --name", s.f.name, s.f.name, maxNameSuffix)
 }
 
-func (s *setup) parseKey(raw json.RawMessage) (*apiKeyEntry, *setupError) {
+// uncertainCreate and uncertainReset describe the key that may exist (or
+// may have been reset) on TrueNAS when the reply to the call was lost.
+func (s *setup) uncertainCreate(name, owner string) string {
+	return fmt.Sprintf("The API key %q may have been created anyway without anyone holding it: check Credentials > Users > %s > View API Keys in the TrueNAS web UI and delete it if it is there", name, owner)
+}
+
+func (s *setup) uncertainReset(k *apiKeyEntry) string {
+	return fmt.Sprintf("The API key %q (id %d) may have been reset anyway, so its old secret may no longer work: check it in the TrueNAS web UI (Credentials > Users > %s > View API Keys) and run setup --rotate again if needed", k.Name, k.ID, printable(k.Username))
+}
+
+func (s *setup) parseKey(raw json.RawMessage, uncertain string) (*apiKeyEntry, *setupError) {
 	var k apiKeyEntry
 	if json.Unmarshal(raw, &k) != nil || k.Key == "" || k.ID == 0 {
-		return nil, failf(exitSetupFailure, "TrueNAS did not return the new API key")
+		return nil, failf(exitSetupFailure, "TrueNAS did not return the new API key. %s", uncertain)
 	}
 	s.sess.AddSecret(k.Key)
 	return &k, nil
 }
 
-func (s *setup) keyCallError(err error, action string) *setupError {
+// keyCallError maps a failed api_key.create or api_key.update. An API
+// error means TrueNAS refused the call; any other error (a timeout or a
+// dropped connection) means the reply was lost and the call may have run,
+// so uncertain is added.
+func (s *setup) keyCallError(err error, action, uncertain string) *setupError {
 	msg := shortErr(err)
+	var ae *truenas.APICallError
+	if !errors.As(err, &ae) {
+		return failf(exitSetupFailure, "could not %s the API key: %s. %s", action, msg, uncertain)
+	}
 	if apiErrno(err) == errnoEACCES {
 		if strings.Contains(msg, "STIG") {
 			return failf(exitSetupPermission, "TrueNAS is in GPOS STIG mode, which does not allow API keys to be created or changed (and does not allow API key logins), so the MCP server cannot be set up with a key on this system")
@@ -941,6 +989,9 @@ func (s *setup) save(k *apiKeyEntry) *setupError {
 	}
 	if _, derr := s.callNAS(s.sess, "api_key.delete", k.ID); derr != nil {
 		return failf(exitSetupIO, "could not save the API key: %s. Deleting the key from TrueNAS also failed (%s): delete the key %q (id %d) in the web UI", reason, shortErr(derr), k.Name, k.ID)
+	}
+	if s.rotated {
+		return failf(exitSetupIO, "could not save the API key: %s. The key record %q (id %d) was deleted from TrueNAS, since its old secret stopped working when it was reset; fix the problem and run setup again, which creates the key again rather than rotating it", reason, k.Name, k.ID)
 	}
 	return failf(exitSetupIO, "could not save the API key: %s. The key was deleted from TrueNAS; fix the problem and run setup again", reason)
 }

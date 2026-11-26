@@ -32,6 +32,8 @@ type fakeSetupNAS struct {
 	createErr   map[string]interface{} // api_key.create error object
 	queryDenied bool                   // api_key.query fails with EACCES
 	keyLoginBad bool                   // API_KEY_PLAIN logins fail
+	badKeyReply bool                   // api_key.create/update succeed but reply without the key
+	dropOn      string                 // close the connection on this method, after acting on it
 
 	mu      sync.Mutex
 	frames  []string
@@ -169,6 +171,12 @@ func (f *fakeSetupNAS) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result, errObj := f.handle(st, req.Method, req.Params)
+		if f.dropOn != "" && req.Method == f.dropOn {
+			return // the call ran, but the reply is lost
+		}
+		if f.badKeyReply && (req.Method == "api_key.create" || req.Method == "api_key.update") && errObj == nil {
+			result = map[string]interface{}{"id": 0}
+		}
 		reply := map[string]interface{}{"jsonrpc": "2.0", "id": req.ID}
 		if errObj != nil {
 			reply["error"] = errObj

@@ -651,7 +651,23 @@ func TestSetupTLS(t *testing.T) {
 		if n := len(f.snapshot()); n != 0 {
 			t.Errorf("%d frames sent", n)
 		}
-		if !strings.Contains(r.stderr, "does not match") {
+		if !strings.Contains(r.stderr, "does not match") || !strings.Contains(r.stderr, "reissued") {
+			t.Errorf("stderr: %s", r.stderr)
+		}
+	})
+	t.Run("stale saved pin suggests rerunning setup", func(t *testing.T) {
+		f := newFakeSetupNAS(t, nil)
+		dir := filepath.Join(t.TempDir(), "cfg")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		pin := filepath.Join(dir, strings.ReplaceAll(f.host(), ":", "_")+".pin")
+		if err := os.WriteFile(pin, []byte("SHA256:"+strings.Repeat("00", 32)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r := runSetupTest(t, f, setupOpts{env: agentEnv(), noTrust: true, dir: dir}, "--user", fakeUser)
+		wantCode(t, r, exitSetupTLS)
+		if !strings.Contains(r.stderr, "reissued") || !strings.Contains(r.stderr, "run setup again") {
 			t.Errorf("stderr: %s", r.stderr)
 		}
 	})

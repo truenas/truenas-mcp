@@ -316,7 +316,7 @@ func NewClientWithOptions(endpoint, apiKey string, tlsConfig *tls.Config, opts O
 func tlsHint(err error, host string) string {
 	var pinErr *PinMismatchError
 	if errors.As(err, &pinErr) {
-		return "the certificate changed since it was pinned (TRUENAS_TLS_PIN / --tls-pin); if you replaced it on purpose, check the new fingerprint and update the pin, for example by running truenas-mcp setup again"
+		return "the certificate changed since it was pinned (TRUENAS_TLS_PIN / --tls-pin); a pin stops matching whenever the certificate is replaced, reissued or renewed (even with the same key); if that was done on purpose, check the new fingerprint and update the pin, for example by running truenas-mcp setup again"
 	}
 	var hostErr x509.HostnameError
 	if errors.As(err, &hostErr) {

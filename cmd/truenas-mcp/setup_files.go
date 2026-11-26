@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -139,4 +140,31 @@ func syncDir(dir string) {
 		_ = d.Sync()
 		d.Close()
 	}
+}
+
+// keyFileID returns the key id from the "<id>-" prefix of the key file at
+// path, or 0 when it cannot be read or has no such prefix. Only the prefix
+// is kept; the bytes read are wiped.
+func keyFileID(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	buf := make([]byte, 21)
+	n, _ := io.ReadFull(f, buf)
+	defer wipe(buf)
+	id := 0
+	for i := 0; i < n; i++ {
+		c := buf[i]
+		switch {
+		case c >= '0' && c <= '9' && i < 19:
+			id = id*10 + int(c-'0')
+		case c == '-' && i > 0:
+			return id
+		default:
+			return 0
+		}
+	}
+	return 0
 }

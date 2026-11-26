@@ -2,10 +2,13 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/term"
@@ -171,3 +174,38 @@ func takeEnv(sio *setupIO, name string) []byte {
 func fprintf(w io.Writer, format string, args ...interface{}) { _, _ = fmt.Fprintf(w, format, args...) }
 func fprintln(w io.Writer, args ...interface{})               { _, _ = fmt.Fprintln(w, args...) }
 func fprint(w io.Writer, args ...interface{})                 { _, _ = fmt.Fprint(w, args...) }
+
+// checkBoolFlagValues refuses a value given to a boolean flag with "=" that
+// is not a boolean, such as --password-stdin=<password>, before the flag
+// package would echo the value in its error. Parsing stops at "--" and at
+// the first argument that is not a flag, as in the flag package.
+func checkBoolFlagValues(fs *flag.FlagSet, args []string) *setupError {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" || len(a) < 2 || a[0] != '-' {
+			return nil
+		}
+		name := strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-")
+		eq := strings.IndexByte(name, '=')
+		if eq < 0 {
+			if fl := fs.Lookup(name); fl != nil && !isBoolFlag(fl) {
+				i++ // skip the value
+			}
+			continue
+		}
+		fl := fs.Lookup(name[:eq])
+		if fl == nil || !isBoolFlag(fl) {
+			continue
+		}
+		if _, err := strconv.ParseBool(name[eq+1:]); err != nil {
+			// The value is not quoted: it may be a password.
+			return failf(exitSetupUsage, "--%s takes no value (it is a switch); the value given was not shown. There is no password flag: use the prompt, %s or --password-stdin", fl.Name, setupPasswordEnv)
+		}
+	}
+	return nil
+}
+
+func isBoolFlag(fl *flag.Flag) bool {
+	b, ok := fl.Value.(interface{ IsBoolFlag() bool })
+	return ok && b.IsBoolFlag()
+}
