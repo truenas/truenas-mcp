@@ -1597,3 +1597,88 @@ func TestRollbackSnapshotNewerBookmarkHint(t *testing.T) {
 		t.Errorf("pool.snapshot.rollback calls = %d", n)
 	}
 }
+
+// A dataset whose name only starts with the target's (tank/database next
+// to tank/data) is not a child: a recursive delete does not reach its
+// snapshot of the same name, and a rollback does not list its snapshots
+// as newer.
+func TestSnapshotDestroyToolsIgnoreSamePrefixSibling(t *testing.T) {
+	t.Run("recursive delete", func(t *testing.T) {
+		f := newSnapDestroyFake()
+		f.addDataset("tank/database", "")
+		f.addSnap("tank/database", "s2", 200)
+		r, fake := f.registry(t)
+		preview, out := confirmAndRun(t, r, fake, "delete_snapshot", "pool.snapshot.delete", map[string]interface{}{"snapshot": "tank/data@s2", "recursive": true})
+		if body := previewBody(t, preview); strings.Contains(body, "tank/database") {
+			t.Errorf("preview includes the sibling:\n%s", body)
+		}
+		if resp := decodeObj(t, out); previewText(t, resp["snapshots"]) != `["tank/data@s2","tank/data/child/grand@s2","tank/data/child@s2"]` {
+			t.Errorf("response = %v", resp)
+		}
+	})
+	t.Run("rollback listing", func(t *testing.T) {
+		f := newSnapDestroyFake()
+		f.addDataset("tank/database", "")
+		f.addSnap("tank/database", "s9", 900)
+		r, fake := f.registry(t)
+		preview, out := confirmAndRun(t, r, fake, "rollback_snapshot", "pool.snapshot.rollback", map[string]interface{}{"snapshot": "tank/data@s1", "allow_destroy_newer": true})
+		if body := previewBody(t, preview); strings.Contains(body, "tank/database") {
+			t.Errorf("preview includes the sibling:\n%s", body)
+		}
+		if resp := decodeObj(t, out); previewText(t, resp["snapshots_destroyed"]) != `["tank/data@s2","tank/data@s3"]` {
+			t.Errorf("response = %v", resp)
+		}
+		if !f.has("tank/database@s9") {
+			t.Error("rollback destroyed the sibling's snapshot")
+		}
+	})
+}
+
+// managedDatasetPart also refuses any dot-prefixed component that is not
+// on the middleware's internal-dataset list, such as tank/.custom.
+func TestSnapshotDestroyToolsRefuseDotPrefixedDataset(t *testing.T) {
+	for _, tc := range []struct{ tool, method string }{
+		{"rollback_snapshot", "pool.snapshot.rollback"},
+		{"delete_snapshot", "pool.snapshot.delete"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			f := newSnapDestroyFake()
+			f.addDataset("tank/.custom", "")
+			f.addSnap("tank/.custom", "x", 400)
+			f.listAll = true
+			r, fake := f.registry(t)
+			assertRefused(t, r, fake, tc.tool, tc.method, map[string]interface{}{"snapshot": "tank/.custom@x"}, "inside '.custom', which TrueNAS manages itself")
+		})
+	}
+}
+
+// The rollback listing of newer snapshots sends extra.min_txg set to the
+// target's createtxg, so ZFS skips older snapshots.
+func TestRollbackSnapshotSendsMinTxg(t *testing.T) {
+	f := newSnapDestroyFake()
+	r, fake := f.registry(t)
+	callTool(t, r, "rollback_snapshot", map[string]interface{}{"snapshot": "tank/data@s1", "allow_destroy_newer": true, "dry_run": true})
+	found := false
+	for _, c := range fake.called("pool.snapshot.query") {
+		var p []interface{}
+		if err := json.Unmarshal(c.Params, &p); err != nil || len(p) < 2 {
+			continue
+		}
+		filters, _ := p[0].([]interface{})
+		opts, _ := p[1].(map[string]interface{})
+		if !namesOnlyQuery(filters, opts) || len(filters) != 1 {
+			continue
+		}
+		if arr, _ := filters[0].([]interface{}); len(arr) != 3 || arr[0] != "dataset" || arr[2] != "tank/data" {
+			continue
+		}
+		found = true
+		extra, _ := opts["extra"].(map[string]interface{})
+		if extra["min_txg"] != float64(100) {
+			t.Errorf("rollback listing extra = %v, want min_txg 100", opts["extra"])
+		}
+	}
+	if !found {
+		t.Error("no names-only listing of tank/data was sent")
+	}
+}
