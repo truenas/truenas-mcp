@@ -92,6 +92,10 @@ func TestHomeInManagedDatasetRefused(t *testing.T) {
 		{"/mnt/freenas-boot", "inside 'freenas-boot'"},
 		{"/mnt/tank/ix-apps/home", "inside 'ix-apps'"},
 		{"/mnt/tank/ix-applications", "inside 'ix-applications'"},
+		// Matched case-insensitively, as share paths are.
+		{"/mnt/tank/IX-Apps/home", "inside 'ix-apps'"},
+		{"/mnt/tank/IX-APPLICATIONS", "inside 'ix-applications'"},
+		{"/mnt/Boot-Pool/home", "inside 'boot-pool'"},
 		{"/mnt/tank/.system/home", "inside '.system'"},
 		{"/mnt/tank/.ix-virt", "inside '.ix-virt'"},
 		{"/mnt/tank/data/.hidden/home", "inside '.hidden'"},

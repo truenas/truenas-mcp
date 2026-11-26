@@ -866,6 +866,8 @@ func TestSetShareACLRefusals(t *testing.T) {
 		{"Unix SID user", aclArgs("docs", full, aclEntry("user", "carol", "READ", "ALLOWED")), "has no SMB SID"},
 		{"Unix SID", aclArgs("docs", full, aclEntry("sid", "S-1-22-1-3003", "READ", "ALLOWED")), "Unix-encoded SID"},
 		{"unknown SID", aclArgs("docs", full, aclEntry("sid", "S-1-5-21-9-9-9-500", "READ", "ALLOWED")), "does not belong to exactly one local SMB user or group"},
+		{"well-known SID", aclArgs("docs", full, aclEntry("sid", "S-1-5-11", "READ", "ALLOWED")), "SID S-1-5-11 is not a local SMB user or group (of the well-known SIDs, only S-1-1-0, everyone, can be used)"},
+		{"unmatched builtin SID", aclArgs("docs", full, aclEntry("sid", "S-1-5-32-545", "READ", "ALLOWED")), "SID S-1-5-32-545 is not a local SMB user or group"},
 		{"malformed SID", aclArgs("docs", full, aclEntry("sid", "S-1-x", "READ", "ALLOWED")), "is not a SID"},
 		{"SID with spaces", aclArgs("docs", full, aclEntry("sid", "S-1-5-32 -544", "READ", "ALLOWED")), "is not a SID"},
 		{"who for everyone", aclArgs("docs", full, aclEntry("everyone", "x", "READ", "ALLOWED")), "omit who"},
@@ -1203,6 +1205,18 @@ func TestSetShareACLDeniedAdminGroup(t *testing.T) {
 	addGroups(f)
 	r, fake := f.registry(t)
 	confirmAndRun(t, r, fake, "set_share_acl", "sharing.smb.setacl", aclArgs("docs", aclEntry("group", "ops", "FULL", "ALLOWED"), aclEntry("group", "staff", "CHANGE", "DENIED")))
+	// Nor does DENIED for a user, by name or by SID: users carry no roles,
+	// so they are never administrative groups.
+	for _, entry := range []map[string]interface{}{
+		aclEntry("user", "alice", "CHANGE", "DENIED"),
+		aclEntry("sid", aliceSID, "READ", "DENIED"),
+	} {
+		r, fake := newShareFake().registry(t)
+		preview, _ := confirmAndRun(t, r, fake, "set_share_acl", "sharing.smb.setacl", aclArgs("docs", everyoneFull, entry))
+		if body := previewBody(t, preview); strings.Contains(body, "allow_no_full_control: it denies") {
+			t.Errorf("a DENIED user entry was treated as a lockout:\n%s", body)
+		}
+	}
 	r, fake = newShareFake().registry(t)
 	assertRefused(t, r, fake, "set_share_acl", "sharing.smb.setacl",
 		mergeArgs(aclArgs("docs", everyoneFull, aclEntry("group", "staff", "READ", "DENIED")), map[string]interface{}{"allow_no_full_control": true}), "omit it")
@@ -1354,6 +1368,31 @@ func TestUpdateNFSShareExposureWarnings(t *testing.T) {
 					t.Errorf("preview has %q:\n%s", w, body)
 				}
 			}
+		})
+	}
+}
+
+// A preview whose TrueNAS version cannot be read says the option shapes
+// were only checked against 25.10; the call is still allowed.
+func TestShareToolsWarnOnUnknownVersion(t *testing.T) {
+	const note = "The TrueNAS version could not be read"
+	for _, tc := range []struct {
+		tool string
+		args map[string]interface{}
+	}{
+		{"update_smb_share", map[string]interface{}{"share_id": 1.0, "readonly": true}},
+		{"delete_smb_share", map[string]interface{}{"share_id": 1.0}},
+		{"update_nfs_share", map[string]interface{}{"share_id": 1.0, "ro": true}},
+		{"delete_nfs_share", map[string]interface{}{"share_id": 1.0}},
+		{"set_share_acl", aclArgs("docs", aclEntry("group", "staff", "FULL", "ALLOWED"))},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			// The version was never loaded, so it cannot be read. (A
+			// version that fails to load or parse refuses every tool.)
+			r, fake := newShareFake().registry(t)
+			dry := dryRunOf(t, r, tc.tool, tc.args)
+			assertContainsAll(t, "warnings", previewText(t, dry["warnings"]), note, "only checked against TrueNAS 25.10")
+			assertNoShareWrites(t, fake)
 		})
 	}
 }

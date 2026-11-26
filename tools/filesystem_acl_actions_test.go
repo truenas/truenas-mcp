@@ -794,6 +794,7 @@ func TestSetFilesystemACLTokenBoundToIdentity(t *testing.T) {
 	}{
 		{"directory replaced at the same path", docsStat(func(st map[string]interface{}) { st["inode"] = 999.0 })},
 		{"mounted again at the same path", docsStat(func(st map[string]interface{}) { st["mount_id"] = 51.0 })},
+		{"device changed", docsStat(func(st map[string]interface{}) { st["dev"] = 8.0 })},
 		{"realpath changed", docsStat(func(st map[string]interface{}) { st["realpath"] = "/mnt/tank/shares/docs-old" })},
 		{"filesystem changed", func(f *fsACLFake) { f.datasets[1]["fsid"] = "fsid-recreated" }},
 		{"dataset row changed", func(f *fsACLFake) { f.datasets[1]["query_mountpoint"] = "/mnt/tank/shares-moved" }},

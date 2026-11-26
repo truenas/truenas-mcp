@@ -89,3 +89,55 @@ func TestPersonalGroupRefusedAtConfirm(t *testing.T) {
 		assertNoAccountWrites(t, fake)
 	}
 }
+
+// Only the personal-group owner lookup fails or answers unexpectedly; every
+// other user.query works. Each tool that checks personal groups refuses
+// rather than treating the group as nobody's primary group.
+func TestPersonalGroupOwnerLookupFailureRefuses(t *testing.T) {
+	local := func(name string, group interface{}) map[string]interface{} {
+		row := accountUser(30, 3030, name, 20, []interface{}{})
+		row["group"] = group
+		return row
+	}
+	remote := accountUser(31, 200001, "remote2", 20, []interface{}{})
+	remote["local"] = false
+	nameless := accountUser(32, 3032, "x", 20, []interface{}{})
+	delete(nameless, "username")
+	for _, lookup := range []struct {
+		name   string
+		answer func() (interface{}, map[string]interface{})
+		want   string
+	}{
+		{"query fails", func() (interface{}, map[string]interface{}) { return nil, rpcErr("database is locked") }, "database is locked"},
+		{"not a list", func() (interface{}, map[string]interface{}) { return map[string]interface{}{"id": 1}, nil }, "unexpected user.query result"},
+		{"primary group missing", func() (interface{}, map[string]interface{}) {
+			return []interface{}{local("ghost", nil)}, nil
+		}, "unexpected user.query result while checking primary groups"},
+		{"primary group id unreadable", func() (interface{}, map[string]interface{}) {
+			return []interface{}{local("ghost", map[string]interface{}{"id": "20"})}, nil
+		}, "unexpected user.query result while checking primary groups"},
+		{"user not local", func() (interface{}, map[string]interface{}) { return []interface{}{remote}, nil }, "unexpected user.query result while checking primary groups"},
+		{"user name missing", func() (interface{}, map[string]interface{}) { return []interface{}{nameless}, nil }, "unexpected user.query result while checking primary groups"},
+	} {
+		for _, tc := range []struct {
+			tool, method string
+			args         map[string]interface{}
+		}{
+			{"create_user", userCreateMethod, map[string]interface{}{"username": "carol", "full_name": "Carol", "add_groups": []interface{}{"staff"}}},
+			{"update_user", userUpdateMethod, map[string]interface{}{"username": "alice", "add_groups": []interface{}{"staff"}}},
+			{"update_group", groupUpdateMethod, map[string]interface{}{"name": "staff", "add_members": []interface{}{"alice"}}},
+			{"delete_group", groupDeleteMethod, map[string]interface{}{"name": "staff"}},
+		} {
+			t.Run(lookup.name+" "+tc.tool, func(t *testing.T) {
+				r, fake, af := accountRegistry(t)
+				// The same call goes through with a working owner lookup.
+				dryRunOf(t, r, tc.tool, tc.args)
+				af.mu.Lock()
+				af.ownerLookup = lookup.answer
+				af.mu.Unlock()
+				assertRefused(t, r, fake, tc.tool, tc.method, tc.args, lookup.want)
+				assertNoAccountWrites(t, fake)
+			})
+		}
+	}
+}

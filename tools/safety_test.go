@@ -59,7 +59,7 @@ var fakeResults = map[string]interface{}{
 	"interface.checkin_waiting":     nil,
 	"interface.query":               []interface{}{netIfaceFixture("eth0", true, nil, nil)},
 	// Account write tools: the local users and groups of account_actions_test.go.
-	"user.query":  accountUserRows(),
+	"user.query":  localAccountUserRows(),
 	"group.query": accountGroupRows(),
 	// Share write tools: the shares and share ACL of share_actions_test.go.
 	"sharing.smb.query":  shareFixtureSMBRows(),
