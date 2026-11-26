@@ -16,9 +16,13 @@ import (
 // users and groups of account_actions_test.go, and filesystem.setacl as a
 // job.
 type fsACLFake struct {
-	mu       sync.Mutex
-	stats    map[string]map[string]interface{} // filesystem.stat overrides
-	datasets []map[string]interface{}          // name, mountpoint, locked, ro, fstype
+	mu    sync.Mutex
+	stats map[string]map[string]interface{} // filesystem.stat overrides
+	// datasets: name, mountpoint, locked, ro, fstype; and for tests:
+	// mounted (statfs reports it even when locked is not false), fsid
+	// (statfs fsid), query_mountpoint (pool.dataset.query mountpoint) and
+	// query_hidden (pool.dataset.query leaves the row out).
+	datasets []map[string]interface{}
 	acls     map[string]map[string]interface{} // filesystem.getacl by path
 	entries  int                               // filesystem.listdir count
 	files    float64                           // statfs files
@@ -55,6 +59,8 @@ func newFSACLFake() *fsACLFake {
 			"/mnt/tank/shares/docs/report.txt": {"realpath": "/mnt/tank/shares/docs/report.txt", "type": "FILE", "mode": float64(0o100660),
 				"uid": 3001.0, "gid": 4001.0, "is_mountpoint": false},
 			"/mnt/tank/shares/link": linkStat("/mnt/tank/shares/link", "/mnt/tank/shares/docs"),
+			"/mnt/tank/shares/posix/notes.txt": {"realpath": "/mnt/tank/shares/posix/notes.txt", "type": "FILE", "mode": float64(0o100660),
+				"uid": 3001.0, "gid": 4001.0, "is_mountpoint": false},
 		},
 		datasets: []map[string]interface{}{
 			fsDataset("tank", "/mnt/tank"),
@@ -66,8 +72,9 @@ func newFSACLFake() *fsACLFake {
 			ro, locked, ext,
 		},
 		acls: map[string]map[string]interface{}{
-			"/mnt/tank/shares/posix": posix,
-			"/mnt/tank/shares/plain": {"path": "/mnt/tank/shares/plain", "uid": 0.0, "gid": 0.0, "acltype": "DISABLED", "trivial": true, "acl": []interface{}{}},
+			"/mnt/tank/shares/posix":           posix,
+			"/mnt/tank/shares/posix/notes.txt": posix,
+			"/mnt/tank/shares/plain":           {"path": "/mnt/tank/shares/plain", "uid": 0.0, "gid": 0.0, "acltype": "DISABLED", "trivial": true, "acl": []interface{}{}},
 		},
 		entries: 12,
 		files:   1000,
@@ -90,7 +97,7 @@ func (f *fsACLFake) mountFor(p string) map[string]interface{} {
 	var best map[string]interface{}
 	for _, d := range f.datasets {
 		mp, _ := d["mountpoint"].(string)
-		if d["locked"] != false || !below(p, mp) {
+		if (d["locked"] != false && d["mounted"] != true) || !below(p, mp) {
 			continue
 		}
 		if best == nil || len(mp) > len(best["mountpoint"].(string)) {
@@ -147,8 +154,12 @@ func (f *fsACLFake) handle(method string, params json.RawMessage) (interface{}, 
 		if d["ro"] == true {
 			flags = []interface{}{"RO", "NOATIME"}
 		}
+		fsid := "fsid-" + d["name"].(string)
+		if s, ok := d["fsid"].(string); ok {
+			fsid = s
+		}
 		return map[string]interface{}{"source": d["name"], "dest": d["mountpoint"], "fstype": fstype, "flags": flags,
-			"fsid": "fsid-" + d["name"].(string), "files": f.files, "free_files": f.free}, nil, true
+			"fsid": fsid, "files": f.files, "free_files": f.free}, nil, true
 	case "pool.dataset.query":
 		filters, _ := p[0].([]interface{})
 		prefix := ""
@@ -162,8 +173,12 @@ func (f *fsACLFake) handle(method string, params json.RawMessage) (interface{}, 
 		}
 		out := []interface{}{}
 		for _, d := range f.datasets {
-			if strings.HasPrefix(d["name"].(string), prefix) {
-				out = append(out, map[string]interface{}{"id": d["id"], "name": d["name"], "mountpoint": d["mountpoint"], "locked": d["locked"]})
+			if strings.HasPrefix(d["name"].(string), prefix) && d["query_hidden"] != true {
+				mp := d["mountpoint"]
+				if s, ok := d["query_mountpoint"].(string); ok {
+					mp = s
+				}
+				out = append(out, map[string]interface{}{"id": d["id"], "name": d["name"], "mountpoint": mp, "locked": d["locked"]})
 			}
 		}
 		return out, nil, true
@@ -490,6 +505,9 @@ func TestSetFilesystemACLEntryErrors(t *testing.T) {
 			e("tag", "OTHER", "posix_perms", "---"), e("tag", "USER", "who", "alice", "posix_perms", "rwx")), "needs a MASK entry"},
 		{"posix default incomplete", fsACLArgs(posix, e("tag", "USER_OBJ", "posix_perms", "rwx"), e("tag", "GROUP_OBJ", "posix_perms", "r-x"),
 			e("tag", "OTHER", "posix_perms", "---"), e("tag", "USER_OBJ", "posix_perms", "rwx", "default", true)), "the default ACL needs exactly one GROUP_OBJ"},
+		{"posix two masks", fsACLArgs(posix, e("tag", "USER_OBJ", "posix_perms", "rwx"), e("tag", "GROUP_OBJ", "posix_perms", "r-x"),
+			e("tag", "OTHER", "posix_perms", "---"), e("tag", "MASK", "posix_perms", "rwx"), e("tag", "MASK", "posix_perms", "r-x")), "has 2 MASK entries"},
+		{"posix default on a file", fsACLArgs(posix+"/notes.txt", e("tag", "USER_OBJ", "posix_perms", "rw-", "default", true)), "default entries apply only to directories"},
 		{"recursive on a file", mergeArgs(fsACLArgs(docs+"/report.txt", nfs4Entry("owner@", "", "ALLOW", "READ", "NOINHERIT")), e("recursive", true)), "recursive applies only to directories"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -725,5 +743,160 @@ func TestSetFilesystemACLWarnsOnUncheckedVersion(t *testing.T) {
 			}
 			assertNoSetACL(t, fake)
 		})
+	}
+}
+
+// The path's own dataset must be found and reported unlocked. The fake's
+// statfs still reports the dataset ("mounted"), so only the dataset-row
+// check can refuse.
+func TestSetFilesystemACLOwnDatasetLockState(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(d map[string]interface{})
+		want  string
+	}{
+		{"locked", func(d map[string]interface{}) { d["locked"] = true }, "dataset tank/shares is locked, or its lock state could not be read"},
+		{"lock state missing", func(d map[string]interface{}) { delete(d, "locked") }, "dataset tank/shares is locked, or its lock state could not be read"},
+		{"lock state not a boolean", func(d map[string]interface{}) { d["locked"] = "no" }, "dataset tank/shares is locked, or its lock state could not be read"},
+		{"dataset row missing", func(d map[string]interface{}) { d["query_hidden"] = true }, "dataset tank/shares of path /mnt/tank/shares/docs was not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFSACLFake()
+			f.datasets[1]["mounted"] = true
+			tc.setup(f.datasets[1])
+			r, fake := f.registry(t)
+			assertRefused(t, r, fake, "set_filesystem_acl", filesystemSetACLMethod, docsACLArgs(), tc.want)
+		})
+	}
+}
+
+// Each part of the binding is changed on its own, with the request and the
+// summary unchanged, so only that part of the binding can reject the token.
+func TestSetFilesystemACLTokenBoundToIdentity(t *testing.T) {
+	docsStat := func(fn func(st map[string]interface{})) func(f *fsACLFake) {
+		return func(f *fsACLFake) {
+			st := dirStat("/mnt/tank/shares/docs")
+			st["inode"], st["dev"], st["mount_id"] = 100.0, 7.0, 50.0
+			fn(st)
+			f.stats["/mnt/tank/shares/docs"] = st
+		}
+	}
+	setID := func(rows []map[string]interface{}, key, name string) {
+		for _, row := range rows {
+			if row[key] == name {
+				row["id"] = 777
+			}
+		}
+	}
+	for _, change := range []struct {
+		name   string
+		mutate func(f *fsACLFake)
+	}{
+		{"directory replaced at the same path", docsStat(func(st map[string]interface{}) { st["inode"] = 999.0 })},
+		{"mounted again at the same path", docsStat(func(st map[string]interface{}) { st["mount_id"] = 51.0 })},
+		{"realpath changed", docsStat(func(st map[string]interface{}) { st["realpath"] = "/mnt/tank/shares/docs-old" })},
+		{"filesystem changed", func(f *fsACLFake) { f.datasets[1]["fsid"] = "fsid-recreated" }},
+		{"dataset row changed", func(f *fsACLFake) { f.datasets[1]["query_mountpoint"] = "/mnt/tank/shares-moved" }},
+		{"user principal recreated", func(f *fsACLFake) { setID(f.users, "username", "alice") }},
+		{"group principal recreated", func(f *fsACLFake) { setID(f.groups, "name", "staff") }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			f := newFSACLFake()
+			r, fake := f.registry(t)
+			args := docsACLArgs()
+			tok := destroyPreviewToken(t, r, "set_filesystem_acl", args)
+			f.mutate(func() { change.mutate(f) })
+			assertTokenRejected(t, r, fake, "set_filesystem_acl", filesystemSetACLMethod, args, tok)
+		})
+	}
+	// Unchanged, the same token runs.
+	f := newFSACLFake()
+	r, fake := f.registry(t)
+	confirmAndRun(t, r, fake, "set_filesystem_acl", filesystemSetACLMethod, docsACLArgs())
+}
+
+// A DENY entry never counts as granting the right to change the ACL.
+func TestSetFilesystemACLLockoutWarningIgnoresDeny(t *testing.T) {
+	const lockout = "No ALLOW entry grants FULL_CONTROL or WRITE_ACL"
+	f := newFSACLFake()
+	r, fake := f.registry(t)
+	for name, entries := range map[string][]map[string]interface{}{
+		"deny full control": {
+			nfs4Entry("everyone@", "", "DENY", "FULL_CONTROL", "NOINHERIT"),
+			nfs4Entry("owner@", "", "ALLOW", "READ", "NOINHERIT"),
+		},
+		"deny write acl": {
+			{"tag": "everyone@", "type": "DENY", "advanced_perms": []interface{}{"WRITE_ACL"}, "advanced_flags": []interface{}{}},
+			nfs4Entry("owner@", "", "ALLOW", "MODIFY", "NOINHERIT"),
+		},
+	} {
+		dry := dryRunOf(t, r, "set_filesystem_acl", fsACLArgs("/mnt/tank/shares/docs", entries...))
+		assertContainsAll(t, name, previewText(t, dry["warnings"]), lockout, "only the file's owner", "and root can change this ACL")
+	}
+	dry := dryRunOf(t, r, "set_filesystem_acl", fsACLArgs("/mnt/tank/shares/docs",
+		nfs4Entry("everyone@", "", "ALLOW", "FULL_CONTROL", "NOINHERIT")))
+	if w := previewText(t, dry["warnings"]); strings.Contains(w, lockout) {
+		t.Errorf("ALLOW FULL_CONTROL still warned: %s", w)
+	}
+	assertNoSetACL(t, fake)
+}
+
+// A recursive change gives everything below the path the inherited ACL,
+// so it needs something to inherit.
+func TestSetFilesystemACLRecursiveNeedsInheritableEntries(t *testing.T) {
+	posix := func(tag, perms string, def bool) map[string]interface{} {
+		return map[string]interface{}{"tag": tag, "posix_perms": perms, "default": def}
+	}
+	access := []map[string]interface{}{posix("USER_OBJ", "rwx", false), posix("GROUP_OBJ", "r-x", false), posix("OTHER", "---", false)}
+	defaults := []map[string]interface{}{posix("USER_OBJ", "rwx", true), posix("GROUP_OBJ", "r-x", true), posix("OTHER", "---", true)}
+	recursive := map[string]interface{}{"recursive": true}
+	for _, tc := range []struct {
+		name string
+		args map[string]interface{}
+		want string // "" when the plan goes ahead
+	}{
+		{"nfs4 noinherit only", fsACLArgs("/mnt/tank/shares/docs",
+			nfs4Entry("owner@", "", "ALLOW", "FULL_CONTROL", "NOINHERIT"),
+			nfs4Entry("everyone@", "", "ALLOW", "READ", "NOINHERIT")), "recursive needs at least one inheritable entry"},
+		{"nfs4 no advanced flags", fsACLArgs("/mnt/tank/shares/docs",
+			map[string]interface{}{"tag": "owner@", "type": "ALLOW", "perms": "FULL_CONTROL", "advanced_flags": []interface{}{"NO_PROPAGATE_INHERIT"}}),
+			"recursive needs at least one inheritable entry"},
+		{"posix without defaults", fsACLArgs("/mnt/tank/shares/posix", access...), "recursive needs default entries"},
+		{"nfs4 inherit", docsACLArgs(), ""},
+		{"nfs4 directory inherit only", fsACLArgs("/mnt/tank/shares/docs",
+			map[string]interface{}{"tag": "owner@", "type": "ALLOW", "perms": "FULL_CONTROL", "advanced_flags": []interface{}{"DIRECTORY_INHERIT"}}), ""},
+		{"nfs4 file inherit only", fsACLArgs("/mnt/tank/shares/docs",
+			map[string]interface{}{"tag": "owner@", "type": "ALLOW", "perms": "FULL_CONTROL", "advanced_flags": []interface{}{"FILE_INHERIT"}}), ""},
+		{"posix with defaults", fsACLArgs("/mnt/tank/shares/posix", append(append([]map[string]interface{}{}, access...), defaults...)...), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFSACLFake()
+			r, fake := f.registry(t)
+			if tc.want != "" {
+				assertRefused(t, r, fake, "set_filesystem_acl", filesystemSetACLMethod, mergeArgs(tc.args, recursive), tc.want)
+				// The same ACL without recursive goes ahead.
+				dryRunOf(t, r, "set_filesystem_acl", tc.args)
+				return
+			}
+			confirmAndRun(t, r, fake, "set_filesystem_acl", filesystemSetACLMethod, mergeArgs(tc.args, recursive))
+		})
+	}
+}
+
+func TestBelowBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		p, mp string
+		want  bool
+	}{
+		{"/mnt/tank/data", "/mnt/tank/data", true},
+		{"/mnt/tank/data/x", "/mnt/tank/data", true},
+		{"/mnt/tank/data2", "/mnt/tank/data", false},
+		{"/mnt/tank/data2/x", "/mnt/tank/data", false},
+		{"/mnt/tank", "/mnt/tank/data", false},
+		{"/mnt/tank/data", "", false},
+	} {
+		if got := below(tc.p, tc.mp); got != tc.want {
+			t.Errorf("below(%q, %q) = %v, want %v", tc.p, tc.mp, got, tc.want)
+		}
 	}
 }

@@ -12,14 +12,15 @@ import (
 // user.create, user.update, group.create and group.update change the
 // fixture, so a call reads back what it wrote.
 type accountWriteFake struct {
-	mu       sync.Mutex
-	users    []map[string]interface{}
-	groups   []map[string]interface{}
-	paths    map[string]string // filesystem.stat type by path
-	fail     map[string]map[string]interface{}
-	onQuery  func(method string) // runs before every user.query / group.query
-	nextUser int
-	smbGuest string // smb.config guest; "" serves nobody
+	mu         sync.Mutex
+	users      []map[string]interface{}
+	groups     []map[string]interface{}
+	paths      map[string]string // filesystem.stat type by path
+	fail       map[string]map[string]interface{}
+	onQuery    func(method string) // runs before every user.query / group.query
+	nextUser   int
+	smbGuest   string // smb.config guest; "" serves nobody
+	smbNoGuest bool   // smb.config reports no guest field
 }
 
 func accountUser(id, uid int, name string, group int, groups []interface{}) map[string]interface{} {
@@ -170,6 +171,9 @@ func (f *accountWriteFake) handle(method string, params json.RawMessage) (interf
 		}
 		return nil, rpcErr("no such account"), true
 	case "smb.config":
+		if f.smbNoGuest {
+			return map[string]interface{}{"enable_smb1": false}, nil, true
+		}
 		guest := f.smbGuest
 		if guest == "" {
 			guest = "nobody"

@@ -169,6 +169,16 @@ func TestDeleteUserRefusals(t *testing.T) {
 		{"smb guest", "alice", func(af *accountWriteFake) { af.setGuest("alice") }, "SMB guest account"},
 		{"ssh directory", "bob", func(af *accountWriteFake) { af.addPath("/mnt/tank/home/bob/.ssh", "DIRECTORY") }, "always removes the .ssh directory"},
 		{"smb.config fails", "alice", func(af *accountWriteFake) { af.failMethod("smb.config", rpcErr("boom")) }, "could not read the SMB guest account"},
+		{"smb.config without guest", "alice", func(af *accountWriteFake) {
+			af.mu.Lock()
+			defer af.mu.Unlock()
+			af.smbNoGuest = true
+		}, "smb.config reported no guest"},
+		// Only ENOENT means there is no .ssh directory; any other stat error
+		// must refuse, or user.delete could remove SSH keys nobody saw.
+		{"ssh directory unreadable", "bob", func(af *accountWriteFake) {
+			af.failMethod("filesystem.stat", rpcErr("[EACCES] Permission denied"))
+		}, "failed to check /mnt/tank/home/bob/.ssh"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, fake, af := accountRegistry(t)

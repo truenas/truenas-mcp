@@ -75,7 +75,7 @@ func (r *Registry) registerFilesystemACLActionTools() {
 	r.tools["set_filesystem_acl"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "set_filesystem_acl",
-			Description: "Replace the filesystem ACL of one file or directory below /mnt/<pool> with filesystem.setacl, which runs as a job tracked with tasks_get. The new ACL replaces the current one as a whole, in the path's current ACL type: NFSv4 entries (tag owner@, group@, everyone@, USER or GROUP; type ALLOW or DENY; perms FULL_CONTROL, MODIFY, READ or TRAVERSE, or advanced_perms; flags INHERIT or NOINHERIT, or advanced_flags) for an NFS4 ACL, POSIX entries (tag USER_OBJ, GROUP_OBJ, OTHER, MASK, USER or GROUP; posix_perms such as 'rwx' or 'r-x'; default for inherited entries) for a POSIX1E ACL. USER and GROUP entries name a local user or group by who; directory service (Active Directory, LDAP, IPA) users and groups and unknown names are refused. Only the path itself changes unless recursive=true, which applies the ACL to every file and directory below it in the same dataset; child datasets are never changed, and the preview shows the size of the subtree (entries directly in the path, objects in use in the dataset, child datasets). Never strips an ACL, changes the owner or group, or changes the ACL type. Refused for pool roots, paths outside /mnt/<pool>, non-normalised paths and paths through a symlink, datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component), read-only or locked datasets, and paths whose ACL type is DISABLED. The preview shows the current ACL and the new one; the confirmation is bound to the path's identity, its dataset and its current ACL, so a change after the preview needs a new one. Use dry_run to preview.",
+			Description: "Replace the filesystem ACL of one file or directory below /mnt/<pool> with filesystem.setacl, which runs as a job tracked with tasks_get. The new ACL replaces the current one as a whole, in the path's current ACL type: NFSv4 entries (tag owner@, group@, everyone@, USER or GROUP; type ALLOW or DENY; perms FULL_CONTROL, MODIFY, READ or TRAVERSE, or advanced_perms; flags INHERIT or NOINHERIT, or advanced_flags) for an NFS4 ACL, POSIX entries (tag USER_OBJ, GROUP_OBJ, OTHER, MASK, USER or GROUP; posix_perms such as 'rwx' or 'r-x'; default for inherited entries) for a POSIX1E ACL. USER and GROUP entries name a local user or group by who; directory service (Active Directory, LDAP, IPA) users and groups and unknown names are refused. Only the path itself changes unless recursive=true, which applies the ACL to every file and directory below it in the same dataset and needs inheritable NFSv4 entries or POSIX default entries; child datasets are never changed, and the preview shows the size of the subtree (entries directly in the path, objects in use in the dataset, child datasets). Never strips an ACL, changes the owner or group, or changes the ACL type. Refused for pool roots, paths outside /mnt/<pool>, non-normalised paths and paths through a symlink, datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component), read-only or locked datasets, and paths whose ACL type is DISABLED. The preview shows the current ACL and the new one; the confirmation is bound to the path's identity, its dataset and its current ACL, so a change after the preview needs a new one. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -103,7 +103,7 @@ func (r *Registry) registerFilesystemACLActionTools() {
 						},
 					},
 					"recursive": map[string]interface{}{"type": "boolean", "default": false,
-						"description": "Optional: Also apply the ACL to every file and directory below path in the same dataset (default: false). Child datasets are never changed. The preview shows the size of the subtree"},
+						"description": "Optional: Also apply the ACL to every file and directory below path in the same dataset (default: false); they get the inherited ACL, so the entries must include inheritable NFSv4 entries or POSIX default entries. Child datasets are never changed. The preview shows the size of the subtree"},
 					"dry_run": map[string]interface{}{"type": "boolean", "default": false, "description": "Optional: Preview without changing the ACL (default: false)"},
 				},
 				"required": []string{"path", "entries"},
@@ -224,6 +224,9 @@ func currentFilesystemACL(ctx context.Context, client *truenas.Client, p string)
 type fsACLEntry struct {
 	Tag, Who string
 	Default  bool
+	// Inherits is true for an NFSv4 entry with FILE_INHERIT or
+	// DIRECTORY_INHERIT (basic flags INHERIT).
+	Inherits bool
 	// Payload is the dacl entry sent to filesystem.setacl, without id for
 	// USER and GROUP entries until the principal is resolved.
 	Payload map[string]interface{}
@@ -317,6 +320,7 @@ func parseNFS4Entry(i int, m map[string]interface{}, isDir bool) (fsACLEntry, er
 	if inherits && !isDir {
 		return fsACLEntry{}, at("inheritance flags apply only to directories, and the path is a file")
 	}
+	e.Inherits = inherits
 	if nfs4SpecialTags[tag] {
 		e.Payload["id"] = aclUndefinedID
 	}
@@ -419,8 +423,25 @@ func posixStructureError(entries []fsACLEntry) error {
 	return nil
 }
 
+// recursiveInheritError refuses a recursive change whose ACL has nothing
+// for the files and directories below the path to inherit: filesystem.setacl
+// gives each of them the ACL inherited from the new one, which would be
+// empty (NFSv4 entries without FILE_INHERIT or DIRECTORY_INHERIT, or a
+// POSIX ACL without default entries).
+func recursiveInheritError(acltype string, entries []fsACLEntry) error {
+	for _, e := range entries {
+		if (acltype == "NFS4" && e.Inherits) || (acltype == "POSIX1E" && e.Default) {
+			return nil
+		}
+	}
+	if acltype == "POSIX1E" {
+		return fmt.Errorf("recursive needs default entries (default: true): the files and directories below the path get the ACL inherited from the new one, and an ACL without default entries leaves them nothing to inherit; add default entries or leave recursive off")
+	}
+	return fmt.Errorf("recursive needs at least one inheritable entry (flags INHERIT, or advanced_flags with FILE_INHERIT or DIRECTORY_INHERIT): the files and directories below the path get the ACL inherited from the new one, and with no inheritable entries it would be empty; add inheritance flags or leave recursive off")
+}
+
 // nfs4GrantsWriteACL reports whether an ALLOW entry lets someone change
-// the ACL afterwards through the filesystem.
+// the ACL afterwards through the filesystem. DENY entries never count.
 func nfs4GrantsWriteACL(entries []fsACLEntry) bool {
 	for _, e := range entries {
 		if e.Payload["type"] != "ALLOW" {
@@ -564,6 +585,11 @@ func planSetFilesystemACL(ctx context.Context, client *truenas.Client, args map[
 				return nil, err
 			}
 		}
+		if recursive {
+			if err := recursiveInheritError(acltype, entries); err != nil {
+				return nil, err
+			}
+		}
 	case "DISABLED":
 		blocked = append(blocked, fmt.Sprintf("ACLs are disabled on dataset %s (ACL type DISABLED); only the owner, group and mode bits apply, and this tool does not change the ACL type", fs.Source))
 	default:
@@ -620,7 +646,7 @@ func planSetFilesystemACL(ctx context.Context, client *truenas.Client, args map[
 	var warnings []string
 	warnings = append(warnings, "The ACL is replaced as a whole: current entries that are not listed are removed")
 	if acltype == "NFS4" && len(entries) > 0 && !nfs4GrantsWriteACL(entries) {
-		warnings = append(warnings, "No ALLOW entry grants FULL_CONTROL or WRITE_ACL: afterwards nobody but root (TrueNAS itself) can change this ACL through the filesystem")
+		warnings = append(warnings, "No ALLOW entry grants FULL_CONTROL or WRITE_ACL: afterwards only the file's owner (who keeps the right to change the ACL) and root can change this ACL through the filesystem")
 	}
 	for _, e := range entries {
 		if e.Payload["type"] == "DENY" {
