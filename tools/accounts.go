@@ -24,7 +24,7 @@ func (r *Registry) registerAccountTools() {
 	r.tools["query_users"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "query_users",
-			Description: "Query user accounts. Returns username, uid, full name, builtin/immutable/locked flags, whether password login is disabled, primary and secondary groups, home, shell, SMB, 2FA and sudo flags, and roles. Never returns password hashes, 2FA secrets, SSH keys or API keys. Local accounts only unless 'include_directory_users' is true. Use 'limit' to control result size (default: 50, maximum: 1000).",
+			Description: "Query user accounts. Returns username, uid, full name, builtin/immutable/locked flags, whether password login is disabled, whether SSH password login is enabled, primary and secondary groups, home, shell, SMB, 2FA and sudo flags, and roles. Never returns password hashes, 2FA secrets, SSH keys or API keys. Local accounts only unless 'include_directory_users' is true. Use 'limit' to control result size (default: 50, maximum: 1000).",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -93,6 +93,7 @@ var userQuerySelect = []interface{}{
 	"id", "uid", "username", "full_name", "builtin", "immutable", "local", "locked",
 	"password_disabled", "group", "groups", "home", "shell", "smb",
 	"twofactor_auth_configured", "sudo_commands", "sudo_commands_nopasswd", "roles",
+	"ssh_password_enabled",
 }
 
 var groupQuerySelect = []interface{}{
@@ -137,7 +138,7 @@ func handleQueryUsers(ctx context.Context, client *truenas.Client, args map[stri
 	var groupNames map[int]string
 	var groupErr error
 	if in := uniqueIDs(groupIDs); len(in) > 0 {
-		raw, err := client.Call(ctx, "group.query", []interface{}{[]interface{}{"id", "in", in}},
+		raw, err := client.Call(ctx, "group.query", lookupFilters(in, includeDS),
 			map[string]interface{}{"select": []interface{}{"id", "name"}})
 		groupNames, groupErr = namesByID(raw, err, "name")
 	}
@@ -203,14 +204,15 @@ func handleQueryGroups(ctx context.Context, client *truenas.Client, args map[str
 		return "", fmt.Errorf("failed to parse groups: %w", err)
 	}
 
+	// Look up only the member ids each group will list.
 	var userIDs []int
 	for _, row := range rows {
-		userIDs = append(userIDs, intList(row["users"])...)
+		userIDs = append(userIDs, listedIDs(intList(row["users"]), maxGroupMembersListed)...)
 	}
 	var usernames map[int]string
 	var userErr error
 	if in := uniqueIDs(userIDs); len(in) > 0 {
-		raw, err := client.Call(ctx, "user.query", []interface{}{[]interface{}{"id", "in", in}},
+		raw, err := client.Call(ctx, "user.query", lookupFilters(in, includeDS),
 			map[string]interface{}{"select": []interface{}{"id", "username"}})
 		usernames, userErr = namesByID(raw, err, "username")
 	}
@@ -247,6 +249,17 @@ func handleQueryGroups(ctx context.Context, client *truenas.Client, args map[str
 		response["note"] = note
 	}
 	return marshalJSON(response)
+}
+
+// lookupFilters is the filter list for an id-to-name lookup. Unless
+// directory accounts were asked for, it stays local so the lookup skips
+// the directory cache.
+func lookupFilters(in []interface{}, includeDS bool) []interface{} {
+	filters := []interface{}{[]interface{}{"id", "in", in}}
+	if !includeDS {
+		filters = append(filters, []interface{}{"local", "=", true})
+	}
+	return filters
 }
 
 // uniqueIDs returns ids without duplicates, in first-seen order, ready to
@@ -296,6 +309,7 @@ func simplifyUser(row map[string]interface{}, groupNames map[int]string) map[str
 		copyBool(out, row, k, k)
 	}
 	copyBool(out, row, "twofactor_auth_configured", "two_factor_enabled")
+	copyBool(out, row, "ssh_password_enabled", "ssh_password_enabled")
 	addSudoFlags(out, row)
 	copyRoles(out, row)
 
@@ -360,11 +374,7 @@ func addSudoFlags(out, row map[string]interface{}) {
 // resolveNames maps ids to sorted names. Ids without a name are returned
 // separately. max > 0 caps how many ids are considered.
 func resolveNames(ids []int, names map[int]string, max int) ([]string, []int) {
-	sorted := append([]int(nil), ids...)
-	sort.Ints(sorted)
-	if max > 0 && len(sorted) > max {
-		sorted = sorted[:max]
-	}
+	sorted := listedIDs(ids, max)
 	resolved := make([]string, 0, len(sorted))
 	var unresolved []int
 	for _, id := range sorted {
@@ -376,6 +386,17 @@ func resolveNames(ids []int, names map[int]string, max int) ([]string, []int) {
 	}
 	sort.Strings(resolved)
 	return resolved, unresolved
+}
+
+// listedIDs returns ids sorted, capped at max when max > 0: the ids
+// resolveNames considers.
+func listedIDs(ids []int, max int) []int {
+	sorted := append([]int(nil), ids...)
+	sort.Ints(sorted)
+	if max > 0 && len(sorted) > max {
+		sorted = sorted[:max]
+	}
+	return sorted
 }
 
 func intList(v interface{}) []int {

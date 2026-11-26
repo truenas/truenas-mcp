@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -31,7 +32,7 @@ func userRow(id, uid float64, username string, extra map[string]interface{}) map
 	row := map[string]interface{}{
 		"id": id, "uid": uid, "username": username, "full_name": "Example " + username,
 		"builtin": false, "immutable": false, "local": true, "locked": false,
-		"password_disabled": false, "smb": true, "twofactor_auth_configured": true,
+		"password_disabled": false, "smb": true, "twofactor_auth_configured": true, "ssh_password_enabled": true,
 		"home": "/var/empty", "shell": "/usr/sbin/nologin",
 		"group":         map[string]interface{}{"id": 40.0, "bsdgrp_gid": 3000.0, "bsdgrp_group": username},
 		"groups":        []interface{}{41.0, 42.0},
@@ -77,7 +78,7 @@ func (a *accountFake) middleware() *fakeMiddleware {
 		if options["count"] == true {
 			return a.count, nil, true
 		}
-		lookup := len(filters) == 1 && fmt.Sprint(filters[0].([]interface{})[0]) == "id"
+		lookup := len(filters) > 0 && fmt.Sprint(filters[0].([]interface{})[0]) == "id"
 		if lookup && a.failFor[method] {
 			return nil, map[string]interface{}{"code": -32001, "message": "lookup failed"}, true
 		}
@@ -154,15 +155,25 @@ func TestQueryUsersNeverReturnsSecrets(t *testing.T) {
 		case "unixhash", "smbhash", "password_history", "sshpubkey", "api_keys":
 			t.Errorf("user.query select requests %v", f)
 		}
+		// The only SSH field requested is the password-login flag;
+		// never the key.
+		if name := fmt.Sprint(f); strings.Contains(name, "ssh") && name != "ssh_password_enabled" {
+			t.Errorf("user.query select requests SSH field %v", f)
+		}
 	}
 
 	users := decode(t, out)["users"].([]interface{})
 	u := users[0].(map[string]interface{})
+	for k := range u {
+		if strings.Contains(k, "ssh") && k != "ssh_password_enabled" {
+			t.Errorf("query_users output has SSH field %q", k)
+		}
+	}
 	want := map[string]interface{}{
 		"username": "alice-example", "uid": 3000.0, "full_name": "Example alice-example",
 		"builtin": false, "immutable": false, "locked": false, "password_disabled": false,
 		"smb": true, "two_factor_enabled": true, "sudo": true, "sudo_nopasswd": true,
-		"home": "/var/empty", "shell": "/usr/sbin/nologin",
+		"ssh_password_enabled": true, "home": "/var/empty", "shell": "/usr/sbin/nologin",
 		"primary_group": "alice-example", "primary_gid": 3000.0,
 	}
 	for k, v := range want {
@@ -314,6 +325,95 @@ func TestQueryGroupsMembers(t *testing.T) {
 	}
 	if redact.ToolOutput(out) != out {
 		t.Errorf("redact.ToolOutput changed query_groups output:\n%s", out)
+	}
+}
+
+// Group output is built from a fixed field list: raw row fields such as
+// the sudo command lists never pass through.
+func TestQueryGroupsNeverPassesRawFields(t *testing.T) {
+	a := &accountFake{
+		users: []interface{}{map[string]interface{}{"id": 100.0, "username": "user000-example"}},
+		groups: []interface{}{map[string]interface{}{
+			"id": 41.0, "gid": 3100.0, "name": "media-example", "builtin": false, "immutable": false,
+			"local": true, "smb": true, "users": []interface{}{100.0}, "roles": []interface{}{},
+			"sudo_commands":          []interface{}{"/usr/bin/sentinel-sudo-command"},
+			"sudo_commands_nopasswd": []interface{}{"/usr/bin/sentinel-nopasswd-command"},
+			"group":                  "sentinel-raw-field", "userns_idmap": "sentinel-idmap",
+		}},
+	}
+	r := queryFilterRegistry(t, a.middleware())
+	out, err := r.CallTool(t.Context(), "query_groups", map[string]interface{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"sentinel", "sudo_commands", "/usr/bin"} {
+		if strings.Contains(out, s) {
+			t.Errorf("query_groups output contains %q:\n%s", s, out)
+		}
+	}
+	g := decode(t, out)["groups"].([]interface{})[0].(map[string]interface{})
+	var keys []string
+	for k := range g {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	want := []string{"builtin", "gid", "id", "immutable", "local", "member_count", "members", "name", "roles", "smb", "sudo", "sudo_nopasswd"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("group output keys = %v, want %v", keys, want)
+	}
+}
+
+// The member lookup asks only for the ids each group lists (at most
+// maxGroupMembersListed), and stays local unless directory groups were
+// asked for. The group lookup in query_users stays local the same way.
+func TestAccountLookupsListedAndLocal(t *testing.T) {
+	var users, members []interface{}
+	for i := 0; i < maxGroupMembersListed+5; i++ {
+		id := float64(100 + i)
+		users = append(users, map[string]interface{}{"id": id, "username": fmt.Sprintf("user%03d-example", i)})
+		members = append(members, id)
+	}
+	// Unsorted on purpose: the listed ids are the lowest ones.
+	members[0], members[len(members)-1] = members[len(members)-1], members[0]
+	groups := []interface{}{map[string]interface{}{
+		"id": 42.0, "gid": 545.0, "name": "builtin_users", "local": true, "users": members,
+	}}
+	local := []interface{}{"local", "=", true}
+
+	for _, includeDS := range []bool{false, true} {
+		a := &accountFake{users: users, groups: groups}
+		r := queryFilterRegistry(t, a.middleware())
+		if _, err := r.CallTool(t.Context(), "query_groups", map[string]interface{}{"include_directory_groups": includeDS}); err != nil {
+			t.Fatal(err)
+		}
+		filters, _ := a.params(t, "user.query", 0)
+		in, _ := filters[0].([]interface{})[2].([]interface{})
+		if len(in) != maxGroupMembersListed {
+			t.Errorf("includeDS=%v: member lookup asks for %d ids, want %d", includeDS, len(in), maxGroupMembersListed)
+		}
+		for _, id := range in {
+			if id.(float64) >= float64(100+maxGroupMembersListed) {
+				t.Errorf("includeDS=%v: member lookup asks for unlisted id %v", includeDS, id)
+			}
+		}
+		hasLocal := len(filters) == 2 && reflect.DeepEqual(filters[1], local)
+		if hasLocal == includeDS || (!includeDS && len(filters) != 2) || (includeDS && len(filters) != 1) {
+			t.Errorf("includeDS=%v: member lookup filters = %v", includeDS, filters)
+		}
+
+		ua := &accountFake{
+			users:  []interface{}{userRow(70, 3000, "alice-example", nil)},
+			groups: []interface{}{map[string]interface{}{"id": 41.0, "name": "media-example"}},
+		}
+		r = queryFilterRegistry(t, ua.middleware())
+		if _, err := r.CallTool(t.Context(), "query_users", map[string]interface{}{"include_directory_users": includeDS}); err != nil {
+			t.Fatal(err)
+		}
+		filters, _ = ua.params(t, "group.query", 0)
+		hasLocal = len(filters) == 2 && reflect.DeepEqual(filters[1], local)
+		if hasLocal == includeDS || (!includeDS && len(filters) != 2) || (includeDS && len(filters) != 1) {
+			t.Errorf("includeDS=%v: group lookup filters = %v", includeDS, filters)
+		}
 	}
 }
 

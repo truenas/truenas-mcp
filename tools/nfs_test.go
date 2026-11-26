@@ -51,7 +51,7 @@ func TestValidateCIDR(t *testing.T) {
 			name:    "no slash",
 			input:   "192.168.1.0",
 			wantErr: true,
-			errMsg:  "CIDR must be in format 'network/mask' (e.g., 192.168.1.0/24)",
+			errMsg:  "CIDR must be in format 'network/mask' (e.g., 192.0.2.0/24)",
 		},
 
 		// Invalid cases - invalid format
