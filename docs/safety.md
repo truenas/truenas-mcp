@@ -250,6 +250,33 @@ value and removed from TrueNAS error messages. Like every other argument
 it is part of the argument hash a confirmation token is bound to, so the
 confirming call must repeat it unchanged.
 
+**Passwords pass through the assistant.** Not returning a password again
+does not keep it private: a password supplied with `password_mode` `set`
+is an argument the AI assistant writes, and a `random` password is in the
+result the assistant reads. Both pass through the assistant and appear in
+the MCP client's chat transcript, and in whatever the client or its
+provider keeps of it. Treat such a password as known to anyone who can read
+that transcript; use `password_mode` `disabled` and set the password in
+the TrueNAS web UI when that is not acceptable, or have the user change it
+after first sign-in.
+
+**A lost random password.** The account is created (or its password
+changed) before the result is returned. If that result never reaches the
+client, for example because the call was cancelled, timed out or the
+connection dropped, or because the result is sent after the one-minute
+window and the password is redacted, the account exists with a password
+nobody saw. It cannot be recovered; set a new one with `update_user`
+(`password_mode` `random` or `set`) or in the TrueNAS web UI.
+
+**Which accounts `update_user` can change.** Apart from its refusals
+(root, the built-in administrator accounts, other built-in accounts, the
+account this server signs in as, directory service users, and users with
+TrueNAS roles, sudo or an administrative group), any local account can be
+changed, including service accounts such as the users that replication or
+rsync tasks sign in as. That includes resetting its password, turning on
+SSH password login and changing its shell. Limit the tool with the tool
+allowlist or denylist, or read-only mode, where that is too broad.
+
 > **Breaking change (confirmation tokens):** `"confirm": true` no longer
 > executes a destructive tool. A call that sends it without a token gets the
 > preview, a token and a message explaining the new flow; repeat the call
