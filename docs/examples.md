@@ -28,6 +28,8 @@ This document provides example natural language queries you can use with TrueNAS
 - "Show the permissions on /mnt/tank/shares/docs"
 - "Give the staff group modify access to /mnt/tank/shares/docs, keeping the owner's full control (preview first)"
 - "Apply that ACL to everything under /mnt/tank/shares/docs, and show me how much it touches first"
+- "Upload the installer ISO from https://example.com/isos/installer.iso to /mnt/tank/isos/installer.iso; its SHA-256 is <checksum>"
+- "Copy /home/me/Downloads/installer.iso from this machine to /mnt/tank/isos (preview first)"
 
 ## Disks and Services
 
