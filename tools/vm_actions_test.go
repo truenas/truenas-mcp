@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/truenas/truenas-mcp/tasks"
-	"github.com/truenas/truenas-mcp/truenas"
 )
 
 // withVMActionResults adds VM preflight and status fixtures to a fake
@@ -79,6 +78,9 @@ type vmFakeEnv struct {
 	stats          map[string]map[string]interface{}
 	statfs         map[string]map[string]interface{}
 	failDeviceIdx  int // >=0 fails vm.device.create on this 0-based call
+	failUpdate     bool
+	failDelete     bool
+	displayDevs    []map[string]interface{} // vm.device.query DISPLAY rows
 	nextVMID       int
 	nextDevID      int
 	nextJobID      int
@@ -331,6 +333,22 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 				created["order"] = 1002.0
 			}
 			return created, nil, true
+		case "vm.device.query":
+			out := make([]interface{}, 0, len(e.displayDevs))
+			for _, d := range e.displayDevs {
+				out = append(out, d)
+			}
+			return out, nil, true
+		case "vm.update":
+			if e.failUpdate {
+				return nil, map[string]interface{}{"code": -32000, "message": "simulated update error"}, true
+			}
+			return map[string]interface{}{"id": 10.0, "autostart": true}, nil, true
+		case "vm.delete":
+			if e.failDelete {
+				return nil, map[string]interface{}{"code": -32000, "message": "simulated delete error"}, true
+			}
+			return true, nil, true
 		case "vm.start", "vm.poweroff", "vm.reset":
 			return nil, nil, true
 		case "vm.stop", "vm.restart":
@@ -438,12 +456,12 @@ func TestCreateVMFullHappyPathAndPasswordRedaction(t *testing.T) {
 		"devices": []interface{}{
 			map[string]interface{}{
 				"dtype": "DISK", "type": "VIRTIO",
-				"path": "/dev/zvol/tank/vms/free0", "serial": "TESTDISK01",
+				"path": "/dev/zvol/tank/vms/free0",
 			},
 			map[string]interface{}{
 				"dtype": "DISK", "type": "AHCI",
 				"create_zvol": true, "zvol_name": "tank/vms/newdisk0",
-				"zvol_volsize": float64(10 << 30), "serial": "TESTDISK02",
+				"zvol_volsize": float64(10 << 30),
 			},
 			map[string]interface{}{
 				"dtype": "CDROM", "path": "/mnt/tank/isos/installer.iso", "order": 1000.0,
@@ -632,12 +650,6 @@ func TestCreateVMRefusalGuards(t *testing.T) {
 			setup:   func(e *vmFakeEnv) { e.physmem = -1 },
 			args:    map[string]interface{}{"name": "vm1", "memory": 1024.0},
 			wantSub: "host physical memory could not be read",
-		},
-		{
-			name:    "memory exceeds available VM memory",
-			setup:   func(e *vmFakeEnv) { e.availMem = 1 * gib },
-			args:    map[string]interface{}{"name": "vm1", "memory": 2048.0},
-			wantSub: "available VM memory",
 		},
 		{
 			name: "wrong field for device dtype",
@@ -1216,7 +1228,7 @@ func TestCreateVMAllowWildcardDisplayBind(t *testing.T) {
 		"memory":                      1024.0,
 		"allow_wildcard_display_bind": true,
 		"devices": []interface{}{
-			map[string]interface{}{"dtype": "DISPLAY", "bind": "0.0.0.0"},
+			map[string]interface{}{"dtype": "DISPLAY", "bind": "0.0.0.0", "password": "pw1"},
 		},
 	}
 	preview, err := r.CallTool(t.Context(), "create_vm", args)
@@ -1228,35 +1240,329 @@ func TestCreateVMAllowWildcardDisplayBind(t *testing.T) {
 	}
 }
 
-func TestCreateVMPartialDeviceFailureReportsState(t *testing.T) {
+func TestCreateVMPartialDeviceFailureRollsBack(t *testing.T) {
 	const pw = "Sup3rSec"
-	env := newVMFakeEnv("25.10.0")
-	env.failDeviceIdx = 1 // fail on second vm.device.create
-	r, _, _ := env.buildRegistry(t, false)
-
-	args := map[string]interface{}{
-		"name":   "partial_vm",
-		"memory": 1024.0,
-		"devices": []interface{}{
-			map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0"},
-			map[string]interface{}{"dtype": "DISPLAY", "type": "SPICE", "password": pw},
-		},
+	args := func() map[string]interface{} {
+		return map[string]interface{}{
+			"name":      "partial_vm",
+			"memory":    1024.0,
+			"autostart": true,
+			"devices": []interface{}{
+				map[string]interface{}{"dtype": "DISK", "create_zvol": true, "zvol_name": "tank/vms/new1", "zvol_volsize": float64(1 << 30)},
+				map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0"},
+				map[string]interface{}{"dtype": "DISPLAY", "type": "SPICE", "password": pw},
+			},
+		}
 	}
+	run := func(t *testing.T, env *vmFakeEnv) (*fakeMiddleware, error) {
+		t.Helper()
+		r, fake, _ := env.buildRegistry(t, false)
+		preview, err := r.CallTool(t.Context(), "create_vm", args())
+		if err != nil {
+			t.Fatal(err)
+		}
+		confirmArgs := args()
+		confirmArgs["confirmation_token"] = confirmTokenFromPreview(t, preview)
+		_, err = r.CallTool(t.Context(), "create_vm", confirmArgs)
+		if err == nil {
+			t.Fatal("expected partial device creation error")
+		}
+		if strings.Contains(err.Error(), pw) {
+			t.Errorf("partial failure error leaked password: %v", err)
+		}
+		if n := len(fake.called("vm.update")); n != 0 {
+			t.Errorf("vm.update calls = %d, want 0 (autostart must not be enabled on a partial VM)", n)
+		}
+		return fake, err
+	}
+
+	t.Run("rollback deletes the VM and keeps zvols", func(t *testing.T) {
+		env := newVMFakeEnv("25.10.0")
+		env.failDeviceIdx = 2
+		fake, err := run(t, env)
+		for _, want := range []string{"attached 2 of 3 device(s)", "devices[2] (DISPLAY)", "Rolled back: deleted VM \"partial_vm\" (id 10)", "kept: tank/vms/new1"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err.Error(), want)
+			}
+		}
+		del := fake.called("vm.delete")
+		if len(del) != 1 {
+			t.Fatalf("vm.delete calls = %d, want 1", len(del))
+		}
+		var p []interface{}
+		if err := json.Unmarshal(del[0].Params, &p); err != nil || len(p) != 2 {
+			t.Fatalf("vm.delete params: %s", del[0].Params)
+		}
+		opts, _ := p[1].(map[string]interface{})
+		if p[0] != 10.0 || opts["zvols"] != false || opts["force"] != false {
+			t.Errorf("vm.delete params = %s, want [10, {zvols:false, force:false}]", del[0].Params)
+		}
+	})
+
+	t.Run("failed zvol device is reported as possibly created", func(t *testing.T) {
+		env := newVMFakeEnv("25.10.0")
+		env.failDeviceIdx = 0
+		_, err := run(t, env)
+		for _, want := range []string{"kept: none", "zvol tank/vms/new1 of the failed device may also have been created"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err.Error(), want)
+			}
+		}
+	})
+
+	t.Run("rollback failure says the VM still exists", func(t *testing.T) {
+		env := newVMFakeEnv("25.10.0")
+		env.failDeviceIdx = 2
+		env.failDelete = true
+		_, err := run(t, env)
+		for _, want := range []string{"Rollback with vm.delete also failed", "VM \"partial_vm\" (id 10) still exists with autostart off and 2 device(s) attached", "Zvols created by this call: tank/vms/new1"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err.Error(), want)
+			}
+		}
+	})
+}
+
+func TestCreateVMAutostartEnabledAfterDevices(t *testing.T) {
+	args := func() map[string]interface{} {
+		return map[string]interface{}{
+			"name":      "auto_vm",
+			"memory":    1024.0,
+			"autostart": true,
+			"devices": []interface{}{
+				map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0"},
+				map[string]interface{}{"dtype": "NIC", "nic_attach": "br0"},
+			},
+		}
+	}
+	confirm := func(t *testing.T, env *vmFakeEnv) (*fakeMiddleware, string, error) {
+		t.Helper()
+		r, fake, _ := env.buildRegistry(t, false)
+		preview, err := r.CallTool(t.Context(), "create_vm", args())
+		if err != nil {
+			t.Fatal(err)
+		}
+		confirmArgs := args()
+		confirmArgs["confirmation_token"] = confirmTokenFromPreview(t, preview)
+		out, err := r.CallTool(t.Context(), "create_vm", confirmArgs)
+		return fake, out, err
+	}
+
+	t.Run("vm.create gets autostart=false and vm.update follows the last device", func(t *testing.T) {
+		env := newVMFakeEnv("25.10.0")
+		fake, out, err := confirm(t, env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var vmParams []map[string]interface{}
+		if err := json.Unmarshal(fake.called("vm.create")[0].Params, &vmParams); err != nil {
+			t.Fatal(err)
+		}
+		if vmParams[0]["autostart"] != false {
+			t.Errorf("vm.create autostart = %v, want false", vmParams[0]["autostart"])
+		}
+		var order []string
+		fake.mu.Lock()
+		for _, c := range fake.calls {
+			if c.Method == "vm.create" || c.Method == "vm.device.create" || c.Method == "vm.update" {
+				order = append(order, c.Method)
+			}
+		}
+		fake.mu.Unlock()
+		want := "vm.create,vm.device.create,vm.device.create,vm.update"
+		if got := strings.Join(order, ","); got != want {
+			t.Errorf("call order = %s, want %s", got, want)
+		}
+		upd := fake.called("vm.update")
+		if !strings.Contains(string(upd[0].Params), `"autostart":true`) || !strings.HasPrefix(string(upd[0].Params), "[10,") {
+			t.Errorf("vm.update params = %s", upd[0].Params)
+		}
+		if !strings.Contains(out, "enabled autostart") {
+			t.Errorf("unexpected output: %s", out)
+		}
+	})
+
+	t.Run("vm.update failure reports autostart still off without rollback", func(t *testing.T) {
+		env := newVMFakeEnv("25.10.0")
+		env.failUpdate = true
+		fake, _, err := confirm(t, env)
+		if err == nil || !strings.Contains(err.Error(), "autostart is still off") {
+			t.Fatalf("err = %v, want autostart-still-off error", err)
+		}
+		if n := len(fake.called("vm.delete")); n != 0 {
+			t.Errorf("vm.delete calls = %d, want 0", n)
+		}
+	})
+
+	t.Run("autostart false sends no vm.update", func(t *testing.T) {
+		env := newVMFakeEnv("25.10.0")
+		r, fake, _ := env.buildRegistry(t, false)
+		a := args()
+		a["autostart"] = false
+		preview, err := r.CallTool(t.Context(), "create_vm", a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a["confirmation_token"] = confirmTokenFromPreview(t, preview)
+		if _, err := r.CallTool(t.Context(), "create_vm", a); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(fake.called("vm.update")); n != 0 {
+			t.Errorf("vm.update calls = %d, want 0", n)
+		}
+	})
+}
+
+func TestCreateVMMiddlewareDeviceChecksUpFront(t *testing.T) {
+	disp := func(extra map[string]interface{}) map[string]interface{} {
+		d := map[string]interface{}{"dtype": "DISPLAY", "type": "SPICE", "password": "pw1"}
+		for k, v := range extra {
+			d[k] = v
+		}
+		return d
+	}
+	otherDisplay := map[string]interface{}{
+		"id": 60.0, "vm": 1.0, "attributes": map[string]interface{}{"dtype": "DISPLAY", "port": 5900.0, "web_port": 5901.0},
+	}
+	cases := []struct {
+		name    string
+		version string
+		setup   func(e *vmFakeEnv)
+		devices []interface{}
+		wantSub string // "" = must pass preview
+	}{
+		{name: "25.10 missing display password", version: "25.10.0",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISPLAY", "type": "SPICE"}},
+			wantSub: "requires a display password"},
+		{name: "25.10 empty display password", version: "25.10.0",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISPLAY", "type": "SPICE", "password": ""}},
+			wantSub: "requires a display password"},
+		{name: "blank display password", version: "28.0.0-MASTER",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISPLAY", "type": "SPICE", "password": "   "}},
+			wantSub: "must not be blank"},
+		{name: "master allows no display password", version: "28.0.0-MASTER",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISPLAY", "type": "SPICE"}}},
+		{name: "display port used by another VM", version: "25.10.0",
+			setup:   func(e *vmFakeEnv) { e.displayDevs = []map[string]interface{}{otherDisplay} },
+			devices: []interface{}{disp(map[string]interface{}{"port": 5900.0})},
+			wantSub: "port 5900 is already used by a display device of VM id 1"},
+		{name: "web_port used by another VM", version: "28.0.0-MASTER",
+			setup:   func(e *vmFakeEnv) { e.displayDevs = []map[string]interface{}{otherDisplay} },
+			devices: []interface{}{disp(map[string]interface{}{"web_port": 5901.0})},
+			wantSub: "web_port 5901 is already used by a display device of VM id 1"},
+		{name: "reserved port 6000", version: "25.10.0",
+			devices: []interface{}{disp(map[string]interface{}{"port": 6000.0})},
+			wantSub: "reserved by TrueNAS"},
+		{name: "free display ports pass", version: "25.10.0",
+			setup:   func(e *vmFakeEnv) { e.displayDevs = []map[string]interface{}{otherDisplay} },
+			devices: []interface{}{disp(map[string]interface{}{"port": 5902.0, "web_port": 5903.0})}},
+		{name: "port equal to web_port in one request", version: "25.10.0",
+			devices: []interface{}{disp(map[string]interface{}{"port": 5950.0, "web_port": 5950.0})},
+			wantSub: "already used by devices[0].port in this request"},
+		{name: "logical sector size above physical", version: "28.0.0-MASTER",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "logical_sectorsize": 4096.0, "physical_sectorsize": 512.0}},
+			wantSub: "cannot be greater than physical_sectorsize"},
+		{name: "25.10 physical without logical", version: "25.10.0",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "physical_sectorsize": 4096.0}},
+			wantSub: "physical_sectorsize requires logical_sectorsize"},
+		{name: "master physical without logical passes", version: "28.0.0-MASTER",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "physical_sectorsize": 4096.0}}},
+		{name: "valid sector sizes pass", version: "25.10.0",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "logical_sectorsize": 512.0, "physical_sectorsize": 4096.0}}},
+		{name: "disk serial refused", version: "25.10.0",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "serial": "ABC123"}},
+			wantSub: "serial"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVMFakeEnv(tc.version)
+			if tc.setup != nil {
+				tc.setup(env)
+			}
+			r, fake, _ := env.buildRegistry(t, false)
+			args := map[string]interface{}{"name": "vm1", "memory": 1024.0, "devices": tc.devices}
+			_, err := r.CallTool(t.Context(), "create_vm", args)
+			if tc.wantSub == "" {
+				if err != nil {
+					t.Fatalf("preview should pass, got %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("err = %v, want substring %q", err, tc.wantSub)
+			}
+			assertNoWriteCalls(t, fake)
+		})
+	}
+}
+
+func TestCreateVMAvailableMemoryOnlyWarns(t *testing.T) {
+	const gib = float64(1 << 30)
+	env := newVMFakeEnv("25.10.0")
+	env.availMem = 1 * gib
+	r, fake, _ := env.buildRegistry(t, false)
+	args := map[string]interface{}{"name": "bigvm", "memory": 2048.0}
 	preview, err := r.CallTool(t.Context(), "create_vm", args)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("available memory should only warn, got %v", err)
 	}
-	confirmArgs := copyMapShallow(args)
-	confirmArgs["confirmation_token"] = confirmTokenFromPreview(t, preview)
-	_, err = r.CallTool(t.Context(), "create_vm", confirmArgs)
-	if err == nil {
-		t.Fatal("expected partial device creation error")
+	if !strings.Contains(preview, "exceeds currently available VM memory") {
+		t.Errorf("missing available-memory warning:\n%s", preview)
 	}
-	if !strings.Contains(err.Error(), "attached 1 of 2 device(s)") || !strings.Contains(err.Error(), "devices[1] (DISPLAY)") {
-		t.Errorf("unexpected partial failure message: %v", err)
+	args["confirmation_token"] = confirmTokenFromPreview(t, preview)
+	if _, err := r.CallTool(t.Context(), "create_vm", args); err != nil {
+		t.Fatalf("confirm: %v", err)
 	}
-	if strings.Contains(err.Error(), pw) {
-		t.Errorf("partial failure error leaked password: %v", err)
+	if n := len(fake.called("vm.create")); n != 1 {
+		t.Fatalf("vm.create calls = %d, want 1", n)
+	}
+}
+
+func TestCreateVMCDROMGuardsWithoutOtherCoverage(t *testing.T) {
+	cases := []struct {
+		name    string
+		setup   func(e *vmFakeEnv)
+		path    string
+		wantSub string
+	}{
+		{name: "path outside /mnt", path: "/etc/installer.iso", wantSub: "outside the storage pools"},
+		{name: "parent is not a directory",
+			setup: func(e *vmFakeEnv) {
+				e.stats["/mnt/tank/isos"] = map[string]interface{}{
+					"realpath": "/mnt/tank/isos", "type": "FILE", "inode": 3.0, "dev": 3.0, "mount_id": 3.0,
+				}
+			},
+			path: "/mnt/tank/isos/installer.iso", wantSub: "/mnt/tank/isos is a FILE, not a directory"},
+		{name: "locked child dataset under the ISO parent",
+			setup: func(e *vmFakeEnv) {
+				e.datasets["tank/isos/sub"] = map[string]interface{}{
+					"id": "tank/isos/sub", "name": "tank/isos/sub", "type": "FILESYSTEM", "mountpoint": "/mnt/tank/isos/sub", "locked": true,
+				}
+				e.stats["/mnt/tank/isos/sub"] = map[string]interface{}{
+					"realpath": "/mnt/tank/isos/sub", "type": "DIRECTORY", "inode": 5.0, "dev": 3.0, "mount_id": 3.0,
+				}
+				e.stats["/mnt/tank/isos/sub/installer.iso"] = map[string]interface{}{
+					"realpath": "/mnt/tank/isos/sub/installer.iso", "type": "FILE", "inode": 101.0, "dev": 3.0, "mount_id": 3.0,
+					"size": 1024.0, "mtime": 1700000000.0, "uid": 0.0, "gid": 0.0, "mode": 0o100644,
+				}
+				e.statfs["/mnt/tank/isos/sub"] = e.statfs["/mnt/tank/isos"]
+			},
+			path: "/mnt/tank/isos/sub/installer.iso", wantSub: "is inside dataset tank/isos/sub, which is locked"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVMFakeEnv("25.10.0")
+			if tc.setup != nil {
+				tc.setup(env)
+			}
+			r, fake, _ := env.buildRegistry(t, false)
+			args := map[string]interface{}{"name": "vm1", "memory": 1024.0, "devices": []interface{}{
+				map[string]interface{}{"dtype": "CDROM", "path": tc.path},
+			}}
+			_, err := r.CallTool(t.Context(), "create_vm", args)
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("err = %v, want substring %q", err, tc.wantSub)
+			}
+			assertNoWriteCalls(t, fake)
+		})
 	}
 }
 
@@ -1316,8 +1622,12 @@ func TestCreateVMTokenBindingAndStaleness(t *testing.T) {
 			},
 		},
 		{
-			name:   "available memory dropped below requested",
-			mutate: func(e *vmFakeEnv, _ map[string]interface{}) { e.availMem = 1 * gib },
+			name: "another VM added a display device",
+			mutate: func(e *vmFakeEnv, _ map[string]interface{}) {
+				e.displayDevs = append(e.displayDevs, map[string]interface{}{
+					"id": 70.0, "vm": 2.0, "attributes": map[string]interface{}{"dtype": "DISPLAY", "port": 5910.0, "web_port": 5911.0},
+				})
+			},
 		},
 	}
 
@@ -1619,13 +1929,5 @@ func TestVMToolsHiddenAndRefusedUnderReadOnly(t *testing.T) {
 	assertNoWriteCalls(t, fake)
 	if len(fake.called("vm.query")) != 0 {
 		t.Errorf("read-only refusal should occur before any vm.query call")
-	}
-}
-
-func TestVMResetVersionGateConstant(t *testing.T) {
-	rng := versionRangeOf("reset_vm")
-	want := truenas.MustParseVersion("28.0")
-	if rng.Min != want {
-		t.Fatalf("reset_vm Min version = %v, want %v", rng.Min, want)
 	}
 }

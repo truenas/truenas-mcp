@@ -129,9 +129,11 @@ var middlewareMethodContract = map[string]string{
 	"user.update":                     "25.10",
 	"vm.create":                       "25.10",
 	"vm.device.bind_choices":          "25.10",
+	"vm.delete":                       "25.10",
 	"vm.device.create":                "25.10",
 	"vm.device.disk_choices":          "25.10",
 	"vm.device.nic_attach_choices":    "25.10",
+	"vm.device.query":                 "25.10",
 	"vm.get_available_memory":         "25.10",
 	"vm.maximum_supported_vcpus":      "25.10",
 	"vm.poweroff":                     "25.10",
@@ -141,6 +143,7 @@ var middlewareMethodContract = map[string]string{
 	"vm.start":                        "25.10",
 	"vm.status":                       "25.10",
 	"vm.stop":                         "25.10",
+	"vm.update":                       "25.10",
 	"vm.virtualization_details":       "25.10",
 }
 
