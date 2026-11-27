@@ -54,13 +54,16 @@ const (
 	maxLocalSourcePath   = 4096
 )
 
+// errUploadTooLong is the cause of a transfer stopped at maxDuration.
+var errUploadTooLong = errors.New("the transfer ran over its time limit")
+
 var sha256Arg = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 
 func (r *Registry) registerUploadTools() {
 	r.tools["upload_file"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "upload_file",
-			Description: "Upload one file, such as an installer ISO, to a dataset on the TrueNAS system. The source is either source_url, an https URL that this MCP server downloads (sha256 required), or source_path, a file on the host running this MCP server (sha256 optional). A URL source is downloaded to a private temporary file on this host and its SHA-256 checked before anything is sent to TrueNAS; a mismatch uploads nothing. Only https is accepted, redirects are followed only to https, and when the URL's host is public, connections to private, loopback or link-local addresses are refused (redirects included); downloads do not use a proxy. The file is sent with TrueNAS's /_upload endpoint to filesystem.put, a job; the transfer runs in the background and is tracked with tasks_get (download, then upload, then the job). path is the absolute target file path in an existing directory of a mounted, unlocked, writable dataset below /mnt/<pool>; refused for files on a pool's root dataset, paths outside /mnt/<pool>, non-normalised paths, paths through a symlink, datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, including a dot-prefixed file name), and missing parent directories (none are created). An existing file is refused unless overwrite=true; it is then truncated and rewritten in place, and the confirmation is bound to its inode, size and modification time. The preview shows the source, its size when known, the SHA-256, the target, its dataset and the free space, and refuses when the free space is clearly too small. Files up to 64 GiB; a transfer that moves no data for 2 minutes, or runs over 12 hours, is stopped. The API key's user needs the FULL_ADMIN role. If an upload fails partway, the target is left partly written. Use dry_run to preview.",
+			Description: "Upload one file, such as an installer ISO, to a dataset on the TrueNAS system. The source is either source_url, an https URL that this MCP server downloads (sha256 required), or source_path, a file on the host running this MCP server (sha256 optional). source_path is off unless the operator lists allowed directories with --upload-source-dirs (TRUENAS_MCP_UPLOAD_SOURCE_DIRS); its real path must then be inside one of them, and hidden paths (any dot-prefixed component, such as .ssh), this server's key, certificate and configuration files, MCP client configurations and .key, .pem and .pin files are refused. A URL source is downloaded to a private temporary file on this host and its SHA-256 checked before anything is sent to TrueNAS; a mismatch uploads nothing. Only https is accepted, redirects are followed only to https, connections to loopback, link-local, shared, multicast and reserved addresses are always refused, and private LAN addresses are used only when the URL's host resolves only to them (redirects included); downloads do not use a proxy. The file is sent with TrueNAS's /_upload endpoint to filesystem.put, a job; the transfer runs in the background and is tracked with tasks_get (download, then upload, then the job). path is the absolute target file path in an existing directory of a mounted, unlocked, writable dataset below /mnt/<pool>; refused for files on a pool's root dataset, paths outside /mnt/<pool>, non-normalised paths, paths through a symlink, datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, including a dot-prefixed file name), and missing parent directories (none are created). An existing file is refused unless overwrite=true; it is then truncated and rewritten in place, and the confirmation is bound to its inode, size and modification time. The preview shows the source, its size when known, the SHA-256, the target, its dataset and the free space, and refuses when the free space is clearly too small. Files up to 64 GiB; a transfer that moves no data for 2 minutes, or runs over 12 hours, is stopped. The API key's user needs the FULL_ADMIN role. If an upload fails partway, the target is left partly written. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -69,7 +72,7 @@ func (r *Registry) registerUploadTools() {
 					"source_url": map[string]interface{}{"type": "string", "minLength": 1, "maxLength": maxSourceURLLength,
 						"description": "Optional: https URL of the file, downloaded by this MCP server (give source_url or source_path). Requires sha256"},
 					"source_path": map[string]interface{}{"type": "string", "minLength": 1, "maxLength": maxLocalSourcePath,
-						"description": "Optional: Absolute path of a regular file on the host running this MCP server (give source_url or source_path)"},
+						"description": "Optional: Absolute path of a regular file on the host running this MCP server (give source_url or source_path). Refused unless the operator allowed its directory with --upload-source-dirs"},
 					"sha256": map[string]interface{}{"type": "string", "maxLength": 64,
 						"description": "SHA-256 of the file as 64 hex characters. Required with source_url; optional with source_path. The file is checked against it before it is sent"},
 					"overwrite": map[string]interface{}{"type": "boolean", "default": false,
@@ -91,7 +94,9 @@ type uploadSource struct {
 	LocalPath string   // resolved path of a local file
 	Size      int64    // -1 when not known before the download
 	ModTime   time.Time
-	SHA256    string // lower case; "" when not given (local files only)
+	FileID    string      // device and inode of a local file ("" where not available)
+	info      os.FileInfo // stat of a local file, for os.SameFile with the opened file
+	SHA256    string      // lower case; "" when not given (local files only)
 }
 
 func (s uploadSource) display() string {
@@ -138,9 +143,24 @@ func (r *Registry) parseUploadSource(args map[string]interface{}) (uploadSource,
 	if !filepath.IsAbs(rawPath) {
 		return src, fmt.Errorf("source_path must be an absolute path on the host running this MCP server")
 	}
+	ls := r.localSourceConfig()
+	if len(ls.dirs) == 0 {
+		return src, errors.New(ls.refusal(""))
+	}
 	real, err := filepath.EvalSymlinks(rawPath)
 	if err != nil {
+		// Say nothing about files outside the allowed directories, not
+		// even whether they exist.
+		if why := ls.refusal(filepath.Clean(rawPath)); why != "" {
+			return src, errors.New(why)
+		}
 		return src, fmt.Errorf("source_path cannot be read: %w", localPathError(err))
+	}
+	if real, err = filepath.Abs(real); err != nil {
+		return src, fmt.Errorf("source_path cannot be read: %w", err)
+	}
+	if why := ls.refusal(real); why != "" {
+		return src, errors.New(why)
 	}
 	st, err := os.Stat(real)
 	if err != nil {
@@ -155,7 +175,16 @@ func (r *Registry) parseUploadSource(args map[string]interface{}) (uploadSource,
 		return src, fmt.Errorf("source_path %s is %s, over the %s limit", real, formatBytes(st.Size()), formatBytes(r.uploadCfg.maxBytes))
 	}
 	src.LocalPath, src.Size, src.ModTime = real, st.Size(), st.ModTime()
+	src.FileID, src.info = fileID(st), st
 	return src, nil
+}
+
+// sameLocalFile reports whether st, the stat of the opened source file, is
+// the file src was planned with: same file (device and inode), size and
+// modification time.
+func (s uploadSource) sameLocalFile(st os.FileInfo) bool {
+	return os.SameFile(s.info, st) && fileID(st) == s.FileID &&
+		st.Mode().IsRegular() && st.Size() == s.Size && st.ModTime().Equal(s.ModTime)
 }
 
 // localPathError is err without the os package's operation prefix.
@@ -171,7 +200,7 @@ func (s uploadSource) bind() map[string]interface{} {
 	if s.URL != nil {
 		return map[string]interface{}{"url": s.URL.String(), "sha256": s.SHA256}
 	}
-	return map[string]interface{}{"path": s.LocalPath, "size": s.Size, "mtime_ns": s.ModTime.UnixNano(), "sha256": s.SHA256}
+	return map[string]interface{}{"path": s.LocalPath, "size": s.Size, "mtime_ns": s.ModTime.UnixNano(), "file_id": s.FileID, "sha256": s.SHA256}
 }
 
 // uploadTargetRefusal is why the validated path p is not a target
@@ -539,13 +568,18 @@ func (r *Registry) runUploadTask(client *truenas.Client, args map[string]interfa
 			_ = mgr.FailLocal(taskID, "Internal error during the transfer; check the target file before using it")
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), r.uploadCfg.maxDuration)
+	limit := r.uploadCfg.maxDuration
+	ctx, cancel := context.WithTimeoutCause(context.Background(), limit, errUploadTooLong)
 	defer cancel()
 	res, err := r.runUpload(ctx, client, args, plan, func(msg string) {
 		_ = mgr.SetLocalMessage(taskID, msg)
 	})
 	if err != nil {
-		_ = mgr.FailLocal(taskID, err.Error())
+		msg := err.Error()
+		if errors.Is(context.Cause(ctx), errUploadTooLong) {
+			msg = fmt.Sprintf("The transfer was stopped because it ran over the %s limit: %s", limit, msg)
+		}
+		_ = mgr.FailLocal(taskID, msg)
 		return
 	}
 	target := plan.TargetName
@@ -599,10 +633,12 @@ func (r *Registry) runUpload(ctx context.Context, client *truenas.Client, args m
 			return res, fmt.Errorf("source_path cannot be read: %s; nothing was uploaded", boundedErr(localPathError(err)))
 		}
 		file = f
+		// The file is opened once: this descriptor is hashed and then
+		// uploaded, and it must be the very file the preview showed.
 		st, err := f.Stat()
-		if err != nil || st.Size() != src.Size || !st.ModTime().Equal(src.ModTime) {
+		if err != nil || !src.sameLocalFile(st) {
 			f.Close()
-			return res, fmt.Errorf("%s changed since the confirmation (size or modification time); nothing was uploaded", src.LocalPath)
+			return res, fmt.Errorf("%s changed since the confirmation (a different file, size or modification time); nothing was uploaded", src.LocalPath)
 		}
 		res.size = st.Size()
 		if src.SHA256 != "" {

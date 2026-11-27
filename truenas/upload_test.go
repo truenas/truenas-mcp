@@ -174,22 +174,29 @@ func TestUploadFileStatusErrors(t *testing.T) {
 	}
 }
 
+// TestUploadFileDoesNotFollowRedirects uses 302 and 303, which Go would
+// follow as a GET (resending the Authorization header on a same-host
+// redirect); a 307 is never followed for a streamed body anyway.
 func TestUploadFileDoesNotFollowRedirects(t *testing.T) {
-	var followed atomic.Bool
-	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		followed.Store(true)
-	}))
-	t.Cleanup(other.Close)
-	c, _, _ := uploadServer(t, func(w http.ResponseWriter, r *http.Request, s *uploadSeen) {
-		http.Redirect(w, r, other.URL+uploadPath, http.StatusTemporaryRedirect)
-	})
-	_, err := c.UploadFile(context.Background(), "filesystem.put", []interface{}{"/mnt/tank/a", map[string]interface{}{}},
-		"a", strings.NewReader("abc"), 3, UploadOptions{})
-	if err == nil {
-		t.Fatal("a redirect was accepted")
-	}
-	if followed.Load() {
-		t.Error("the redirect was followed, resending the API key")
+	for _, code := range []int{http.StatusFound, http.StatusSeeOther} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			var followed atomic.Bool
+			other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				followed.Store(true)
+			}))
+			t.Cleanup(other.Close)
+			c, _, _ := uploadServer(t, func(w http.ResponseWriter, r *http.Request, s *uploadSeen) {
+				http.Redirect(w, r, other.URL+uploadPath, code)
+			})
+			_, err := c.UploadFile(context.Background(), "filesystem.put", []interface{}{"/mnt/tank/a", map[string]interface{}{}},
+				"a", strings.NewReader("abc"), 3, UploadOptions{})
+			if err == nil {
+				t.Fatal("a redirect was accepted")
+			}
+			if followed.Load() {
+				t.Error("the redirect was followed, resending the API key")
+			}
+		})
 	}
 }
 

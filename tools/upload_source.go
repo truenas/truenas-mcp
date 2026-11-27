@@ -114,24 +114,69 @@ func displayURL(u *url.URL) string {
 
 // restrictedAddr reports whether a is not a public unicast address:
 // loopback, private (RFC 1918, fc00::/7), shared (100.64.0.0/10),
-// link-local, multicast or unspecified.
+// link-local, multicast, unspecified, or one of the reserved ranges in
+// reservedPrefixes.
 func restrictedAddr(a netip.Addr) bool {
 	a = a.Unmap()
-	return !a.IsValid() || a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() ||
+	if !a.IsValid() || a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() ||
 		a.IsLinkLocalMulticast() || a.IsInterfaceLocalMulticast() || a.IsMulticast() ||
-		a.IsUnspecified() || cgnatPrefix.Contains(a)
+		a.IsUnspecified() {
+		return true
+	}
+	for _, p := range reservedPrefixes {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
-var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+// reservedPrefixes are ranges that are not public unicast but that the
+// netip predicates above do not cover, including IPv6 prefixes that embed
+// an IPv4 address (so an internal IPv4 address cannot be reached through
+// a translator).
+var reservedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),      // "this network"
+	netip.MustParsePrefix("100.64.0.0/10"),  // shared address space (CGNAT)
+	netip.MustParsePrefix("192.0.0.0/24"),   // IETF protocol assignments
+	netip.MustParsePrefix("198.18.0.0/15"),  // benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),    // reserved, and broadcast
+	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64
+	netip.MustParsePrefix("64:ff9b:1::/48"), // local-use NAT64
+	netip.MustParsePrefix("2001::/32"),      // Teredo
+	netip.MustParsePrefix("2002::/16"),      // 6to4
+	netip.MustParsePrefix("::/96"),          // IPv4-compatible (deprecated)
+	netip.MustParsePrefix("100::/64"),       // discard-only
+}
 
-// sourceClient fetches one source URL. allowRestricted is set when the
-// URL's own host resolves only to restricted addresses (an internal
-// mirror): then redirects may go to such addresses too. Otherwise every
-// connection, including after a redirect, must go to a public address.
+// lanAddr reports whether a is in a private LAN range: RFC 1918
+// (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or IPv6 unique local
+// (fc00::/7). These are the only restricted addresses an internal mirror
+// may use; loopback, link-local (including 169.254.169.254, the cloud
+// metadata address), shared, unspecified, multicast and the other
+// reserved ranges are always refused.
+func lanAddr(a netip.Addr) bool {
+	return a.Unmap().IsPrivate()
+}
+
+// sourceAddrAllowed applies the address policy to one resolved address.
+func sourceAddrAllowed(a netip.Addr, allowLAN bool) bool {
+	if !restrictedAddr(a) {
+		return true
+	}
+	return allowLAN && lanAddr(a)
+}
+
+// sourceClient fetches one source URL. allowLAN is set when the URL's own
+// host resolves only to private LAN addresses (an internal mirror): then
+// that request and its redirects may connect to private LAN addresses too.
+// Otherwise every connection, including after a redirect, must go to a
+// public address. No source ever reaches loopback, link-local or the other
+// restricted ranges.
 type sourceClient struct {
-	cfg             uploadConfig
-	allowRestricted bool
-	http            *http.Client
+	cfg      uploadConfig
+	allowLAN bool
+	http     *http.Client
 }
 
 func (r *Registry) newSourceClient(ctx context.Context, u *url.URL) (*sourceClient, error) {
@@ -140,10 +185,10 @@ func (r *Registry) newSourceClient(ctx context.Context, u *url.URL) (*sourceClie
 	if err != nil {
 		return nil, err
 	}
-	sc.allowRestricted = true
+	sc.allowLAN = true
 	for _, a := range addrs {
-		if !restrictedAddr(a) {
-			sc.allowRestricted = false
+		if !lanAddr(a) {
+			sc.allowLAN = false
 		}
 	}
 	transport := &http.Transport{
@@ -215,8 +260,8 @@ func (sc *sourceClient) dialContext(ctx context.Context, network, addr string) (
 	}
 	var lastErr error
 	for _, a := range addrs {
-		if restrictedAddr(a) && !sc.allowRestricted {
-			lastErr = fmt.Errorf("%w: %s resolves to %s, a private, loopback or link-local address; the source URL's host is public, so connections to such addresses are refused", errSourcePolicy, host, a.Unmap())
+		if !sourceAddrAllowed(a, sc.allowLAN) {
+			lastErr = fmt.Errorf("%w: %s resolves to %s; %s", errSourcePolicy, host, a.Unmap(), refusedAddrReason(a, sc.allowLAN))
 			continue
 		}
 		conn, err := dial(ctx, network, net.JoinHostPort(a.Unmap().String(), port))
@@ -226,6 +271,14 @@ func (sc *sourceClient) dialContext(ctx context.Context, network, addr string) (
 		lastErr = err
 	}
 	return nil, lastErr
+}
+
+// refusedAddrReason explains why a refused address is not used.
+func refusedAddrReason(a netip.Addr, allowLAN bool) string {
+	if lanAddr(a) && !allowLAN {
+		return "a private address, and the source URL's host is not on the private network only, so connections to private addresses are refused"
+	}
+	return "a loopback, link-local, shared, multicast or reserved address, which a source never uses"
 }
 
 // sourceError words a failed request without quoting the URL (url.Error

@@ -454,7 +454,7 @@ func TestAnnotationsPresent(t *testing.T) {
 			continue
 		}
 		s := safetyOf(tool.Name)
-		if a.ReadOnlyHint != (s.Access == Read) || a.DestructiveHint != (s.Access == Destructive || s.Overwrites) || a.OpenWorldHint {
+		if a.ReadOnlyHint != (s.Access == Read) || a.DestructiveHint != (s.Access == Destructive || s.Overwrites) || a.OpenWorldHint != s.OpenWorld || a.OpenWorldHint != (tool.Name == "upload_file") {
 			t.Errorf("%s annotations %+v do not match %v", tool.Name, *a, s.Access)
 		}
 		props := tool.InputSchema["properties"].(map[string]interface{})

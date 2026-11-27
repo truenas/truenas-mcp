@@ -54,6 +54,9 @@ type Registry struct {
 	uploadCfg uploadConfig
 	uploadMu  sync.Mutex
 	uploads   map[string]bool
+	// localSources is where source_path may read (tools/upload_local.go),
+	// guarded by uploadMu; empty means local sources are off.
+	localSources localSources
 }
 
 type Tool struct {

@@ -128,6 +128,7 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 	})), nil)
 	fake.handle = uploadTargetAbsent(fake.handle)
 	r := NewRegistry(client, nil)
+	allowUploadTestSource(t, r)
 
 	badValues := []struct {
 		name string

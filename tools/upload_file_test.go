@@ -38,6 +38,23 @@ func uploadTestSourceFile() string {
 	return p
 }
 
+// allowUploadTestSource enables source_path on r for the directory of
+// uploadTestSourceFile, as an operator would with --upload-source-dirs.
+func allowUploadTestSource(t *testing.T, r *Registry) {
+	t.Helper()
+	if err := r.SetUploadSourceDirs([]string{filepath.Dir(uploadTestSourceFile())}, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// allowUploadSources enables source_path on r for dirs.
+func allowUploadSources(t *testing.T, r *Registry, dirs ...string) {
+	t.Helper()
+	if err := r.SetUploadSourceDirs(dirs, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // uploadTargetAbsent makes filesystem.stat of uploadTestTarget fail with
 // ENOENT, for fakes that answer every stat with the same directory.
 func uploadTargetAbsent(next func(string, json.RawMessage) (interface{}, map[string]interface{}, bool)) func(string, json.RawMessage) (interface{}, map[string]interface{}, bool) {
@@ -187,6 +204,10 @@ func (u *uploadFake) registry(t *testing.T, withTasks bool) (*Registry, *fakeMid
 	}
 	r := NewRegistry(client, mgr)
 	r.uploadCfg.tempDir = t.TempDir()
+	// Local sources are off by default; these tests read files from
+	// t.TempDir(), so they allow the temporary directory like an operator
+	// would. The tests of the setting itself turn it off again.
+	allowUploadSources(t, r, os.TempDir())
 	return r, fake, mgr
 }
 
@@ -569,16 +590,14 @@ func TestUploadFileRedirectRules(t *testing.T) {
 	}
 	for _, tc := range []struct{ url, want string }{
 		{"https://example.com/to-http", "only https is followed"},
-		{"https://example.com/to-internal", "10.0.0.5, a private, loopback or link-local address"},
+		{"https://example.com/to-internal", "10.0.0.5; a private address"},
 		{"https://example.com/to-metadata", "169.254.169.254"},
 		{"https://internal.example.com/isos/installer.iso", ""},
 		{"https://example.com/loop", "more than 5 redirects"},
 	} {
 		_, err := call(tc.url)
 		if tc.want == "" {
-			// The URL's own host is private, so it may be reached; the
-			// test listener answers under any name, but the certificate
-			// is not valid for this one, which is only a warning.
+			// The URL's own host is private, so it may be reached.
 			if err != nil {
 				t.Errorf("%s: %v", tc.url, err)
 			}
@@ -589,18 +608,102 @@ func TestUploadFileRedirectRules(t *testing.T) {
 		}
 	}
 
-	// A private source host may redirect to another private address,
-	// and to a public one.
-	loopback := "https://" + src.srv.Listener.Addr().String()
-	for _, p := range []string{"/to-internal", "/to-public"} {
-		r.uploadCfg.lookup = func(_ context.Context, host string) ([]netip.Addr, error) {
-			if host == "internal.example.com" {
-				return []netip.Addr{netip.MustParseAddr("10.0.0.5")}, nil
-			}
-			return []netip.Addr{netip.MustParseAddr("192.0.2.10")}, nil
+	if n := len(u.uploads()); n != 0 {
+		t.Errorf("uploaded %d time(s)", n)
+	}
+}
+
+// TestUploadFileInternalMirrorPolicy checks the internal-mirror exception:
+// a source host that resolves only to private LAN addresses (RFC 1918,
+// fc00::/7) may reach private LAN addresses, for that request and its
+// redirects, and nothing else that is restricted: never loopback,
+// link-local (the metadata address), shared, unspecified or reserved.
+func TestUploadFileInternalMirrorPolicy(t *testing.T) {
+	body := testISO()
+	sum := sha256Hex(body)
+	src := newSourceServer(t, body, func(mux *http.ServeMux) {
+		for path, to := range map[string]string{
+			"/to-lan":      "https://lan.example.com/isos/installer.iso",
+			"/to-ula":      "https://ula.example.com/isos/installer.iso",
+			"/to-public":   "https://example.com/isos/installer.iso",
+			"/to-loop":     "https://loop.example.com/isos/installer.iso",
+			"/to-metadata": "https://metadata.example.com/isos/installer.iso",
+			"/to-cgnat":    "https://cgnat.example.com/isos/installer.iso",
+			"/to-zero":     "https://zero.example.com/isos/installer.iso",
+			"/to-nat64":    "https://nat64.example.com/isos/installer.iso",
+		} {
+			mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, to, http.StatusFound)
+			})
 		}
-		if _, err := call(loopback + p); err != nil && strings.Contains(err.Error(), "refused by the source rules") {
-			t.Errorf("%s from a loopback source: %v", p, err)
+	})
+	u := newUploadFake()
+	r, _, _ := u.registry(t, false)
+	src.attach(r)
+	hosts := map[string][]string{
+		"example.com":          {"192.0.2.10"},
+		"internal.example.com": {"10.0.0.5"},
+		"lan.example.com":      {"192.168.1.20"},
+		"ula.example.com":      {"fd00::5"},
+		"loop.example.com":     {"127.0.0.1"},
+		"metadata.example.com": {"169.254.169.254"},
+		"cgnat.example.com":    {"100.64.0.1"},
+		"zero.example.com":     {"0.0.0.1"},
+		"nat64.example.com":    {"64:ff9b::a00:5"},
+		"mixed.example.com":    {"10.0.0.6", "127.0.0.1"},
+		"split.example.com":    {"10.0.0.7", "192.0.2.11"},
+	}
+	r.uploadCfg.lookup = func(_ context.Context, host string) ([]netip.Addr, error) {
+		var out []netip.Addr
+		for _, a := range hosts[host] {
+			out = append(out, netip.MustParseAddr(a))
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("no such host")
+		}
+		return out, nil
+	}
+	call := func(url string) (string, error) {
+		return r.CallTool(t.Context(), "upload_file", map[string]interface{}{"path": uploadTestTarget, "source_url": url, "sha256": sum, "dry_run": true})
+	}
+	for _, url := range []string{
+		"https://internal.example.com/isos/installer.iso",
+		"https://internal.example.com/to-lan",
+		"https://internal.example.com/to-ula",
+		"https://internal.example.com/to-public",
+		"https://ula.example.com/to-lan",
+	} {
+		out, err := call(url)
+		if err != nil {
+			t.Errorf("%s: %v", url, err)
+			continue
+		}
+		if strings.Contains(out, "could not be read") {
+			t.Errorf("%s: the size probe failed:\n%s", url, out)
+		}
+	}
+	for _, tc := range []struct{ url, want string }{
+		{"https://internal.example.com/to-loop", "127.0.0.1"},
+		{"https://internal.example.com/to-metadata", "169.254.169.254"},
+		{"https://internal.example.com/to-cgnat", "100.64.0.1"},
+		{"https://internal.example.com/to-zero", "0.0.0.1"},
+		{"https://internal.example.com/to-nat64", "64:ff9b::a00:5"},
+		{"https://loop.example.com/isos/installer.iso", "127.0.0.1"},
+		{"https://127.0.0.1/isos/installer.iso", "127.0.0.1"},
+		{"https://[::1]/isos/installer.iso", "::1"},
+		{"https://metadata.example.com/isos/installer.iso", "169.254.169.254"},
+		{"https://cgnat.example.com/isos/installer.iso", "100.64.0.1"},
+		// A host with a loopback address besides its private one is not
+		// an internal mirror: neither address is used.
+		{"https://mixed.example.com/isos/installer.iso", "refused by the source rules"},
+		// A host with a public address besides its private one is not
+		// an internal mirror either: its redirects stay public.
+		{"https://split.example.com/to-lan", "192.168.1.20"},
+		{"https://example.com/to-lan", "192.168.1.20"},
+	} {
+		_, err := call(tc.url)
+		if err == nil || !strings.Contains(err.Error(), "refused by the source rules") || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want a refusal naming %q", tc.url, err, tc.want)
 		}
 	}
 	if n := len(u.uploads()); n != 0 {
@@ -687,6 +790,16 @@ func TestUploadFileTargetRefusals(t *testing.T) {
 			})
 		}, want: "is a symlink"},
 		{name: "parent is a file", path: "/mnt/tank/shares/docs/report.txt/x.iso", want: "not a directory"},
+		{name: "dataset of another pool", path: "/mnt/tank/foreign/x.iso", setup: func(u *uploadFake) {
+			u.mutate(func() { u.datasets = append(u.datasets, fsDataset("other/data", "/mnt/tank/foreign")) })
+		}, want: `is on "other/data", not on a dataset of pool 'tank'`, blocked: true},
+		{name: "dataset row missing", path: "/mnt/tank/hidden/x.iso", setup: func(u *uploadFake) {
+			u.mutate(func() {
+				d := fsDataset("tank/hidden", "/mnt/tank/hidden")
+				d["query_hidden"] = true
+				u.datasets = append(u.datasets, d)
+			})
+		}, want: "dataset tank/hidden of /mnt/tank/hidden was not found", blocked: true},
 		{name: "not enough space", path: uploadTestTarget, setup: func(u *uploadFake) { u.avail = 1000 },
 			want: "has 1000 B available, which is not enough for 256.02 KiB", blocked: true},
 	} {
@@ -1195,9 +1308,47 @@ func TestRestrictedAddr(t *testing.T) {
 		"10.1.2.3": true, "172.16.0.1": true, "192.168.1.1": true, "127.0.0.1": true, "169.254.169.254": true,
 		"100.64.0.1": true, "0.0.0.0": true, "::1": true, "fe80::1": true, "fd00::1": true, "::ffff:10.0.0.1": true,
 		"224.0.0.1": true, "192.0.2.10": false, "198.51.100.7": false, "2001:db8::1": false,
+		"0.1.2.3": true, "198.18.0.1": true, "198.19.255.254": true, "240.0.0.1": true, "255.255.255.255": true,
+		"192.0.0.8": true, "64:ff9b::a00:1": true, "64:ff9b:1::a00:1": true, "2002:a00:1::1": true,
+		"2001:0:a00:1::1": true, "::a00:1": true, "100::1": true, "ff02::1": true, "::": true,
+		"203.0.113.9": false, "2606:4700::1": false,
 	} {
 		if got := restrictedAddr(netip.MustParseAddr(addr)); got != want {
 			t.Errorf("restrictedAddr(%s) = %v, want %v", addr, got, want)
+		}
+	}
+}
+
+// TestSourceAddrAllowed checks the internal-mirror exception: only RFC 1918
+// and fc00::/7 addresses are unlocked, never loopback, link-local,
+// shared, unspecified, multicast or reserved ones.
+func TestSourceAddrAllowed(t *testing.T) {
+	for addr, want := range map[string][2]bool{ // {public host, internal mirror}
+		"192.0.2.10":      {true, true},
+		"10.1.2.3":        {false, true},
+		"172.16.0.1":      {false, true},
+		"192.168.1.1":     {false, true},
+		"fd00::1":         {false, true},
+		"::ffff:10.0.0.1": {false, true},
+		"127.0.0.1":       {false, false},
+		"::1":             {false, false},
+		"169.254.169.254": {false, false},
+		"fe80::1":         {false, false},
+		"100.64.0.1":      {false, false},
+		"0.0.0.0":         {false, false},
+		"::":              {false, false},
+		"224.0.0.1":       {false, false},
+		"ff02::1":         {false, false},
+		"198.18.0.1":      {false, false},
+		"240.0.0.1":       {false, false},
+		"64:ff9b::a00:1":  {false, false},
+	} {
+		a := netip.MustParseAddr(addr)
+		if got := sourceAddrAllowed(a, false); got != want[0] {
+			t.Errorf("sourceAddrAllowed(%s, public host) = %v, want %v", addr, got, want[0])
+		}
+		if got := sourceAddrAllowed(a, true); got != want[1] {
+			t.Errorf("sourceAddrAllowed(%s, internal mirror) = %v, want %v", addr, got, want[1])
 		}
 	}
 }
