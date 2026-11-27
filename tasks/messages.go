@@ -21,6 +21,8 @@ var checkTools = map[string]string{
 	"apply_update":                "system_info and update_status",
 	"configure_directory_service": "get_directory_service_status",
 	"leave_directory_service":     "get_directory_service_status",
+	"stop_vm":                     "query_vms",
+	"restart_vm":                  "query_vms",
 }
 
 // expectedMethods is the job method each tool's start call creates. A job
@@ -40,6 +42,8 @@ var expectedMethods = map[string]string{
 	"configure_directory_service": "directoryservices.update",
 	"leave_directory_service":     "directoryservices.leave",
 	"upload_file":                 "filesystem.put",
+	"stop_vm":                     "vm.stop",
+	"restart_vm":                  "vm.restart",
 }
 
 // methodMatches reports whether a job with this method can be the one

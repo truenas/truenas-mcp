@@ -37,7 +37,7 @@ func issue156Registry(t *testing.T, appConfig map[string]interface{}, catalog ma
 	}
 	installed := []interface{}{plex, issue157InstalledApp(false)}
 	fake := &fakeMiddleware{
-		results: withFilesystemACLResults(withDiskActionResults(map[string]interface{}{
+		results: withVMActionResults(withFilesystemACLResults(withDiskActionResults(map[string]interface{}{
 			"catalog.get_app_details": catalog,
 			"pool.query": []interface{}{
 				map[string]interface{}{"id": 1.0, "name": "tank", "size": 1.0e12, "status": "ONLINE"},
@@ -61,7 +61,7 @@ func issue156Registry(t *testing.T, appConfig map[string]interface{}, catalog ma
 			"pool.snapshottask.query":  replicationTaskFixtures()["pool.snapshottask.query"],
 			"pool.snapshot.query":      replicationTaskFixtures()["pool.snapshot.query"],
 			"service.query":            registryServiceFixtures(),
-		})),
+		}))),
 		handle: func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
 			if method == "app.query" {
 				return filterAppQuery(params, installed), nil, true

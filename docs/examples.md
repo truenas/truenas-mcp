@@ -77,6 +77,11 @@ This document provides example natural language queries you can use with TrueNAS
 - "What's the memory allocation for my VMs?"
 - "Show me details for the homeassistant VM"
 - "Which VMs are stopped?"
+- "Create a UEFI VM named lab01 with 2 vCPUs, 4096 MiB RAM, a new 32 GiB VIRTIO zvol at tank/vms/lab01, the installer ISO at /mnt/tank/isos/installer.iso, a VIRTIO NIC on br0, and a local SPICE display (preview first)"
+- "Start the lab01 VM"
+- "Gracefully stop the lab01 VM and track the stop job"
+- "Forcibly power off the lab01 VM (preview first)"
+- "Restart the lab01 VM"
 
 ## Performance
 

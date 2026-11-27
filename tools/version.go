@@ -18,9 +18,9 @@ type VersionRange struct {
 
 // toolVersion is the per-tool min/max table used to hide and refuse tools
 // that the connected TrueNAS release cannot run. Every registered tool has
-// an entry. Currently all tools are available on 25.10 and later; entries
-// with a higher Min or a Max are how 27-only or 25.10-only methods are
-// gated when they appear.
+// an entry. Most tools are available on 25.10 and later; entries with a
+// higher Min or a Max gate newer or release-specific methods (for example
+// reset_vm requires TrueNAS 28.0+).
 var toolVersionMu sync.RWMutex
 var toolVersion = map[string]VersionRange{
 	// System
@@ -65,6 +65,12 @@ var toolVersion = map[string]VersionRange{
 	"query_snapshots":           {Min: truenas.MinSupported},
 	"query_shares":              {Min: truenas.MinSupported},
 	"query_vms":                 {Min: truenas.MinSupported},
+	"create_vm":                 {Min: truenas.MinSupported},
+	"start_vm":                  {Min: truenas.MinSupported},
+	"stop_vm":                   {Min: truenas.MinSupported},
+	"poweroff_vm":               {Min: truenas.MinSupported},
+	"restart_vm":                {Min: truenas.MinSupported},
+	"reset_vm":                  {Min: truenas.MustParseVersion("28.0")},
 	"create_dataset":            {Min: truenas.MinSupported},
 	"create_smb_share":          {Min: truenas.MinSupported},
 	"create_nfs_share":          {Min: truenas.MinSupported},
