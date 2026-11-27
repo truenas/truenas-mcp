@@ -1581,6 +1581,92 @@
     }
   },
   {
+    "name": "delete_vm",
+    "description": "DESTRUCTIVE: Delete a virtual machine via vm.delete. Refuses if the VM is not STOPPED unless force=true (which forcibly powers off a running VM and ignores cleanup errors). Backing zvols are kept by default; pass zvols=true to permanently and recursively destroy every attached /dev/zvol/ DISK volume (refused if any zvol is attached to another VM or fails managed-dataset guards; the preview lists every zvol with its size). Confirmation is bound to the VM row, live status, full device list, and zvol state. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without making changes (default: false)",
+          "type": "boolean"
+        },
+        "force": {
+          "description": "Allow deleting a VM that is not STOPPED (forcibly powers off a running VM without guest shutdown) and ignore domain or zvol cleanup errors. Default: false.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Optional: Numeric VM ID (provide id or name; if both are given they must refer to the same VM)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "description": "Optional: Exact VM name (provide id or name; if both are given they must refer to the same VM)",
+          "maxLength": 150,
+          "minLength": 1,
+          "type": "string"
+        },
+        "zvols": {
+          "description": "Also permanently and recursively destroy every attached /dev/zvol/ DISK volume (and its snapshots). Refused if any zvol is attached to another VM or fails managed-dataset guards. Default: false.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "delete_vm_device",
+    "description": "DESTRUCTIVE: Remove a device from a virtual machine via vm.device.delete. This is also how installer CDROMs are ejected in TrueNAS (removing the CDROM device leaves the ISO file on disk). Backing zvols and raw image files are kept by default; pass zvol=true (DISK only) or raw_file=true (RAW only) to permanently destroy them too. Refuses while the VM is RUNNING or SUSPENDED (TrueNAS rejects vm.device.delete on active VMs even with force=true; stop the VM first with stop_vm). Never destroys a zvol or raw file shared with another VM device. Confirmation is bound to the device row, VM status, and backing storage. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "device_id": {
+          "description": "ID of the VM device to remove (from query_vms).",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "dry_run": {
+          "description": "Preview the device deletion without executing (default: false).",
+          "type": "boolean"
+        },
+        "force": {
+          "description": "Ignore errors when destroying the backing zvol or raw file and still remove the device record (also allows deletion when VM state is ERROR). Does not bypass TrueNAS's refusal on RUNNING or SUSPENDED VMs. Default: false.",
+          "type": "boolean"
+        },
+        "raw_file": {
+          "description": "RAW devices only: also permanently delete the backing raw image file on disk. Refused if shared with another VM device or outside user datasets. Default: false.",
+          "type": "boolean"
+        },
+        "zvol": {
+          "description": "DISK devices only: also permanently destroy the backing ZFS volume (zvol) and its snapshots. Refused if shared with another VM device or outside user datasets. Default: false.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "device_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "dismiss_alert",
     "description": "Dismiss a system alert by UUID",
     "inputSchema": {
@@ -4244,6 +4330,54 @@
       },
       "required": [
         "username"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "update_vm_device",
+    "description": "DESTRUCTIVE: Modify an existing VM device via vm.device.update (for example changing boot order, swapping a CDROM ISO, or updating DISK, NIC, or DISPLAY settings). Device type (dtype) cannot be changed; to eject an installer CDROM completely, use delete_vm_device instead (which leaves the ISO file on disk). Refuses while the VM is not STOPPED unless force=true (which updates stored configuration only, taking effect after stop and start). Mirrors TrueNAS device validators in the preview. Confirmation is bound to the device row, VM status, and validated targets. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "allow_wildcard_display_bind": {
+          "description": "Required when setting a DISPLAY device bind address to 0.0.0.0 or ::. Default: false.",
+          "type": "boolean"
+        },
+        "attributes": {
+          "description": "Partial device attributes to update (merged into existing attributes; do not include dtype). Allowed keys depend on the device's dtype: DISK (path, type, iotype, logical_sectorsize, physical_sectorsize; serial is read-only), CDROM (path), NIC (type, nic_attach, mac, trust_guest_rx_filters), DISPLAY (type, bind, web, password, port, web_port, resolution, wait).",
+          "type": "object"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "device_id": {
+          "description": "ID of the VM device to update (from query_vms).",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "dry_run": {
+          "description": "Preview the device update without executing (default: false).",
+          "type": "boolean"
+        },
+        "force": {
+          "description": "Allow updating a device while the VM is not STOPPED. Updates stored configuration only; changes take effect after the VM is stopped and started. Default: false.",
+          "type": "boolean"
+        },
+        "order": {
+          "description": "New boot/attach order (lower numbers boot first). Colliding sibling device orders are shifted upward by TrueNAS.",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "device_id"
       ],
       "type": "object"
     },

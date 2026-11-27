@@ -394,6 +394,8 @@ func (r *Registry) registerVMActionTools() {
 		Plan:    planResetVM,
 		Execute: r.executeResetVM,
 	}
+
+	r.registerVMManageTools()
 }
 
 type plannedVMDevice struct {
@@ -812,12 +814,26 @@ func (e *vmCreateEnv) warn(format string, a ...interface{}) {
 	e.Warnings = append(e.Warnings, fmt.Sprintf(format, a...))
 }
 
-// vmPre27 reports whether the host runs a release before 27.0, or one whose
+// isVMPre27 reports whether the host runs a release before 27.0, or one whose
 // version could not be read. 25.10 device validators are stricter than
 // 27.0+/master ones, so an unknown version gets the stricter rules.
-func (e *vmCreateEnv) vmPre27() bool {
-	v := e.HostLimits.Version
+func isVMPre27(v truenas.Version) bool {
 	return v.IsZero() || v.Less(truenas.MustParseVersion("27.0"))
+}
+
+func (e *vmCreateEnv) vmPre27() bool {
+	return isVMPre27(e.HostLimits.Version)
+}
+
+func zvolPathToName(p string) (string, bool) {
+	if !strings.HasPrefix(p, "/dev/zvol/") {
+		return "", false
+	}
+	name := strings.ReplaceAll(strings.TrimPrefix(p, "/dev/zvol/"), "+", " ")
+	if name == "" {
+		return "", false
+	}
+	return name, true
 }
 
 // vmDisplayReservedPort is always treated as in use by the middleware
@@ -1259,6 +1275,10 @@ func vmCreatePreflight(ctx context.Context, client *truenas.Client, spec *vmCrea
 // (vm.all_used_display_device_ports): the ports and web ports of every
 // existing DISPLAY device, plus the always-reserved port 6000.
 func fetchVMDisplayPortsInUse(ctx context.Context, client *truenas.Client) (map[int]int, error) {
+	return fetchVMDisplayPortsInUseExcluding(ctx, client, 0)
+}
+
+func fetchVMDisplayPortsInUseExcluding(ctx context.Context, client *truenas.Client, excludeDeviceID int) (map[int]int, error) {
 	raw, err := client.Call(ctx, "vm.device.query",
 		[]interface{}{[]interface{}{"attributes.dtype", "=", "DISPLAY"}},
 	)
@@ -1271,6 +1291,11 @@ func fetchVMDisplayPortsInUse(ctx context.Context, client *truenas.Client) (map[
 	}
 	out := map[int]int{vmDisplayReservedPort: 0}
 	for _, row := range rows {
+		if excludeDeviceID > 0 {
+			if devID, ok := extractZFSInt64(row["id"]); ok && int(devID) == excludeDeviceID {
+				continue
+			}
+		}
 		attrs, _ := row["attributes"].(map[string]interface{})
 		if dtype, _ := attrs["dtype"].(string); dtype != "DISPLAY" {
 			continue
@@ -1285,19 +1310,23 @@ func fetchVMDisplayPortsInUse(ctx context.Context, client *truenas.Client) (map[
 	return out, nil
 }
 
-// bindPorts returns the in-use display ports in a stable order for the
+// bindDisplayPorts returns in-use display ports in a stable order for the
 // confirmation token.
-func (e *vmCreateEnv) bindPorts() []interface{} {
-	ports := make([]int, 0, len(e.DisplayPorts))
-	for p := range e.DisplayPorts {
+func bindDisplayPorts(inUse map[int]int) []interface{} {
+	ports := make([]int, 0, len(inUse))
+	for p := range inUse {
 		ports = append(ports, p)
 	}
 	sort.Ints(ports)
 	out := make([]interface{}, 0, len(ports))
 	for _, p := range ports {
-		out = append(out, map[string]interface{}{"port": p, "vm": e.DisplayPorts[p]})
+		out = append(out, map[string]interface{}{"port": p, "vm": inUse[p]})
 	}
 	return out
+}
+
+func (e *vmCreateEnv) bindPorts() []interface{} {
+	return bindDisplayPorts(e.DisplayPorts)
 }
 
 func (e *vmCreateEnv) planDevice(ctx context.Context, client *truenas.Client, spec *vmCreateSpec, i int, dm map[string]interface{}) (plannedVMDevice, error) {
@@ -1447,10 +1476,143 @@ func (e *vmCreateEnv) planDiskDevice(ctx context.Context, client *truenas.Client
 	return nil
 }
 
+type cdromPathCheck struct {
+	Dataset string
+	Size    int64
+	HasSize bool
+	Blocked []string
+	Bind    map[string]interface{}
+}
+
+func checkLibvirtStatAccess(st map[string]interface{}, needBit int64) (bool, int64) {
+	if acl, ok := st["acl"].(bool); ok && acl {
+		return true, 0
+	}
+	mode, ok := extractZFSInt64(st["mode"])
+	if !ok || mode <= 0 {
+		return true, 0
+	}
+	if mode&needBit != 0 {
+		return true, mode
+	}
+	user, _ := st["user"].(string)
+	if user == "libvirt-qemu" && mode&(needBit<<6) != 0 {
+		return true, mode
+	}
+	if mode&(needBit<<3) != 0 {
+		group, _ := st["group"].(string)
+		gid, hasGID := extractZFSInt64(st["gid"])
+		if group == "libvirt-qemu" || group == "kvm" || (group == "" && hasGID && gid != 0) {
+			return true, mode
+		}
+	}
+	return false, mode
+}
+
+// checkCDROMPath validates that a CDROM ISO path is a regular, non-symlink file
+// inside an unlocked, non-root, non-managed ZFS dataset. Shared by create_vm
+// and update_vm_device.
+func checkCDROMPath(ctx context.Context, client *truenas.Client, p, label string) (*cdromPathCheck, error) {
+	res := &cdromPathCheck{Bind: map[string]interface{}{}}
+	block := func(format string, a ...interface{}) {
+		res.Blocked = append(res.Blocked, fmt.Sprintf(label+": "+format, a...))
+	}
+
+	parent := path.Dir(p)
+	resolvedParent, parentSt, err := resolveACLPath(ctx, client, parent)
+	if err != nil {
+		return nil, fmt.Errorf("%s: parent directory %s cannot be read: %w", label, parent, err)
+	}
+	parentRealpath, _ := parentSt["realpath"].(string)
+	if resolvedParent != parent || (parentRealpath != "" && parentRealpath != parent) {
+		target := resolvedParent
+		if target == parent {
+			target = parentRealpath
+		}
+		block("parent directory %s goes through a symlink (resolves to %s)", parent, target)
+	} else if pt, _ := parentSt["type"].(string); pt != "DIRECTORY" {
+		block("%s is a %v, not a directory", parent, parentSt["type"])
+	} else if ok, mode := checkLibvirtStatAccess(parentSt, 0o001); !ok {
+		block("parent directory %s is not traversable by libvirt-qemu (mode %#o)", parent, mode&0o7777)
+	}
+
+	fileSt, err := statACLPath(ctx, client, p)
+	if err != nil {
+		if !isENOENT(err) {
+			return nil, fmt.Errorf("%s: cannot stat %s: %w", label, p, err)
+		}
+		block("ISO file %s does not exist", p)
+	} else {
+		ft, _ := fileSt["type"].(string)
+		switch {
+		case ft == "SYMLINK":
+			block("%s is a symlink; give the real path of a regular ISO file", p)
+		case ft != "FILE":
+			block("%s is a %v, not a regular file", p, fileSt["type"])
+		case fileSt["realpath"] != p:
+			block("%s resolves to %v; give the real path", p, fileSt["realpath"])
+		}
+		if ok, mode := checkLibvirtStatAccess(fileSt, 0o004); !ok {
+			block("ISO file %s is not readable by libvirt-qemu (mode %#o)", p, mode&0o7777)
+		}
+		if sz, ok := fileSt["size"].(float64); ok && sz >= 0 {
+			res.Size = int64(sz)
+			res.HasSize = true
+		}
+		res.Bind["file"] = map[string]interface{}{
+			"realpath": fileSt["realpath"], "type": fileSt["type"],
+			"inode": fileSt["inode"], "dev": fileSt["dev"], "mount_id": fileSt["mount_id"],
+			"size": fileSt["size"], "mtime": fileSt["mtime"],
+			"uid": fileSt["uid"], "gid": fileSt["gid"], "mode": fileSt["mode"],
+		}
+	}
+	res.Bind["parent"] = map[string]interface{}{
+		"realpath": parentSt["realpath"], "type": parentSt["type"],
+		"inode": parentSt["inode"], "dev": parentSt["dev"], "mount_id": parentSt["mount_id"],
+	}
+
+	fs, err := readACLPathFS(ctx, client, parent)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	pool, _, _ := strings.Cut(strings.TrimPrefix(p, "/mnt/"), "/")
+	dsPool, _, _ := strings.Cut(fs.Source, "/")
+	switch {
+	case fs.FSType != "zfs":
+		block("%s is not on a ZFS dataset (filesystem type %q)", parent, fs.FSType)
+	case fs.Source == "" || dsPool != pool:
+		block("%s is on %q, not on a dataset of pool '%s'", parent, fs.Source, pool)
+	case fs.Source == pool:
+		block("%s is on the root dataset of pool '%s'; put the ISO in a dataset below it", parent, pool)
+	}
+	if part, ok := managedDatasetPart(strings.ToLower(fs.Source)); ok {
+		block("%s is on dataset %s, inside '%s', which TrueNAS manages itself", parent, fs.Source, part)
+	}
+
+	ds, children, err := datasetAndChildren(ctx, client, fs.Source)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	switch {
+	case ds == nil:
+		block("dataset %s of %s was not found with pool.dataset.query", fs.Source, parent)
+	case ds["locked"] != false:
+		block("dataset %s is locked, or its lock state could not be read", fs.Source)
+	}
+	for _, c := range children {
+		if c.Locked != false && below(parent, c.Mountpoint) {
+			block("%s is inside dataset %s, which is locked or whose lock state could not be read", parent, c.Name)
+		}
+	}
+	res.Dataset = fs.Source
+	res.Bind["filesystem"] = fs.bind()
+	res.Bind["dataset"] = ds
+	return res, nil
+}
+
 func (e *vmCreateEnv) planCDROMDevice(ctx context.Context, client *truenas.Client, i int, dm map[string]interface{}, pd *plannedVMDevice) error {
 	cdPath, _ := dm["path"].(string)
 	p, _ := validateACLPath(cdPath)
-	parent := path.Dir(p)
 	attrs := map[string]interface{}{
 		"dtype": "CDROM",
 		"path":  p,
@@ -1461,93 +1623,23 @@ func (e *vmCreateEnv) planCDROMDevice(ctx context.Context, client *truenas.Clien
 	}
 	devBind := map[string]interface{}{"attributes": copyMapShallow(attrs)}
 
-	resolvedParent, parentSt, err := resolveACLPath(ctx, client, parent)
+	chk, err := checkCDROMPath(ctx, client, p, fmt.Sprintf("devices[%d] (CDROM)", i))
 	if err != nil {
-		return fmt.Errorf("devices[%d] (CDROM): parent directory %s cannot be read: %w", i, parent, err)
+		return err
 	}
-	parentRealpath, _ := parentSt["realpath"].(string)
-	if resolvedParent != parent || (parentRealpath != "" && parentRealpath != parent) {
-		target := resolvedParent
-		if target == parent {
-			target = parentRealpath
-		}
-		e.block("devices[%d] (CDROM): parent directory %s goes through a symlink (resolves to %s)", i, parent, target)
-	} else if pt, _ := parentSt["type"].(string); pt != "DIRECTORY" {
-		e.block("devices[%d] (CDROM): %s is a %v, not a directory", i, parent, parentSt["type"])
+	e.Blocked = append(e.Blocked, chk.Blocked...)
+	if chk.HasSize {
+		preview["size"] = chk.Size
+		preview["size_human"] = formatBytes(chk.Size)
 	}
-
-	fileSt, err := statACLPath(ctx, client, p)
-	if err != nil {
-		if !isENOENT(err) {
-			return fmt.Errorf("devices[%d] (CDROM): cannot stat %s: %w", i, p, err)
-		}
-		e.block("devices[%d] (CDROM): ISO file %s does not exist", i, p)
-	} else {
-		ft, _ := fileSt["type"].(string)
-		switch {
-		case ft == "SYMLINK":
-			e.block("devices[%d] (CDROM): %s is a symlink; give the real path of a regular ISO file", i, p)
-		case ft != "FILE":
-			e.block("devices[%d] (CDROM): %s is a %v, not a regular file", i, p, fileSt["type"])
-		case fileSt["realpath"] != p:
-			e.block("devices[%d] (CDROM): %s resolves to %v; give the real path", i, p, fileSt["realpath"])
-		}
-		if sz, ok := fileSt["size"].(float64); ok && sz >= 0 {
-			preview["size"] = int64(sz)
-			preview["size_human"] = formatBytes(int64(sz))
-		}
-		devBind["file"] = map[string]interface{}{
-			"realpath": fileSt["realpath"], "type": fileSt["type"],
-			"inode": fileSt["inode"], "dev": fileSt["dev"], "mount_id": fileSt["mount_id"],
-			"size": fileSt["size"], "mtime": fileSt["mtime"],
-			"uid": fileSt["uid"], "gid": fileSt["gid"], "mode": fileSt["mode"],
-		}
+	for k, v := range chk.Bind {
+		devBind[k] = v
 	}
-	devBind["parent"] = map[string]interface{}{
-		"realpath": parentSt["realpath"], "type": parentSt["type"],
-		"inode": parentSt["inode"], "dev": parentSt["dev"], "mount_id": parentSt["mount_id"],
-	}
-
-	fs, err := readACLPathFS(ctx, client, parent)
-	if err != nil {
-		return fmt.Errorf("devices[%d] (CDROM): %w", i, err)
-	}
-	pool, _, _ := strings.Cut(strings.TrimPrefix(p, "/mnt/"), "/")
-	dsPool, _, _ := strings.Cut(fs.Source, "/")
-	switch {
-	case fs.FSType != "zfs":
-		e.block("devices[%d] (CDROM): %s is not on a ZFS dataset (filesystem type %q)", i, parent, fs.FSType)
-	case fs.Source == "" || dsPool != pool:
-		e.block("devices[%d] (CDROM): %s is on %q, not on a dataset of pool '%s'", i, parent, fs.Source, pool)
-	case fs.Source == pool:
-		e.block("devices[%d] (CDROM): %s is on the root dataset of pool '%s'; put the ISO in a dataset below it", i, parent, pool)
-	}
-	if part, ok := managedDatasetPart(strings.ToLower(fs.Source)); ok {
-		e.block("devices[%d] (CDROM): %s is on dataset %s, inside '%s', which TrueNAS manages itself", i, parent, fs.Source, part)
-	}
-
-	ds, children, err := datasetAndChildren(ctx, client, fs.Source)
-	if err != nil {
-		return fmt.Errorf("devices[%d] (CDROM): %w", i, err)
-	}
-	switch {
-	case ds == nil:
-		e.block("devices[%d] (CDROM): dataset %s of %s was not found with pool.dataset.query", i, fs.Source, parent)
-	case ds["locked"] != false:
-		e.block("devices[%d] (CDROM): dataset %s is locked, or its lock state could not be read", i, fs.Source)
-	}
-	for _, c := range children {
-		if c.Locked != false && below(parent, c.Mountpoint) {
-			e.block("devices[%d] (CDROM): %s is inside dataset %s, which is locked or whose lock state could not be read", i, parent, c.Name)
-		}
-	}
-	preview["dataset"] = fs.Source
-	devBind["filesystem"] = fs.bind()
-	devBind["dataset"] = ds
+	preview["dataset"] = chk.Dataset
 	pd.Attributes = attrs
 	pd.Preview = preview
 	pd.Bind = devBind
-	pd.Summary = fmt.Sprintf("CDROM: %s (dataset %s)", p, fs.Source)
+	pd.Summary = fmt.Sprintf("CDROM: %s (dataset %s)", p, chk.Dataset)
 	return nil
 }
 
@@ -1628,7 +1720,7 @@ func (e *vmCreateEnv) planDisplayDevice(spec *vmCreateSpec, i int, dm map[string
 	if _, ok := e.BindChoices[bindAddr]; !ok {
 		e.block("devices[%d] (DISPLAY): bind address %q is not in vm.device.bind_choices", i, bindAddr)
 	}
-	if dispType == "VNC" && web && !e.HostLimits.Version.IsZero() && e.HostLimits.Version.Less(truenas.MustParseVersion("27.0")) {
+	if dispType == "VNC" && web && e.vmPre27() {
 		e.block("devices[%d] (DISPLAY): VNC does not support web=true on TrueNAS %s; set web=false or use type=SPICE", i, vmVersionLabel(e.HostLimits.Version))
 	}
 	if password == "" {
@@ -2050,35 +2142,22 @@ func (v *resolvedVM) currentState() map[string]interface{} {
 	return out
 }
 
-func lookupVMWithStatus(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*resolvedVM, error) {
+func parseVMSelector(args map[string]interface{}) (int, bool, string, bool, error) {
 	vmID, hasID, err := vmIntArg(args, "id", 0)
 	if err != nil || (hasID && vmID < 1) {
-		return nil, fmt.Errorf("id must be a positive integer")
+		return 0, false, "", false, fmt.Errorf("id must be a positive integer")
 	}
 	name, hasName := args["name"].(string)
 	if !hasID && (!hasName || name == "") {
-		return nil, fmt.Errorf("provide id or name to select a VM")
+		return 0, false, "", false, fmt.Errorf("provide id or name to select a VM")
 	}
 	if hasName && name != "" && hasLineBreak(name) {
-		return nil, fmt.Errorf("name must be a single line")
+		return 0, false, "", false, fmt.Errorf("name must be a single line")
 	}
+	return vmID, hasID, name, hasName, nil
+}
 
-	var filters []interface{}
-	if hasID {
-		filters = []interface{}{[]interface{}{"id", "=", vmID}}
-	} else {
-		filters = []interface{}{[]interface{}{"name", "=", name}}
-	}
-	raw, err := client.Call(ctx, "vm.query", filters, map[string]interface{}{"select": vmQuerySelect})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query VM: %w", err)
-	}
-	var rows []map[string]interface{}
-	if err := json.Unmarshal(raw, &rows); err != nil {
-		return nil, fmt.Errorf("failed to parse vm.query response: %w", err)
-	}
-
-	var matched map[string]interface{}
+func matchVMRow(rows []map[string]interface{}, vmID int, hasID bool, name string, hasName bool) (map[string]interface{}, error) {
 	for _, row := range rows {
 		idFloat, _ := row["id"].(float64)
 		rowName, _ := row["name"].(string)
@@ -2091,16 +2170,15 @@ func lookupVMWithStatus(ctx context.Context, client *truenas.Client, args map[st
 			}
 			continue
 		}
-		matched = row
-		break
+		return row, nil
 	}
-	if matched == nil {
-		if hasID {
-			return nil, fmt.Errorf("VM with id %d not found", vmID)
-		}
-		return nil, fmt.Errorf("VM %q not found", name)
+	if hasID {
+		return nil, fmt.Errorf("VM with id %d not found", vmID)
 	}
+	return nil, fmt.Errorf("VM %q not found", name)
+}
 
+func resolveVMRowWithStatus(ctx context.Context, client *truenas.Client, matched map[string]interface{}) (*resolvedVM, error) {
 	idFloat, ok := matched["id"].(float64)
 	if !ok || idFloat < 1 || math.Trunc(idFloat) != idFloat {
 		return nil, fmt.Errorf("vm.query returned a VM with an invalid id")
@@ -2135,6 +2213,33 @@ func lookupVMWithStatus(ctx context.Context, client *truenas.Client, args map[st
 		DomainState: statusObj["domain_state"],
 		Raw:         matched,
 	}, nil
+}
+
+func lookupVMWithStatus(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*resolvedVM, error) {
+	vmID, hasID, name, hasName, err := parseVMSelector(args)
+	if err != nil {
+		return nil, err
+	}
+
+	var filters []interface{}
+	if hasID {
+		filters = []interface{}{[]interface{}{"id", "=", vmID}}
+	} else {
+		filters = []interface{}{[]interface{}{"name", "=", name}}
+	}
+	raw, err := client.Call(ctx, "vm.query", filters, map[string]interface{}{"select": vmQuerySelect})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query VM: %w", err)
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("failed to parse vm.query response: %w", err)
+	}
+	matched, err := matchVMRow(rows, vmID, hasID, name, hasName)
+	if err != nil {
+		return nil, err
+	}
+	return resolveVMRowWithStatus(ctx, client, matched)
 }
 
 func planStartVM(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {

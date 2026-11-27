@@ -82,6 +82,11 @@ This document provides example natural language queries you can use with TrueNAS
 - "Gracefully stop the lab01 VM and track the stop job"
 - "Forcibly power off the lab01 VM (preview first)"
 - "Restart the lab01 VM"
+- "Change the boot order of device 10 on lab01 to 1001 so it boots from disk first (preview first)"
+- "Eject the installer CDROM (device 11) from the stopped lab01 VM without deleting the ISO file"
+- "Swap the CDROM ISO on device 11 to /mnt/tank/isos/rescue.iso (preview first)"
+- "Delete the stopped lab01 VM while keeping its backing zvols (preview first)"
+- "Delete the stopped lab01 VM and permanently destroy its attached zvols (preview first)"
 
 ## Performance
 

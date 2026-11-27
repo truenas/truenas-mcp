@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/truenas/truenas-mcp/tasks"
+	"github.com/truenas/truenas-mcp/truenas"
 )
 
 // withVMActionResults adds VM preflight and status fixtures to a fake
@@ -40,13 +41,20 @@ func withVMActionResults(results map[string]interface{}) map[string]interface{} 
 	results["vm.device.bind_choices"] = map[string]interface{}{
 		"127.0.0.1": "127.0.0.1", "0.0.0.0": "0.0.0.0", "192.0.2.10": "192.0.2.10",
 	}
+	stoppedDev := map[string]interface{}{
+		"id": 10.0, "vm": 1.0, "order": 1001.0,
+		"attributes": map[string]interface{}{
+			"dtype": "CDROM", "path": "/mnt/tank/isos/installer.iso",
+		},
+	}
+	results["vm.device.query"] = []interface{}{stoppedDev}
 	results["vm.query"] = []interface{}{
 		map[string]interface{}{
 			"id": 1.0, "name": "stoppedvm", "uuid": "11111111-1111-1111-1111-111111111111",
 			"vcpus": 1.0, "cores": 2.0, "threads": 1.0, "memory": 2048.0,
 			"bootloader": "UEFI", "autostart": false,
 			"status":  map[string]interface{}{"state": "STOPPED", "pid": nil, "domain_state": "SHUTOFF"},
-			"devices": []interface{}{},
+			"devices": []interface{}{stoppedDev},
 		},
 		map[string]interface{}{
 			"id": 2.0, "name": "runningvm", "uuid": "22222222-2222-2222-2222-222222222222",
@@ -61,31 +69,33 @@ func withVMActionResults(results map[string]interface{}) map[string]interface{} 
 }
 
 type vmFakeEnv struct {
-	version        string
-	cores          float64
-	physmem        float64
-	virtSupported  bool
-	virtErr        interface{}
-	maxVCPUs       float64
-	availMem       float64
-	availMemOC     float64
-	vms            []map[string]interface{}
-	statuses       map[int]map[string]interface{}
-	diskChoices    map[string]string
-	nicChoices     interface{}
-	bindChoices    map[string]string
-	datasets       map[string]map[string]interface{}
-	stats          map[string]map[string]interface{}
-	statfs         map[string]map[string]interface{}
-	failDeviceIdx  int // >=0 fails vm.device.create on this 0-based call
-	failUpdate     bool
-	failDelete     bool
-	displayDevs    []map[string]interface{} // vm.device.query DISPLAY rows
-	nextVMID       int
-	nextDevID      int
-	nextJobID      int
-	devCreateCount int
-	jobs           map[int]map[string]interface{}
+	version          string
+	cores            float64
+	physmem          float64
+	virtSupported    bool
+	virtErr          interface{}
+	maxVCPUs         float64
+	availMem         float64
+	availMemOC       float64
+	vms              []map[string]interface{}
+	statuses         map[int]map[string]interface{}
+	diskChoices      map[string]string
+	nicChoices       interface{}
+	bindChoices      map[string]string
+	datasets         map[string]map[string]interface{}
+	stats            map[string]map[string]interface{}
+	statfs           map[string]map[string]interface{}
+	failDeviceIdx    int // >=0 fails vm.device.create on this 0-based call
+	failUpdate       bool
+	failDelete       bool
+	failDeviceUpdate bool
+	failDeviceDelete bool
+	displayDevs      []map[string]interface{} // extra vm.device.query DISPLAY rows
+	nextVMID         int
+	nextDevID        int
+	nextJobID        int
+	devCreateCount   int
+	jobs             map[int]map[string]interface{}
 }
 
 func newVMFakeEnv(version string) *vmFakeEnv {
@@ -334,11 +344,110 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 			}
 			return created, nil, true
 		case "vm.device.query":
-			out := make([]interface{}, 0, len(e.displayDevs))
+			var p []interface{}
+			_ = json.Unmarshal(params, &p)
+			var filters []interface{}
+			if len(p) > 0 {
+				filters, _ = p[0].([]interface{})
+			}
+			seen := map[int]bool{}
+			out := []interface{}{}
+			addIfMatch := func(d map[string]interface{}) {
+				if id, ok := extractZFSInt64(d["id"]); ok && id > 0 {
+					if seen[int(id)] {
+						return
+					}
+					seen[int(id)] = true
+				}
+				if vmDeviceMatchesFilters(d, filters) {
+					out = append(out, d)
+				}
+			}
+			for _, vm := range e.vms {
+				devs, _ := vm["devices"].([]interface{})
+				for _, item := range devs {
+					if dm, ok := item.(map[string]interface{}); ok {
+						addIfMatch(dm)
+					}
+				}
+			}
 			for _, d := range e.displayDevs {
-				out = append(out, d)
+				addIfMatch(d)
 			}
 			return out, nil, true
+		case "vm.device.update":
+			if e.failDeviceUpdate {
+				return nil, map[string]interface{}{"code": -32000, "message": "simulated device update error"}, true
+			}
+			var p []interface{}
+			_ = json.Unmarshal(params, &p)
+			if len(p) < 2 {
+				return nil, map[string]interface{}{"code": -32000, "message": "missing params"}, true
+			}
+			devID := int(p[0].(float64))
+			upd, _ := p[1].(map[string]interface{})
+			for _, vm := range e.vms {
+				devs, _ := vm["devices"].([]interface{})
+				for _, item := range devs {
+					dm, ok := item.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if id, ok := extractZFSInt64(dm["id"]); ok && int(id) == devID {
+						if ord, ok := upd["order"]; ok {
+							dm["order"] = ord
+						}
+						if newAttrs, ok := upd["attributes"].(map[string]interface{}); ok {
+							curAttrs, _ := dm["attributes"].(map[string]interface{})
+							if curAttrs == nil {
+								curAttrs = map[string]interface{}{}
+								dm["attributes"] = curAttrs
+							}
+							for k, v := range newAttrs {
+								curAttrs[k] = v
+							}
+						}
+						return copyMapShallow(dm), nil, true
+					}
+				}
+			}
+			return nil, map[string]interface{}{"code": -32000, "message": fmt.Sprintf("device %d not found", devID)}, true
+		case "vm.device.delete":
+			if e.failDeviceDelete {
+				return nil, map[string]interface{}{"code": -32000, "message": "simulated device delete error"}, true
+			}
+			var p []interface{}
+			_ = json.Unmarshal(params, &p)
+			if len(p) < 1 {
+				return nil, map[string]interface{}{"code": -32000, "message": "missing device id"}, true
+			}
+			devID := int(p[0].(float64))
+			var opts map[string]interface{}
+			if len(p) > 1 {
+				opts, _ = p[1].(map[string]interface{})
+			}
+			for _, vm := range e.vms {
+				devs, _ := vm["devices"].([]interface{})
+				for i, item := range devs {
+					dm, ok := item.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if id, ok := extractZFSInt64(dm["id"]); ok && int(id) == devID {
+						if delZvol, _ := opts["zvol"].(bool); delZvol {
+							attrs, _ := dm["attributes"].(map[string]interface{})
+							if pathStr, _ := attrs["path"].(string); pathStr != "" {
+								if zn, ok := zvolPathToName(pathStr); ok {
+									delete(e.datasets, zn)
+								}
+							}
+						}
+						vm["devices"] = append(devs[:i], devs[i+1:]...)
+						return true, nil, true
+					}
+				}
+			}
+			return nil, map[string]interface{}{"code": -32000, "message": fmt.Sprintf("device %d not found", devID)}, true
 		case "vm.update":
 			if e.failUpdate {
 				return nil, map[string]interface{}{"code": -32000, "message": "simulated update error"}, true
@@ -347,6 +456,41 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 		case "vm.delete":
 			if e.failDelete {
 				return nil, map[string]interface{}{"code": -32000, "message": "simulated delete error"}, true
+			}
+			var p []interface{}
+			_ = json.Unmarshal(params, &p)
+			if len(p) > 0 {
+				if vmID, ok := p[0].(float64); ok {
+					var opts map[string]interface{}
+					if len(p) > 1 {
+						opts, _ = p[1].(map[string]interface{})
+					}
+					delZvols, _ := opts["zvols"].(bool)
+					for i, vm := range e.vms {
+						if id, ok := extractZFSInt64(vm["id"]); ok && int(id) == int(vmID) {
+							if delZvols {
+								devs, _ := vm["devices"].([]interface{})
+								for _, item := range devs {
+									dm, _ := item.(map[string]interface{})
+									attrs, _ := dm["attributes"].(map[string]interface{})
+									if dtype, _ := attrs["dtype"].(string); dtype == "DISK" {
+										if pathStr, _ := attrs["path"].(string); pathStr != "" {
+											if zn, ok := zvolPathToName(pathStr); ok {
+												delete(e.datasets, zn)
+											}
+										}
+									}
+								}
+							}
+							e.vms = append(e.vms[:i], e.vms[i+1:]...)
+							delete(e.statuses, int(vmID))
+							break
+						}
+					}
+				}
+			}
+			if v, err := truenas.ParseVersion(e.version); err == nil && !v.Less(truenas.MustParseVersion("28.0")) {
+				return nil, nil, true
 			}
 			return true, nil, true
 		case "vm.start", "vm.poweroff", "vm.reset":
@@ -372,8 +516,10 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 		}
 	}
 	client, _ := newFakeClientFrom(t, fake)
-	if err := client.RequireSupportedVersion(context.Background()); err != nil {
-		t.Fatalf("RequireSupportedVersion(%s): %v", e.version, err)
+	if e.version != "" {
+		if err := client.RequireSupportedVersion(context.Background()); err != nil {
+			t.Fatalf("RequireSupportedVersion(%s): %v", e.version, err)
+		}
 	}
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: 50 * time.Millisecond, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)
@@ -382,6 +528,32 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 		r.SetPolicy(Policy{ReadOnly: true})
 	}
 	return r, fake, mgr
+}
+
+func vmDeviceMatchesFilters(dev map[string]interface{}, filters []interface{}) bool {
+	for _, f := range filters {
+		cond, ok := f.([]interface{})
+		if !ok || len(cond) != 3 {
+			continue
+		}
+		field, _ := cond[0].(string)
+		op, _ := cond[1].(string)
+		val := cond[2]
+		if op != "=" {
+			continue
+		}
+		var actual interface{}
+		if strings.HasPrefix(field, "attributes.") {
+			attrs, _ := dev["attributes"].(map[string]interface{})
+			actual = attrs[strings.TrimPrefix(field, "attributes.")]
+		} else {
+			actual = dev[field]
+		}
+		if fmt.Sprintf("%v", actual) != fmt.Sprintf("%v", val) {
+			return false
+		}
+	}
+	return true
 }
 
 func vmMatchesFilters(vm map[string]interface{}, filters []interface{}) bool {

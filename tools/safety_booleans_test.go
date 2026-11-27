@@ -88,6 +88,9 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 		"poweroff_vm":              {"id": 2.0},
 		"restart_vm":               {"id": 2.0},
 		"reset_vm":                 {"id": 2.0},
+		"update_vm_device":         {"device_id": 10.0, "order": 1005.0},
+		"delete_vm_device":         {"device_id": 10.0},
+		"delete_vm":                {"id": 1.0},
 	}
 	args := map[string]interface{}{}
 	for k, v := range valid[name] {
