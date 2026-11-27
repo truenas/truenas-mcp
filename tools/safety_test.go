@@ -253,6 +253,7 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"update_nfs_share": Destructive, "delete_nfs_share": Destructive,
 		"set_share_acl": Destructive, "set_filesystem_acl": Destructive,
 		"offline_disk": Destructive, "online_disk": Destructive, "replace_disk": Destructive,
+		"upload_file": Destructive,
 	}
 	for name, s := range toolSafety {
 		if got, exp := s.Access, want[name]; exp != 0 && got != exp || exp == 0 && got != Read {
@@ -265,8 +266,8 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 			destructive++
 		}
 	}
-	if destructive != 33 {
-		t.Errorf("%d destructive tools, want 33; update docs/safety.md and docs/full-features.md too", destructive)
+	if destructive != 34 {
+		t.Errorf("%d destructive tools, want 34; update docs/safety.md and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
 		if s.Overwrites {

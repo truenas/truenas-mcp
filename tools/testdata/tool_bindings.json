@@ -453,5 +453,11 @@
     "handler": "(*Registry).handleUpgradeAppWithDryRun",
     "plan": "planUpgradeApp",
     "execute": "(*Registry).executeUpgradeApp"
+  },
+  {
+    "name": "upload_file",
+    "handler": "(*Registry).handleUploadFile",
+    "plan": "(*Registry).planUploadFile",
+    "execute": "(*Registry).executeUploadFile"
   }
 ]

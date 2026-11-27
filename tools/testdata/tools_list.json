@@ -3838,5 +3838,60 @@
       "idempotentHint": false,
       "openWorldHint": false
     }
+  },
+  {
+    "name": "upload_file",
+    "description": "Upload one file, such as an installer ISO, to a dataset on the TrueNAS system. The source is either source_url, an https URL that this MCP server downloads (sha256 required), or source_path, a file on the host running this MCP server (sha256 optional). A URL source is downloaded to a private temporary file on this host and its SHA-256 checked before anything is sent to TrueNAS; a mismatch uploads nothing. Only https is accepted, redirects are followed only to https, and when the URL's host is public, connections to private, loopback or link-local addresses are refused (redirects included); downloads do not use a proxy. The file is sent with TrueNAS's /_upload endpoint to filesystem.put, a job; the transfer runs in the background and is tracked with tasks_get (download, then upload, then the job). path is the absolute target file path in an existing directory of a mounted, unlocked, writable dataset below /mnt/\u003cpool\u003e; refused for files on a pool's root dataset, paths outside /mnt/\u003cpool\u003e, non-normalised paths, paths through a symlink, datasets TrueNAS manages itself (the boot pool, .system, ix-apps, ix-applications, .ix-virt or any dot-prefixed component, including a dot-prefixed file name), and missing parent directories (none are created). An existing file is refused unless overwrite=true; it is then truncated and rewritten in place, and the confirmation is bound to its inode, size and modification time. The preview shows the source, its size when known, the SHA-256, the target, its dataset and the free space, and refuses when the free space is clearly too small. Files up to 64 GiB; a transfer that moves no data for 2 minutes, or runs over 12 hours, is stopped. The API key's user needs the FULL_ADMIN role. If an upload fails partway, the target is left partly written. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without uploading (default: false)",
+          "type": "boolean"
+        },
+        "overwrite": {
+          "default": false,
+          "description": "Optional: Replace an existing file at path (default: false). The confirmation is bound to that file's inode, size and modification time",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Required: Absolute target file path below /mnt/\u003cpool\u003e in an existing directory of a dataset, e.g. /mnt/tank/isos/TrueNAS-SCALE.iso (not on the pool's root dataset; normalised, no symlinks)",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 of the file as 64 hex characters. Required with source_url; optional with source_path. The file is checked against it before it is sent",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "source_path": {
+          "description": "Optional: Absolute path of a regular file on the host running this MCP server (give source_url or source_path)",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_url": {
+          "description": "Optional: https URL of the file, downloaded by this MCP server (give source_url or source_path). Requires sha256",
+          "maxLength": 2048,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   }
 ]

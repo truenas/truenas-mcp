@@ -61,6 +61,7 @@ var middlewareMethodContract = map[string]string{
 	"directoryservices.update":        "25.10",
 	"filesystem.getacl":               "25.10",
 	"filesystem.listdir":              "25.10",
+	"filesystem.put":                  "25.10",
 	"filesystem.setacl":               "25.10",
 	"filesystem.stat":                 "25.10",
 	"filesystem.statfs":               "25.10",

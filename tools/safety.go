@@ -128,6 +128,10 @@ var toolSafety = map[string]Safety{
 	"set_filesystem_acl":        {Access: Destructive},
 	"analyze_capacity":          {Access: Read},
 	"get_pool_capacity_details": {Access: Read},
+	// Uploading a file writes data onto a dataset, and with overwrite
+	// replaces an existing file in place; it executes only after
+	// confirmation bound to the source and the target's current state.
+	"upload_file": {Access: Destructive},
 
 	// Accounts. The write tools are destructive so that they execute only
 	// after confirmation, bound to the account's current settings: a new

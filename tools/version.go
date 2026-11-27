@@ -76,6 +76,7 @@ var toolVersion = map[string]VersionRange{
 	"get_share_acl":             {Min: truenas.MinSupported},
 	"get_filesystem_acl":        {Min: truenas.MinSupported},
 	"set_filesystem_acl":        {Min: truenas.MinSupported},
+	"upload_file":               {Min: truenas.MinSupported},
 	"analyze_capacity":          {Min: truenas.MinSupported},
 	"get_pool_capacity_details": {Min: truenas.MinSupported},
 	// Accounts

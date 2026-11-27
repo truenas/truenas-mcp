@@ -514,6 +514,7 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 			return nil, nil, false
 		}
 	}
+	fake.handle = uploadTargetAbsent(fake.handle)
 	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)

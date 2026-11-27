@@ -134,10 +134,11 @@ type aclPathFS struct {
 	Source, FSType, Dest, FSID string
 	Flags                      []string
 	Objects                    int64 // objects in use, -1 when unknown
+	Avail                      int64 // bytes available to unprivileged users, -1 when unknown
 }
 
 func readACLPathFS(ctx context.Context, client *truenas.Client, p string) (aclPathFS, error) {
-	fs := aclPathFS{Objects: -1}
+	fs := aclPathFS{Objects: -1, Avail: -1}
 	raw, err := client.Call(ctx, "filesystem.statfs", p)
 	if err != nil {
 		return fs, fmt.Errorf("failed to read the filesystem of %s (filesystem.statfs): %w", p, err)
@@ -156,6 +157,9 @@ func readACLPathFS(ctx context.Context, client *truenas.Client, p string) (aclPa
 	free, ok2 := st["free_files"].(float64)
 	if ok1 && ok2 && files >= free {
 		fs.Objects = int64(files - free)
+	}
+	if avail, ok := st["avail_bytes"].(float64); ok && avail >= 0 {
+		fs.Avail = int64(avail)
 	}
 	return fs, nil
 }

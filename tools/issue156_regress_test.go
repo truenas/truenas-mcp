@@ -99,6 +99,7 @@ func issue156Registry(t *testing.T, appConfig map[string]interface{}, catalog ma
 			return []interface{}{}, nil, true
 		},
 	}
+	fake.handle = uploadTargetAbsent(fake.handle)
 	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)

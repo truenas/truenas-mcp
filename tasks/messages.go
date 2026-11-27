@@ -39,6 +39,7 @@ var expectedMethods = map[string]string{
 	"apply_update":                "update.run",
 	"configure_directory_service": "directoryservices.update",
 	"leave_directory_service":     "directoryservices.leave",
+	"upload_file":                 "filesystem.put",
 }
 
 // methodMatches reports whether a job with this method can be the one

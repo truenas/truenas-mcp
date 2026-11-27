@@ -87,6 +87,10 @@ func toolArgsForSafetyFlagTest(name string) map[string]interface{} {
 	for k, v := range valid[name] {
 		args[k] = v
 	}
+	if name == "upload_file" {
+		args["path"] = uploadTestTarget
+		args["source_path"] = uploadTestSourceFile()
+	}
 	return args
 }
 
@@ -122,6 +126,7 @@ func TestNonBooleanDryRunAndConfirmRejected(t *testing.T) {
 		"pool.snapshot.query":      replicationTaskFixtures()["pool.snapshot.query"],
 		"service.query":            registryServiceFixtures(),
 	})), nil)
+	fake.handle = uploadTargetAbsent(fake.handle)
 	r := NewRegistry(client, nil)
 
 	badValues := []struct {
