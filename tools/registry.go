@@ -47,6 +47,16 @@ type Registry struct {
 	// netWriteMu serializes update_network_interface from its pending
 	// check through the commit.
 	netWriteMu sync.Mutex
+
+	// uploadCfg holds upload_file's limits (tools/upload_source.go);
+	// uploads are the target paths of the uploads running, guarded by
+	// uploadMu.
+	uploadCfg uploadConfig
+	uploadMu  sync.Mutex
+	uploads   map[string]bool
+	// localSources is where source_path may read (tools/upload_local.go),
+	// guarded by uploadMu; empty means local sources are off.
+	localSources localSources
 }
 
 type Tool struct {
@@ -70,6 +80,8 @@ func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
 		tools:          make(map[string]Tool),
 		confirmTokens:  newConfirmationTokens(),
 		oneTimeSecrets: newOneTimeSecrets(),
+		uploadCfg:      defaultUploadConfig(),
+		uploads:        map[string]bool{},
 	}
 	r.registerTools()
 	r.applySafety()
@@ -117,6 +129,7 @@ func (r *Registry) registerTools() {
 
 	r.registerACLTools()
 	r.registerFilesystemACLActionTools()
+	r.registerUploadTools()
 
 	r.registerAlertTools()
 

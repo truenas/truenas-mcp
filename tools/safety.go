@@ -54,6 +54,9 @@ type Safety struct {
 	// Destructive tools always advertise destructiveHint. No tool uses it
 	// now: update_app, the only one that did, is destructive.
 	Overwrites bool
+	// OpenWorld marks a tool that reaches outside the TrueNAS system
+	// (upload_file downloads arbitrary URLs); it advertises openWorldHint.
+	OpenWorld bool
 }
 
 // toolSafety classifies every registered tool. A tool missing from this
@@ -128,6 +131,10 @@ var toolSafety = map[string]Safety{
 	"set_filesystem_acl":        {Access: Destructive},
 	"analyze_capacity":          {Access: Read},
 	"get_pool_capacity_details": {Access: Read},
+	// Uploading a file writes data onto a dataset, and with overwrite
+	// replaces an existing file in place; it executes only after
+	// confirmation bound to the source and the target's current state.
+	"upload_file": {Access: Destructive, OpenWorld: true},
 
 	// Accounts. The write tools are destructive so that they execute only
 	// after confirmation, bound to the account's current settings: a new
@@ -376,7 +383,7 @@ func (r *Registry) applySafety() {
 			ReadOnlyHint:    s.Access == Read,
 			DestructiveHint: s.Access == Destructive || s.Overwrites,
 			IdempotentHint:  s.Access == Read || s.Idempotent,
-			OpenWorldHint:   false,
+			OpenWorldHint:   s.OpenWorld,
 		}
 		if s.Access == Destructive {
 			props, _ := tool.Definition.InputSchema["properties"].(map[string]interface{})

@@ -45,6 +45,7 @@ Binaries report their version with `--version`. `make` takes the version from `g
 - `--allow-tools` - Comma-separated list of the only tools to expose (or use `TRUENAS_MCP_ALLOW_TOOLS`)
 - `--deny-tools` - Comma-separated list of tools to hide and refuse (or use `TRUENAS_MCP_DENY_TOOLS`)
 - `--require-human-confirm` - Refuse destructive tools on clients that do not support MCP elicitation, instead of falling back to a confirmation token (or set `TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM=1`); see [Safety controls](safety.md#safety-controls)
+- `--upload-source-dirs` - Directories on this host that `upload_file` may read `source_path` files from, separated by `:` (`;` on Windows) (or use `TRUENAS_MCP_UPLOAD_SOURCE_DIRS`). Unset by default, which disables `source_path`: only `source_url` works. Each directory must be an absolute path of an existing directory that is not a filesystem root and has no dot-prefixed (hidden) component; the server exits at startup otherwise. Even below these directories, hidden paths (such as `.ssh`, `.aws` or `.config`), this server's own API key file, CA file and setup configuration directory, MCP client configuration files and `.key`, `.pem` and `.pin` files are refused; see [Local sources](safety.md#upload_file-local-sources)
 - `--version` - Print version and exit
 
 Examples:

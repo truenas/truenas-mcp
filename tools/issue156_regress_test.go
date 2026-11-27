@@ -99,10 +99,13 @@ func issue156Registry(t *testing.T, appConfig map[string]interface{}, catalog ma
 			return []interface{}{}, nil, true
 		},
 	}
+	fake.handle = uploadTargetAbsent(fake.handle)
 	client, _ := newFakeClientFrom(t, fake)
 	mgr := tasks.NewManager(client, tasks.PollerConfig{PollInterval: time.Second, CleanupInterval: time.Minute})
 	t.Cleanup(mgr.Shutdown)
-	return NewRegistry(client, mgr), fake
+	r := NewRegistry(client, mgr)
+	allowUploadTestSource(t, r)
+	return r, fake
 }
 
 func issue156Elicit(t *testing.T, r *Registry, name string, args map[string]interface{}) string {

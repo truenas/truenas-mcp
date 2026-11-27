@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	runtimedebug "runtime/debug"
 	"strings"
 	"time"
@@ -36,11 +37,12 @@ var (
 	requireHumanConfirm = flag.Bool("require-human-confirm", false, "Refuse destructive tools on clients that do not support MCP elicitation, instead of falling back to a confirmation token (env TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM)")
 )
 
-// --allow-tools and --deny-tools are read through flag.Visit in main (a passed
+// --allow-tools, --deny-tools and --upload-source-dirs are read through flag.Visit in main (a passed
 // flag wins over its environment variable), so they need no variable here.
 func init() {
 	flag.String("allow-tools", "", "Comma-separated list of the only tools to expose (env TRUENAS_MCP_ALLOW_TOOLS)")
 	flag.String("deny-tools", "", "Comma-separated list of tools to hide and refuse (env TRUENAS_MCP_DENY_TOOLS)")
+	flag.String("upload-source-dirs", "", "Directories on this host that upload_file may read source_path files from, separated by "+string(os.PathListSeparator)+"; unset (the default) disables source_path (env TRUENAS_MCP_UPLOAD_SOURCE_DIRS)")
 }
 
 // Version is the release version reported by --version and in the MCP
@@ -123,6 +125,40 @@ func safetyPolicy(readOnly, requireHumanConfirm bool, setFlags map[string]string
 		return p, fmt.Errorf("--allow-tools / TRUENAS_MCP_ALLOW_TOOLS is set but names no tools; unset it to expose all tools")
 	}
 	return p, nil
+}
+
+// uploadSourceDirs is the list of directories upload_file may read
+// source_path files from: --upload-source-dirs, or else
+// TRUENAS_MCP_UPLOAD_SOURCE_DIRS, split on the OS path list separator.
+// Empty means source_path is disabled.
+func uploadSourceDirs(setFlags map[string]string, lookupEnv func(string) (string, bool)) []string {
+	v, ok := setFlags["upload-source-dirs"]
+	if !ok {
+		v, _ = lookupEnv("TRUENAS_MCP_UPLOAD_SOURCE_DIRS")
+	}
+	var dirs []string
+	for _, d := range filepath.SplitList(v) {
+		if d = strings.TrimSpace(d); d != "" {
+			dirs = append(dirs, d)
+		}
+	}
+	return dirs
+}
+
+// protectedSourcePaths are this server's own secrets and configuration,
+// which upload_file never reads as a source_path: the API key file, the
+// CA file and setup's configuration directory.
+func protectedSourcePaths(apiKeyFile, tlsCA string, getenv func(string) string, userConfigDir func() (string, error)) []string {
+	var out []string
+	for _, p := range []string{apiKeyFile, getenv("TRUENAS_API_KEY_FILE"), tlsCA, getenv("TRUENAS_TLS_CA")} {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if dir, err := userConfigDir(); err == nil && dir != "" {
+		out = append(out, filepath.Join(dir, "truenas-mcp"))
+	}
+	return out
 }
 
 // configureLogging sends the standard logger to stderr. Stdout carries the
@@ -245,6 +281,18 @@ func main() {
 	if policy.RequireHumanConfirm {
 		log.Println("Require-human-confirm: destructive tools are refused on clients that do not support MCP elicitation")
 	}
+	sourceDirs := uploadSourceDirs(setFlags, os.LookupEnv)
+	if err := registry.SetUploadSourceDirs(sourceDirs, protectedSourcePaths(*apiKeyFile, *tlsCA, os.Getenv, os.UserConfigDir)); err != nil {
+		log.Fatalf("Invalid --upload-source-dirs / TRUENAS_MCP_UPLOAD_SOURCE_DIRS: %v", err)
+	}
+	if len(sourceDirs) > 0 {
+		log.Printf("upload_file may read local files below: %s", strings.Join(sourceDirs, ", "))
+	}
+	go func() {
+		if n := registry.SweepStaleUploadTemps(); n > 0 {
+			log.Printf("Removed %d stale upload_file temporary file(s) left by an earlier run", n)
+		}
+	}()
 
 	handler := NewStdioHandler(registry, *debug)
 	if err := handler.Run(context.Background()); err != nil {
