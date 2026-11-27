@@ -160,6 +160,96 @@ func (m *Manager) CreateJobTask(ctx context.Context, toolName string, args map[s
 	return task, nil
 }
 
+// CreateLocalTask creates a working task for an operation whose first part
+// runs in this server (a download, say) before it starts a TrueNAS job. The
+// poller leaves it alone until AttachJob gives it the job; until then the
+// caller reports progress with SetLocalMessage and ends it with FailLocal.
+// ttl bounds the whole operation, the local part included.
+func (m *Manager) CreateLocalTask(toolName string, args map[string]interface{}, ttl time.Duration, message string, opts ...TaskOption) (*Task, error) {
+	task := &Task{
+		TaskID:        uuid.New().String(),
+		Status:        TaskStatusWorking,
+		StatusMessage: message,
+		CreatedAt:     time.Now(),
+		LastUpdatedAt: time.Now(),
+		TTL:           int64(ttl.Seconds()),
+		PollInterval:  int64(m.config.PollInterval.Seconds()),
+		OperationType: OperationTypeJob,
+		ToolName:      toolName,
+		Arguments:     args,
+	}
+	for _, opt := range opts {
+		opt(task)
+	}
+	if err := m.store.Add(task); err != nil {
+		return nil, fmt.Errorf("failed to store task: %w", err)
+	}
+	return task.clone(), nil
+}
+
+// errJobAttached refuses a local update to a task that already tracks a job.
+var errJobAttached = fmt.Errorf("task already tracks a TrueNAS job")
+
+// localTask returns the stored copy of a task created by CreateLocalTask
+// that has no job yet.
+func (m *Manager) localTask(taskID string) (*Task, error) {
+	task, err := m.store.Get(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task.Status.Terminal() {
+		return nil, ErrTaskFinished
+	}
+	if task.JobID != nil {
+		return nil, errJobAttached
+	}
+	return task, nil
+}
+
+// SetLocalMessage sets the status message of a local task that has no job
+// yet.
+func (m *Manager) SetLocalMessage(taskID, message string) error {
+	task, err := m.localTask(taskID)
+	if err != nil {
+		return err
+	}
+	if task.StatusMessage == message {
+		return nil
+	}
+	task.StatusMessage = message
+	return m.store.Update(task)
+}
+
+// FailLocal ends a local task that has no job yet as failed with message.
+func (m *Manager) FailLocal(taskID, message string) error {
+	task, err := m.localTask(taskID)
+	if err != nil {
+		return err
+	}
+	task.Status = TaskStatusFailed
+	task.StatusMessage = message
+	log.Printf("task %s (%s): %s", task.TaskID, task.ToolName, message)
+	return m.store.Update(task)
+}
+
+// AttachJob hands a local task over to the poller, which tracks jobID from
+// now on as it does for CreateJobTask. opts are applied first.
+func (m *Manager) AttachJob(ctx context.Context, taskID string, jobID int, message string, opts ...TaskOption) error {
+	task, err := m.localTask(taskID)
+	if err != nil {
+		return err
+	}
+	for _, opt := range opts {
+		opt(task)
+	}
+	task.JobID = &jobID
+	task.StatusMessage = message
+	if m.client != nil {
+		m.poller.recordIdentity(ctx, task)
+	}
+	return m.store.Update(task)
+}
+
 // Get retrieves a task by ID
 func (m *Manager) Get(taskID string) (*Task, error) {
 	return m.store.Get(taskID)
