@@ -127,7 +127,21 @@ var middlewareMethodContract = map[string]string{
 	"user.delete":                     "25.10",
 	"user.query":                      "25.10",
 	"user.update":                     "25.10",
+	"vm.create":                       "25.10",
+	"vm.device.bind_choices":          "25.10",
+	"vm.device.create":                "25.10",
+	"vm.device.disk_choices":          "25.10",
+	"vm.device.nic_attach_choices":    "25.10",
+	"vm.get_available_memory":         "25.10",
+	"vm.maximum_supported_vcpus":      "25.10",
+	"vm.poweroff":                     "25.10",
 	"vm.query":                        "25.10",
+	"vm.reset":                        "28.0",
+	"vm.restart":                      "25.10",
+	"vm.start":                        "25.10",
+	"vm.status":                       "25.10",
+	"vm.stop":                         "25.10",
+	"vm.virtualization_details":       "25.10",
 }
 
 // dispatchers are the functions that forward a method name to the

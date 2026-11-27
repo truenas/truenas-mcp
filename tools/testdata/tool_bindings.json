@@ -73,6 +73,12 @@
     "execute": "(*Registry).executeCreateUser"
   },
   {
+    "name": "create_vm",
+    "handler": "(*Registry).handleCreateVM",
+    "plan": "planCreateVM",
+    "execute": "(*Registry).executeCreateVM"
+  },
+  {
     "name": "delete_app",
     "handler": "(*Registry).handleDeleteAppWithDryRun",
     "plan": "planDeleteApp",
@@ -231,6 +237,12 @@
     "execute": "executeOnlineDisk"
   },
   {
+    "name": "poweroff_vm",
+    "handler": "(*Registry).handlePoweroffVM",
+    "plan": "planPoweroffVM",
+    "execute": "(*Registry).executePoweroffVM"
+  },
+  {
     "name": "query_apps",
     "handler": "handleQueryApps"
   },
@@ -316,6 +328,18 @@
     "execute": "(*Registry).executeReplaceDisk"
   },
   {
+    "name": "reset_vm",
+    "handler": "(*Registry).handleResetVM",
+    "plan": "planResetVM",
+    "execute": "(*Registry).executeResetVM"
+  },
+  {
+    "name": "restart_vm",
+    "handler": "(*Registry).handleRestartVM",
+    "plan": "planRestartVM",
+    "execute": "(*Registry).executeRestartVM"
+  },
+  {
     "name": "restore_alert",
     "handler": "handleRestoreAlertWithDryRun",
     "plan": "planRestoreAlert"
@@ -375,10 +399,22 @@
     "plan": "planStartApp"
   },
   {
+    "name": "start_vm",
+    "handler": "(*Registry).handleStartVM",
+    "plan": "planStartVM",
+    "execute": "(*Registry).executeStartVM"
+  },
+  {
     "name": "stop_app",
     "handler": "(*Registry).handleStopAppWithDryRun",
     "plan": "planStopApp",
     "execute": "(*Registry).executeStopApp"
+  },
+  {
+    "name": "stop_vm",
+    "handler": "(*Registry).handleStopVM",
+    "plan": "planStopVM",
+    "execute": "(*Registry).executeStopVM"
   },
   {
     "name": "system_health",
