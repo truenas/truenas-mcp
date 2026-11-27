@@ -109,6 +109,8 @@ type vmFakeEnv struct {
 	keepStorage bool
 	// keepVM simulates vm.delete returning while the VM row stays.
 	keepVM bool
+	// keepDevice simulates vm.device.delete returning while the device row stays.
+	keepDevice bool
 	// onDeviceCreateFail runs when vm.device.create fails (failDeviceIdx).
 	onDeviceCreateFail func()
 	// snapshotsIgnoreFilter makes pool.snapshot.query return every row.
@@ -497,7 +499,9 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 						if delRaw, _ := opts["raw_file"].(bool); delRaw && !e.keepStorage {
 							delete(e.stats, pathStr)
 						}
-						vm["devices"] = append(devs[:i], devs[i+1:]...)
+						if !e.keepDevice {
+							vm["devices"] = append(devs[:i], devs[i+1:]...)
+						}
 						return true, nil, true
 					}
 				}

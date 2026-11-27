@@ -134,7 +134,7 @@ func (r *Registry) registerVMManageTools() {
 	r.tools["delete_vm"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "delete_vm",
-			Description: "DESTRUCTIVE: Delete a virtual machine via vm.delete. Refuses if the VM is not STOPPED unless force=true (which forcibly powers off a running VM and ignores cleanup errors). Backing zvols are kept by default; pass zvols=true to permanently and recursively destroy every attached /dev/zvol/ DISK volume and its snapshots (refused if any zvol is attached to another VM, is used by an iSCSI extent, NVMe-oF namespace or, before 27.0, an Incus instance, has a snapshot with clones or holds, which a recursive destroy would also destroy or release, or fails managed-dataset guards; the preview lists every zvol with its size and snapshot count). After the delete, the result reports which of the VM and its zvols are actually gone. Confirmation is bound to the VM row, live status, full device list, and each zvol's dataset, snapshots, clones and holds. Use dry_run to preview.",
+			Description: "DESTRUCTIVE: Delete a virtual machine via vm.delete. Refuses if the VM is not STOPPED unless force=true (which forcibly powers off a running VM and ignores cleanup errors). Backing zvols are kept by default; pass zvols=true to permanently and recursively destroy every attached /dev/zvol/ DISK volume and its snapshots (refused if any zvol is attached to another VM, is used by an iSCSI extent, NVMe-oF namespace or, before 27.0, an Incus instance, has a snapshot with clones or holds, which a recursive destroy would also destroy or release, or fails managed-dataset guards; the preview lists every zvol with its size and snapshot count). After the delete, the result lists the zvols it asked TrueNAS to destroy (zvols_requested) and, from a read-back, which are actually gone (zvols_destroyed), still present (zvols_still_present) or could not be checked (zvols_unverified), and whether the VM row is gone. Confirmation is bound to the VM row, live status, full device list, and each zvol's dataset, snapshots, clones and holds. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type":       "object",
 				"properties": deleteVMProps,
@@ -2033,12 +2033,12 @@ func buildDeleteVMPlan(vm *resolvedVM, devices []interface{}, zvols []*deleteVMZ
 		},
 		ConfirmSummary: newConfirmSummary(summary, facts...),
 		Result: map[string]interface{}{
-			"vm_id":         vm.ID,
-			"name":          vm.Name,
-			"zvols":         deleteZvols,
-			"zvols_deleted": toDelete,
-			"zvols_kept":    kept,
-			"force":         force,
+			"vm_id":           vm.ID,
+			"name":            vm.Name,
+			"zvols":           deleteZvols,
+			"zvols_requested": toDelete,
+			"zvols_kept":      kept,
+			"force":           force,
 		},
 	}
 }
@@ -2071,7 +2071,7 @@ func (r *Registry) executeDeleteVM(ctx context.Context, client *truenas.Client, 
 	name, _ := plan.Result["name"].(string)
 	deleteZvols, _ := plan.Result["zvols"].(bool)
 	force, _ := plan.Result["force"].(bool)
-	zvolsDeleted, _ := plan.Result["zvols_deleted"].([]map[string]interface{})
+	zvolsRequested, _ := plan.Result["zvols_requested"].([]map[string]interface{})
 	zvolsKept, _ := plan.Result["zvols_kept"].([]map[string]interface{})
 
 	result := map[string]interface{}{
@@ -2094,7 +2094,7 @@ func (r *Registry) executeDeleteVM(ctx context.Context, client *truenas.Client, 
 		defer cancel()
 		exists, ok := vmStillExists(cctx, client, vmID)
 		vmGone, vmChecked = !exists, ok
-		for _, z := range zvolsDeleted {
+		for _, z := range zvolsRequested {
 			zn, _ := z["name"].(string)
 			if existed, _ := z["exists"].(bool); !existed {
 				absent = append(absent, zn)
@@ -2117,8 +2117,10 @@ func (r *Registry) executeDeleteVM(ctx context.Context, client *truenas.Client, 
 	} else if !vmGone {
 		result["vm_still_exists"] = true
 	}
-	if len(zvolsDeleted) > 0 {
-		result["zvols_deleted"] = zvolsDeleted
+	if len(zvolsRequested) > 0 {
+		// zvols_requested is what vm.delete was asked to destroy; only
+		// zvols_destroyed is confirmed by the read-back.
+		result["zvols_requested"] = zvolsRequested
 		result["zvols_destroyed"] = nonNilStrings(destroyed)
 	}
 	if len(remaining) > 0 {
@@ -2137,8 +2139,8 @@ func (r *Registry) executeDeleteVM(ctx context.Context, client *truenas.Client, 
 		msg = fmt.Sprintf("vm.delete for VM %q (id %d) returned, but whether the VM is gone could not be read back.", name, vmID)
 	case !vmGone:
 		msg = fmt.Sprintf("vm.delete for VM %q (id %d) returned, but the VM still exists.", name, vmID)
-	case deleteZvols && len(zvolsDeleted) > 0:
-		msg = fmt.Sprintf("Deleted VM %q (id %d) and destroyed %d of %d backing zvol(s).", name, vmID, len(destroyed), len(zvolsDeleted)-len(absent))
+	case deleteZvols && len(zvolsRequested) > 0:
+		msg = fmt.Sprintf("Deleted VM %q (id %d) and destroyed %d of %d backing zvol(s).", name, vmID, len(destroyed), len(zvolsRequested)-len(absent))
 	case !deleteZvols && len(zvolsKept) > 0:
 		msg = fmt.Sprintf("Deleted VM %q (id %d); %d backing zvol(s) were kept.", name, vmID, len(zvolsKept))
 	default:

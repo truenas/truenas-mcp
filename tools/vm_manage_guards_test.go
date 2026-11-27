@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/truenas/truenas-mcp/truenas"
 )
 
 // Tests for the backing-storage guards of delete_vm and delete_vm_device,
@@ -174,6 +176,16 @@ func TestDeleteVMZvolConsumerGuards(t *testing.T) {
 		})
 	}
 
+	t.Run("incus is checked on an unknown version", func(t *testing.T) {
+		env := newVMManageEnv("")
+		env.virtInstances = []map[string]interface{}{{"id": "web", "name": "web"}}
+		env.virtDevices = map[string][]map[string]interface{}{"web": {{"dev_type": "DISK", "source": "/dev/zvol/tank/vms/app-disk0"}}}
+		r, fake, _ := env.buildRegistry(t, false)
+		assertPreviewBlocked(t, r, "delete_vm", map[string]interface{}{"id": 1.0, "zvols": true}, `Incus instance "web"`)
+		assertPreviewBlocked(t, r, "delete_vm_device", map[string]interface{}{"device_id": 10.0, "zvol": true}, `Incus instance "web"`)
+		assertNoWriteCalls(t, fake)
+	})
+
 	t.Run("incus is not queried from 27.0", func(t *testing.T) {
 		env := newVMManageEnv("27.1.0-MASTER")
 		r, fake, _ := env.buildRegistry(t, false)
@@ -187,9 +199,11 @@ func TestDeleteVMZvolConsumerGuards(t *testing.T) {
 		}
 	})
 
-	for _, m := range []string{"iscsi.extent.query", "nvmet.namespace.query", "virt.instance.query", "pool.snapshot.query"} {
+	for _, m := range []string{"iscsi.extent.query", "nvmet.namespace.query", "virt.instance.query", "virt.instance.device_list", "pool.snapshot.query"} {
 		t.Run("fails closed when "+m+" fails", func(t *testing.T) {
 			env := newVMManageEnv("25.10.0")
+			// device_list is only called for an existing instance.
+			env.virtInstances = []map[string]interface{}{{"id": "web", "name": "web"}}
 			env.failConsumers = m
 			r, fake, _ := env.buildRegistry(t, false)
 			for _, call := range []struct {
@@ -261,6 +275,25 @@ func TestDeleteVMReportsWhatRemains(t *testing.T) {
 		if out["deleted"] != true {
 			t.Fatalf("VM row is gone, deleted should be true: %+v", out)
 		}
+		// The requested list is what vm.delete was asked to destroy; the
+		// kept zvol must not be reported as destroyed.
+		req, _ := out["zvols_requested"].([]interface{})
+		first, _ := func() (map[string]interface{}, bool) {
+			if len(req) != 1 {
+				return nil, false
+			}
+			m, ok := req[0].(map[string]interface{})
+			return m, ok
+		}()
+		if first["name"] != "tank/vms/app-disk0" {
+			t.Fatalf("expected zvols_requested to list the zvol: %+v", out)
+		}
+		if got, ok := out["zvols_destroyed"].([]interface{}); !ok || len(got) != 0 {
+			t.Fatalf("expected an empty zvols_destroyed: %+v", out)
+		}
+		if _, ok := out["zvols_deleted"]; ok {
+			t.Fatalf("zvols_deleted must not be reported: %+v", out)
+		}
 	})
 
 	t.Run("zvols destroyed are confirmed", func(t *testing.T) {
@@ -275,6 +308,88 @@ func TestDeleteVMReportsWhatRemains(t *testing.T) {
 		got, _ := out["zvols_destroyed"].([]interface{})
 		if len(got) != 1 || got[0] != "tank/vms/app-disk0" || out["zvols_still_present"] != nil {
 			t.Fatalf("unexpected result: %+v", out)
+		}
+		if req, _ := out["zvols_requested"].([]interface{}); len(req) != 1 || !strings.Contains(out["message"].(string), "destroyed 1 of 1") {
+			t.Fatalf("expected one requested and destroyed zvol: %+v", out)
+		}
+	})
+
+	// failAfterDelete makes method fail once vm.delete has run, so only the
+	// read-back sees the failure.
+	failAfterDelete := func(env *vmFakeEnv, method string) {
+		deleted := false
+		env.onCall = func(m string) {
+			if m == "vm.delete" || m == "vm.device.delete" {
+				deleted = true
+				return
+			}
+			if deleted {
+				env.failConsumers = method
+			}
+		}
+	}
+
+	t.Run("failed zvol read-back is unverified", func(t *testing.T) {
+		env := newVMManageEnv("25.10.0")
+		r, _, _ := env.buildRegistry(t, false)
+		args := map[string]interface{}{"id": 1.0, "zvols": true}
+		_, tok := previewAndGetToken(t, r, "delete_vm", args)
+		failAfterDelete(env, "pool.dataset.query")
+		out, err := confirmTool(t, r, "delete_vm", args, tok)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unv, _ := out["zvols_unverified"].([]interface{})
+		if len(unv) != 1 || unv[0] != "tank/vms/app-disk0" || out["zvols_still_present"] != nil || !strings.Contains(out["message"].(string), "destroyed 0 of 1") {
+			t.Fatalf("expected the zvol to be unverified: %+v", out)
+		}
+		if got, _ := out["zvols_destroyed"].([]interface{}); len(got) != 0 {
+			t.Fatalf("an unread zvol must not be reported destroyed: %+v", out)
+		}
+	})
+
+	t.Run("failed VM read-back is unverified", func(t *testing.T) {
+		env := newVMManageEnv("25.10.0")
+		r, _, _ := env.buildRegistry(t, false)
+		args := map[string]interface{}{"id": 1.0, "force": true}
+		_, tok := previewAndGetToken(t, r, "delete_vm", args)
+		failAfterDelete(env, "vm.query")
+		out, err := confirmTool(t, r, "delete_vm", args, tok)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out["deleted"] != false || out["vm_status_unverified"] != true || out["vm_still_exists"] != nil || !strings.Contains(out["message"].(string), "could not be read back") {
+			t.Fatalf("expected the VM status to be unverified: %+v", out)
+		}
+	})
+
+	t.Run("delete_vm_device reports a device still listed", func(t *testing.T) {
+		env := newVMManageEnv("25.10.0")
+		env.keepDevice = true
+		r, _, _ := env.buildRegistry(t, false)
+		args := map[string]interface{}{"device_id": 11.0, "force": true}
+		_, tok := previewAndGetToken(t, r, "delete_vm_device", args)
+		out, err := confirmTool(t, r, "delete_vm_device", args, tok)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out["deleted"] != false || out["device_still_exists"] != true || !strings.Contains(out["message"].(string), "the device still exists") {
+			t.Fatalf("expected the surviving device to be reported: %+v", out)
+		}
+	})
+
+	t.Run("delete_vm_device failed device read-back is unverified", func(t *testing.T) {
+		env := newVMManageEnv("25.10.0")
+		r, _, _ := env.buildRegistry(t, false)
+		args := map[string]interface{}{"device_id": 11.0, "force": true}
+		_, tok := previewAndGetToken(t, r, "delete_vm_device", args)
+		failAfterDelete(env, "vm.device.query")
+		out, err := confirmTool(t, r, "delete_vm_device", args, tok)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out["deleted"] != false || out["device_unverified"] != true || out["device_still_exists"] != nil {
+			t.Fatalf("expected the device status to be unverified: %+v", out)
 		}
 	})
 
@@ -396,6 +511,12 @@ func TestDeleteVMDeviceTokenBindsStaleness(t *testing.T) {
 		}},
 		{"raw file size", map[string]interface{}{"device_id": 14.0, "raw_file": true}, func(e *vmFakeEnv) {
 			e.stats["/mnt/tank/vms/raw0.img"]["size"] = 1.0
+		}},
+		{"raw file filesystem", map[string]interface{}{"device_id": 14.0, "raw_file": true}, func(e *vmFakeEnv) {
+			e.statfs["/mnt/tank/vms"]["fsid"] = "fsid-remounted"
+		}},
+		{"raw file dataset", map[string]interface{}{"device_id": 14.0, "raw_file": true}, func(e *vmFakeEnv) {
+			e.datasets["tank/vms"]["mountpoint"] = "/mnt/tank/vms-moved"
 		}},
 	}
 	for _, tc := range cases {
@@ -654,4 +775,26 @@ func TestCreateVMCleanupIgnoresCancellation(t *testing.T) {
 			t.Fatalf("unexpected cleanup deadline: %v %v", dl, ok)
 		}
 	})
+}
+
+// The middleware writes a space in a zvol name as '+' in /dev/zvol paths;
+// Incus disk sources are mapped back with the same helper as VM disks.
+func TestFetchZvolConsumersIncusEscapedSpace(t *testing.T) {
+	client, _ := newFakeClientWith(t, map[string]interface{}{
+		"iscsi.extent.query":    []interface{}{},
+		"nvmet.namespace.query": []interface{}{},
+		"virt.instance.query":   []interface{}{map[string]interface{}{"id": "web", "name": "web"}},
+		"virt.instance.device_list": []interface{}{
+			map[string]interface{}{"dev_type": "DISK", "source": "/dev/zvol/tank/vms/app+disk0"},
+			map[string]interface{}{"dev_type": "NIC", "source": "/dev/zvol/tank/vms/nic"},
+			map[string]interface{}{"dev_type": "DISK", "source": "/mnt/tank/vms/raw.img"},
+		},
+	}, nil)
+	got, err := fetchZvolConsumers(context.Background(), client, truenas.MustParseVersion("25.10.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || len(got["tank/vms/app disk0"]) != 1 || got["tank/vms/app disk0"][0] != `Incus instance "web"` {
+		t.Fatalf("expected the escaped name to map to %q: %+v", "tank/vms/app disk0", got)
+	}
 }

@@ -180,10 +180,9 @@ func fetchZvolConsumers(ctx context.Context, client *truenas.Client, ver truenas
 					continue
 				}
 				src, _ := d["source"].(string)
-				if !strings.HasPrefix(src, "/dev/zvol/") {
-					continue
+				if zn, ok := zvolPathToName(src); ok {
+					add(zn, fmt.Sprintf("Incus instance %q", id))
 				}
-				add(strings.TrimPrefix(src, "/dev/zvol/"), fmt.Sprintf("Incus instance %q", id))
 			}
 		}
 	}

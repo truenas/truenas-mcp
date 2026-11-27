@@ -125,7 +125,7 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - **Requires a `confirmation_token`** bound to the VM id, name, UUID, memory, autostart, live status, full sanitized device list, attached zvol dataset rows, and `zvols`/`force`; with `zvols=true`, also every snapshot of each zvol with its clones, hold tags and hold count
   - Calls `vm.delete(id, {"zvols": <bool>, "force": <bool>})` (both default to `false`). Refuses while the VM is not `STOPPED` unless `force=true` (which forcibly powers off a running VM without guest shutdown and ignores cleanup errors)
   - With `zvols=true`, lists every attached `/dev/zvol/` DISK volume with its size in the preview and permanently and recursively destroys them (including snapshots); refuses if any zvol is attached to another VM, is not a `VOLUME`, fails managed-dataset guards, is used by an iSCSI extent, an NVMe-oF namespace or (before 27.0) an Incus instance, or has a snapshot with clones or holds. From 27.0 the middleware's recursive destroy releases holds and destroys every clone of the zvol's snapshots (such as the disks of a VM made with `vm.clone`); on 25.10 it fails instead and `force=true` ignores the failure. The preview shows each zvol's snapshot count
-  - After the delete (with `zvols=true` or `force=true`), reads back whether the VM and each zvol are gone and reports what is still present
+  - After the delete (with `zvols=true` or `force=true`), reads back whether the VM and each zvol are gone. `zvols_requested` lists what TrueNAS was asked to destroy; only `zvols_destroyed` is confirmed gone, and `zvols_still_present` / `zvols_unverified` list the rest
 
 ### Accounts
 - **query_users** - Query user accounts
