@@ -1228,7 +1228,7 @@ func TestDeleteVMHappyPathsAndGuards(t *testing.T) {
 		args := map[string]interface{}{"id": 1.0, "zvols": true}
 		res, tok := previewAndGetToken(t, r, "delete_vm", args)
 		rawPrev, _ := json.Marshal(res)
-		if !strings.Contains(string(rawPrev), "tank/vms/app-disk0 (20.00 GiB)") {
+		if !strings.Contains(string(rawPrev), "tank/vms/app-disk0 (20.00 GiB, 0 snapshot(s))") {
 			t.Errorf("expected zvol name and size in preview/summary: %s", rawPrev)
 		}
 		if _, err := r.CallTool(context.Background(), "delete_vm", tokenArgs(args, map[string]interface{}{"confirmation_token": tok})); err != nil {

@@ -10,7 +10,7 @@ import (
 const secretDryRunValue = "true-secret-must-not-be-echoed"
 
 func writeishMiddlewareMethod(method string) bool {
-	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".has_pending_changes", ".checkin_waiting", ".websocket_local_ip", ".system_routes", ".getacl", ".get_state", ".details", ".stat", ".statfs", ".listdir", ".virtualization_details", ".maximum_supported_vcpus", ".disk_choices", ".nic_attach_choices", ".bind_choices", ".get_available_memory"} {
+	for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", ".get_jobs", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".has_pending_changes", ".checkin_waiting", ".websocket_local_ip", ".system_routes", ".getacl", ".get_state", ".details", ".stat", ".statfs", ".listdir", ".virtualization_details", ".maximum_supported_vcpus", ".disk_choices", ".nic_attach_choices", ".bind_choices", ".get_available_memory", ".device_list"} {
 		if strings.HasSuffix(method, suffix) {
 			return false
 		}

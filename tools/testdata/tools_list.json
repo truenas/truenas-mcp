@@ -1582,7 +1582,7 @@
   },
   {
     "name": "delete_vm",
-    "description": "DESTRUCTIVE: Delete a virtual machine via vm.delete. Refuses if the VM is not STOPPED unless force=true (which forcibly powers off a running VM and ignores cleanup errors). Backing zvols are kept by default; pass zvols=true to permanently and recursively destroy every attached /dev/zvol/ DISK volume (refused if any zvol is attached to another VM or fails managed-dataset guards; the preview lists every zvol with its size). Confirmation is bound to the VM row, live status, full device list, and zvol state. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "description": "DESTRUCTIVE: Delete a virtual machine via vm.delete. Refuses if the VM is not STOPPED unless force=true (which forcibly powers off a running VM and ignores cleanup errors). Backing zvols are kept by default; pass zvols=true to permanently and recursively destroy every attached /dev/zvol/ DISK volume and its snapshots (refused if any zvol is attached to another VM, is used by an iSCSI extent, NVMe-oF namespace or, before 27.0, an Incus instance, has a snapshot with clones or holds, which a recursive destroy would also destroy or release, or fails managed-dataset guards; the preview lists every zvol with its size and snapshot count). After the delete, the result reports which of the VM and its zvols are actually gone. Confirmation is bound to the VM row, live status, full device list, and each zvol's dataset, snapshots, clones and holds. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
       "properties": {
         "confirmation_token": {
@@ -1595,7 +1595,7 @@
           "type": "boolean"
         },
         "force": {
-          "description": "Allow deleting a VM that is not STOPPED (forcibly powers off a running VM without guest shutdown) and ignore domain or zvol cleanup errors. Default: false.",
+          "description": "Allow deleting a VM that is not STOPPED (forcibly powers off a running VM without guest shutdown) and ignore domain or zvol cleanup errors; the result then reports which of the VM and its zvols are still present. Default: false.",
           "type": "boolean"
         },
         "id": {
@@ -1610,7 +1610,7 @@
           "type": "string"
         },
         "zvols": {
-          "description": "Also permanently and recursively destroy every attached /dev/zvol/ DISK volume (and its snapshots). Refused if any zvol is attached to another VM or fails managed-dataset guards. Default: false.",
+          "description": "Also permanently and recursively destroy every attached /dev/zvol/ DISK volume and its snapshots. Refused if any zvol is attached to another VM, used by another service (iSCSI, NVMe-oF, or before 27.0 an Incus instance), has a snapshot with clones or holds, or fails managed-dataset guards. Default: false.",
           "type": "boolean"
         }
       },
@@ -1625,7 +1625,7 @@
   },
   {
     "name": "delete_vm_device",
-    "description": "DESTRUCTIVE: Remove a device from a virtual machine via vm.device.delete. This is also how installer CDROMs are ejected in TrueNAS (removing the CDROM device leaves the ISO file on disk). Backing zvols and raw image files are kept by default; pass zvol=true (DISK only) or raw_file=true (RAW only) to permanently destroy them too. Refuses while the VM is RUNNING or SUSPENDED (TrueNAS rejects vm.device.delete on active VMs even with force=true; stop the VM first with stop_vm). Never destroys a zvol or raw file shared with another VM device. Confirmation is bound to the device row, VM status, and backing storage. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "description": "DESTRUCTIVE: Remove a device from a virtual machine via vm.device.delete. This is also how installer CDROMs are ejected in TrueNAS (removing the CDROM device leaves the ISO file on disk). Backing zvols and raw image files are kept by default; pass zvol=true (DISK only) or raw_file=true (RAW only) to permanently destroy them too. Refuses while the VM is RUNNING or SUSPENDED (TrueNAS rejects vm.device.delete on active VMs even with force=true; stop the VM first with stop_vm). Never destroys a zvol or raw file shared with another VM device. A zvol is also refused when it has snapshots (TrueNAS destroys it non-recursively and would refuse) or when an iSCSI extent, NVMe-oF namespace or (before 27.0) Incus instance uses it. After the delete, the result reports whether the device and its backing storage are actually gone. Confirmation is bound to the device row, VM status, and backing storage. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
       "properties": {
         "confirmation_token": {
@@ -1642,7 +1642,7 @@
           "type": "boolean"
         },
         "force": {
-          "description": "Ignore errors when destroying the backing zvol or raw file and still remove the device record (also allows deletion when VM state is ERROR). Does not bypass TrueNAS's refusal on RUNNING or SUSPENDED VMs. Default: false.",
+          "description": "Ignore errors when destroying the backing zvol or raw file and still remove the device record (also allows deletion when VM state is ERROR); the result then reports what is still present. Does not bypass TrueNAS's refusal on RUNNING or SUSPENDED VMs. Default: false.",
           "type": "boolean"
         },
         "raw_file": {
@@ -1650,7 +1650,7 @@
           "type": "boolean"
         },
         "zvol": {
-          "description": "DISK devices only: also permanently destroy the backing ZFS volume (zvol) and its snapshots. Refused if shared with another VM device or outside user datasets. Default: false.",
+          "description": "DISK devices only: also permanently destroy the backing ZFS volume (zvol). Refused if it has snapshots, is shared with another VM device or another service (iSCSI, NVMe-oF), or is outside user datasets. Default: false.",
           "type": "boolean"
         }
       },
@@ -4342,7 +4342,7 @@
   },
   {
     "name": "update_vm_device",
-    "description": "DESTRUCTIVE: Modify an existing VM device via vm.device.update (for example changing boot order, swapping a CDROM ISO, or updating DISK, NIC, or DISPLAY settings). Device type (dtype) cannot be changed; to eject an installer CDROM completely, use delete_vm_device instead (which leaves the ISO file on disk). Refuses while the VM is not STOPPED unless force=true (which updates stored configuration only, taking effect after stop and start). Mirrors TrueNAS device validators in the preview. Confirmation is bound to the device row, VM status, and validated targets. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "description": "DESTRUCTIVE: Modify an existing VM device via vm.device.update (for example changing boot order, swapping a CDROM ISO, or updating DISK, NIC, or DISPLAY settings). Device type (dtype) cannot be changed; to eject an installer CDROM completely, use delete_vm_device instead (which leaves the ISO file on disk). Refuses while the VM is not STOPPED unless force=true (which updates stored configuration only, taking effect after stop and start); a DISK path change always needs the VM STOPPED, even with force=true. Mirrors TrueNAS device validators in the preview. Confirmation is bound to the device row, VM status, and validated targets. Use dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
       "properties": {
         "allow_wildcard_display_bind": {
@@ -4367,7 +4367,7 @@
           "type": "boolean"
         },
         "force": {
-          "description": "Allow updating a device while the VM is not STOPPED. Updates stored configuration only; changes take effect after the VM is stopped and started. Default: false.",
+          "description": "Allow updating a device while the VM is not STOPPED. Updates stored configuration only; changes take effect after the VM is stopped and started. Does not allow a DISK path change, which always needs the VM STOPPED. Default: false.",
           "type": "boolean"
         },
         "order": {

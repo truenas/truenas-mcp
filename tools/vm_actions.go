@@ -1484,6 +1484,12 @@ type cdromPathCheck struct {
 	Bind    map[string]interface{}
 }
 
+// checkLibvirtStatAccess reports whether the libvirt-qemu user can use a
+// path with needBit (0o4 read, 0o1 traverse) from its mode bits: through
+// the other bits, the owner bits when libvirt-qemu owns it, or the group
+// bits when the group is libvirt-qemu or kvm. With an ACL, or a mode that
+// cannot be read, the mode bits do not decide, so it defers to the
+// middleware's own access check at create or update time.
 func checkLibvirtStatAccess(st map[string]interface{}, needBit int64) (bool, int64) {
 	if acl, ok := st["acl"].(bool); ok && acl {
 		return true, 0
@@ -1499,10 +1505,11 @@ func checkLibvirtStatAccess(st map[string]interface{}, needBit int64) (bool, int
 	if user == "libvirt-qemu" && mode&(needBit<<6) != 0 {
 		return true, mode
 	}
+	// Only a group known to include libvirt-qemu counts. An unnamed or
+	// unknown group is treated as not granting access.
 	if mode&(needBit<<3) != 0 {
 		group, _ := st["group"].(string)
-		gid, hasGID := extractZFSInt64(st["gid"])
-		if group == "libvirt-qemu" || group == "kvm" || (group == "" && hasGID && gid != 0) {
+		if group == "libvirt-qemu" || group == "kvm" {
 			return true, mode
 		}
 	}
@@ -2057,7 +2064,12 @@ func (r *Registry) executeCreateVM(ctx context.Context, client *truenas.Client, 
 	}
 	msg := fmt.Sprintf("Created VM %q (id %d) with %d device(s). Use start_vm to power it on.", plan.TargetName, vmID, len(createdDevices))
 	if autostart, _ := plan.Result["autostart"].(bool); autostart {
-		if _, err := client.Call(ctx, "vm.update", vmID, map[string]interface{}{"autostart": true}); err != nil {
+		// The VM exists with every device attached; a cancelled request
+		// must not leave autostart half-applied, so this runs detached.
+		cctx, cancel := vmCleanupContext(ctx)
+		_, err := client.Call(cctx, "vm.update", vmID, map[string]interface{}{"autostart": true})
+		cancel()
+		if err != nil {
 			return "", fmt.Errorf("created VM %q (id %d) with all %d device(s), but enabling autostart with vm.update failed, so autostart is still off: %w",
 				plan.TargetName, vmID, len(createdDevices), err)
 		}
@@ -2094,7 +2106,11 @@ func rollbackCreateVM(ctx context.Context, client *truenas.Client, name string, 
 	}
 	attachMsg := fmt.Sprintf("attached %d of %d device(s) to new VM %q (id %d), then failed to attach devices[%d] (%s): %v",
 		attached, total, name, vmID, failedIdx, failed.DType, attachErr)
-	if _, err := client.Call(ctx, "vm.delete", vmID, map[string]interface{}{"zvols": false, "force": false}); err != nil {
+	// Rollback runs detached from the request, so cancelling the request
+	// (often the very reason the attach failed) cannot leave a partial VM.
+	cctx, cancel := vmCleanupContext(ctx)
+	defer cancel()
+	if _, err := client.Call(cctx, "vm.delete", vmID, map[string]interface{}{"zvols": false, "force": false}); err != nil {
 		return fmt.Errorf("%s. Rollback with vm.delete also failed (%v): VM %q (id %d) still exists with autostart off and %d device(s) attached. Zvols created by this call: %s%s",
 			attachMsg, err, name, vmID, attached, zvols, maybe)
 	}

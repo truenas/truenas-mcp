@@ -20,7 +20,9 @@ import (
 // not called anywhere.
 //
 // Versions are inclusive minima. pool.scrub.scrub is deprecated from
-// 26.0 but is still the start method on every supported release.
+// 26.0 but is still the start method on every supported release. The
+// virt (Incus) plugin is gone from 27.0, so the virt.* methods are called
+// only on earlier versions (fetchZvolConsumers).
 var middlewareMethodContract = map[string]string{
 	"alert.dismiss":                   "25.10",
 	"alert.list":                      "25.10",
@@ -77,8 +79,10 @@ var middlewareMethodContract = map[string]string{
 	"interface.rollback":              "25.10",
 	"interface.update":                "25.10",
 	"interface.websocket_local_ip":    "25.10",
+	"iscsi.extent.query":              "25.10",
 	"network.configuration.config":    "25.10",
 	"network.configuration.update":    "25.10",
+	"nvmet.namespace.query":           "25.10",
 	"pool.dataset.create":             "25.10",
 	"pool.dataset.query":              "25.10",
 	"pool.offline":                    "25.10",
@@ -127,6 +131,8 @@ var middlewareMethodContract = map[string]string{
 	"user.delete":                     "25.10",
 	"user.query":                      "25.10",
 	"user.update":                     "25.10",
+	"virt.instance.device_list":       "25.10",
+	"virt.instance.query":             "25.10",
 	"vm.create":                       "25.10",
 	"vm.device.bind_choices":          "25.10",
 	"vm.delete":                       "25.10",

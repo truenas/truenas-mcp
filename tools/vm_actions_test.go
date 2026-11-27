@@ -96,6 +96,25 @@ type vmFakeEnv struct {
 	nextJobID        int
 	devCreateCount   int
 	jobs             map[int]map[string]interface{}
+
+	// Backing-storage consumers and snapshots for the zvol destroy guards.
+	snapshots       []map[string]interface{} // pool.snapshot.query rows
+	iscsiExtents    []map[string]interface{}
+	nvmetNamespaces []map[string]interface{}
+	virtInstances   []map[string]interface{}
+	virtDevices     map[string][]map[string]interface{}
+	failConsumers   string // method name of a consumer query to fail
+	// keepStorage simulates force=true swallowing a failed zvol destroy or
+	// unlink: the record is removed but the storage stays.
+	keepStorage bool
+	// keepVM simulates vm.delete returning while the VM row stays.
+	keepVM bool
+	// onDeviceCreateFail runs when vm.device.create fails (failDeviceIdx).
+	onDeviceCreateFail func()
+	// snapshotsIgnoreFilter makes pool.snapshot.query return every row.
+	snapshotsIgnoreFilter bool
+	// onCall runs before each request is answered.
+	onCall func(method string)
 }
 
 func newVMFakeEnv(version string) *vmFakeEnv {
@@ -221,7 +240,38 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 		results: map[string]interface{}{},
 	}
 	fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if e.onCall != nil {
+			e.onCall(method)
+		}
+		if method == e.failConsumers {
+			return nil, map[string]interface{}{"code": -32000, "message": "simulated " + method + " error"}, true
+		}
 		switch method {
+		case "pool.snapshot.query":
+			var p []interface{}
+			_ = json.Unmarshal(params, &p)
+			var filters []interface{}
+			if len(p) > 0 {
+				filters, _ = p[0].([]interface{})
+			}
+			out := []interface{}{}
+			for _, row := range e.snapshots {
+				if e.snapshotsIgnoreFilter || datasetRowMatchesFilters(row, filters) {
+					out = append(out, row)
+				}
+			}
+			return out, nil, true
+		case "iscsi.extent.query":
+			return nonNilRows(e.iscsiExtents), nil, true
+		case "nvmet.namespace.query":
+			return nonNilRows(e.nvmetNamespaces), nil, true
+		case "virt.instance.query":
+			return nonNilRows(e.virtInstances), nil, true
+		case "virt.instance.device_list":
+			var p []interface{}
+			_ = json.Unmarshal(params, &p)
+			id, _ := p[0].(string)
+			return nonNilRows(e.virtDevices[id]), nil, true
 		case "system.info":
 			info := map[string]interface{}{"hostname": "nas", "version": e.version, "uptime_seconds": 100.0}
 			if e.cores >= 0 {
@@ -330,6 +380,9 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 			idx := e.devCreateCount
 			e.devCreateCount++
 			if e.failDeviceIdx >= 0 && idx == e.failDeviceIdx {
+				if e.onDeviceCreateFail != nil {
+					e.onDeviceCreateFail()
+				}
 				return nil, map[string]interface{}{"code": -32000, "message": "simulated device creation error"}, true
 			}
 			var p []interface{}
@@ -434,13 +487,15 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 						continue
 					}
 					if id, ok := extractZFSInt64(dm["id"]); ok && int(id) == devID {
-						if delZvol, _ := opts["zvol"].(bool); delZvol {
-							attrs, _ := dm["attributes"].(map[string]interface{})
-							if pathStr, _ := attrs["path"].(string); pathStr != "" {
-								if zn, ok := zvolPathToName(pathStr); ok {
-									delete(e.datasets, zn)
-								}
+						attrs, _ := dm["attributes"].(map[string]interface{})
+						pathStr, _ := attrs["path"].(string)
+						if delZvol, _ := opts["zvol"].(bool); delZvol && !e.keepStorage {
+							if zn, ok := zvolPathToName(pathStr); ok {
+								delete(e.datasets, zn)
 							}
+						}
+						if delRaw, _ := opts["raw_file"].(bool); delRaw && !e.keepStorage {
+							delete(e.stats, pathStr)
 						}
 						vm["devices"] = append(devs[:i], devs[i+1:]...)
 						return true, nil, true
@@ -468,7 +523,7 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 					delZvols, _ := opts["zvols"].(bool)
 					for i, vm := range e.vms {
 						if id, ok := extractZFSInt64(vm["id"]); ok && int(id) == int(vmID) {
-							if delZvols {
+							if delZvols && !e.keepStorage {
 								devs, _ := vm["devices"].([]interface{})
 								for _, item := range devs {
 									dm, _ := item.(map[string]interface{})
@@ -482,8 +537,10 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 									}
 								}
 							}
-							e.vms = append(e.vms[:i], e.vms[i+1:]...)
-							delete(e.statuses, int(vmID))
+							if !e.keepVM {
+								e.vms = append(e.vms[:i], e.vms[i+1:]...)
+								delete(e.statuses, int(vmID))
+							}
 							break
 						}
 					}
@@ -528,6 +585,13 @@ func (e *vmFakeEnv) buildRegistry(t *testing.T, readOnly bool) (*Registry, *fake
 		r.SetPolicy(Policy{ReadOnly: true})
 	}
 	return r, fake, mgr
+}
+
+func nonNilRows(rows []map[string]interface{}) []map[string]interface{} {
+	if rows == nil {
+		return []map[string]interface{}{}
+	}
+	return rows
 }
 
 func vmDeviceMatchesFilters(dev map[string]interface{}, filters []interface{}) bool {

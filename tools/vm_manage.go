@@ -46,7 +46,7 @@ func (r *Registry) registerVMManageTools() {
 	r.tools["update_vm_device"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "update_vm_device",
-			Description: "DESTRUCTIVE: Modify an existing VM device via vm.device.update (for example changing boot order, swapping a CDROM ISO, or updating DISK, NIC, or DISPLAY settings). Device type (dtype) cannot be changed; to eject an installer CDROM completely, use delete_vm_device instead (which leaves the ISO file on disk). Refuses while the VM is not STOPPED unless force=true (which updates stored configuration only, taking effect after stop and start). Mirrors TrueNAS device validators in the preview. Confirmation is bound to the device row, VM status, and validated targets. Use dry_run to preview.",
+			Description: "DESTRUCTIVE: Modify an existing VM device via vm.device.update (for example changing boot order, swapping a CDROM ISO, or updating DISK, NIC, or DISPLAY settings). Device type (dtype) cannot be changed; to eject an installer CDROM completely, use delete_vm_device instead (which leaves the ISO file on disk). Refuses while the VM is not STOPPED unless force=true (which updates stored configuration only, taking effect after stop and start); a DISK path change always needs the VM STOPPED, even with force=true. Mirrors TrueNAS device validators in the preview. Confirmation is bound to the device row, VM status, and validated targets. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -66,7 +66,7 @@ func (r *Registry) registerVMManageTools() {
 					},
 					"force": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Allow updating a device while the VM is not STOPPED. Updates stored configuration only; changes take effect after the VM is stopped and started. Default: false.",
+						"description": "Allow updating a device while the VM is not STOPPED. Updates stored configuration only; changes take effect after the VM is stopped and started. Does not allow a DISK path change, which always needs the VM STOPPED. Default: false.",
 					},
 					"allow_wildcard_display_bind": map[string]interface{}{
 						"type":        "boolean",
@@ -88,7 +88,7 @@ func (r *Registry) registerVMManageTools() {
 	r.tools["delete_vm_device"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "delete_vm_device",
-			Description: "DESTRUCTIVE: Remove a device from a virtual machine via vm.device.delete. This is also how installer CDROMs are ejected in TrueNAS (removing the CDROM device leaves the ISO file on disk). Backing zvols and raw image files are kept by default; pass zvol=true (DISK only) or raw_file=true (RAW only) to permanently destroy them too. Refuses while the VM is RUNNING or SUSPENDED (TrueNAS rejects vm.device.delete on active VMs even with force=true; stop the VM first with stop_vm). Never destroys a zvol or raw file shared with another VM device. Confirmation is bound to the device row, VM status, and backing storage. Use dry_run to preview.",
+			Description: "DESTRUCTIVE: Remove a device from a virtual machine via vm.device.delete. This is also how installer CDROMs are ejected in TrueNAS (removing the CDROM device leaves the ISO file on disk). Backing zvols and raw image files are kept by default; pass zvol=true (DISK only) or raw_file=true (RAW only) to permanently destroy them too. Refuses while the VM is RUNNING or SUSPENDED (TrueNAS rejects vm.device.delete on active VMs even with force=true; stop the VM first with stop_vm). Never destroys a zvol or raw file shared with another VM device. A zvol is also refused when it has snapshots (TrueNAS destroys it non-recursively and would refuse) or when an iSCSI extent, NVMe-oF namespace or (before 27.0) Incus instance uses it. After the delete, the result reports whether the device and its backing storage are actually gone. Confirmation is bound to the device row, VM status, and backing storage. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -99,7 +99,7 @@ func (r *Registry) registerVMManageTools() {
 					},
 					"zvol": map[string]interface{}{
 						"type":        "boolean",
-						"description": "DISK devices only: also permanently destroy the backing ZFS volume (zvol) and its snapshots. Refused if shared with another VM device or outside user datasets. Default: false.",
+						"description": "DISK devices only: also permanently destroy the backing ZFS volume (zvol). Refused if it has snapshots, is shared with another VM device or another service (iSCSI, NVMe-oF), or is outside user datasets. Default: false.",
 					},
 					"raw_file": map[string]interface{}{
 						"type":        "boolean",
@@ -107,7 +107,7 @@ func (r *Registry) registerVMManageTools() {
 					},
 					"force": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Ignore errors when destroying the backing zvol or raw file and still remove the device record (also allows deletion when VM state is ERROR). Does not bypass TrueNAS's refusal on RUNNING or SUSPENDED VMs. Default: false.",
+						"description": "Ignore errors when destroying the backing zvol or raw file and still remove the device record (also allows deletion when VM state is ERROR); the result then reports what is still present. Does not bypass TrueNAS's refusal on RUNNING or SUSPENDED VMs. Default: false.",
 					},
 					"dry_run": map[string]interface{}{
 						"type":        "boolean",
@@ -125,16 +125,16 @@ func (r *Registry) registerVMManageTools() {
 	deleteVMProps := vmSelectorSchemaProps()
 	deleteVMProps["zvols"] = map[string]interface{}{
 		"type":        "boolean",
-		"description": "Also permanently and recursively destroy every attached /dev/zvol/ DISK volume (and its snapshots). Refused if any zvol is attached to another VM or fails managed-dataset guards. Default: false.",
+		"description": "Also permanently and recursively destroy every attached /dev/zvol/ DISK volume and its snapshots. Refused if any zvol is attached to another VM, used by another service (iSCSI, NVMe-oF, or before 27.0 an Incus instance), has a snapshot with clones or holds, or fails managed-dataset guards. Default: false.",
 	}
 	deleteVMProps["force"] = map[string]interface{}{
 		"type":        "boolean",
-		"description": "Allow deleting a VM that is not STOPPED (forcibly powers off a running VM without guest shutdown) and ignore domain or zvol cleanup errors. Default: false.",
+		"description": "Allow deleting a VM that is not STOPPED (forcibly powers off a running VM without guest shutdown) and ignore domain or zvol cleanup errors; the result then reports which of the VM and its zvols are still present. Default: false.",
 	}
 	r.tools["delete_vm"] = Tool{
 		Definition: mcp.Tool{
 			Name:        "delete_vm",
-			Description: "DESTRUCTIVE: Delete a virtual machine via vm.delete. Refuses if the VM is not STOPPED unless force=true (which forcibly powers off a running VM and ignores cleanup errors). Backing zvols are kept by default; pass zvols=true to permanently and recursively destroy every attached /dev/zvol/ DISK volume (refused if any zvol is attached to another VM or fails managed-dataset guards; the preview lists every zvol with its size). Confirmation is bound to the VM row, live status, full device list, and zvol state. Use dry_run to preview.",
+			Description: "DESTRUCTIVE: Delete a virtual machine via vm.delete. Refuses if the VM is not STOPPED unless force=true (which forcibly powers off a running VM and ignores cleanup errors). Backing zvols are kept by default; pass zvols=true to permanently and recursively destroy every attached /dev/zvol/ DISK volume and its snapshots (refused if any zvol is attached to another VM, is used by an iSCSI extent, NVMe-oF namespace or, before 27.0, an Incus instance, has a snapshot with clones or holds, which a recursive destroy would also destroy or release, or fails managed-dataset guards; the preview lists every zvol with its size and snapshot count). After the delete, the result reports which of the VM and its zvols are actually gone. Confirmation is bound to the VM row, live status, full device list, and each zvol's dataset, snapshots, clones and holds. Use dry_run to preview.",
 			InputSchema: map[string]interface{}{
 				"type":       "object",
 				"properties": deleteVMProps,
@@ -648,6 +648,13 @@ func planUpdateDiskAttrs(ctx context.Context, client *truenas.Client, dctx *vmDe
 		if refs := dctx.OtherZvolRefs[zvolName]; len(refs) > 0 {
 			st.block("DISK zvol %s is already attached to %s", zvolName, formatDeviceRefs(refs))
 		}
+		if p != curPath && dctx.VM.State != "STOPPED" {
+			// The middleware accepts this update on an active VM, but the
+			// guest keeps the old zvol open while the device table no
+			// longer shows it attached, so another VM could attach it.
+			st.block("DISK path changes need VM %q (id %d) to be STOPPED (it is %s), even with force=true: the running guest keeps %s open while it would no longer be listed as attached",
+				dctx.VM.Name, dctx.VM.ID, dctx.VM.State, curPath)
+		}
 		if p != curPath {
 			choices, err := fetchVMDiskChoices(ctx, client)
 			if err != nil {
@@ -857,22 +864,53 @@ func planUpdateNICAttrs(ctx context.Context, client *truenas.Client, dctx *vmDev
 	return nil
 }
 
-func planUpdateDisplayAttrs(ctx context.Context, client *truenas.Client, dctx *vmDeviceContext, spec *vmDeviceUpdateSpec, st *deviceUpdatePlanState) error {
-	existing := dctx.DeviceAttr
-	attrs := spec.Attributes
+// displayUpdate is the effective DISPLAY configuration while an update is
+// planned: the stored values with the requested ones applied.
+type displayUpdate struct {
+	existing map[string]interface{}
+	attrs    map[string]interface{}
+	version  truenas.Version
+	pre27    bool
+	curType  string
+	effType  string
+}
 
+func planUpdateDisplayAttrs(ctx context.Context, client *truenas.Client, dctx *vmDeviceContext, spec *vmDeviceUpdateSpec, st *deviceUpdatePlanState) error {
 	limits, err := fetchVMHostLimits(ctx, client)
 	if err != nil {
 		return err
 	}
 	st.extraBind["host_version"] = limits.Version.String()
-	pre27 := isVMPre27(limits.Version)
+	d := &displayUpdate{
+		existing: dctx.DeviceAttr,
+		attrs:    spec.Attributes,
+		version:  limits.Version,
+		pre27:    isVMPre27(limits.Version),
+	}
+	if err := d.planTypeAndResolution(dctx, st); err != nil {
+		return err
+	}
+	if err := d.planBind(ctx, client, spec, st); err != nil {
+		return err
+	}
+	if err := d.planWebAndWait(st); err != nil {
+		return err
+	}
+	if err := d.planPassword(st); err != nil {
+		return err
+	}
+	return d.planPorts(ctx, client, dctx, st)
+}
 
+// planTypeAndResolution applies type (at most one display of each type per
+// VM) and resolution.
+func (d *displayUpdate) planTypeAndResolution(dctx *vmDeviceContext, st *deviceUpdatePlanState) error {
+	existing, attrs := d.existing, d.attrs
 	curType, _ := existing["type"].(string)
 	if curType == "" {
 		curType = "SPICE"
 	}
-	effType := curType
+	d.curType, d.effType = curType, curType
 	if rawType, ok := attrs["type"]; ok {
 		dt, ok := rawType.(string)
 		if !ok || (dt != "SPICE" && dt != "VNC") {
@@ -894,7 +932,7 @@ func planUpdateDisplayAttrs(ctx context.Context, client *truenas.Client, dctx *v
 		st.attrPayload["type"] = dt
 		st.attrPreview["type"] = dt
 		st.attrBind["type"] = dt
-		effType = dt
+		d.effType = dt
 	}
 
 	if rawRes, ok := attrs["resolution"]; ok {
@@ -911,6 +949,13 @@ func planUpdateDisplayAttrs(ctx context.Context, client *truenas.Client, dctx *v
 		}
 	}
 
+	return nil
+}
+
+// planBind applies bind: a wildcard needs allow_wildcard_display_bind, and
+// the address must be one of vm.device.bind_choices.
+func (d *displayUpdate) planBind(ctx context.Context, client *truenas.Client, spec *vmDeviceUpdateSpec, st *deviceUpdatePlanState) error {
+	existing, attrs := d.existing, d.attrs
 	effBind, _ := existing["bind"].(string)
 	if effBind == "" {
 		effBind = "127.0.0.1"
@@ -935,7 +980,7 @@ func planUpdateDisplayAttrs(ctx context.Context, client *truenas.Client, dctx *v
 		if !spec.AllowWildcardDisplayBind {
 			st.block("DISPLAY bind %q exposes the VM console on all host interfaces; bind to 127.0.0.1 or set allow_wildcard_display_bind=true", effBind)
 		} else {
-			st.warn("DISPLAY (%s) binds to %s, exposing the VM console on all host interfaces", effType, effBind)
+			st.warn("DISPLAY (%s) binds to %s, exposing the VM console on all host interfaces", d.effType, effBind)
 		}
 	}
 
@@ -948,6 +993,12 @@ func planUpdateDisplayAttrs(ctx context.Context, client *truenas.Client, dctx *v
 		st.block("DISPLAY bind address %q is not in vm.device.bind_choices", effBind)
 	}
 
+	return nil
+}
+
+// planWebAndWait applies web and wait; before 27.0, VNC cannot have web.
+func (d *displayUpdate) planWebAndWait(st *deviceUpdatePlanState) error {
+	existing, attrs := d.existing, d.attrs
 	effWeb := true
 	if curWeb, ok := existing["web"].(bool); ok {
 		effWeb = curWeb
@@ -981,10 +1032,18 @@ func planUpdateDisplayAttrs(ctx context.Context, client *truenas.Client, dctx *v
 		}
 	}
 
-	if effType == "VNC" && effWeb && pre27 {
-		st.block("DISPLAY VNC does not support web=true on TrueNAS %s; set web=false or use type=SPICE", vmVersionLabel(limits.Version))
+	if d.effType == "VNC" && effWeb && d.pre27 {
+		st.block("DISPLAY VNC does not support web=true on TrueNAS %s; set web=false or use type=SPICE", vmVersionLabel(d.version))
 	}
 
+	return nil
+}
+
+// planPassword applies password; before 27.0 a display needs a non-empty
+// one. The password itself is bound only as a hash.
+func (d *displayUpdate) planPassword(st *deviceUpdatePlanState) error {
+	existing, attrs := d.existing, d.attrs
+	effType, curType, pre27 := d.effType, d.curType, d.pre27
 	existingPw, _ := existing["password"].(string)
 	if rawPw, hasPw := attrs["password"]; hasPw {
 		pw, ok := rawPw.(string)
@@ -998,7 +1057,7 @@ func planUpdateDisplayAttrs(ctx context.Context, client *truenas.Client, dctx *v
 			return fmt.Errorf("DISPLAY VNC password must be at most %d characters", vmVNCPasswordMaxLen)
 		}
 		if pw == "" && pre27 {
-			st.block("TrueNAS %s requires a non-empty display password", vmVersionLabel(limits.Version))
+			st.block("TrueNAS %s requires a non-empty display password", vmVersionLabel(d.version))
 		}
 		if pw == "" && !pre27 {
 			st.warn("DISPLAY (%s) password will be cleared", effType)
@@ -1016,13 +1075,20 @@ func planUpdateDisplayAttrs(ctx context.Context, client *truenas.Client, dctx *v
 		st.changed = true
 	} else {
 		if existingPw == "" && pre27 {
-			st.block("TrueNAS %s requires a display password; set attributes.password", vmVersionLabel(limits.Version))
+			st.block("TrueNAS %s requires a display password; set attributes.password", vmVersionLabel(d.version))
 		}
 		if curType == "SPICE" && effType == "VNC" && existingPw != "" {
 			st.warn("Switching DISPLAY from SPICE to VNC without setting a new password: VNC requires passwords of at most %d characters; set attributes.password explicitly if the existing password is longer", vmVNCPasswordMaxLen)
 		}
 	}
 
+	return nil
+}
+
+// planPorts applies port and web_port: in range, distinct, and not used by
+// another VM's display or reserved by TrueNAS.
+func (d *displayUpdate) planPorts(ctx context.Context, client *truenas.Client, dctx *vmDeviceContext, st *deviceUpdatePlanState) error {
+	existing, attrs := d.existing, d.attrs
 	effPort64, _ := extractZFSInt64(existing["port"])
 	effWebPort64, _ := extractZFSInt64(existing["web_port"])
 	effPort, effWebPort := int(effPort64), int(effWebPort64)
@@ -1277,13 +1343,15 @@ func planDeleteVMDevice(ctx context.Context, client *truenas.Client, args map[st
 		Bind:           bind,
 		ConfirmSummary: newConfirmSummary(summary, facts...),
 		Result: map[string]interface{}{
-			"device_id": dctx.DeviceID,
-			"dtype":     dctx.DType,
-			"vm_id":     dctx.VM.ID,
-			"vm_name":   dctx.VM.Name,
-			"zvol":      deleteZvol,
-			"raw_file":  deleteRawFile,
-			"force":     force,
+			"device_id":   dctx.DeviceID,
+			"dtype":       dctx.DType,
+			"vm_id":       dctx.VM.ID,
+			"vm_name":     dctx.VM.Name,
+			"zvol":        deleteZvol,
+			"raw_file":    deleteRawFile,
+			"force":       force,
+			"zvol_target": action["zvol_to_delete"],
+			"raw_target":  action["raw_file_to_delete"],
 		},
 	}, nil
 }
@@ -1340,8 +1408,36 @@ func planDeleteDeviceZvol(ctx context.Context, client *truenas.Client, dctx *vmD
 			info["volsize_human"] = formatBytes(vs)
 			sizeLabel = formatBytes(vs)
 		}
+		limits, err := fetchVMHostLimits(ctx, client)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+		consumers, err := fetchZvolConsumers(ctx, client, limits.Version)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+		if reason := zvolConsumerRefusal(zvolName, consumers[zvolName]); reason != "" {
+			blocked = append(blocked, reason)
+		}
+		snaps, err := zvolSnapshots(ctx, client, zvolName)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+		// vm.device.delete destroys the zvol non-recursively on 25.10
+		// (zfs.dataset.delete) and on master (destroy_impl), so ZFS refuses
+		// a zvol that has snapshots; with force=true that failure is
+		// ignored and only the device record is removed.
+		if len(snaps) > 0 {
+			blocked = append(blocked, fmt.Sprintf(
+				"cannot destroy zvol %s: it has %d snapshot(s) (%s), and TrueNAS destroys a device's zvol non-recursively, so it would refuse (with force=true it would remove the device and keep the zvol); delete the snapshots first, or keep the zvol",
+				zvolName, len(snaps), strings.Join(snapshotIDs(snaps), ", ")))
+		}
+		info["snapshot_count"] = len(snaps)
+		if len(consumers[zvolName]) > 0 {
+			info["used_by"] = consumers[zvolName]
+		}
 		action["zvol_to_delete"] = info
-		warnings = append(warnings, fmt.Sprintf("PERMANENT DATA LOSS: zvol %s (%s) and any snapshots on it will be destroyed", zvolName, sizeLabel))
+		warnings = append(warnings, fmt.Sprintf("PERMANENT DATA LOSS: zvol %s (%s) will be destroyed", zvolName, sizeLabel))
 	}
 
 	return fmt.Sprintf("zvol %s (%s)", zvolName, sizeLabel), blocked, warnings, bind, nil
@@ -1453,6 +1549,61 @@ func (r *Registry) handleDeleteVMDevice(ctx context.Context, client *truenas.Cli
 	return handlePlanned(ctx, client, args, planDeleteVMDevice, r.executeDeleteVMDevice)
 }
 
+// deviceStillExists reports whether VM device id is still listed. ok is
+// false when that could not be read.
+func deviceStillExists(ctx context.Context, client *truenas.Client, id int) (exists, ok bool) {
+	raw, err := client.Call(ctx, "vm.device.query", []interface{}{[]interface{}{"id", "=", id}})
+	if err != nil {
+		return false, false
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return false, false
+	}
+	for _, row := range rows {
+		if rid, _ := extractZFSInt64(row["id"]); int(rid) == id {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// backingStorageOutcome reads back whether the storage a delete was asked
+// to remove is gone: "destroyed", "still_present", "absent" (it did not
+// exist at preview time) or "unverified".
+func backingStorageOutcome(ctx context.Context, client *truenas.Client, target interface{}, isZvol bool) (string, string) {
+	info, _ := target.(map[string]interface{})
+	if info == nil {
+		return "", ""
+	}
+	if existed, _ := info["exists"].(bool); !existed {
+		name, _ := info["name"].(string)
+		if !isZvol {
+			name, _ = info["path"].(string)
+		}
+		return name, "absent"
+	}
+	if isZvol {
+		name, _ := info["name"].(string)
+		present, ok := zvolStillPresent(ctx, client, name)
+		switch {
+		case !ok:
+			return name, "unverified"
+		case present:
+			return name, "still_present"
+		}
+		return name, "destroyed"
+	}
+	p, _ := info["path"].(string)
+	if _, err := statACLPath(ctx, client, p); err != nil {
+		if isENOENT(err) {
+			return p, "destroyed"
+		}
+		return p, "unverified"
+	}
+	return p, "still_present"
+}
+
 func (r *Registry) executeDeleteVMDevice(ctx context.Context, client *truenas.Client, _ map[string]interface{}, plan *writePlan) (string, error) {
 	if _, err := callPlan(ctx, client, plan); err != nil {
 		return "", fmt.Errorf("failed to delete VM device: %w", err)
@@ -1465,27 +1616,69 @@ func (r *Registry) executeDeleteVMDevice(ctx context.Context, client *truenas.Cl
 	deleteRawFile, _ := plan.Result["raw_file"].(bool)
 	force, _ := plan.Result["force"].(bool)
 
-	msg := fmt.Sprintf("Deleted %s device %d from VM %q (id %d).", dtype, deviceID, vmName, vmID)
-	switch {
-	case deleteZvol:
-		msg = fmt.Sprintf("Deleted %s device %d from VM %q (id %d) and destroyed its backing zvol.", dtype, deviceID, vmName, vmID)
-	case deleteRawFile:
-		msg = fmt.Sprintf("Deleted %s device %d from VM %q (id %d) and deleted its backing raw file.", dtype, deviceID, vmName, vmID)
-	case dtype == "CDROM":
-		msg = fmt.Sprintf("Ejected and removed CDROM device %d from VM %q (id %d); ISO file on disk was kept.", deviceID, vmName, vmID)
-	}
-
 	result := map[string]interface{}{
 		"device_id":        deviceID,
 		"vm_id":            vmID,
 		"vm_name":          vmName,
 		"dtype":            dtype,
 		"deleted":          true,
-		"zvol_deleted":     deleteZvol,
-		"raw_file_deleted": deleteRawFile,
+		"zvol_deleted":     false,
+		"raw_file_deleted": false,
 		"force":            force,
-		"message":          msg,
 	}
+
+	msg := fmt.Sprintf("Deleted %s device %d from VM %q (id %d).", dtype, deviceID, vmName, vmID)
+	if dtype == "CDROM" && !deleteZvol && !deleteRawFile {
+		msg = fmt.Sprintf("Ejected and removed CDROM device %d from VM %q (id %d); ISO file on disk was kept.", deviceID, vmName, vmID)
+	}
+
+	// With force=true, vm.device.delete ignores a failed zvol destroy or
+	// unlink and still removes the record, so what is gone is read back.
+	// The reads run even if the request was cancelled.
+	if force || deleteZvol || deleteRawFile {
+		cctx, cancel := vmCleanupContext(ctx)
+		defer cancel()
+		exists, ok := deviceStillExists(cctx, client, deviceID)
+		switch {
+		case !ok:
+			result["deleted"] = false
+			result["device_unverified"] = true
+			msg = fmt.Sprintf("vm.device.delete for %s device %d on VM %q (id %d) returned, but whether the device is gone could not be read back.", dtype, deviceID, vmName, vmID)
+		case exists:
+			result["deleted"] = false
+			result["device_still_exists"] = true
+			msg = fmt.Sprintf("vm.device.delete for %s device %d on VM %q (id %d) returned, but the device still exists.", dtype, deviceID, vmName, vmID)
+		}
+		kind, key, target := "", "", interface{}(nil)
+		switch {
+		case deleteZvol:
+			kind, key, target = "zvol", "zvol_deleted", plan.Result["zvol_target"]
+		case deleteRawFile:
+			kind, key, target = "raw file", "raw_file_deleted", plan.Result["raw_target"]
+		}
+		if kind != "" {
+			name, outcome := backingStorageOutcome(cctx, client, target, deleteZvol)
+			result[key] = outcome == "destroyed"
+			if outcome != "" {
+				result["backing_storage"] = map[string]interface{}{"name": name, "outcome": outcome}
+			}
+			switch outcome {
+			case "destroyed":
+				msg += fmt.Sprintf(" Its backing %s %s was destroyed.", kind, name)
+			case "still_present":
+				why := ""
+				if force {
+					why = " (force=true ignored the failure)"
+				}
+				msg += fmt.Sprintf(" Its backing %s %s is still present%s.", kind, name, why)
+			case "absent":
+				msg += fmt.Sprintf(" Its backing %s %s did not exist.", kind, name)
+			case "unverified":
+				msg += fmt.Sprintf(" Whether its backing %s %s was destroyed could not be read back.", kind, name)
+			}
+		}
+	}
+	result["message"] = msg
 	if len(plan.Warnings) > 0 {
 		result["warnings"] = plan.Warnings
 	}
@@ -1497,6 +1690,198 @@ func (r *Registry) executeDeleteVMDevice(ctx context.Context, client *truenas.Cl
 }
 
 // --- delete_vm ---
+
+// deleteVMZvol is one /dev/zvol/ DISK of the VM being deleted.
+type deleteVMZvol struct {
+	Name      string
+	Path      string
+	Dataset   map[string]interface{}
+	Snapshots []snapDetail
+	Consumers []string
+	Invalid   bool
+}
+
+func (z *deleteVMZvol) sizeLabel() string {
+	if z.Dataset != nil {
+		if vs, ok := extractZFSInt64(z.Dataset["volsize"]); ok && vs > 0 {
+			return formatBytes(vs)
+		}
+	}
+	return "size unknown"
+}
+
+// entry is the zvol as the preview and result show it.
+func (z *deleteVMZvol) entry(withSnapshots bool) map[string]interface{} {
+	e := map[string]interface{}{
+		"name":   z.Name,
+		"path":   z.Path,
+		"exists": z.Dataset != nil,
+	}
+	if z.Dataset != nil {
+		if vs, ok := extractZFSInt64(z.Dataset["volsize"]); ok && vs > 0 {
+			e["volsize"] = vs
+			e["volsize_human"] = formatBytes(vs)
+		}
+		if locked, ok := z.Dataset["locked"].(bool); ok {
+			e["locked"] = locked
+		}
+	}
+	if withSnapshots {
+		e["snapshot_count"] = len(z.Snapshots)
+		if len(z.Snapshots) > 0 {
+			e["snapshots"] = snapStates(z.Snapshots)
+		}
+		if len(z.Consumers) > 0 {
+			e["used_by"] = z.Consumers
+		}
+	}
+	return e
+}
+
+// otherVMZvolRefs maps every zvol attached to a VM other than vmID to its
+// device references.
+func otherVMZvolRefs(allVMs []map[string]interface{}, vmID int) map[string][]vmDeviceRef {
+	out := map[string][]vmDeviceRef{}
+	for _, row := range allVMs {
+		rowID64, _ := extractZFSInt64(row["id"])
+		rowID := int(rowID64)
+		if rowID == vmID {
+			continue
+		}
+		rowName, _ := row["name"].(string)
+		devs, _ := row["devices"].([]interface{})
+		for _, item := range devs {
+			dm, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			attrs, _ := dm["attributes"].(map[string]interface{})
+			if dtype, _ := attrs["dtype"].(string); dtype != "DISK" {
+				continue
+			}
+			p, _ := attrs["path"].(string)
+			if zn, ok := zvolPathToName(p); ok {
+				devID64, _ := extractZFSInt64(dm["id"])
+				out[zn] = append(out[zn], vmDeviceRef{
+					VMID: rowID, VMName: rowName, DeviceID: int(devID64), DType: "DISK",
+				})
+			}
+		}
+	}
+	return out
+}
+
+// deleteVMStateChecks returns the refusals and warnings for the VM's state.
+func deleteVMStateChecks(vm *resolvedVM, force bool) (blocked, warnings []string) {
+	if vm.State != "STOPPED" {
+		if !force {
+			blocked = append(blocked, fmt.Sprintf(
+				"VM %q (id %d) is currently %s; stop it with stop_vm first, or pass force=true to forcibly power it off and delete it (and ignore domain/zvol cleanup errors)",
+				vm.Name, vm.ID, vm.State))
+		} else {
+			warnings = append(warnings, fmt.Sprintf(
+				"VM %q (id %d) is currently %s; force=true will forcibly power it off without guest shutdown and ignore domain/zvol cleanup errors",
+				vm.Name, vm.ID, vm.State))
+		}
+	} else if force {
+		warnings = append(warnings, fmt.Sprintf(
+			"force=true will ignore domain and zvol cleanup errors while deleting VM %q (id %d)",
+			vm.Name, vm.ID))
+	}
+	return blocked, warnings
+}
+
+// collectDeleteVMZvols returns the VM's sanitized devices and its distinct
+// /dev/zvol/ DISKs, each with its dataset row. With deleteZvols it warns
+// about DISK paths vm.delete does not destroy.
+func collectDeleteVMZvols(ctx context.Context, client *truenas.Client, vm *resolvedVM, deleteZvols bool) ([]interface{}, []*deleteVMZvol, []string, error) {
+	rawDevs, _ := vm.Raw["devices"].([]interface{})
+	devices := make([]interface{}, 0, len(rawDevs))
+	seen := map[string]bool{}
+	var zvols []*deleteVMZvol
+	var warnings []string
+	for _, item := range rawDevs {
+		dm, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		devices = append(devices, sanitizeCreatedDevice(dm))
+		attrs, _ := dm["attributes"].(map[string]interface{})
+		if dtype, _ := attrs["dtype"].(string); dtype != "DISK" {
+			continue
+		}
+		devPath, _ := attrs["path"].(string)
+		name, isZvol := zvolPathToName(devPath)
+		if !isZvol {
+			if deleteZvols && devPath != "" {
+				warnings = append(warnings, fmt.Sprintf("DISK path %q is not under /dev/zvol/ and will not be destroyed by vm.delete", devPath))
+			}
+			continue
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		z := &deleteVMZvol{Name: name, Path: devPath}
+		if deleteZvols && validateZvolName(name) != nil {
+			z.Invalid = true
+			zvols = append(zvols, z)
+			continue
+		}
+		row, err := queryDatasetRow(ctx, client, name)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		z.Dataset = row
+		zvols = append(zvols, z)
+	}
+	return devices, zvols, warnings, nil
+}
+
+// checkDeleteVMZvols applies the destroy guards to every zvol vm.delete
+// would destroy: name, other VMs, dataset type, other services, and the
+// snapshots a recursive destroy would take with it. It fills Snapshots and
+// Consumers.
+func checkDeleteVMZvols(ctx context.Context, client *truenas.Client, zvols []*deleteVMZvol, others map[string][]vmDeviceRef) (blocked, warnings []string, err error) {
+	var consumers zvolConsumers
+	for _, z := range zvols {
+		if z.Invalid {
+			reason := validateZvolName(z.Name)
+			blocked = append(blocked, fmt.Sprintf("refusing to destroy zvol %q: %v", z.Name, reason))
+			continue
+		}
+		if refs := others[z.Name]; len(refs) > 0 {
+			blocked = append(blocked, fmt.Sprintf("cannot destroy zvol %s: it is also attached to %s", z.Name, formatDeviceRefs(refs)))
+		}
+		if z.Dataset == nil {
+			warnings = append(warnings, fmt.Sprintf("zvol %s was not found in pool.dataset.query; vm.delete may fail unless force=true", z.Name))
+			continue
+		}
+		if dt, _ := z.Dataset["type"].(string); dt != "" && dt != "VOLUME" {
+			blocked = append(blocked, fmt.Sprintf("dataset %s is a %s, not a VOLUME; refusing to destroy it", z.Name, dt))
+		}
+		if consumers == nil {
+			limits, err := fetchVMHostLimits(ctx, client)
+			if err != nil {
+				return nil, nil, err
+			}
+			if consumers, err = fetchZvolConsumers(ctx, client, limits.Version); err != nil {
+				return nil, nil, err
+			}
+		}
+		z.Consumers = consumers[z.Name]
+		if reason := zvolConsumerRefusal(z.Name, z.Consumers); reason != "" {
+			blocked = append(blocked, reason)
+		}
+		snaps, err := zvolSnapshots(ctx, client, z.Name)
+		if err != nil {
+			return nil, nil, err
+		}
+		z.Snapshots = snaps
+		blocked = append(blocked, recursiveZvolDestroyRefusals(z.Name, snaps)...)
+	}
+	return blocked, warnings, nil
+}
 
 func planDeleteVM(ctx context.Context, client *truenas.Client, args map[string]interface{}) (*writePlan, error) {
 	vmID, hasID, name, hasName, err := parseVMSelector(args)
@@ -1519,140 +1904,57 @@ func planDeleteVM(ctx context.Context, client *truenas.Client, args map[string]i
 		return nil, err
 	}
 
-	var blocked, warnings []string
-	if vm.State != "STOPPED" {
-		if !force {
-			blocked = append(blocked, fmt.Sprintf(
-				"VM %q (id %d) is currently %s; stop it with stop_vm first, or pass force=true to forcibly power it off and delete it (and ignore domain/zvol cleanup errors)",
-				vm.Name, vm.ID, vm.State))
-		} else {
-			warnings = append(warnings, fmt.Sprintf(
-				"VM %q (id %d) is currently %s; force=true will forcibly power it off without guest shutdown and ignore domain/zvol cleanup errors",
-				vm.Name, vm.ID, vm.State))
-		}
-	} else if force {
-		warnings = append(warnings, fmt.Sprintf(
-			"force=true will ignore domain and zvol cleanup errors while deleting VM %q (id %d)",
-			vm.Name, vm.ID))
+	blocked, warnings := deleteVMStateChecks(vm, force)
+	others := otherVMZvolRefs(allVMs, vm.ID)
+	devices, zvols, zWarnings, err := collectDeleteVMZvols(ctx, client, vm, deleteZvols)
+	if err != nil {
+		return nil, err
 	}
-
-	// Build a map of every zvol attached to any OTHER VM.
-	otherVMZvols := map[string][]vmDeviceRef{}
-	for _, row := range allVMs {
-		rowID64, _ := extractZFSInt64(row["id"])
-		rowID := int(rowID64)
-		if rowID == vm.ID {
-			continue
-		}
-		rowName, _ := row["name"].(string)
-		devs, _ := row["devices"].([]interface{})
-		for _, item := range devs {
-			dm, ok := item.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			attrs, _ := dm["attributes"].(map[string]interface{})
-			if dtype, _ := attrs["dtype"].(string); dtype != "DISK" {
-				continue
-			}
-			p, _ := attrs["path"].(string)
-			if zn, ok := zvolPathToName(p); ok {
-				devID64, _ := extractZFSInt64(dm["id"])
-				otherVMZvols[zn] = append(otherVMZvols[zn], vmDeviceRef{
-					VMID: rowID, VMName: rowName, DeviceID: int(devID64), DType: "DISK",
-				})
-			}
-		}
-	}
-
-	rawDevs, _ := vm.Raw["devices"].([]interface{})
-	sanitizedDevices := make([]interface{}, 0, len(rawDevs))
-	seenZvols := map[string]bool{}
-	var zvolsToDelete []map[string]interface{}
-	var zvolsKept []map[string]interface{}
-	var zvolBinds []interface{}
-	var deleteSummaryParts []string
-
-	for _, item := range rawDevs {
-		dm, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		sanitizedDevices = append(sanitizedDevices, sanitizeCreatedDevice(dm))
-		attrs, _ := dm["attributes"].(map[string]interface{})
-		if dtype, _ := attrs["dtype"].(string); dtype != "DISK" {
-			continue
-		}
-		devPath, _ := attrs["path"].(string)
-		zvolName, isZvol := zvolPathToName(devPath)
-		if !isZvol {
-			if deleteZvols && devPath != "" {
-				warnings = append(warnings, fmt.Sprintf("DISK path %q is not under /dev/zvol/ and will not be destroyed by vm.delete", devPath))
-			}
-			continue
-		}
-		if seenZvols[zvolName] {
-			continue
-		}
-		seenZvols[zvolName] = true
-
-		if deleteZvols {
-			if err := validateZvolName(zvolName); err != nil {
-				blocked = append(blocked, fmt.Sprintf("refusing to destroy zvol %q: %v", zvolName, err))
-				zvolBinds = append(zvolBinds, map[string]interface{}{"name": zvolName, "path": devPath, "invalid": true})
-				continue
-			}
-			if refs := otherVMZvols[zvolName]; len(refs) > 0 {
-				blocked = append(blocked, fmt.Sprintf("cannot destroy zvol %s: it is also attached to %s", zvolName, formatDeviceRefs(refs)))
-			}
-		}
-
-		dsRow, err := queryDatasetRow(ctx, client, zvolName)
+	warnings = append(warnings, zWarnings...)
+	if deleteZvols {
+		zBlocked, zWarn, err := checkDeleteVMZvols(ctx, client, zvols, others)
 		if err != nil {
 			return nil, err
 		}
+		blocked = append(blocked, zBlocked...)
+		warnings = append(warnings, zWarn...)
+	}
+	return buildDeleteVMPlan(vm, devices, zvols, others, deleteZvols, force, blocked, warnings), nil
+}
 
-		entry := map[string]interface{}{
-			"name":   zvolName,
-			"path":   devPath,
-			"exists": dsRow != nil,
+// buildDeleteVMPlan assembles the vm.delete preview, confirmation binding
+// and result.
+func buildDeleteVMPlan(vm *resolvedVM, devices []interface{}, zvols []*deleteVMZvol, others map[string][]vmDeviceRef, deleteZvols, force bool, blocked, warnings []string) *writePlan {
+	var toDelete, kept []map[string]interface{}
+	var zvolBinds []interface{}
+	var parts []string
+	for _, z := range zvols {
+		if z.Invalid {
+			zvolBinds = append(zvolBinds, map[string]interface{}{"name": z.Name, "path": z.Path, "invalid": true})
+			continue
 		}
-		sizeLabel := "size unknown"
-		if dsRow != nil {
-			if vs, ok := extractZFSInt64(dsRow["volsize"]); ok && vs > 0 {
-				entry["volsize"] = vs
-				entry["volsize_human"] = formatBytes(vs)
-				sizeLabel = formatBytes(vs)
-			}
-			if locked, ok := dsRow["locked"].(bool); ok {
-				entry["locked"] = locked
-			}
+		b := map[string]interface{}{
+			"name":            z.Name,
+			"path":            z.Path,
+			"dataset":         bindDatasetRow(z.Dataset),
+			"other_zvol_refs": formatDeviceRefs(others[z.Name]),
 		}
-
-		zvolBinds = append(zvolBinds, map[string]interface{}{
-			"name":            zvolName,
-			"path":            devPath,
-			"dataset":         bindDatasetRow(dsRow),
-			"other_zvol_refs": formatDeviceRefs(otherVMZvols[zvolName]),
-		})
-
 		if deleteZvols {
-			if dsRow == nil {
-				warnings = append(warnings, fmt.Sprintf("zvol %s was not found in pool.dataset.query; vm.delete may fail unless force=true", zvolName))
-			} else if dt, _ := dsRow["type"].(string); dt != "" && dt != "VOLUME" {
-				blocked = append(blocked, fmt.Sprintf("dataset %s is a %s, not a VOLUME; refusing to destroy it", zvolName, dt))
-			}
-			zvolsToDelete = append(zvolsToDelete, entry)
-			deleteSummaryParts = append(deleteSummaryParts, fmt.Sprintf("%s (%s)", zvolName, sizeLabel))
+			// A zvol used by another service is refused, so only the
+			// snapshots (with their clones and holds) are bound.
+			b["snapshots"] = snapBinds(z.Snapshots)
+			toDelete = append(toDelete, z.entry(true))
+			parts = append(parts, fmt.Sprintf("%s (%s, %d snapshot(s))", z.Name, z.sizeLabel(), len(z.Snapshots)))
 		} else {
-			zvolsKept = append(zvolsKept, entry)
+			kept = append(kept, z.entry(false))
 		}
+		zvolBinds = append(zvolBinds, b)
 	}
 
 	if deleteZvols {
-		if len(zvolsToDelete) > 0 {
+		if len(toDelete) > 0 {
 			warnings = append(warnings, fmt.Sprintf("PERMANENT DATA LOSS: %d zvol(s) and all of their snapshots will be recursively destroyed: %s",
-				len(zvolsToDelete), strings.Join(deleteSummaryParts, ", ")))
+				len(toDelete), strings.Join(parts, ", ")))
 		} else {
 			warnings = append(warnings, fmt.Sprintf("zvols=true was requested, but VM %q (id %d) has no attached /dev/zvol/ disks", vm.Name, vm.ID))
 		}
@@ -1665,26 +1967,26 @@ func planDeleteVM(ctx context.Context, client *truenas.Client, args map[string]i
 	action := map[string]interface{}{
 		"vm_id":        vm.ID,
 		"name":         vm.Name,
-		"device_count": len(sanitizedDevices),
+		"device_count": len(devices),
 		"zvols":        deleteZvols,
 		"force":        force,
 	}
-	if len(zvolsToDelete) > 0 {
-		action["zvols_to_delete"] = zvolsToDelete
+	if len(toDelete) > 0 {
+		action["zvols_to_delete"] = toDelete
 	}
-	if len(zvolsKept) > 0 {
-		action["zvols_kept"] = zvolsKept
+	if len(kept) > 0 {
+		action["zvols_kept"] = kept
 	}
 
 	currentState := vm.currentState()
-	currentState["device_count"] = len(sanitizedDevices)
-	currentState["devices"] = sanitizedDevices
+	currentState["device_count"] = len(devices)
+	currentState["devices"] = devices
 
-	summary := fmt.Sprintf("Delete VM %q (id %d, %d device(s))", vm.Name, vm.ID, len(sanitizedDevices))
-	if deleteZvols && len(deleteSummaryParts) > 0 {
-		summary += " AND PERMANENTLY DESTROY zvols: " + strings.Join(deleteSummaryParts, ", ")
-	} else if !deleteZvols && len(zvolsKept) > 0 {
-		summary += fmt.Sprintf(" (%d backing zvol(s) kept)", len(zvolsKept))
+	summary := fmt.Sprintf("Delete VM %q (id %d, %d device(s))", vm.Name, vm.ID, len(devices))
+	if deleteZvols && len(parts) > 0 {
+		summary += " AND PERMANENTLY DESTROY zvols: " + strings.Join(parts, ", ")
+	} else if !deleteZvols && len(kept) > 0 {
+		summary += fmt.Sprintf(" (%d backing zvol(s) kept)", len(kept))
 	}
 	if vm.State != "STOPPED" && force {
 		summary += fmt.Sprintf(" (VM is %s, force=true)", vm.State)
@@ -1692,12 +1994,12 @@ func planDeleteVM(ctx context.Context, client *truenas.Client, args map[string]i
 
 	facts := []string{
 		confirmFact("vm", fmt.Sprintf("%s (id %d, state %s)", vm.Name, vm.ID, vm.State)),
-		confirmFact("devices", fmt.Sprintf("%d", len(sanitizedDevices))),
+		confirmFact("devices", fmt.Sprintf("%d", len(devices))),
 		confirmBoolFact("zvols", deleteZvols),
 		confirmBoolFact("force", force),
 	}
-	if deleteZvols && len(deleteSummaryParts) > 0 {
-		facts = append(facts, confirmFact("zvols_to_destroy", strings.Join(deleteSummaryParts, ", ")))
+	if deleteZvols && len(parts) > 0 {
+		facts = append(facts, confirmFact("zvols_to_destroy", strings.Join(parts, ", ")))
 	}
 
 	return &writePlan{
@@ -1725,7 +2027,7 @@ func planDeleteVM(ctx context.Context, client *truenas.Client, args map[string]i
 			"memory":    vm.MemoryMiB,
 			"autostart": vm.Autostart,
 			"status":    vm.statusBind(),
-			"devices":   sanitizedDevices,
+			"devices":   devices,
 			"zvols":     zvolBinds,
 			"options":   opts,
 		},
@@ -1734,15 +2036,30 @@ func planDeleteVM(ctx context.Context, client *truenas.Client, args map[string]i
 			"vm_id":         vm.ID,
 			"name":          vm.Name,
 			"zvols":         deleteZvols,
-			"zvols_deleted": zvolsToDelete,
-			"zvols_kept":    zvolsKept,
+			"zvols_deleted": toDelete,
+			"zvols_kept":    kept,
 			"force":         force,
 		},
-	}, nil
+	}
 }
 
 func (r *Registry) handleDeleteVM(ctx context.Context, client *truenas.Client, args map[string]interface{}) (string, error) {
 	return handlePlanned(ctx, client, args, planDeleteVM, r.executeDeleteVM)
+}
+
+// vmStillExists reports whether VM vmID is still listed by vm.query. ok is
+// false when that could not be read.
+func vmStillExists(ctx context.Context, client *truenas.Client, vmID int) (exists, ok bool) {
+	rows, err := queryAllVMs(ctx, client)
+	if err != nil {
+		return false, false
+	}
+	for _, row := range rows {
+		if id, _ := extractZFSInt64(row["id"]); int(id) == vmID {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 func (r *Registry) executeDeleteVM(ctx context.Context, client *truenas.Client, _ map[string]interface{}, plan *writePlan) (string, error) {
@@ -1757,27 +2074,90 @@ func (r *Registry) executeDeleteVM(ctx context.Context, client *truenas.Client, 
 	zvolsDeleted, _ := plan.Result["zvols_deleted"].([]map[string]interface{})
 	zvolsKept, _ := plan.Result["zvols_kept"].([]map[string]interface{})
 
-	msg := fmt.Sprintf("Deleted VM %q (id %d).", name, vmID)
-	if deleteZvols && len(zvolsDeleted) > 0 {
-		msg = fmt.Sprintf("Deleted VM %q (id %d) and destroyed %d backing zvol(s).", name, vmID, len(zvolsDeleted))
-	} else if !deleteZvols && len(zvolsKept) > 0 {
-		msg = fmt.Sprintf("Deleted VM %q (id %d); %d backing zvol(s) were kept.", name, vmID, len(zvolsKept))
-	}
-
 	result := map[string]interface{}{
-		"vm_id":   vmID,
-		"name":    name,
-		"deleted": true,
-		"zvols":   deleteZvols,
-		"force":   force,
-		"message": msg,
-	}
-	if len(zvolsDeleted) > 0 {
-		result["zvols_deleted"] = zvolsDeleted
+		"vm_id": vmID,
+		"name":  name,
+		"zvols": deleteZvols,
+		"force": force,
 	}
 	if len(zvolsKept) > 0 {
 		result["zvols_kept"] = zvolsKept
 	}
+
+	// vm.delete succeeds with force=true even when it could not destroy a
+	// zvol or undefine the domain, so what remains is read back rather than
+	// assumed. The reads run even if the request was cancelled.
+	vmGone, vmChecked := true, true
+	var destroyed, remaining, unverified, absent []string
+	if force || deleteZvols {
+		cctx, cancel := vmCleanupContext(ctx)
+		defer cancel()
+		exists, ok := vmStillExists(cctx, client, vmID)
+		vmGone, vmChecked = !exists, ok
+		for _, z := range zvolsDeleted {
+			zn, _ := z["name"].(string)
+			if existed, _ := z["exists"].(bool); !existed {
+				absent = append(absent, zn)
+				continue
+			}
+			present, ok := zvolStillPresent(cctx, client, zn)
+			switch {
+			case !ok:
+				unverified = append(unverified, zn)
+			case present:
+				remaining = append(remaining, zn)
+			default:
+				destroyed = append(destroyed, zn)
+			}
+		}
+	}
+	result["deleted"] = vmGone && vmChecked
+	if !vmChecked {
+		result["vm_status_unverified"] = true
+	} else if !vmGone {
+		result["vm_still_exists"] = true
+	}
+	if len(zvolsDeleted) > 0 {
+		result["zvols_deleted"] = zvolsDeleted
+		result["zvols_destroyed"] = nonNilStrings(destroyed)
+	}
+	if len(remaining) > 0 {
+		result["zvols_still_present"] = remaining
+	}
+	if len(unverified) > 0 {
+		result["zvols_unverified"] = unverified
+	}
+	if len(absent) > 0 {
+		result["zvols_absent_before_delete"] = absent
+	}
+
+	var msg string
+	switch {
+	case !vmChecked:
+		msg = fmt.Sprintf("vm.delete for VM %q (id %d) returned, but whether the VM is gone could not be read back.", name, vmID)
+	case !vmGone:
+		msg = fmt.Sprintf("vm.delete for VM %q (id %d) returned, but the VM still exists.", name, vmID)
+	case deleteZvols && len(zvolsDeleted) > 0:
+		msg = fmt.Sprintf("Deleted VM %q (id %d) and destroyed %d of %d backing zvol(s).", name, vmID, len(destroyed), len(zvolsDeleted)-len(absent))
+	case !deleteZvols && len(zvolsKept) > 0:
+		msg = fmt.Sprintf("Deleted VM %q (id %d); %d backing zvol(s) were kept.", name, vmID, len(zvolsKept))
+	default:
+		msg = fmt.Sprintf("Deleted VM %q (id %d).", name, vmID)
+	}
+	if len(remaining) > 0 {
+		why := ""
+		if force {
+			why = " (force=true ignored the destroy failure)"
+		}
+		msg += fmt.Sprintf(" Still present%s: %s.", why, strings.Join(remaining, ", "))
+	}
+	if len(absent) > 0 {
+		msg += fmt.Sprintf(" Already absent before the delete: %s.", strings.Join(absent, ", "))
+	}
+	if len(unverified) > 0 {
+		msg += fmt.Sprintf(" Could not verify: %s.", strings.Join(unverified, ", "))
+	}
+	result["message"] = msg
 	if len(plan.Warnings) > 0 {
 		result["warnings"] = plan.Warnings
 	}
@@ -1786,4 +2166,12 @@ func (r *Registry) executeDeleteVM(ctx context.Context, client *truenas.Client, 
 		return "", err
 	}
 	return string(data), nil
+}
+
+// nonNilStrings returns s, or an empty list for nil, so JSON shows [].
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
