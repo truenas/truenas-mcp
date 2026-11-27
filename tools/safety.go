@@ -112,9 +112,18 @@ var toolSafety = map[string]Safety{
 	"delete_snapshot":   {Access: Destructive},
 	"query_shares":      {Access: Read},
 	"query_vms":         {Access: Read},
-	"create_dataset":    {Access: Write},
-	"create_smb_share":  {Access: Write},
-	"create_nfs_share":  {Access: Write},
+	// Creating a VM allocates host RAM/CPUs and can create zvols or expose a
+	// display console; power operations can stop, reboot, or forcibly cut
+	// power to a running guest. All six execute only after confirmation.
+	"create_vm":        {Access: Destructive},
+	"start_vm":         {Access: Destructive},
+	"stop_vm":          {Access: Destructive},
+	"poweroff_vm":      {Access: Destructive},
+	"restart_vm":       {Access: Destructive},
+	"reset_vm":         {Access: Destructive},
+	"create_dataset":   {Access: Write},
+	"create_smb_share": {Access: Write},
+	"create_nfs_share": {Access: Write},
 	// Changing or deleting a share, or replacing its share ACL, can cut
 	// clients off or widen access in place, so these execute only after
 	// confirmation bound to the share's current settings.

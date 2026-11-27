@@ -50,6 +50,8 @@ func (r *Registry) registerVMTools() {
 		},
 		Handler: handleQueryVMs,
 	}
+
+	r.registerVMActionTools()
 }
 
 var vmQuerySelect = []interface{}{
