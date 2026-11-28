@@ -34,7 +34,7 @@ func withVMActionResults(results map[string]interface{}) map[string]interface{} 
 		"pw_name": "truenas_admin",
 		"privilege": map[string]interface{}{
 			"web_shell": true,
-			"roles":     []interface{}{"VM_WRITE", "FULL_ADMIN"},
+			"roles":     map[string]interface{}{"$set": []interface{}{"VM_WRITE", "FULL_ADMIN"}},
 		},
 	}
 	results["vm.maximum_supported_vcpus"] = 255.0

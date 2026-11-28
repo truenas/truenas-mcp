@@ -1312,8 +1312,8 @@ func querySMBAccounts(ctx context.Context, client *truenas.Client, group bool, f
 		if group {
 			a.Name, _ = row["name"].(string)
 			a.ID, a.IDOK = intID(row["gid"])
-			if roles, ok := row["roles"].([]interface{}); ok {
-				a.Roles, a.RolesOK = stringList(roles), true
+			if roles, ok := roleList(row["roles"]); ok {
+				a.Roles, a.RolesOK = roles, true
 			}
 		} else {
 			a.Name, _ = row["username"].(string)

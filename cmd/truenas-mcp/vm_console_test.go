@@ -210,7 +210,7 @@ func TestVMConsoleRoundTripThroughStdioRedaction(t *testing.T) {
 					"pw_name": "truenas_admin",
 					"privilege": map[string]interface{}{
 						"web_shell": true,
-						"roles":     []interface{}{"VM_WRITE"},
+						"roles":     map[string]interface{}{"$set": []interface{}{"VM_WRITE"}},
 					},
 				}
 			case "auth.generate_token":

@@ -449,3 +449,33 @@ func TestAccountToolsUnderPolicy(t *testing.T) {
 		t.Error("query_groups ran although not allowed")
 	}
 }
+
+func TestRoleListSetAndArray(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     interface{}
+		want   []string
+		wantOK bool
+	}{
+		{"array", []interface{}{"READONLY_ADMIN", "SHARING_ADMIN"}, []string{"READONLY_ADMIN", "SHARING_ADMIN"}, true},
+		{"empty array", []interface{}{}, []string{}, true},
+		{"set object", map[string]interface{}{"$set": []interface{}{"FULL_ADMIN"}}, []string{"FULL_ADMIN"}, true},
+		{"empty set object", map[string]interface{}{"$set": []interface{}{}}, []string{}, true},
+		{"nil", nil, []string{}, false},
+		{"wrong key", map[string]interface{}{"other": []interface{}{"FULL_ADMIN"}}, []string{}, false},
+		{"extra key", map[string]interface{}{"$set": []interface{}{"FULL_ADMIN"}, "extra": true}, []string{}, false},
+		{"non-array set", map[string]interface{}{"$set": "FULL_ADMIN"}, []string{}, false},
+		{"string", "FULL_ADMIN", []string{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := roleList(tc.in)
+			if ok != tc.wantOK {
+				t.Fatalf("roleList(%#v) ok = %v, want %v", tc.in, ok, tc.wantOK)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("roleList(%#v) = %#v, want %#v", tc.in, got, tc.want)
+			}
+		})
+	}
+}

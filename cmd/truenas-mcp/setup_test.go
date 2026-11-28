@@ -776,3 +776,133 @@ func TestServerTLSConfigPin(t *testing.T) {
 		t.Error("short pin accepted")
 	}
 }
+
+func TestSetupLoginRolesSetAndList(t *testing.T) {
+	t.Run("$set limited role succeeds", func(t *testing.T) {
+		f := newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.rawLoginRoles = map[string]interface{}{"$set": []string{"READONLY_ADMIN"}}
+		})
+		r := runSetupTest(t, f, setupOpts{env: agentEnv()}, "--user", fakeUser)
+		wantCode(t, r, exitSetupOK)
+		if f.count("api_key.create") != 1 {
+			t.Errorf("calls %v, want 1 api_key.create", f.methods())
+		}
+	})
+	t.Run("$set empty role is refused", func(t *testing.T) {
+		f := newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.rawLoginRoles = map[string]interface{}{"$set": []string{}}
+		})
+		r := runSetupTest(t, f, setupOpts{env: agentEnv()}, "--user", fakeUser)
+		wantCode(t, r, exitSetupPermission)
+		if !strings.Contains(r.stderr, "has no TrueNAS role") {
+			t.Errorf("stderr = %s", r.stderr)
+		}
+		if f.count("api_key.create") != 0 {
+			t.Errorf("key created for roleless user")
+		}
+	})
+	t.Run("plain list still succeeds", func(t *testing.T) {
+		f := newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.rawLoginRoles = []string{"READONLY_ADMIN"}
+		})
+		r := runSetupTest(t, f, setupOpts{env: agentEnv()}, "--user", fakeUser)
+		wantCode(t, r, exitSetupOK)
+	})
+}
+
+func TestSetupCheckOwnerSetRoles(t *testing.T) {
+	t.Run("limited role in $set succeeds", func(t *testing.T) {
+		f := newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.roles = []string{"FULL_ADMIN"}
+			f.users["mcp-bot"] = []string{"READONLY_ADMIN"}
+			f.userQuerySetRoles = true
+		})
+		r := runSetupTest(t, f, setupOpts{env: agentEnv()}, "--user", fakeUser, "--key-owner", "mcp-bot")
+		wantCode(t, r, exitSetupOK)
+		if len(f.creates) != 1 || f.creates[0]["username"] != "mcp-bot" {
+			t.Errorf("creates = %v, want owner mcp-bot", f.creates)
+		}
+	})
+	t.Run("FULL_ADMIN in $set requires confirmation", func(t *testing.T) {
+		f := newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.roles = []string{"FULL_ADMIN"}
+			f.users["admin-bot"] = []string{"FULL_ADMIN"}
+			f.userQuerySetRoles = true
+		})
+		r := runSetupTest(t, f, setupOpts{env: agentEnv()}, "--user", fakeUser, "--key-owner", "admin-bot")
+		wantCode(t, r, exitSetupPermission)
+		if f.count("api_key.create") != 0 {
+			t.Errorf("created FULL_ADMIN key without confirmation")
+		}
+		f = newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.roles = []string{"FULL_ADMIN"}
+			f.users["admin-bot"] = []string{"FULL_ADMIN"}
+			f.userQuerySetRoles = true
+		})
+		r = runSetupTest(t, f, setupOpts{env: agentEnv()}, "--user", fakeUser, "--key-owner", "admin-bot", "--yes-full-admin")
+		wantCode(t, r, exitSetupOK)
+	})
+	t.Run("empty $set role is refused", func(t *testing.T) {
+		f := newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.roles = []string{"FULL_ADMIN"}
+			f.users["norole"] = []string{}
+			f.userQuerySetRoles = true
+		})
+		r := runSetupTest(t, f, setupOpts{env: agentEnv()}, "--user", fakeUser, "--key-owner", "norole")
+		wantCode(t, r, exitSetupPermission)
+		if !strings.Contains(r.stderr, "has no TrueNAS role") {
+			t.Errorf("stderr = %s", r.stderr)
+		}
+	})
+}
+
+func TestSetupMalformedLoginResponse(t *testing.T) {
+	t.Run("malformed SUCCESS from auth.login_ex", func(t *testing.T) {
+		f := newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.rawLoginRoles = "FULL_ADMIN"
+		})
+		r := runSetupTest(t, f, setupOpts{env: agentEnv()}, "--user", fakeUser)
+		wantCode(t, r, exitSetupFailure)
+		if !strings.Contains(r.stderr, "login succeeded") || !strings.Contains(r.stderr, "could not parse the auth.login_ex response") {
+			t.Errorf("stderr = %s", r.stderr)
+		}
+		if f.count("api_key.create") != 0 {
+			t.Errorf("key created after malformed login response")
+		}
+	})
+	t.Run("malformed SUCCESS from auth.login_ex_continue", func(t *testing.T) {
+		f := newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.otp = fakeOTP
+			f.otpRawResult = map[string]interface{}{
+				"response_type": "SUCCESS",
+				"user_info": map[string]interface{}{
+					"pw_name":   fakeUser,
+					"privilege": map[string]interface{}{"roles": map[string]interface{}{"unexpected": []string{"FULL_ADMIN"}}},
+				},
+			}
+		})
+		env := agentEnv()
+		env[setupOTPEnv] = fakeOTP
+		r := runSetupTest(t, f, setupOpts{env: env}, "--user", fakeUser)
+		wantCode(t, r, exitSetupFailure)
+		if !strings.Contains(r.stderr, "login succeeded") || !strings.Contains(r.stderr, "could not parse the auth.login_ex_continue response") {
+			t.Errorf("stderr = %s", r.stderr)
+		}
+		if f.count("api_key.create") != 0 {
+			t.Errorf("key created after malformed OTP login response")
+		}
+	})
+	t.Run("malformed non-SUCCESS response", func(t *testing.T) {
+		f := newFakeSetupNAS(t, func(f *fakeSetupNAS) {
+			f.loginRawResult = "not-an-object"
+		})
+		r := runSetupTest(t, f, setupOpts{env: agentEnv()}, "--user", fakeUser)
+		wantCode(t, r, exitSetupFailure)
+		if strings.Contains(r.stderr, "login succeeded") {
+			t.Errorf("non-SUCCESS failure should not claim login succeeded:\n%s", r.stderr)
+		}
+		if !strings.Contains(r.stderr, "could not parse the auth.login_ex response") {
+			t.Errorf("stderr = %s", r.stderr)
+		}
+	})
+}

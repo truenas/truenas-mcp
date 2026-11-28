@@ -24,7 +24,7 @@ import (
 // Exit codes of truenas-mcp setup.
 const (
 	exitSetupOK         = 0
-	exitSetupFailure    = 1  // anything not listed below
+	exitSetupFailure    = 1  // anything not listed below (including unreadable TrueNAS responses)
 	exitSetupUsage      = 2  // bad flags or arguments
 	exitSetupAuth       = 3  // login refused (wrong password, expired, redirect, mechanism)
 	exitSetupOTP        = 4  // two-factor code missing or rejected
@@ -550,7 +550,7 @@ type loginResponse struct {
 		Username          string   `json:"pw_name"`
 		AccountAttributes []string `json:"account_attributes"`
 		Privilege         struct {
-			Roles []string `json:"roles"`
+			Roles truenas.RoleSet `json:"roles"`
 		} `json:"privilege"`
 	} `json:"user_info"`
 }
@@ -645,7 +645,7 @@ func (s *setup) login() (string, []string, *setupError) {
 		if cerr != nil {
 			return "", nil, s.loginCallError(cerr)
 		}
-		resp, perr := parseLogin(raw)
+		resp, perr := parseLogin("auth.login_ex", raw)
 		if perr != nil {
 			return "", nil, perr
 		}
@@ -710,7 +710,7 @@ func (s *setup) otpLogin() (*loginResponse, *setupError) {
 			}
 			return nil, se
 		}
-		resp, perr := parseLogin(raw)
+		resp, perr := parseLogin("auth.login_ex_continue", raw)
 		if perr != nil {
 			return nil, perr
 		}
@@ -726,10 +726,16 @@ func (s *setup) otpLogin() (*loginResponse, *setupError) {
 	return nil, failf(exitSetupOTP, "two-factor login failed: %d codes were rejected", maxOTPTries)
 }
 
-func parseLogin(raw json.RawMessage) (*loginResponse, *setupError) {
+func parseLogin(method string, raw json.RawMessage) (*loginResponse, *setupError) {
 	var r loginResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, failf(exitSetupAuth, "could not read the auth.login_ex response")
+		var head struct {
+			ResponseType string `json:"response_type"`
+		}
+		if json.Unmarshal(raw, &head) == nil && head.ResponseType == "SUCCESS" {
+			return nil, failf(exitSetupFailure, "login succeeded, but could not parse the %s response: %s", method, printable(err.Error()))
+		}
+		return nil, failf(exitSetupFailure, "could not parse the %s response: %s", method, printable(err.Error()))
 	}
 	return &r, nil
 }
@@ -789,7 +795,7 @@ func (s *setup) checkOwner(owner, loginName string, loginRoles []string) *setupE
 		switch {
 		case err == nil:
 			var users []struct {
-				Roles []string `json:"roles"`
+				Roles truenas.RoleSet `json:"roles"`
 			}
 			if json.Unmarshal(raw, &users) != nil {
 				return failf(exitSetupFailure, "could not read the user.query response")
@@ -1023,7 +1029,7 @@ func (s *setup) verify(owner, key string) *setupError {
 	if err != nil {
 		return failf(exitSetupVerify, "the new key could not log in: %s. %s", shortErr(err), s.keptNote())
 	}
-	resp, perr := parseLogin(raw)
+	resp, perr := parseLogin("auth.login_ex", raw)
 	if perr != nil || resp.ResponseType != "SUCCESS" {
 		got := "an unreadable response"
 		if resp != nil {
