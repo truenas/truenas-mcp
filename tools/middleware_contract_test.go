@@ -146,6 +146,7 @@ var middlewareMethodContract = map[string]string{
 	"vm.device.query":                 "25.10",
 	"vm.device.update":                "25.10",
 	"vm.get_available_memory":         "25.10",
+	"vm.get_guest_network_interfaces": "28.0",
 	"vm.maximum_supported_vcpus":      "25.10",
 	"vm.poweroff":                     "25.10",
 	"vm.query":                        "25.10",

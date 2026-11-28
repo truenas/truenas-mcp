@@ -2155,6 +2155,29 @@
     }
   },
   {
+    "name": "get_vm_guest_ips",
+    "description": "Read a running virtual machine's guest network interfaces and IPv4/IPv6 addresses via the QEMU guest agent. Requires TrueNAS 28.0 or later and qemu-guest-agent running inside the guest. Read-only.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "Numeric VM ID (from query_vms)",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "hold_snapshot",
     "description": "Place a hold on a ZFS snapshot so it cannot be deleted, manually or by periodic snapshot task or replication retention, until the hold is released with release_snapshot. TrueNAS adds the hold tag 'truenas'. Only the named snapshot is held, not snapshots of child datasets. If the snapshot already has the 'truenas' hold, nothing changes and the call succeeds. The preview shows the snapshot and its current holds. Use dry_run to preview.",
     "inputSchema": {

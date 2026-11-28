@@ -112,6 +112,7 @@ var toolSafety = map[string]Safety{
 	"delete_snapshot":   {Access: Destructive},
 	"query_shares":      {Access: Read},
 	"query_vms":         {Access: Read},
+	"get_vm_guest_ips":  {Access: Read},
 	// Creating a VM allocates host RAM/CPUs and can create zvols or expose a
 	// display console; power operations can stop, reboot, or forcibly cut
 	// power to a running guest; device update/delete and VM delete can

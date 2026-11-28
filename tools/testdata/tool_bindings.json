@@ -217,6 +217,10 @@
     "handler": "handleGetUpsMetrics"
   },
   {
+    "name": "get_vm_guest_ips",
+    "handler": "handleGetVMGuestIPs"
+  },
+  {
     "name": "hold_snapshot",
     "handler": "handleHoldSnapshot",
     "plan": "planHoldSnapshot"

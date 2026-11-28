@@ -65,6 +65,7 @@ var toolVersion = map[string]VersionRange{
 	"query_snapshots":           {Min: truenas.MinSupported},
 	"query_shares":              {Min: truenas.MinSupported},
 	"query_vms":                 {Min: truenas.MinSupported},
+	"get_vm_guest_ips":          {Min: truenas.MustParseVersion("28.0")},
 	"create_vm":                 {Min: truenas.MinSupported},
 	"start_vm":                  {Min: truenas.MinSupported},
 	"stop_vm":                   {Min: truenas.MinSupported},
