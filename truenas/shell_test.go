@@ -9,7 +9,10 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +27,8 @@ type fakeShellServer struct {
 	srv         *httptest.Server
 	mu          sync.Mutex
 	tokenParams []interface{}
+	tokenDelay  time.Duration
+	shellDials  int
 	handshake   map[string]interface{}
 	inputFrames []struct {
 		msgType int
@@ -63,7 +68,9 @@ func startFakeShellServer(t *testing.T, shellHandler func(*websocket.Conn)) *fak
 			case "auth.generate_token":
 				fs.mu.Lock()
 				fs.tokenParams = req.Params
+				delay := fs.tokenDelay
 				fs.mu.Unlock()
+				time.Sleep(delay)
 				result = testShellToken
 			default:
 				result = map[string]interface{}{}
@@ -82,6 +89,9 @@ func startFakeShellServer(t *testing.T, shellHandler func(*websocket.Conn)) *fak
 			return
 		}
 		defer conn.Close()
+		fs.mu.Lock()
+		fs.shellDials++
+		fs.mu.Unlock()
 		shellHandler(conn)
 	})
 
@@ -282,9 +292,117 @@ func TestOpenVMShellAbruptCloseDuringHandshake(t *testing.T) {
 }
 
 func TestOpenVMShellRejectsInvalidVMID(t *testing.T) {
-	fs := startFakeShellServer(t, func(conn *websocket.Conn) {})
+	// The server would accept the handshake: without vm_id TrueNAS opens a
+	// host login shell, so the check must refuse before minting a token or
+	// dialing.
+	fs := startFakeShellServer(t, func(conn *websocket.Conn) {
+		_, _, _ = conn.ReadMessage()
+		ack, _ := json.Marshal(map[string]interface{}{"msg": "connected", "id": "host-shell"})
+		_ = conn.WriteMessage(websocket.TextMessage, ack)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
 	client := newTestShellClient(t, fs.srv)
-	if _, err := client.OpenVMShell(context.Background(), 0); err == nil {
-		t.Fatal("expected error for vmID=0")
+	for _, id := range []int{0, -1} {
+		sc, err := client.OpenVMShell(context.Background(), id)
+		if err == nil {
+			_ = sc.Close()
+			t.Fatalf("expected error for vmID=%d", id)
+		}
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.tokenParams != nil || fs.shellDials != 0 {
+		t.Errorf("invalid vmID minted a token (%v) or dialed the shell (%d times)", fs.tokenParams != nil, fs.shellDials)
+	}
+}
+
+func TestOpenVMShellRejectsEmptyShellID(t *testing.T) {
+	for _, id := range []string{"", "   "} {
+		fs := startFakeShellServer(t, func(conn *websocket.Conn) {
+			_, _, _ = conn.ReadMessage()
+			ack, _ := json.Marshal(map[string]interface{}{"msg": "connected", "id": id})
+			_ = conn.WriteMessage(websocket.TextMessage, ack)
+		})
+		client := newTestShellClient(t, fs.srv)
+		sc, err := client.OpenVMShell(context.Background(), 3)
+		if err == nil {
+			_ = sc.Close()
+			t.Fatalf("expected error for shell id %q", id)
+		}
+		if !strings.Contains(err.Error(), "without a shell id") {
+			t.Errorf("shell id %q: unexpected error: %v", id, err)
+		}
+	}
+}
+
+func TestFormatShellDialErrorScrubsSecrets(t *testing.T) {
+	c := &Client{apiKey: testAPIKey}
+	target := &url.URL{Scheme: "wss", Host: "192.0.2.10", Path: shellPath}
+	scrub := func(s string) string {
+		return c.scrubSecrets(strings.ReplaceAll(s, testShellToken, "[REDACTED]"))
+	}
+	raw := errors.New("dial tcp 192.0.2.10:443: refused (token=" + testShellToken + " key=" + testAPIKey + ")")
+	err := c.formatShellDialError(target, nil, nil, raw, scrub)
+	for _, secret := range []string{testShellToken, testAPIKey} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("dial error leaked %q: %v", secret, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "refused") {
+		t.Errorf("dial error lost its cause: %v", err)
+	}
+}
+
+func TestLateShellTokenResponseIsMaskedInDebugLogs(t *testing.T) {
+	SetDebugLogging(true)
+	defer SetDebugLogging(false)
+	logs := &syncBuffer{}
+	log.SetOutput(logs)
+	defer log.SetOutput(os.Stderr)
+
+	fs := startFakeShellServer(t, func(*websocket.Conn) {})
+	client := newTestShellClient(t, fs.srv)
+	fs.mu.Lock()
+	fs.tokenDelay = 300 * time.Millisecond
+	fs.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := client.OpenVMShell(ctx, 3); err == nil {
+		t.Fatal("expected the token request to time out")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(logs.String(), "unknown request ID") {
+		if time.Now().After(deadline) {
+			t.Fatalf("late token response never arrived:\n%s", logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if strings.Contains(logs.String(), testShellToken) {
+		t.Errorf("late shell token response logged unmasked:\n%s", logs.String())
+	}
+}
+
+func TestAbandonPendingBoundsLateSensitive(t *testing.T) {
+	c := &Client{pending: make(map[string]*pendingCall)}
+	for i := 0; i < maxLateSensitive+6; i++ {
+		key := strconv.Itoa(i)
+		c.pending[key] = &pendingCall{sensitiveResult: true}
+		c.abandonPending(key)
+	}
+	c.pending["plain"] = &pendingCall{}
+	c.abandonPending("plain")
+	if len(c.lateSensitive) != maxLateSensitive {
+		t.Fatalf("lateSensitive holds %d entries, want %d", len(c.lateSensitive), maxLateSensitive)
+	}
+	if c.lateSensitive[len(c.lateSensitive)-1] != strconv.Itoa(maxLateSensitive+5) || slices.Contains(c.lateSensitive, "0") || slices.Contains(c.lateSensitive, "plain") {
+		t.Errorf("lateSensitive should keep the newest sensitive keys only: %v", c.lateSensitive)
+	}
+	if len(c.pending) != 0 {
+		t.Errorf("abandoned calls still pending: %d", len(c.pending))
 	}
 }

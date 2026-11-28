@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -98,5 +99,47 @@ func TestDebugStdinLogsRedactVMConsoleKeys(t *testing.T) {
 	}
 	if !strings.Contains(out, "[STDIN]") || !strings.Contains(out, redact.Marker) {
 		t.Errorf("expected redacted [STDIN] log line:\n%s", out)
+	}
+}
+
+func TestRedactStdinForLogConsoleKeysShapes(t *testing.T) {
+	const secret = "plainword42"
+	call := func(id int, args string) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"send_vm_console_keys","arguments":%s}}`, id, args)
+	}
+	args := `{"session_id":"vmcon_abc","text":"` + secret + `","keys":["` + secret + `"]}`
+	// Without session_id nothing else on the line is redacted, so the line
+	// reaches the console masking exactly as the client sent it.
+	bare := `{"text":"` + secret + `","keys":["` + secret + `"]}`
+	escaped := strings.Replace(call(1, bare), "send_vm", `send\u005fvm`, 1)
+	other := `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"read_vm_console","arguments":{"wait_for":"login:"}}}`
+	cases := map[string]string{
+		"single":                     call(1, args),
+		"batch":                      "[" + call(1, args) + "," + call(2, args) + "]",
+		"several per line":           call(1, args) + " " + call(2, args) + "\n" + call(3, args),
+		"console call after another": other + " " + call(1, bare),
+		"escaped name":               escaped,
+		"arguments string":           call(1, `"`+secret+`"`),
+		"unparsable":                 call(1, args) + `{"broken":`,
+		"escaped unparsable":         escaped + "}",
+	}
+	for name, line := range cases {
+		out := string(redactStdinForLog([]byte(line)))
+		if strings.Contains(out, secret) {
+			t.Errorf("%s: keystrokes leaked: %s", name, out)
+		}
+		if !strings.Contains(out, redact.Marker) {
+			t.Errorf("%s: no redaction marker: %s", name, out)
+		}
+	}
+	for name, want := range map[string]int{"batch": 2, "several per line": 3} {
+		if got := string(redactStdinForLog([]byte(cases[name]))); strings.Count(got, "send_vm_console_keys") != want {
+			t.Errorf("%s: want all %d messages kept after masking: %s", name, want, got)
+		}
+	}
+
+	// Other tools are left alone.
+	if got := string(redactStdinForLog([]byte(other))); got != other {
+		t.Errorf("unrelated call changed: %s", got)
 	}
 }

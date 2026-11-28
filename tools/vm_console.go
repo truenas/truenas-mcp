@@ -393,7 +393,7 @@ func (r *Registry) executeOpenVMConsole(ctx context.Context, client *truenas.Cli
 		return "", err
 	}
 
-	session := newVMConsoleSession(sessionID, vmID, vmName, domain, cols, rows, shell, r.vmConsoles.unregisterSession)
+	session := newVMConsoleSession(sessionID, vmID, vmName, domain, cols, rows, shell, r.vmConsoles.sessionEnded)
 	if err := r.vmConsoles.registerSession(session); err != nil {
 		reserved = false
 		session.Close("manager closed")
@@ -405,7 +405,7 @@ func (r *Registry) executeOpenVMConsole(ctx context.Context, client *truenas.Cli
 	// immediately (e.g. another console already attached, or libvirt permission error).
 	snap := session.waitInitialSettle(ctx, r.vmConsoles.settleTimeout)
 	if !snap.Connected {
-		session.Close("remote closed during open")
+		_, _ = r.vmConsoles.closeSession(session.id, "remote closed during open")
 		detail := strings.TrimSpace(snap.Screen)
 		if detail != "" {
 			return "", fmt.Errorf("VM serial console for %q (id %d) disconnected immediately after opening: %s", vmName, vmID, detail)
@@ -588,9 +588,9 @@ func (r *Registry) handleSendVMConsoleKeys(_ context.Context, _ *truenas.Client,
 	return string(b), nil
 }
 
-func (r *Registry) handleCloseVMConsole(ctx context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
+func (r *Registry) handleCloseVMConsole(_ context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
 	sessionID, _ := args["session_id"].(string)
-	session, err := r.vmConsoles.closeSession(ctx, sessionID, "closed by client")
+	session, err := r.vmConsoles.closeSession(sessionID, "closed by client")
 	if err != nil {
 		return "", err
 	}
