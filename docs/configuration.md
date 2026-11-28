@@ -115,7 +115,7 @@ Setup flags:
 
 Progress and the summary go to stderr; only the snippet goes to stdout. A later run for the same host reuses the saved pin.
 
-Exit codes: `0` success, `1` other failure, `2` bad flags, `3` login refused (wrong password, expired password, HA standby, mechanism not allowed), `4` two-factor code missing or rejected, `5` certificate not trusted or pin mismatch, `6` permission (including GPOS STIG mode, which does not allow API keys, and an unconfirmed `FULL_ADMIN` owner), `7` config directory or key file, `8` could not connect, `9` the new key did not work, `10` TrueNAS older than 25.10.
+Exit codes: `0` success, `1` other failure (including unreadable TrueNAS responses), `2` bad flags, `3` login refused (wrong password, expired password, HA standby, mechanism not allowed), `4` two-factor code missing or rejected, `5` certificate not trusted or pin mismatch, `6` permission (including GPOS STIG mode, which does not allow API keys, and an unconfirmed `FULL_ADMIN` owner), `7` config directory or key file, `8` could not connect, `9` the new key did not work, `10` TrueNAS older than 25.10.
 
 ## API key
 

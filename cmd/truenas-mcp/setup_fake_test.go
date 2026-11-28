@@ -26,14 +26,18 @@ type fakeSetupNAS struct {
 	users          map[string][]string // other users: name -> roles
 	version        string
 
-	loginType   string                 // force this PASSWORD_PLAIN response_type
-	loginErr    map[string]interface{} // auth.login_ex PASSWORD_PLAIN error object
-	otpErr      map[string]interface{} // auth.login_ex_continue error object
-	createErr   map[string]interface{} // api_key.create error object
-	queryDenied bool                   // api_key.query fails with EACCES
-	keyLoginBad bool                   // API_KEY_PLAIN logins fail
-	badKeyReply bool                   // api_key.create/update succeed but reply without the key
-	dropOn      string                 // close the connection on this method, after acting on it
+	loginType         string                 // force this PASSWORD_PLAIN response_type
+	loginRawResult    interface{}            // override PASSWORD_PLAIN result when non-nil
+	otpRawResult      interface{}            // override successful OTP_TOKEN result when non-nil
+	rawLoginRoles     interface{}            // override userInfo privilege.roles when non-nil
+	userQuerySetRoles bool                   // encode user.query roles as {"$set": [...]}
+	loginErr          map[string]interface{} // auth.login_ex PASSWORD_PLAIN error object
+	otpErr            map[string]interface{} // auth.login_ex_continue error object
+	createErr         map[string]interface{} // api_key.create error object
+	queryDenied       bool                   // api_key.query fails with EACCES
+	keyLoginBad       bool                   // API_KEY_PLAIN logins fail
+	badKeyReply       bool                   // api_key.create/update succeed but reply without the key
+	dropOn            string                 // close the connection on this method, after acting on it
 
 	mu      sync.Mutex
 	frames  []string
@@ -140,9 +144,13 @@ type fakeConnState struct {
 }
 
 func (f *fakeSetupNAS) userInfo() map[string]interface{} {
+	var roles interface{} = map[string]interface{}{"$set": f.roles}
+	if f.rawLoginRoles != nil {
+		roles = f.rawLoginRoles
+	}
 	return map[string]interface{}{
 		"pw_name":            f.user,
-		"privilege":          map[string]interface{}{"roles": f.roles},
+		"privilege":          map[string]interface{}{"roles": roles},
 		"account_attributes": []string{"LOCAL"},
 	}
 }
@@ -204,6 +212,9 @@ func (f *fakeSetupNAS) handle(st *fakeConnState, method string, params []json.Ra
 			if f.loginErr != nil {
 				return nil, f.loginErr
 			}
+			if f.loginRawResult != nil {
+				return f.loginRawResult, nil
+			}
 			if f.loginType != "" {
 				res := map[string]interface{}{"response_type": f.loginType}
 				if f.loginType == "REDIRECT" {
@@ -243,6 +254,9 @@ func (f *fakeSetupNAS) handle(st *fakeConnState, method string, params []json.Ra
 		}
 		if d["otp_token"] == f.otp {
 			st.otpPending, st.authed, st.user = false, true, f.user
+			if f.otpRawResult != nil {
+				return f.otpRawResult, nil
+			}
 			return map[string]interface{}{"response_type": "SUCCESS", "user_info": f.userInfo(), "authenticator": "LEVEL_2"}, nil
 		}
 		st.otpTries++
@@ -265,11 +279,17 @@ func (f *fakeSetupNAS) handle(st *fakeConnState, method string, params []json.Ra
 		var filters [][]interface{}
 		arg(0, &filters)
 		name, _ := filters[0][2].(string)
+		encodeRoles := func(roles []string) interface{} {
+			if f.userQuerySetRoles {
+				return map[string]interface{}{"$set": roles}
+			}
+			return roles
+		}
 		if name == f.user {
-			return []interface{}{map[string]interface{}{"username": name, "roles": f.roles}}, nil
+			return []interface{}{map[string]interface{}{"username": name, "roles": encodeRoles(f.roles)}}, nil
 		}
 		if roles, ok := f.users[name]; ok {
-			return []interface{}{map[string]interface{}{"username": name, "roles": roles}}, nil
+			return []interface{}{map[string]interface{}{"username": name, "roles": encodeRoles(roles)}}, nil
 		}
 		return []interface{}{}, nil
 	case "api_key.query", "api_key.my_keys":
