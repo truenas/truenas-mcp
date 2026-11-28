@@ -498,8 +498,8 @@ func TestVMConsoleRefusals(t *testing.T) {
 				fs.sysInfoErr = tc.sysErr
 				r := fs.newRegistry(t, []string{"debian"})
 				_, err := r.CallTool(context.Background(), "open_vm_console", map[string]interface{}{"id": 2.0})
-				if err == nil || !strings.Contains(err.Error(), "unknown or unsupported") {
-					t.Fatalf("%s: expected strict unknown/unsupported version refusal, got: %v", tc.name, err)
+				if err == nil || !strings.Contains(err.Error(), "unknown or unsupported") || !strings.Contains(err.Error(), "libvirt domain format") {
+					t.Fatalf("%s: expected strict early unknown/unsupported version refusal, got: %v", tc.name, err)
 				}
 			})
 		}
@@ -568,12 +568,15 @@ func TestVMConsoleRefusals(t *testing.T) {
 	t.Run("VM stopping between plan and execute is refused", func(t *testing.T) {
 		fs := newVMConsoleFakeServer(t, "25.10.0")
 		r := fs.newRegistry(t, []string{"debian"})
-		approved := approve(t, r, "open_vm_console", map[string]interface{}{"id": 2.0})
+		plan, err := r.planOpenVMConsole(context.Background(), r.client, map[string]interface{}{"id": 2.0})
+		if err != nil {
+			t.Fatalf("planOpenVMConsole: %v", err)
+		}
 		fs.mu.Lock()
 		fs.statuses[2] = map[string]interface{}{"state": "STOPPED", "pid": nil, "domain_state": "SHUTOFF"}
 		fs.mu.Unlock()
-		if _, err := r.CallTool(context.Background(), "open_vm_console", approved); err == nil || !strings.Contains(err.Error(), "STOPPED") {
-			t.Fatalf("expected refusal when VM stopped before execute, got: %v", err)
+		if _, err := r.executeOpenVMConsole(context.Background(), r.client, nil, plan); err == nil || !strings.Contains(err.Error(), "STOPPED") {
+			t.Fatalf("expected executeOpenVMConsole refusal when VM stopped after plan, got: %v", err)
 		}
 	})
 
