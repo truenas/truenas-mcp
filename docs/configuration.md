@@ -309,6 +309,8 @@ proxy in the client's `env` block (or pass `--proxy` in `args`):
 The server stays on `/api/current` and records the connected release after
 login. Tools the connected release cannot run are omitted from `tools/list`
 and refused if called, with a message that names the tool and the version
-it needs, and states that nothing was executed. The per-tool range lives
-next to the safety table in `tools/version.go`. All current tools run on
-TrueNAS 25.10 and later.
+it needs, and states that nothing was executed. Development builds whose
+version carries a `-MASTER` suffix (such as `27.1.0-MASTER`) satisfy
+per-tool minimum-version gates once the 25.10 baseline is met, since they
+serve the newest API on `/api/current`. The per-tool range lives next to
+the safety table in `tools/version.go`.

@@ -64,7 +64,7 @@ func defaultGuestIPVMQueryHandler(method string, params json.RawMessage) (interf
 }
 
 func TestGetVMGuestIPsVersionGating(t *testing.T) {
-	for _, ver := range []string{"25.10.0", "25.10.8", "27.0.0", "27.1.0-MASTER"} {
+	for _, ver := range []string{"25.10.0", "25.10.8", "27.0.0", "27.1.0"} {
 		t.Run("gated on "+ver, func(t *testing.T) {
 			r, fake := newVMGuestIPsRegistry(t, ver, false, defaultGuestIPVMQueryHandler)
 			if listed(r)["get_vm_guest_ips"] {
@@ -87,17 +87,53 @@ func TestGetVMGuestIPsVersionGating(t *testing.T) {
 		})
 	}
 
+	for _, ver := range []string{"27.1.0-MASTER", "27.1.0-master", "TrueNAS-SCALE-27.1.0-MASTER-20260401-120000", "28.0.0", "28.1.0"} {
+		t.Run("allowed on "+ver, func(t *testing.T) {
+			r, fake := newVMGuestIPsRegistry(t, ver, false, func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+				if res, rpcErr, ok := defaultGuestIPVMQueryHandler(method, params); ok {
+					return res, rpcErr, ok
+				}
+				if method == "vm.get_guest_network_interfaces" {
+					return []map[string]interface{}{
+						{
+							"name":             "ens3",
+							"hardware_address": "00:a0:98:11:22:33",
+							"ip_addresses": []map[string]interface{}{
+								{"ip_address": "192.0.2.50", "prefix": 24, "ip_address_type": "IPV4"},
+							},
+						},
+					}, nil, true
+				}
+				return nil, nil, false
+			})
+			if !listed(r)["get_vm_guest_ips"] {
+				t.Fatalf("get_vm_guest_ips should be listed on TrueNAS %s", ver)
+			}
+			out, err := r.CallTool(t.Context(), "get_vm_guest_ips", map[string]interface{}{"id": 2.0})
+			if err != nil {
+				t.Fatalf("get_vm_guest_ips on %s: %v", ver, err)
+			}
+			if !strings.Contains(out, "192.0.2.50/24") {
+				t.Errorf("output on %s = %s, want guest IP", ver, out)
+			}
+			if len(fake.called("vm.get_guest_network_interfaces")) != 1 {
+				t.Errorf("vm.get_guest_network_interfaces calls = %d, want 1", len(fake.called("vm.get_guest_network_interfaces")))
+			}
+		})
+	}
+
 	t.Run("method not found fallback returns friendly error", func(t *testing.T) {
 		for _, tc := range []struct {
-			name   string
-			rpcErr map[string]interface{}
+			name    string
+			version string
+			rpcErr  map[string]interface{}
 		}{
-			{"jsonrpc -32601", map[string]interface{}{"code": -32601, "message": "Method not found"}},
-			{"method does not exist", map[string]interface{}{"code": -32001, "message": "Method does not exist"}},
+			{"jsonrpc -32601 unset version", "", map[string]interface{}{"code": -32601, "message": "Method not found"}},
+			{"method does not exist unset version", "", map[string]interface{}{"code": -32001, "message": "Method does not exist"}},
+			{"jsonrpc -32601 on MASTER build", "27.1.0-MASTER", map[string]interface{}{"code": -32601, "message": "Method not found"}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				// Empty version skips RequireSupportedVersion so SessionVersion is unset.
-				r, _ := newVMGuestIPsRegistry(t, "", false, func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+				r, _ := newVMGuestIPsRegistry(t, tc.version, false, func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
 					if res, rpcErr, ok := defaultGuestIPVMQueryHandler(method, params); ok {
 						return res, rpcErr, ok
 					}
