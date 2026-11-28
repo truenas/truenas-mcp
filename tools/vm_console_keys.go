@@ -12,7 +12,35 @@ const (
 	vmConsoleMaxPayloadBytes = 4096
 	// vmConsoleMaxKeys caps the number of named keys in a single call.
 	vmConsoleMaxKeys = 256
+
+	vmConsoleCursorKeysAuto        = "auto"
+	vmConsoleCursorKeysNormal      = "normal"
+	vmConsoleCursorKeysApplication = "application"
 )
+
+// resolveVMConsoleAppCursorKeys resolves whether cursor keys (arrows, Home,
+// End) should use DECCKM application-cursor SS3 sequences for a single call.
+// Empty string or "auto" follows trackedAppCursor; "normal" forces CSI and
+// "application" forces SS3.
+func resolveVMConsoleAppCursorKeys(mode string, trackedAppCursor bool) (bool, error) {
+	switch mode {
+	case "", vmConsoleCursorKeysAuto:
+		return trackedAppCursor, nil
+	case vmConsoleCursorKeysNormal:
+		return false, nil
+	case vmConsoleCursorKeysApplication:
+		return true, nil
+	default:
+		return false, fmt.Errorf("cursor_keys must be one of %q, %q, or %q", vmConsoleCursorKeysAuto, vmConsoleCursorKeysNormal, vmConsoleCursorKeysApplication)
+	}
+}
+
+func vmConsoleCursorKeysModeName(appCursorKeys bool) string {
+	if appCursorKeys {
+		return vmConsoleCursorKeysApplication
+	}
+	return vmConsoleCursorKeysNormal
+}
 
 const supportedVMConsoleKeysHint = "Enter, Tab, Shift+Tab, Backspace, Esc, Space, Up, Down, Left, Right, Home, End, Insert, Delete, PageUp, PageDown, F1-F12, Ctrl+<A-Z|@|[|\\|]|^|_|?>, Alt+<char|key>"
 

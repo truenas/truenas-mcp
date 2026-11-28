@@ -68,8 +68,9 @@ func (r *Registry) registerVMConsoleTools() {
 	r.tools["read_vm_console"] = Tool{
 		Definition: mcp.Tool{
 			Name: "read_vm_console",
-			Description: "Read the current rendered VT100/xterm screen text and cursor position of an open VM serial console session. " +
-				"Optionally waits (without busy polling) until wait_for (substring) or wait_for_regex (RE2 regex) appears on the rendered screen, or until timeout_seconds elapses.",
+			Description: "Read the current rendered VT100/xterm screen text, cursor position, and tracked cursor_keys_mode (normal or application) of an open VM serial console session. " +
+				"Optionally waits (without busy polling) until wait_for (substring) or wait_for_regex (RE2 regex) appears on the rendered screen, or until timeout_seconds elapses. " +
+				"If the console opened while a full-screen menu was already on screen, cursor_keys_mode may still read normal; if arrow keys do not respond in a full-screen menu, retry send_vm_console_keys with cursor_keys=application.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -108,6 +109,7 @@ func (r *Registry) registerVMConsoleTools() {
 			Name: "send_vm_console_keys",
 			Description: "Send literal text and/or named keys to an open VM serial console session. " +
 				"Literal text is sent first as UTF-8 bytes, followed by any named keys (" + supportedVMConsoleKeysHint + "). " +
+				"By default (cursor_keys=auto), arrow keys and Home/End follow the session's tracked DECCKM mode; if arrows do not respond in a full-screen menu, retry with cursor_keys=application. " +
 				"Payload is capped at 4096 bytes and 256 keys per call. " +
 				"Input is NEVER echoed in responses or written to server logs; set sensitive=true for passwords or passphrases to also omit byte and key counts from the response. " +
 				"Note: Ctrl+] detaches virsh console on TrueNAS; use close_vm_console to end a session cleanly.",
@@ -131,6 +133,12 @@ func (r *Registry) registerVMConsoleTools() {
 							"type": "string",
 						},
 						"description": "Optional: Named keys to send after text (e.g. Enter, Tab, Shift+Tab, Backspace, Esc, Space, Up/Down/Left/Right, Home/End, Insert/Delete, PageUp/PageDown, F1-F12, Ctrl+C, Alt+F2)",
+					},
+					"cursor_keys": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{vmConsoleCursorKeysAuto, vmConsoleCursorKeysNormal, vmConsoleCursorKeysApplication},
+						"default":     vmConsoleCursorKeysAuto,
+						"description": "Optional: Override encoding of arrow keys (Up, Down, Left, Right) and Home/End for this call only: auto (default, use tracked DECCKM mode), normal (CSI: ESC [ ...), or application (SS3: ESC O ...). If arrows do not respond in a full-screen menu, retry with cursor_keys=application.",
 					},
 					"sensitive": map[string]interface{}{
 						"type":        "boolean",
@@ -424,6 +432,7 @@ func (r *Registry) executeOpenVMConsole(ctx context.Context, client *truenas.Cli
 		"rows":                 snap.Rows,
 		"cursor":               map[string]interface{}{"row": snap.CursorRow, "col": snap.CursorCol, "hidden": snap.CursorHidden},
 		"alt_screen":           snap.AltScreen,
+		"cursor_keys_mode":     snap.CursorKeysMode,
 		"screen":               snap.Screen,
 		"truncated":            snap.Truncated,
 		"connected":            snap.Connected,
@@ -511,16 +520,17 @@ func (r *Registry) handleReadVMConsole(ctx context.Context, _ *truenas.Client, a
 	}
 
 	out := map[string]interface{}{
-		"console_id": snap.ConsoleID,
-		"vm_id":      snap.VMID,
-		"vm_name":    snap.VMName,
-		"cols":       snap.Cols,
-		"rows":       snap.Rows,
-		"cursor":     map[string]interface{}{"row": snap.CursorRow, "col": snap.CursorCol, "hidden": snap.CursorHidden},
-		"alt_screen": snap.AltScreen,
-		"screen":     snap.Screen,
-		"truncated":  snap.Truncated,
-		"connected":  snap.Connected,
+		"console_id":       snap.ConsoleID,
+		"vm_id":            snap.VMID,
+		"vm_name":          snap.VMName,
+		"cols":             snap.Cols,
+		"rows":             snap.Rows,
+		"cursor":           map[string]interface{}{"row": snap.CursorRow, "col": snap.CursorCol, "hidden": snap.CursorHidden},
+		"alt_screen":       snap.AltScreen,
+		"cursor_keys_mode": snap.CursorKeysMode,
+		"screen":           snap.Screen,
+		"truncated":        snap.Truncated,
+		"connected":        snap.Connected,
 	}
 	if !snap.Connected && snap.CloseReason != "" {
 		out["close_reason"] = snap.CloseReason
@@ -547,6 +557,13 @@ func (r *Registry) handleSendVMConsoleKeys(_ context.Context, _ *truenas.Client,
 	if err != nil {
 		return "", err
 	}
+	cursorKeys, err := optionalStringArg(args, "cursor_keys")
+	if err != nil {
+		return "", err
+	}
+	if _, err := resolveVMConsoleAppCursorKeys(cursorKeys, false); err != nil {
+		return "", err
+	}
 	sensitive := false
 	if rawSens, exists := args["sensitive"]; exists && rawSens != nil {
 		b, ok := rawSens.(bool)
@@ -561,7 +578,7 @@ func (r *Registry) handleSendVMConsoleKeys(_ context.Context, _ *truenas.Client,
 		return "", err
 	}
 
-	bytesSent, keysSent, err := session.sendInput(text, keys)
+	bytesSent, keysSent, err := session.sendInput(text, keys, cursorKeys)
 	if err != nil {
 		return "", err
 	}

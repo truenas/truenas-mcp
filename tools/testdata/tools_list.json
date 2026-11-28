@@ -3009,7 +3009,7 @@
   },
   {
     "name": "read_vm_console",
-    "description": "Read the current rendered VT100/xterm screen text and cursor position of an open VM serial console session. Optionally waits (without busy polling) until wait_for (substring) or wait_for_regex (RE2 regex) appears on the rendered screen, or until timeout_seconds elapses.",
+    "description": "Read the current rendered VT100/xterm screen text, cursor position, and tracked cursor_keys_mode (normal or application) of an open VM serial console session. Optionally waits (without busy polling) until wait_for (substring) or wait_for_regex (RE2 regex) appears on the rendered screen, or until timeout_seconds elapses. If the console opened while a full-screen menu was already on screen, cursor_keys_mode may still read normal; if arrow keys do not respond in a full-screen menu, retry send_vm_console_keys with cursor_keys=application.",
     "inputSchema": {
       "properties": {
         "console_id": {
@@ -3440,12 +3440,22 @@
   },
   {
     "name": "send_vm_console_keys",
-    "description": "Send literal text and/or named keys to an open VM serial console session. Literal text is sent first as UTF-8 bytes, followed by any named keys (Enter, Tab, Shift+Tab, Backspace, Esc, Space, Up, Down, Left, Right, Home, End, Insert, Delete, PageUp, PageDown, F1-F12, Ctrl+\u003cA-Z|@|[|\\|]|^|_|?\u003e, Alt+\u003cchar|key\u003e). Payload is capped at 4096 bytes and 256 keys per call. Input is NEVER echoed in responses or written to server logs; set sensitive=true for passwords or passphrases to also omit byte and key counts from the response. Note: Ctrl+] detaches virsh console on TrueNAS; use close_vm_console to end a session cleanly.",
+    "description": "Send literal text and/or named keys to an open VM serial console session. Literal text is sent first as UTF-8 bytes, followed by any named keys (Enter, Tab, Shift+Tab, Backspace, Esc, Space, Up, Down, Left, Right, Home, End, Insert, Delete, PageUp, PageDown, F1-F12, Ctrl+\u003cA-Z|@|[|\\|]|^|_|?\u003e, Alt+\u003cchar|key\u003e). By default (cursor_keys=auto), arrow keys and Home/End follow the session's tracked DECCKM mode; if arrows do not respond in a full-screen menu, retry with cursor_keys=application. Payload is capped at 4096 bytes and 256 keys per call. Input is NEVER echoed in responses or written to server logs; set sensitive=true for passwords or passphrases to also omit byte and key counts from the response. Note: Ctrl+] detaches virsh console on TrueNAS; use close_vm_console to end a session cleanly.",
     "inputSchema": {
       "properties": {
         "console_id": {
           "description": "Opaque console_id returned by open_vm_console",
           "minLength": 1,
+          "type": "string"
+        },
+        "cursor_keys": {
+          "default": "auto",
+          "description": "Optional: Override encoding of arrow keys (Up, Down, Left, Right) and Home/End for this call only: auto (default, use tracked DECCKM mode), normal (CSI: ESC [ ...), or application (SS3: ESC O ...). If arrows do not respond in a full-screen menu, retry with cursor_keys=application.",
+          "enum": [
+            "auto",
+            "normal",
+            "application"
+          ],
           "type": "string"
         },
         "keys": {

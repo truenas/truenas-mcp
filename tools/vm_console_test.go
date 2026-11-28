@@ -1058,6 +1058,296 @@ func TestEncodeVMConsoleInputNamedKeys(t *testing.T) {
 	}
 }
 
+func TestVMConsoleCursorKeysModeEncoding(t *testing.T) {
+	keyCases := []struct {
+		key    string
+		normal string
+		app    string
+	}{
+		{"Up", "\x1b[A", "\x1bOA"},
+		{"Down", "\x1b[B", "\x1bOB"},
+		{"Right", "\x1b[C", "\x1bOC"},
+		{"Left", "\x1b[D", "\x1bOD"},
+		{"Home", "\x1b[H", "\x1bOH"},
+		{"End", "\x1b[F", "\x1bOF"},
+	}
+
+	for _, tc := range keyCases {
+		t.Run(tc.key+"/normal", func(t *testing.T) {
+			appCursor, err := resolveVMConsoleAppCursorKeys(vmConsoleCursorKeysNormal, true)
+			if err != nil {
+				t.Fatalf("resolveVMConsoleAppCursorKeys: %v", err)
+			}
+			got, err := encodeVMConsoleInput("", []string{tc.key}, appCursor)
+			if err != nil {
+				t.Fatalf("encodeVMConsoleInput: %v", err)
+			}
+			if string(got) != tc.normal {
+				t.Errorf("%s normal = %q, want %q", tc.key, got, tc.normal)
+			}
+		})
+		t.Run(tc.key+"/application", func(t *testing.T) {
+			appCursor, err := resolveVMConsoleAppCursorKeys(vmConsoleCursorKeysApplication, false)
+			if err != nil {
+				t.Fatalf("resolveVMConsoleAppCursorKeys: %v", err)
+			}
+			got, err := encodeVMConsoleInput("", []string{tc.key}, appCursor)
+			if err != nil {
+				t.Fatalf("encodeVMConsoleInput: %v", err)
+			}
+			if string(got) != tc.app {
+				t.Errorf("%s application = %q, want %q", tc.key, got, tc.app)
+			}
+		})
+	}
+
+	resolveCases := []struct {
+		mode    string
+		tracked bool
+		want    bool
+	}{
+		{"", false, false},
+		{"", true, true},
+		{"auto", false, false},
+		{"auto", true, true},
+		{"normal", false, false},
+		{"normal", true, false},
+		{"application", false, true},
+		{"application", true, true},
+	}
+	for _, tc := range resolveCases {
+		got, err := resolveVMConsoleAppCursorKeys(tc.mode, tc.tracked)
+		if err != nil {
+			t.Errorf("resolveVMConsoleAppCursorKeys(%q, %v) unexpected err: %v", tc.mode, tc.tracked, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("resolveVMConsoleAppCursorKeys(%q, %v) = %v, want %v", tc.mode, tc.tracked, got, tc.want)
+		}
+	}
+
+	if _, err := resolveVMConsoleAppCursorKeys("SecretBadMode", false); err == nil {
+		t.Errorf("expected error for invalid cursor_keys mode")
+	} else if strings.Contains(err.Error(), "SecretBadMode") {
+		t.Errorf("invalid cursor_keys error echoed caller input: %v", err)
+	}
+
+	if got := vmConsoleCursorKeysModeName(false); got != "normal" {
+		t.Errorf("vmConsoleCursorKeysModeName(false) = %q, want normal", got)
+	}
+	if got := vmConsoleCursorKeysModeName(true); got != "application" {
+		t.Errorf("vmConsoleCursorKeysModeName(true) = %q, want application", got)
+	}
+}
+
+func TestVMConsoleCursorKeysOverrideAndModeReporting(t *testing.T) {
+	readSnap := func(t *testing.T, r *Registry, args map[string]interface{}) map[string]interface{} {
+		t.Helper()
+		out, err := r.CallTool(context.Background(), "read_vm_console", args)
+		if err != nil {
+			t.Fatalf("read_vm_console: %v", err)
+		}
+		var snap map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &snap); err != nil {
+			t.Fatalf("unmarshal read_vm_console: %v\n%s", err, out)
+		}
+		return snap
+	}
+
+	t.Run("mid-menu session without DECCKM sends SS3 with cursor_keys=application for that call only", func(t *testing.T) {
+		fs := newVMConsoleFakeServer(t, "25.10.0")
+		r := fs.newRegistry(t, []string{"debian"})
+		shell := newFakeVMShell()
+		// Guest draws a dialog menu without emitting DECCKM (as when attaching mid-menu).
+		shell.frames <- []byte("Console Setup\r\n1) Install/Upgrade\r\n2) Shell\r\n3) Reboot\r\n")
+
+		r.vmConsoles.opener = func(context.Context, *truenas.Client, int) (vmShellConn, error) {
+			return shell, nil
+		}
+		r.vmConsoles.settleTimeout = 10 * time.Millisecond
+		opened := openVMConsoleForTest(t, r, map[string]interface{}{"id": 2.0})
+		sid := opened["console_id"].(string)
+
+		if opened["cursor_keys_mode"] != "normal" {
+			t.Errorf("open_vm_console cursor_keys_mode = %v, want normal", opened["cursor_keys_mode"])
+		}
+		snap := readSnap(t, r, map[string]interface{}{
+			"console_id":      sid,
+			"wait_for":        "Console Setup",
+			"timeout_seconds": 2.0,
+		})
+		if snap["cursor_keys_mode"] != "normal" {
+			t.Errorf("read_vm_console cursor_keys_mode = %v, want normal", snap["cursor_keys_mode"])
+		}
+
+		allCursorKeys := []interface{}{"Up", "Down", "Left", "Right", "Home", "End"}
+
+		// Default (auto) sends CSI because no DECCKM sequence was observed.
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id": sid,
+			"keys":       allCursorKeys,
+		}); err != nil {
+			t.Fatalf("send_vm_console_keys default: %v", err)
+		}
+		// Override with application sends SS3 for this call only.
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id":  sid,
+			"keys":        allCursorKeys,
+			"cursor_keys": "application",
+		}); err != nil {
+			t.Fatalf("send_vm_console_keys application: %v", err)
+		}
+		// Subsequent auto call reverts to tracked normal mode (CSI).
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id":  sid,
+			"keys":        []interface{}{"Home", "Down"},
+			"cursor_keys": "auto",
+		}); err != nil {
+			t.Fatalf("send_vm_console_keys auto: %v", err)
+		}
+
+		shell.mu.Lock()
+		writes := append([][]byte(nil), shell.writes...)
+		shell.mu.Unlock()
+		want := []string{
+			"\x1b[A\x1b[B\x1b[D\x1b[C\x1b[H\x1b[F",
+			"\x1bOA\x1bOB\x1bOD\x1bOC\x1bOH\x1bOF",
+			"\x1b[H\x1b[B",
+		}
+		if len(writes) != len(want) {
+			t.Fatalf("got %d writes (%q), want %d (%q)", len(writes), writes, len(want), want)
+		}
+		for i, w := range want {
+			if string(writes[i]) != w {
+				t.Errorf("write[%d] = %q, want %q", i, writes[i], w)
+			}
+		}
+
+		// Tracked mode stays normal after the one-shot override.
+		snapAfter := readSnap(t, r, map[string]interface{}{"console_id": sid})
+		if snapAfter["cursor_keys_mode"] != "normal" {
+			t.Errorf("cursor_keys_mode after override = %v, want normal", snapAfter["cursor_keys_mode"])
+		}
+	})
+
+	t.Run("DECCKM mode changes reported by read_vm_console and overridden by cursor_keys=normal", func(t *testing.T) {
+		fs := newVMConsoleFakeServer(t, "25.10.0")
+		r := fs.newRegistry(t, []string{"debian"})
+		shell := newFakeVMShell()
+		sid := openFakeVMConsole(t, r, shell)
+
+		if snap := readSnap(t, r, map[string]interface{}{"console_id": sid}); snap["cursor_keys_mode"] != "normal" {
+			t.Errorf("initial cursor_keys_mode = %v, want normal", snap["cursor_keys_mode"])
+		}
+
+		// Guest enables DECCKM.
+		shell.frames <- []byte("\x1b[?1hmenu-ready")
+		snap := readSnap(t, r, map[string]interface{}{
+			"console_id":      sid,
+			"wait_for":        "menu-ready",
+			"timeout_seconds": 2.0,
+		})
+		if snap["cursor_keys_mode"] != "application" {
+			t.Errorf("after DECCKM enable cursor_keys_mode = %v, want application", snap["cursor_keys_mode"])
+		}
+
+		// Auto sends SS3, normal overrides to CSI for that call only, next auto sends SS3 again.
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id": sid,
+			"keys":       []interface{}{"Up", "Home", "End"},
+		}); err != nil {
+			t.Fatalf("send_vm_console_keys auto (app): %v", err)
+		}
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id":  sid,
+			"keys":        []interface{}{"Up", "Home", "End"},
+			"cursor_keys": "normal",
+		}); err != nil {
+			t.Fatalf("send_vm_console_keys normal override: %v", err)
+		}
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id": sid,
+			"keys":       []interface{}{"Down"},
+		}); err != nil {
+			t.Fatalf("send_vm_console_keys after normal override: %v", err)
+		}
+
+		// Guest disables DECCKM.
+		shell.frames <- []byte("\x1b[?1lshell-ready")
+		snap = readSnap(t, r, map[string]interface{}{
+			"console_id":      sid,
+			"wait_for":        "shell-ready",
+			"timeout_seconds": 2.0,
+		})
+		if snap["cursor_keys_mode"] != "normal" {
+			t.Errorf("after DECCKM disable cursor_keys_mode = %v, want normal", snap["cursor_keys_mode"])
+		}
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id": sid,
+			"keys":       []interface{}{"Down"},
+		}); err != nil {
+			t.Fatalf("send_vm_console_keys after DECCKM disable: %v", err)
+		}
+
+		shell.mu.Lock()
+		writes := append([][]byte(nil), shell.writes...)
+		shell.mu.Unlock()
+		want := []string{
+			"\x1bOA\x1bOH\x1bOF",
+			"\x1b[A\x1b[H\x1b[F",
+			"\x1bOB",
+			"\x1b[B",
+		}
+		if len(writes) != len(want) {
+			t.Fatalf("got %d writes (%q), want %d (%q)", len(writes), writes, len(want), want)
+		}
+		for i, w := range want {
+			if string(writes[i]) != w {
+				t.Errorf("write[%d] = %q, want %q", i, writes[i], w)
+			}
+		}
+	})
+
+	t.Run("invalid cursor_keys is rejected without echoing", func(t *testing.T) {
+		fs := newVMConsoleFakeServer(t, "25.10.0")
+		r := fs.newRegistry(t, []string{"debian"})
+		shell := newFakeVMShell()
+		sid := openFakeVMConsole(t, r, shell)
+
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id":  sid,
+			"keys":        []interface{}{"Down"},
+			"cursor_keys": "SecretModeValue99",
+		}); err == nil || !strings.Contains(err.Error(), "cursor_keys") {
+			t.Fatalf("expected invalid cursor_keys error, got: %v", err)
+		} else if strings.Contains(err.Error(), "SecretModeValue99") {
+			t.Fatalf("invalid cursor_keys error echoed caller input: %v", err)
+		}
+
+		if _, err := r.handleSendVMConsoleKeys(context.Background(), nil, map[string]interface{}{
+			"console_id":  sid,
+			"keys":        []interface{}{"Down"},
+			"cursor_keys": "SecretModeValue99",
+		}); err == nil || !strings.Contains(err.Error(), "cursor_keys") {
+			t.Fatalf("handler: expected invalid cursor_keys error, got: %v", err)
+		} else if strings.Contains(err.Error(), "SecretModeValue99") {
+			t.Fatalf("handler: invalid cursor_keys error echoed caller input: %v", err)
+		}
+
+		// The handler validates cursor_keys before looking up the session, so
+		// an invalid mode is reported even for an unknown console_id.
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id":  "vmcon_does_not_exist",
+			"keys":        []interface{}{"Down"},
+			"cursor_keys": "SecretModeValue99",
+		}); err == nil || !strings.Contains(err.Error(), "cursor_keys") {
+			t.Fatalf("unknown console_id: expected invalid cursor_keys error, got: %v", err)
+		} else if strings.Contains(err.Error(), "SecretModeValue99") {
+			t.Fatalf("unknown console_id: invalid cursor_keys error echoed caller input: %v", err)
+		}
+	})
+}
+
 func TestTruncateUTF8BytesPreservesRunes(t *testing.T) {
 	in := "hello 世界!"
 	got, truncated := truncateUTF8Bytes(in, 8) // "hello " is 6 bytes, "世" is 3 bytes

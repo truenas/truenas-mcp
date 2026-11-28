@@ -499,7 +499,7 @@ func TestVMConsoleSendOnClosedSession(t *testing.T) {
 	s := registerTestSession(t, m, 2, shell)
 	s.Close("closed by client")
 
-	if _, _, err := s.sendInput("secret", []string{"Enter"}); err == nil || !strings.Contains(err.Error(), "is closed (closed by client)") {
+	if _, _, err := s.sendInput("secret", []string{"Enter"}, vmConsoleCursorKeysAuto); err == nil || !strings.Contains(err.Error(), "is closed (closed by client)") {
 		t.Errorf("send on a closed session: err = %v", err)
 	}
 	shell.mu.Lock()
@@ -561,7 +561,7 @@ func TestVMConsoleFailedSendEndsSession(t *testing.T) {
 	s := registerTestSession(t, m, 2, shell)
 	shell.failWrites.Store(true)
 
-	if _, _, err := s.sendInput("x", nil); err == nil {
+	if _, _, err := s.sendInput("x", nil, vmConsoleCursorKeysAuto); err == nil {
 		t.Fatal("expected the failed write to be reported")
 	}
 	shell.waitClosed(t)
