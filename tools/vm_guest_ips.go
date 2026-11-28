@@ -96,13 +96,16 @@ func handleGetVMGuestIPs(ctx context.Context, client *truenas.Client, args map[s
 	rawIfaces, err := client.Call(ctx, "vm.get_guest_network_interfaces", vmID)
 	if err != nil {
 		if isMethodNotFoundErr(err) {
-			return "", fmt.Errorf("get_vm_guest_ips requires TrueNAS 28.0 or later; vm.get_guest_network_interfaces is not available on this TrueNAS release")
+			return "", needsNewerTrueNASError("get_vm_guest_ips", "vm.get_guest_network_interfaces")
 		}
 		if isVMMissingErr(err) {
 			return "", fmt.Errorf("VM %s not found", formatVMLabel(vmName, vmID))
 		}
 		if isVMNotRunningErr(err) {
 			return "", fmt.Errorf("VM %s is not running; start the VM to read guest network interfaces", formatVMLabel(vmName, vmID))
+		}
+		if isGuestAgentErr(err) {
+			return "", fmt.Errorf("failed to get guest network interfaces for VM %s: %w; the QEMU guest agent did not answer: install and start qemu-guest-agent in the guest, or retry if the guest is still booting", formatVMLabel(vmName, vmID), err)
 		}
 		return "", fmt.Errorf("failed to get guest network interfaces for VM %s: %w", formatVMLabel(vmName, vmID), err)
 	}
@@ -188,6 +191,19 @@ func isMethodNotFoundErr(err error) bool {
 	}
 	msg := strings.ToLower(apiErr.Message)
 	return strings.Contains(msg, "method not found") || strings.Contains(msg, "method does not exist")
+}
+
+// needsNewerTrueNASError is the error for a tool whose middleware method the
+// connected TrueNAS build does not serve (method not found).
+func needsNewerTrueNASError(tool, method string) error {
+	return fmt.Errorf("%s requires TrueNAS 28.0 or later; %s is not available on this TrueNAS release, so nothing was executed", tool, method)
+}
+
+// isGuestAgentErr reports whether err is the middleware's error for a QEMU
+// guest agent that is not installed, not running or not answering.
+func isGuestAgentErr(err error) bool {
+	var apiErr *truenas.APICallError
+	return errors.As(err, &apiErr) && strings.Contains(strings.ToLower(apiErr.Message), "guest agent")
 }
 
 func isVMMissingErr(err error) bool {

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 	"github.com/gorilla/websocket"
 
 	"github.com/truenas/truenas-mcp/truenas"
@@ -588,5 +590,70 @@ func TestVMConsoleEndSessionMarksClosedOnce(t *testing.T) {
 	}
 	if snap := s.snapshotLockedCopy(false, false); snap.CloseReason != "console stream closed by remote" {
 		t.Errorf("close_reason = %q, want the first reason", snap.CloseReason)
+	}
+}
+
+// TestVMConsoleEmulatorPanicReleasesLock checks that a panic inside the
+// terminal emulator while it renders guest output does not leave the
+// session lock held: the session ends with a reason, and later console
+// calls and the shutdown return instead of hanging.
+func TestVMConsoleEmulatorPanicReleasesLock(t *testing.T) {
+	fs := newVMConsoleFakeServer(t, "25.10.0")
+	r := fs.newRegistry(t, []string{"debian"})
+	shell := newFakeVMShell()
+	sid := openFakeVMConsole(t, r, shell)
+	s := managedSession(t, r, sid)
+
+	// The reader only touches the emulator under s.mu, so swapping the
+	// callbacks under it is race-free. DECCKM (CSI ? 1 h) calls EnableMode
+	// from inside emu.Write.
+	s.mu.Lock()
+	s.emu.SetCallbacks(vt.Callbacks{EnableMode: func(ansi.Mode) { panic("injected emulator panic") }})
+	s.mu.Unlock()
+	shell.frames <- []byte("\x1b[?1h")
+
+	waitChan(t, s.readerDone, "reader exit after the emulator panic")
+	if !lockFreedWithin(&s.mu, 2*time.Second) {
+		// Release the leaked lock so the cleanup can still run.
+		s.mu.Unlock()
+		t.Fatal("the session lock is still held after the emulator panic; every later console call would hang")
+	}
+	shell.waitClosed(t)
+	callWithin(t, 2*time.Second, "read_vm_console after the emulator panic", func() error {
+		out, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"session_id": sid})
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(out, `"connected": false`) || !strings.Contains(out, "internal reader error") {
+			return fmt.Errorf("want an ended session with the reader error, got %s", out)
+		}
+		return nil
+	})
+	callWithin(t, 2*time.Second, "send_vm_console_keys after the emulator panic", func() error {
+		_, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{"session_id": sid, "text": "x"})
+		if err == nil || !strings.Contains(err.Error(), "is closed (internal reader error)") {
+			return fmt.Errorf("err = %v, want closed with the reader error", err)
+		}
+		return nil
+	})
+	callWithin(t, 2*time.Second, "close_vm_console after the emulator panic", func() error {
+		_, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"session_id": sid})
+		return err
+	})
+	callWithin(t, 2*time.Second, "registry shutdown", func() error { r.vmConsoles.Close(); return nil })
+}
+
+// lockFreedWithin reports whether mu can be locked within d.
+func lockFreedWithin(mu *sync.Mutex, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if mu.TryLock() {
+			mu.Unlock()
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

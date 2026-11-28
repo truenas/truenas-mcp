@@ -97,7 +97,7 @@ func TestGetVMGuestIPsVersionGating(t *testing.T) {
 					return []map[string]interface{}{
 						{
 							"name":             "ens3",
-							"hardware_address": "00:a0:98:11:22:33",
+							"hardware_address": "02:00:00:11:22:33",
 							"ip_addresses": []map[string]interface{}{
 								{"ip_address": "192.0.2.50", "prefix": 24, "ip_address_type": "IPV4"},
 							},
@@ -167,7 +167,7 @@ func TestGetVMGuestIPsReadOnlyAndAnnotations(t *testing.T) {
 			return []map[string]interface{}{
 				{
 					"name":             "ens3",
-					"hardware_address": "00:a0:98:11:22:33",
+					"hardware_address": "02:00:00:11:22:33",
 					"ip_addresses": []map[string]interface{}{
 						{"ip_address": "192.0.2.50", "prefix": 24, "ip_address_type": "IPV4"},
 					},
@@ -230,7 +230,7 @@ func TestGetVMGuestIPsSuccessParsing(t *testing.T) {
 				},
 				{
 					"name":             "ens3",
-					"hardware_address": "00:a0:98:11:22:33",
+					"hardware_address": "02:00:00:11:22:33",
 					"ip_addresses": []map[string]interface{}{
 						{"ip_address": "192.0.2.50", "prefix": 24, "ip_address_type": "IPV4"},
 						{"ip_address": "192.0.2.51", "prefix": 32, "ip_address_type": "ipv4"},
@@ -292,7 +292,7 @@ func TestGetVMGuestIPsSuccessParsing(t *testing.T) {
 
 	// Sorted alphabetically: ens3, lo, wg0.
 	ens3 := resp.Interfaces[0]
-	if ens3.Name != "ens3" || ens3.MAC != "00:a0:98:11:22:33" {
+	if ens3.Name != "ens3" || ens3.MAC != "02:00:00:11:22:33" {
 		t.Errorf("ens3 = %+v", ens3)
 	}
 	if strings.Join(ens3.IPv4, ",") != "192.0.2.50/24,192.0.2.51/32" {
@@ -541,6 +541,72 @@ func TestGetVMGuestIPsMiddlewareErrors(t *testing.T) {
 		_, err := r.CallTool(t.Context(), "get_vm_guest_ips", map[string]interface{}{"id": 2.0})
 		if err == nil || !strings.Contains(err.Error(), "failed to parse guest network interfaces") {
 			t.Errorf("err = %v, want parse error", err)
+		}
+	})
+}
+
+// guestIPsWithInterfacesError answers vm.query from the default VMs and
+// fails vm.get_guest_network_interfaces with rpcErr.
+func guestIPsWithInterfacesError(rpcErr map[string]interface{}) func(string, json.RawMessage) (interface{}, map[string]interface{}, bool) {
+	return func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+		if res, e, ok := defaultGuestIPVMQueryHandler(method, params); ok {
+			return res, e, ok
+		}
+		if method == "vm.get_guest_network_interfaces" {
+			return nil, rpcErr, true
+		}
+		return nil, nil, false
+	}
+}
+
+// TestGetVMGuestIPsErrorMessages pins the exact message of each error
+// mapping, so a mapping that falls through to the generic error (which
+// often repeats the same words from the middleware) fails.
+func TestGetVMGuestIPsErrorMessages(t *testing.T) {
+	const agentHint = "the QEMU guest agent did not answer: install and start qemu-guest-agent in the guest, or retry if the guest is still booting"
+	cases := []struct {
+		name   string
+		id     float64
+		rpcErr map[string]interface{}
+		want   string
+	}{
+		{"stopped VM", 1, nil,
+			`VM "stoppedvm" (id 1) is STOPPED; start the VM to read guest network interfaces`},
+		{"method not found by code only", 2, map[string]interface{}{"code": -32601, "message": "no such call"},
+			"get_vm_guest_ips requires TrueNAS 28.0 or later; vm.get_guest_network_interfaces is not available on this TrueNAS release, so nothing was executed"},
+		{"VM deleted before the call", 2, map[string]interface{}{"code": -32001, "message": "[ENOENT] Match not found"},
+			`VM "runningvm" (id 2) not found`},
+		{"VM stopped before the call", 2, map[string]interface{}{"code": -32001, "message": "VM 2 is not running"},
+			`VM "runningvm" (id 2) is not running; start the VM to read guest network interfaces`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := newVMGuestIPsRegistry(t, "28.0.0-MASTER", false, guestIPsWithInterfacesError(tc.rpcErr))
+			_, err := r.CallTool(t.Context(), "get_vm_guest_ips", map[string]interface{}{"id": tc.id})
+			if err == nil || err.Error() != tc.want {
+				t.Errorf("err = %v\nwant %s", err, tc.want)
+			}
+		})
+	}
+
+	t.Run("guest agent not answering gets the hint", func(t *testing.T) {
+		for _, msg := range []string{
+			"VM 2: Guest agent command failed: Guest agent is not responding: QEMU guest agent is not connected",
+			"VM 2: QEMU guest agent is not connected",
+		} {
+			r, _ := newVMGuestIPsRegistry(t, "28.0.0-MASTER", false, guestIPsWithInterfacesError(map[string]interface{}{"code": -32001, "message": msg}))
+			_, err := r.CallTool(t.Context(), "get_vm_guest_ips", map[string]interface{}{"id": 2.0})
+			if err == nil || !strings.Contains(err.Error(), msg) || !strings.HasSuffix(err.Error(), agentHint) {
+				t.Errorf("%s: err = %v, want the middleware error and the qemu-guest-agent hint", msg, err)
+			}
+		}
+	})
+
+	t.Run("other errors get no guest agent hint", func(t *testing.T) {
+		r, _ := newVMGuestIPsRegistry(t, "28.0.0-MASTER", false, guestIPsWithInterfacesError(map[string]interface{}{"code": -32001, "message": "libvirt connection lost"}))
+		_, err := r.CallTool(t.Context(), "get_vm_guest_ips", map[string]interface{}{"id": 2.0})
+		if err == nil || !strings.Contains(err.Error(), "libvirt connection lost") || strings.Contains(err.Error(), "qemu-guest-agent") {
+			t.Errorf("err = %v, want the middleware error without the guest agent hint", err)
 		}
 	})
 }

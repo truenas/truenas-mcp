@@ -45,6 +45,10 @@ type localSources struct {
 	// never be or be below: this server's API key file, CA file and
 	// configuration directory.
 	protected []string
+	// protectedFiles are the stats of the protected paths that are files,
+	// so a hard link to one (or, where names ignore case, another spelling
+	// of its path) is refused as the same file.
+	protectedFiles []os.FileInfo
 }
 
 // SetUploadSourceDirs enables source_path for files below dirs (absolute
@@ -92,6 +96,10 @@ func (r *Registry) SetUploadSourceDirs(dirs, protected []string) error {
 			if abs, err := filepath.Abs(real); err == nil {
 				ls.protected = append(ls.protected, abs)
 			}
+		}
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
+			loadFileIdentity(st)
+			ls.protectedFiles = append(ls.protectedFiles, st)
 		}
 	}
 	r.uploadMu.Lock()
@@ -163,6 +171,24 @@ func (ls localSources) refusal(real string) string {
 		return fmt.Sprintf("source_path %s is a key or certificate file (%s), which is never uploaded", real, filepath.Ext(base))
 	}
 	return ""
+}
+
+// isProtectedFile reports whether st is one of the protected files,
+// compared as files rather than by path.
+func (ls localSources) isProtectedFile(st os.FileInfo) bool {
+	for _, pf := range ls.protectedFiles {
+		if os.SameFile(pf, st) {
+			return true
+		}
+	}
+	return false
+}
+
+// loadFileIdentity makes st carry its file identity now. Where os.Stat
+// does not fill it in (Windows), os.SameFile reads it lazily by path on
+// first use, which would be from whatever is at the path by then.
+func loadFileIdentity(st os.FileInfo) {
+	_ = os.SameFile(st, st)
 }
 
 // SweepStaleUploadTemps removes temporary downloads left by an earlier run

@@ -166,6 +166,10 @@ func (r *Registry) parseUploadSource(args map[string]interface{}) (uploadSource,
 	if err != nil {
 		return src, fmt.Errorf("source_path cannot be read: %w", localPathError(err))
 	}
+	loadFileIdentity(st)
+	if ls.isProtectedFile(st) {
+		return src, fmt.Errorf("source_path %s is this server's own key, certificate or configuration file (another link to it), which is never uploaded", real)
+	}
 	switch {
 	case !st.Mode().IsRegular():
 		return src, fmt.Errorf("source_path %s is not a regular file", real)

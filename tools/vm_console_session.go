@@ -232,12 +232,19 @@ func (s *vmConsoleSession) readLoop() {
 		if len(data) == 0 {
 			continue
 		}
-		s.mu.Lock()
-		if !s.closed {
-			_, _ = s.emu.Write(data)
-			s.notifyLocked()
-		}
-		s.mu.Unlock()
+		s.feedEmulator(data)
+	}
+}
+
+// feedEmulator renders guest output. The lock is released by defer so a
+// panic inside vt.Emulator cannot leave it held, which would hang every
+// later console call and the session's own teardown.
+func (s *vmConsoleSession) feedEmulator(data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		_, _ = s.emu.Write(data)
+		s.notifyLocked()
 	}
 }
 
