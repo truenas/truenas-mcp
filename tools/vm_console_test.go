@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1043,5 +1044,178 @@ func TestTruncateUTF8BytesPreservesRunes(t *testing.T) {
 	got, truncated := truncateUTF8Bytes(in, 8) // "hello " is 6 bytes, "世" is 3 bytes
 	if !truncated || got != "hello " {
 		t.Errorf("got (%q, %v), want (%q, true)", got, truncated, "hello ")
+	}
+}
+
+func TestAuthMeRolesUnmarshalJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name:  "list of strings",
+			input: `{"roles": ["VM_WRITE", "FULL_ADMIN"]}`,
+			want:  []string{"VM_WRITE", "FULL_ADMIN"},
+		},
+		{
+			name:  "empty list",
+			input: `{"roles": []}`,
+			want:  nil,
+		},
+		{
+			name:  "set object",
+			input: `{"roles": {"$set": ["FULL_ADMIN", "VM_WRITE"]}}`,
+			want:  []string{"FULL_ADMIN", "VM_WRITE"},
+		},
+		{
+			name:  "empty set object",
+			input: `{"roles": {"$set": []}}`,
+			want:  nil,
+		},
+		{
+			name:  "set object with null",
+			input: `{"roles": {"$set": null}}`,
+			want:  nil,
+		},
+		{
+			name:  "null roles",
+			input: `{"roles": null}`,
+			want:  nil,
+		},
+		{
+			name:  "missing roles",
+			input: `{}`,
+			want:  nil,
+		},
+		{
+			name:    "invalid string",
+			input:   `{"roles": "FULL_ADMIN"}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid number",
+			input:   `{"roles": 42}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid boolean",
+			input:   `{"roles": true}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid array element",
+			input:   `{"roles": [123]}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid empty object",
+			input:   `{"roles": {}}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid object wrong key",
+			input:   `{"roles": {"other": ["FULL_ADMIN"]}}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid object extra key",
+			input:   `{"roles": {"$set": ["FULL_ADMIN"], "extra": true}}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid set non-array value",
+			input:   `{"roles": {"$set": "FULL_ADMIN"}}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid set element",
+			input:   `{"roles": {"$set": [123]}}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got struct {
+				Roles authMeRoles `json:"roles"`
+			}
+			err := json.Unmarshal([]byte(tc.input), &got)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %s, got roles=%v", tc.input, got.Roles)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %s: %v", tc.input, err)
+			}
+			if !slices.Equal(got.Roles, tc.want) {
+				t.Errorf("roles = %v, want %v", got.Roles, tc.want)
+			}
+		})
+	}
+}
+
+func TestFetchAuthMePrivilegeSetRoles(t *testing.T) {
+	cases := []struct {
+		name           string
+		roles          map[string]interface{}
+		wantVMWrite    bool
+		wantFullAdmin  bool
+		wantBlockedStr string
+	}{
+		{
+			name:          "FULL_ADMIN in $set satisfies console role check",
+			roles:         map[string]interface{}{"$set": []interface{}{"FULL_ADMIN"}},
+			wantFullAdmin: true,
+		},
+		{
+			name:        "VM_WRITE in $set satisfies console role check",
+			roles:       map[string]interface{}{"$set": []interface{}{"VM_WRITE"}},
+			wantVMWrite: true,
+		},
+		{
+			name:           "VM_READ in $set is blocked on 27.1.0-MASTER",
+			roles:          map[string]interface{}{"$set": []interface{}{"VM_READ"}},
+			wantBlockedStr: "VM_WRITE",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newVMConsoleFakeServer(t, "27.1.0-MASTER")
+			fs.authMe["privilege"].(map[string]interface{})["roles"] = tc.roles
+			r := fs.newRegistry(t, []string{"debian"})
+
+			priv, err := fetchAuthMePrivilege(context.Background(), r.client)
+			if err != nil {
+				t.Fatalf("fetchAuthMePrivilege: %v", err)
+			}
+			if !priv.Present || !priv.WebShell || priv.Username != "truenas_admin" {
+				t.Fatalf("unexpected privilege metadata: %+v", priv)
+			}
+			if got := hasRole(priv.Roles, "VM_WRITE"); got != tc.wantVMWrite {
+				t.Errorf("hasRole(VM_WRITE) = %v, want %v (roles=%v)", got, tc.wantVMWrite, priv.Roles)
+			}
+			if got := hasRole(priv.Roles, "FULL_ADMIN"); got != tc.wantFullAdmin {
+				t.Errorf("hasRole(FULL_ADMIN) = %v, want %v (roles=%v)", got, tc.wantFullAdmin, priv.Roles)
+			}
+
+			plan, err := r.planOpenVMConsole(context.Background(), r.client, map[string]interface{}{"id": 2.0})
+			if err != nil {
+				t.Fatalf("planOpenVMConsole: %v", err)
+			}
+			if tc.wantBlockedStr == "" {
+				if len(plan.Blocked) != 0 {
+					t.Errorf("expected no blocked reasons, got %v", plan.Blocked)
+				}
+			} else {
+				if len(plan.Blocked) == 0 || !strings.Contains(strings.Join(plan.Blocked, "; "), tc.wantBlockedStr) {
+					t.Errorf("expected blocked reason containing %q, got %v", tc.wantBlockedStr, plan.Blocked)
+				}
+			}
+		})
 	}
 }
