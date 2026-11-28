@@ -410,12 +410,31 @@ func intList(v interface{}) []int {
 	return out
 }
 
+// roleList extracts role names from a decoded JSON value: a list
+// ([]interface{}) or a TrueNAS middleware set object ({"$set": [...]}).
+// It returns an empty non-nil slice and ok=false when v is absent, null,
+// or another shape.
+func roleList(v interface{}) ([]string, bool) {
+	switch raw := v.(type) {
+	case []interface{}:
+		return stringList(raw), true
+	case map[string]interface{}:
+		if len(raw) != 1 {
+			return []string{}, false
+		}
+		if list, ok := raw["$set"].([]interface{}); ok {
+			return stringList(list), true
+		}
+	}
+	return []string{}, false
+}
+
 // copyRoles copies the role names, sorted.
 func copyRoles(out, row map[string]interface{}) {
-	if _, ok := row["roles"].([]interface{}); !ok {
+	roles, ok := roleList(row["roles"])
+	if !ok {
 		return
 	}
-	roles := stringList(row["roles"])
 	sort.Strings(roles)
 	out["roles"] = roles
 }

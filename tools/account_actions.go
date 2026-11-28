@@ -343,7 +343,7 @@ func parseUser(row map[string]interface{}) userInfo {
 	u.PasswordDisabled, _ = row["password_disabled"].(bool)
 	u.SMB, _ = row["smb"].(bool)
 	u.SSHPassword, _ = row["ssh_password_enabled"].(bool)
-	u.Roles = stringList(row["roles"])
+	u.Roles, _ = roleList(row["roles"])
 	sort.Strings(u.Roles)
 	u.Sudo = len(stringList(row["sudo_commands"]))+len(stringList(row["sudo_commands_nopasswd"])) > 0
 	return u
@@ -387,7 +387,7 @@ func parseGroup(row map[string]interface{}) groupInfo {
 	g.SMB, _ = row["smb"].(bool)
 	g.Users = intList(row["users"])
 	sort.Ints(g.Users)
-	g.Roles = stringList(row["roles"])
+	g.Roles, _ = roleList(row["roles"])
 	sort.Strings(g.Roles)
 	g.Sudo = len(stringList(row["sudo_commands"]))+len(stringList(row["sudo_commands_nopasswd"])) > 0
 	return g

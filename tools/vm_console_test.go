@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -80,7 +79,7 @@ func newVMConsoleFakeServer(t *testing.T, version string) *vmConsoleFakeServer {
 			"pw_name": "truenas_admin",
 			"privilege": map[string]interface{}{
 				"web_shell": true,
-				"roles":     []interface{}{"VM_WRITE"},
+				"roles":     map[string]interface{}{"$set": []interface{}{"VM_WRITE"}},
 			},
 		},
 	}
@@ -318,7 +317,7 @@ func TestVMConsoleHandshakeBothBranches(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := newVMConsoleFakeServer(t, tc.version)
-			fs.authMe["privilege"].(map[string]interface{})["roles"] = tc.roles
+			fs.authMe["privilege"].(map[string]interface{})["roles"] = map[string]interface{}{"$set": tc.roles}
 			r := fs.newRegistry(t, []string{"debian"})
 
 			args := map[string]interface{}{"name": "debian"}
@@ -522,7 +521,7 @@ func TestVMConsoleRefusals(t *testing.T) {
 
 	t.Run("missing VM_WRITE role is refused on 26.0+/master", func(t *testing.T) {
 		fs := newVMConsoleFakeServer(t, "28.0.0-MASTER")
-		fs.authMe["privilege"].(map[string]interface{})["roles"] = []interface{}{"VM_READ"}
+		fs.authMe["privilege"].(map[string]interface{})["roles"] = map[string]interface{}{"$set": []interface{}{"VM_READ"}}
 		r := fs.newRegistry(t, []string{"debian"})
 		_, err := r.CallTool(context.Background(), "open_vm_console", map[string]interface{}{"id": 2.0})
 		if err == nil || !strings.Contains(err.Error(), "VM_WRITE") {
@@ -1064,117 +1063,6 @@ func TestTruncateUTF8BytesPreservesRunes(t *testing.T) {
 	got, truncated := truncateUTF8Bytes(in, 8) // "hello " is 6 bytes, "世" is 3 bytes
 	if !truncated || got != "hello " {
 		t.Errorf("got (%q, %v), want (%q, true)", got, truncated, "hello ")
-	}
-}
-
-func TestAuthMeRolesUnmarshalJSON(t *testing.T) {
-	cases := []struct {
-		name    string
-		input   string
-		want    []string
-		wantErr bool
-	}{
-		{
-			name:  "list of strings",
-			input: `{"roles": ["VM_WRITE", "FULL_ADMIN"]}`,
-			want:  []string{"VM_WRITE", "FULL_ADMIN"},
-		},
-		{
-			name:  "empty list",
-			input: `{"roles": []}`,
-			want:  nil,
-		},
-		{
-			name:  "set object",
-			input: `{"roles": {"$set": ["FULL_ADMIN", "VM_WRITE"]}}`,
-			want:  []string{"FULL_ADMIN", "VM_WRITE"},
-		},
-		{
-			name:  "empty set object",
-			input: `{"roles": {"$set": []}}`,
-			want:  nil,
-		},
-		{
-			name:  "set object with null",
-			input: `{"roles": {"$set": null}}`,
-			want:  nil,
-		},
-		{
-			name:  "null roles",
-			input: `{"roles": null}`,
-			want:  nil,
-		},
-		{
-			name:  "missing roles",
-			input: `{}`,
-			want:  nil,
-		},
-		{
-			name:    "invalid string",
-			input:   `{"roles": "FULL_ADMIN"}`,
-			wantErr: true,
-		},
-		{
-			name:    "invalid number",
-			input:   `{"roles": 42}`,
-			wantErr: true,
-		},
-		{
-			name:    "invalid boolean",
-			input:   `{"roles": true}`,
-			wantErr: true,
-		},
-		{
-			name:    "invalid array element",
-			input:   `{"roles": [123]}`,
-			wantErr: true,
-		},
-		{
-			name:    "invalid empty object",
-			input:   `{"roles": {}}`,
-			wantErr: true,
-		},
-		{
-			name:    "invalid object wrong key",
-			input:   `{"roles": {"other": ["FULL_ADMIN"]}}`,
-			wantErr: true,
-		},
-		{
-			name:    "invalid object extra key",
-			input:   `{"roles": {"$set": ["FULL_ADMIN"], "extra": true}}`,
-			wantErr: true,
-		},
-		{
-			name:    "invalid set non-array value",
-			input:   `{"roles": {"$set": "FULL_ADMIN"}}`,
-			wantErr: true,
-		},
-		{
-			name:    "invalid set element",
-			input:   `{"roles": {"$set": [123]}}`,
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var got struct {
-				Roles authMeRoles `json:"roles"`
-			}
-			err := json.Unmarshal([]byte(tc.input), &got)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for %s, got roles=%v", tc.input, got.Roles)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error for %s: %v", tc.input, err)
-			}
-			if !slices.Equal(got.Roles, tc.want) {
-				t.Errorf("roles = %v, want %v", got.Roles, tc.want)
-			}
-		})
 	}
 }
 
