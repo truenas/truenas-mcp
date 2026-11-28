@@ -65,7 +65,7 @@ func defaultVMShellOpener(ctx context.Context, client *truenas.Client, vmID int)
 
 // vmConsoleSnapshot is a point-in-time view of a VM console's rendered screen.
 type vmConsoleSnapshot struct {
-	SessionID    string
+	ConsoleID    string
 	VMID         int
 	VMName       string
 	Cols         int
@@ -332,7 +332,7 @@ func (s *vmConsoleSession) isIdle(now time.Time, timeout time.Duration) bool {
 // waitInitialSettle waits briefly after opening a session so any immediate
 // remote exit (for example, virsh console printing an error frame and then
 // closing the socket because another console is already attached) is observed
-// before returning a session_id.
+// before returning a console_id.
 func (s *vmConsoleSession) waitInitialSettle(ctx context.Context, d time.Duration) vmConsoleSnapshot {
 	if d <= 0 {
 		return s.snapshotLockedCopy(false, false)
@@ -373,7 +373,7 @@ func (s *vmConsoleSession) renderLocked() vmConsoleSnapshot {
 	screen, truncated := truncateUTF8Bytes(raw, vmConsoleMaxOutputBytes)
 	pos := s.emu.CursorPosition()
 	return vmConsoleSnapshot{
-		SessionID:    s.id,
+		ConsoleID:    s.id,
 		VMID:         s.vmID,
 		VMName:       s.vmName,
 		Cols:         s.cols,
@@ -650,33 +650,33 @@ func (m *vmConsoleManager) dropLocked(sessionID string) *vmConsoleSession {
 	return s
 }
 
-func (m *vmConsoleManager) getSession(sessionID string) (*vmConsoleSession, error) {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+func (m *vmConsoleManager) getSession(consoleID string) (*vmConsoleSession, error) {
+	consoleID = strings.TrimSpace(consoleID)
+	if consoleID == "" {
+		return nil, fmt.Errorf("console_id is required")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.sessions[sessionID]
+	s, ok := m.sessions[consoleID]
 	if !ok {
-		return nil, fmt.Errorf("VM serial console session %q not found (it may have closed or timed out)", sessionID)
+		return nil, fmt.Errorf("VM serial console session %q not found (it may have closed or timed out)", consoleID)
 	}
 	return s, nil
 }
 
-// closeSession removes sessionID from the manager and closes it. Cleanup
+// closeSession removes consoleID from the manager and closes it. Cleanup
 // takes no context, so a cancelled request cannot interrupt it.
-func (m *vmConsoleManager) closeSession(sessionID, reason string) (*vmConsoleSession, error) {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+func (m *vmConsoleManager) closeSession(consoleID, reason string) (*vmConsoleSession, error) {
+	consoleID = strings.TrimSpace(consoleID)
+	if consoleID == "" {
+		return nil, fmt.Errorf("console_id is required")
 	}
 	m.mu.Lock()
-	s := m.dropLocked(sessionID)
+	s := m.dropLocked(consoleID)
 	m.mu.Unlock()
 
 	if s == nil {
-		return nil, fmt.Errorf("VM serial console session %q not found (it may already be closed or timed out)", sessionID)
+		return nil, fmt.Errorf("VM serial console session %q not found (it may already be closed or timed out)", consoleID)
 	}
 	s.Close(reason)
 	return s, nil

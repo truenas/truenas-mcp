@@ -412,7 +412,7 @@ func TestIsSensitiveKeySegments(t *testing.T) {
 	}
 	harmless := []string{
 		"passthrough", "bypass", "compass", "passive", "pwm", "pwr", "pwm_fan", "PASSIVE_MODE",
-		"pinned", "spinning", "spindown", "sessions",
+		"pinned", "spinning", "spindown", "sessions", "console_id",
 		"hash", "checksum", "credential_type", "token_type", "credentialType", "key_type",
 		"public_key", "sshpubkey", "ssh_public_key", "peer_public_key", "communities",
 		"opinion", "options", "keyboard_layout", "pass_count", "session_timeout", "password_length",
