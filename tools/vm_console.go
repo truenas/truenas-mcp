@@ -4,6 +4,7 @@ package tools
 // send_vm_console_keys, close_vm_console).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -164,6 +165,45 @@ func (r *Registry) registerVMConsoleTools() {
 	}
 }
 
+// authMeRoles decodes auth.me privilege.roles, which TrueNAS middleware may
+// serialize either as a JSON array of strings or as a set object
+// ({"$set": [...]}).
+type authMeRoles []string
+
+func (r *authMeRoles) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*r = nil
+		return nil
+	}
+	switch trimmed[0] {
+	case '[':
+		var list []string
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			return fmt.Errorf("invalid roles array: %w", err)
+		}
+		*r = list
+		return nil
+	case '{':
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &obj); err != nil {
+			return fmt.Errorf("invalid roles object: %w", err)
+		}
+		rawSet, ok := obj["$set"]
+		if !ok || len(obj) != 1 {
+			return fmt.Errorf(`roles object must contain only a "$set" key`)
+		}
+		var list []string
+		if err := json.Unmarshal(rawSet, &list); err != nil {
+			return fmt.Errorf(`invalid roles "$set" value: %w`, err)
+		}
+		*r = list
+		return nil
+	default:
+		return fmt.Errorf(`roles must be a JSON array of strings or {"$set": [...]}`)
+	}
+}
+
 type authMePrivilege struct {
 	Present  bool
 	WebShell bool
@@ -179,8 +219,8 @@ func fetchAuthMePrivilege(ctx context.Context, client *truenas.Client) (authMePr
 	var resp struct {
 		Username  string `json:"pw_name"`
 		Privilege *struct {
-			WebShell bool     `json:"web_shell"`
-			Roles    []string `json:"roles"`
+			WebShell bool        `json:"web_shell"`
+			Roles    authMeRoles `json:"roles"`
 		} `json:"privilege"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
