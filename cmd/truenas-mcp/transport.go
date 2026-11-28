@@ -107,7 +107,7 @@ func (c *lineConn) readLoop(lines *mcp.LineReader, maxLineBytes int) {
 // could not be written.
 func (c *lineConn) decode(line []byte) (jsonrpc.Message, error) {
 	if c.debug {
-		log.Printf("[STDIN] %s", truenas.RedactJSONForLog(line))
+		log.Printf("[STDIN] %s", redactStdinForLog(line))
 	}
 	if !json.Valid(line) {
 		var v interface{}
@@ -319,3 +319,43 @@ func (c *lineConn) Close() error {
 }
 
 func (c *lineConn) SessionID() string { return "" }
+
+// redactStdinForLog redacts standard secret fields and also masks console
+// keystroke payloads (text and keys) in send_vm_console_keys calls so terminal
+// input, which may contain passwords, never reaches debug logs.
+func redactStdinForLog(line []byte) []byte {
+	redacted := truenas.RedactJSONForLog(line)
+	var msg map[string]interface{}
+	if err := json.Unmarshal(redacted, &msg); err != nil {
+		return redacted
+	}
+	if method, _ := msg["method"].(string); method != "tools/call" {
+		return redacted
+	}
+	params, _ := msg["params"].(map[string]interface{})
+	if params == nil {
+		return redacted
+	}
+	if name, _ := params["name"].(string); name != "send_vm_console_keys" {
+		return redacted
+	}
+	args, _ := params["arguments"].(map[string]interface{})
+	if args == nil {
+		return redacted
+	}
+	changed := false
+	for _, field := range []string{"text", "keys"} {
+		if _, ok := args[field]; ok {
+			args[field] = redact.Marker
+			changed = true
+		}
+	}
+	if !changed {
+		return redacted
+	}
+	out, err := json.Marshal(msg)
+	if err != nil {
+		return redacted
+	}
+	return out
+}
