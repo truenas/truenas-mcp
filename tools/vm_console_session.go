@@ -65,21 +65,22 @@ func defaultVMShellOpener(ctx context.Context, client *truenas.Client, vmID int)
 
 // vmConsoleSnapshot is a point-in-time view of a VM console's rendered screen.
 type vmConsoleSnapshot struct {
-	ConsoleID    string
-	VMID         int
-	VMName       string
-	Cols         int
-	Rows         int
-	CursorRow    int
-	CursorCol    int
-	CursorHidden bool
-	AltScreen    bool
-	Screen       string
-	Truncated    bool
-	Matched      bool
-	TimedOut     bool
-	Connected    bool
-	CloseReason  string
+	ConsoleID      string
+	VMID           int
+	VMName         string
+	Cols           int
+	Rows           int
+	CursorRow      int
+	CursorCol      int
+	CursorHidden   bool
+	AltScreen      bool
+	CursorKeysMode string
+	Screen         string
+	Truncated      bool
+	Matched        bool
+	TimedOut       bool
+	Connected      bool
+	CloseReason    string
 }
 
 type vmConsoleSession struct {
@@ -373,19 +374,20 @@ func (s *vmConsoleSession) renderLocked() vmConsoleSnapshot {
 	screen, truncated := truncateUTF8Bytes(raw, vmConsoleMaxOutputBytes)
 	pos := s.emu.CursorPosition()
 	return vmConsoleSnapshot{
-		ConsoleID:    s.id,
-		VMID:         s.vmID,
-		VMName:       s.vmName,
-		Cols:         s.cols,
-		Rows:         s.rows,
-		CursorRow:    pos.Y,
-		CursorCol:    pos.X,
-		CursorHidden: s.emu.CursorHidden(),
-		AltScreen:    s.emu.IsAltScreen(),
-		Screen:       screen,
-		Truncated:    truncated,
-		Connected:    !s.closed,
-		CloseReason:  s.closeReason,
+		ConsoleID:      s.id,
+		VMID:           s.vmID,
+		VMName:         s.vmName,
+		Cols:           s.cols,
+		Rows:           s.rows,
+		CursorRow:      pos.Y,
+		CursorCol:      pos.X,
+		CursorHidden:   s.emu.CursorHidden(),
+		AltScreen:      s.emu.IsAltScreen(),
+		CursorKeysMode: vmConsoleCursorKeysModeName(s.appCursorKeys),
+		Screen:         screen,
+		Truncated:      truncated,
+		Connected:      !s.closed,
+		CloseReason:    s.closeReason,
 	}
 }
 
@@ -448,7 +450,7 @@ func (s *vmConsoleSession) readScreen(ctx context.Context, waitFor string, waitR
 	}
 }
 
-func (s *vmConsoleSession) sendInput(text string, keys []string) (int, int, error) {
+func (s *vmConsoleSession) sendInput(text string, keys []string, cursorKeys string) (int, int, error) {
 	s.mu.Lock()
 	if s.closed {
 		reason := s.closeReason
@@ -458,7 +460,11 @@ func (s *vmConsoleSession) sendInput(text string, keys []string) (int, int, erro
 		}
 		return 0, 0, fmt.Errorf("VM serial console session %s is closed (%s)", s.id, reason)
 	}
-	appCursor := s.appCursorKeys
+	appCursor, err := resolveVMConsoleAppCursorKeys(cursorKeys, s.appCursorKeys)
+	if err != nil {
+		s.mu.Unlock()
+		return 0, 0, err
+	}
 	s.lastActivity = time.Now()
 	s.mu.Unlock()
 

@@ -333,6 +333,9 @@ func TestVMConsoleRoundTripThroughStdioRedaction(t *testing.T) {
 	if readRes["console_id"] != consoleID {
 		t.Errorf("read_vm_console console_id = %v, want %q", readRes["console_id"], consoleID)
 	}
+	if readRes["cursor_keys_mode"] != "normal" {
+		t.Errorf("read_vm_console cursor_keys_mode = %v, want normal", readRes["cursor_keys_mode"])
+	}
 	if screen, _ := readRes["screen"].(string); !strings.Contains(screen, "login:") {
 		t.Errorf("read_vm_console screen missing login prompt: %q", screen)
 	}
