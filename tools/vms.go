@@ -240,8 +240,10 @@ func simplifyVMDevices(devices []interface{}) map[string]interface{} {
 	}
 
 	var disks []map[string]interface{}
+	var cdroms []map[string]interface{}
 	var nics []map[string]interface{}
 	var displays []map[string]interface{}
+	var otherDevices []map[string]interface{}
 
 	for _, dev := range devices {
 		device, ok := dev.(map[string]interface{})
@@ -255,56 +257,82 @@ func simplifyVMDevices(devices []interface{}) map[string]interface{} {
 		}
 
 		dtype, _ := attrs["dtype"].(string)
+		base := map[string]interface{}{}
+		if id, ok := device["id"].(float64); ok {
+			base["id"] = int(id)
+		}
+		if order, ok := device["order"].(float64); ok {
+			base["order"] = int(order)
+		}
 
 		switch dtype {
 		case "DISK":
-			disk := map[string]interface{}{}
 			if path, ok := attrs["path"].(string); ok {
-				disk["path"] = path
+				base["path"] = path
 			}
 			if diskType, ok := attrs["type"].(string); ok {
-				disk["type"] = diskType
+				base["type"] = diskType
 			}
 			if serial, ok := attrs["serial"].(string); ok {
-				disk["serial"] = serial
+				base["serial"] = serial
 			}
-			disks = append(disks, disk)
+			disks = append(disks, base)
+
+		case "CDROM":
+			if path, ok := attrs["path"].(string); ok {
+				base["path"] = path
+			}
+			cdroms = append(cdroms, base)
 
 		case "NIC":
-			nic := map[string]interface{}{}
 			if nicType, ok := attrs["type"].(string); ok {
-				nic["type"] = nicType
+				base["type"] = nicType
 			}
 			if attach, ok := attrs["nic_attach"].(string); ok {
-				nic["attached_to"] = attach
+				base["attached_to"] = attach
 			}
 			if mac, ok := attrs["mac"].(string); ok {
-				nic["mac"] = mac
+				base["mac"] = mac
 			}
-			nics = append(nics, nic)
+			nics = append(nics, base)
 
 		case "DISPLAY":
-			display := map[string]interface{}{}
 			if displayType, ok := attrs["type"].(string); ok {
-				display["type"] = displayType
+				base["type"] = displayType
 			}
 			if port, ok := attrs["port"].(float64); ok {
-				display["port"] = int(port)
+				base["port"] = int(port)
 			}
 			if webPort, ok := attrs["web_port"].(float64); ok {
-				display["web_port"] = int(webPort)
+				base["web_port"] = int(webPort)
 			}
 			if bind, ok := attrs["bind"].(string); ok {
-				display["bind"] = bind
+				base["bind"] = bind
 			}
 			// Explicitly exclude password field for security
-			displays = append(displays, display)
+			displays = append(displays, base)
+
+		default:
+			if dtype != "" {
+				base["dtype"] = dtype
+			}
+			if path, ok := attrs["path"].(string); ok && path != "" {
+				base["path"] = path
+			}
+			if pptdev, ok := attrs["pptdev"].(string); ok && pptdev != "" {
+				base["pptdev"] = pptdev
+			}
+			otherDevices = append(otherDevices, base)
 		}
 	}
 
 	if len(disks) > 0 {
 		summary["disks"] = disks
 		summary["disk_count"] = len(disks)
+	}
+	if len(cdroms) > 0 {
+		summary["cdroms"] = cdroms
+		summary["cdrom_count"] = len(cdroms)
 	}
 	if len(nics) > 0 {
 		summary["nics"] = nics
@@ -313,6 +341,9 @@ func simplifyVMDevices(devices []interface{}) map[string]interface{} {
 	if len(displays) > 0 {
 		summary["displays"] = displays
 		summary["display_count"] = len(displays)
+	}
+	if len(otherDevices) > 0 {
+		summary["other_devices"] = otherDevices
 	}
 
 	return summary

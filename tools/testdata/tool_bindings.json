@@ -127,6 +127,18 @@
     "execute": "(*Registry).executeDeleteUser"
   },
   {
+    "name": "delete_vm",
+    "handler": "(*Registry).handleDeleteVM",
+    "plan": "planDeleteVM",
+    "execute": "(*Registry).executeDeleteVM"
+  },
+  {
+    "name": "delete_vm_device",
+    "handler": "(*Registry).handleDeleteVMDevice",
+    "plan": "planDeleteVMDevice",
+    "execute": "(*Registry).executeDeleteVMDevice"
+  },
+  {
     "name": "dismiss_alert",
     "handler": "handleDismissAlertWithDryRun",
     "plan": "planDismissAlert"
@@ -483,6 +495,12 @@
     "handler": "(*Registry).handleUpdateUser",
     "plan": "planUpdateUser",
     "execute": "(*Registry).executeUpdateUser"
+  },
+  {
+    "name": "update_vm_device",
+    "handler": "(*Registry).handleUpdateVMDevice",
+    "plan": "planUpdateVMDevice",
+    "execute": "(*Registry).executeUpdateVMDevice"
   },
   {
     "name": "upgrade_app",

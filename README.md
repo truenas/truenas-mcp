@@ -16,7 +16,7 @@ An [MCP](https://modelcontextprotocol.io) server for TrueNAS. It runs on your co
 - **Directory services:** Active Directory, LDAP and FreeIPA status and setup.
 - **Accounts:** local users and groups: listing, creating, changing and deleting them, never granting sudo, roles or administrative group membership, and never deleting home directories or primary groups.
 - **Capacity planning:** usage analysis and growth trends.
-- **Virtual machines:** VM status, creating a VM with its devices (DISK, CDROM, NIC, DISPLAY), and VM power control (`start_vm`, `stop_vm`, `poweroff_vm`, `restart_vm`, and `reset_vm` on TrueNAS 28.0+).
+- **Virtual machines:** VM status (including device IDs and boot orders), creating a VM with its devices (DISK, CDROM, NIC, DISPLAY), updating or removing VM devices (`update_vm_device`, `delete_vm_device`), deleting a VM (`delete_vm`), and VM power control (`start_vm`, `stop_vm`, `poweroff_vm`, `restart_vm`, and `reset_vm` on TrueNAS 28.0+).
 
 Safety: `--read-only` hides every tool that changes the system. Destructive actions need your explicit confirmation, and secrets are redacted from everything sent back to the assistant.
 

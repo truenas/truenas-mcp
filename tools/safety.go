@@ -114,13 +114,18 @@ var toolSafety = map[string]Safety{
 	"query_vms":         {Access: Read},
 	// Creating a VM allocates host RAM/CPUs and can create zvols or expose a
 	// display console; power operations can stop, reboot, or forcibly cut
-	// power to a running guest. All six execute only after confirmation.
+	// power to a running guest; device update/delete and VM delete can
+	// change boot order, detach devices, or permanently destroy zvols. All
+	// nine execute only after confirmation.
 	"create_vm":        {Access: Destructive},
 	"start_vm":         {Access: Destructive},
 	"stop_vm":          {Access: Destructive},
 	"poweroff_vm":      {Access: Destructive},
 	"restart_vm":       {Access: Destructive},
 	"reset_vm":         {Access: Destructive},
+	"update_vm_device": {Access: Destructive},
+	"delete_vm_device": {Access: Destructive},
+	"delete_vm":        {Access: Destructive},
 	"create_dataset":   {Access: Write},
 	"create_smb_share": {Access: Write},
 	"create_nfs_share": {Access: Write},
