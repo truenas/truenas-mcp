@@ -139,14 +139,14 @@
     "description": "Close an open VM serial console session and release its underlying WebSocket connection and terminal buffer.",
     "inputSchema": {
       "properties": {
-        "session_id": {
-          "description": "Opaque session_id returned by open_vm_console",
+        "console_id": {
+          "description": "Opaque console_id returned by open_vm_console",
           "minLength": 1,
           "type": "string"
         }
       },
       "required": [
-        "session_id"
+        "console_id"
       ],
       "type": "object"
     },
@@ -2426,7 +2426,7 @@
   },
   {
     "name": "open_vm_console",
-    "description": "Open an interactive serial console session to a RUNNING virtual machine over TrueNAS's /websocket/shell endpoint and return an opaque session_id plus the initial rendered terminal screen. Only VMs explicitly listed in --allow-vm-console (or TRUENAS_MCP_ALLOW_VM_CONSOLE) are permitted; all VMs are refused when the allowlist is unset. Refuses VMs that are not RUNNING, refuses unknown or unsupported TrueNAS versions, enforces a cap on concurrent sessions, and closes idle sessions automatically after 10 minutes or on server shutdown. Requires web_shell privilege on TrueNAS 25.10 (and VM_WRITE on TrueNAS 26.0+). WARNING: Keystrokes sent to a serial console can execute arbitrary actions inside the guest. Use dry_run=true to preview first. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "description": "Open an interactive serial console session to a RUNNING virtual machine over TrueNAS's /websocket/shell endpoint and return an opaque console_id plus the initial rendered terminal screen. Only VMs explicitly listed in --allow-vm-console (or TRUENAS_MCP_ALLOW_VM_CONSOLE) are permitted; all VMs are refused when the allowlist is unset. Refuses VMs that are not RUNNING, refuses unknown or unsupported TrueNAS versions, enforces a cap on concurrent sessions, and closes idle sessions automatically after 10 minutes or on server shutdown. Requires web_shell privilege on TrueNAS 25.10 (and VM_WRITE on TrueNAS 26.0+). WARNING: Keystrokes sent to a serial console can execute arbitrary actions inside the guest. Use dry_run=true to preview first. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
       "properties": {
         "cols": {
@@ -3012,8 +3012,8 @@
     "description": "Read the current rendered VT100/xterm screen text and cursor position of an open VM serial console session. Optionally waits (without busy polling) until wait_for (substring) or wait_for_regex (RE2 regex) appears on the rendered screen, or until timeout_seconds elapses.",
     "inputSchema": {
       "properties": {
-        "session_id": {
-          "description": "Opaque session_id returned by open_vm_console",
+        "console_id": {
+          "description": "Opaque console_id returned by open_vm_console",
           "minLength": 1,
           "type": "string"
         },
@@ -3037,7 +3037,7 @@
         }
       },
       "required": [
-        "session_id"
+        "console_id"
       ],
       "type": "object"
     },
@@ -3443,6 +3443,11 @@
     "description": "Send literal text and/or named keys to an open VM serial console session. Literal text is sent first as UTF-8 bytes, followed by any named keys (Enter, Tab, Shift+Tab, Backspace, Esc, Space, Up, Down, Left, Right, Home, End, Insert, Delete, PageUp, PageDown, F1-F12, Ctrl+\u003cA-Z|@|[|\\|]|^|_|?\u003e, Alt+\u003cchar|key\u003e). Payload is capped at 4096 bytes and 256 keys per call. Input is NEVER echoed in responses or written to server logs; set sensitive=true for passwords or passphrases to also omit byte and key counts from the response. Note: Ctrl+] detaches virsh console on TrueNAS; use close_vm_console to end a session cleanly.",
     "inputSchema": {
       "properties": {
+        "console_id": {
+          "description": "Opaque console_id returned by open_vm_console",
+          "minLength": 1,
+          "type": "string"
+        },
         "keys": {
           "description": "Optional: Named keys to send after text (e.g. Enter, Tab, Shift+Tab, Backspace, Esc, Space, Up/Down/Left/Right, Home/End, Insert/Delete, PageUp/PageDown, F1-F12, Ctrl+C, Alt+F2)",
           "items": {
@@ -3456,11 +3461,6 @@
           "description": "Optional: Mark input as sensitive (e.g. passwords); input is never echoed or logged regardless, and sensitive=true also omits byte and key counts from the response",
           "type": "boolean"
         },
-        "session_id": {
-          "description": "Opaque session_id returned by open_vm_console",
-          "minLength": 1,
-          "type": "string"
-        },
         "text": {
           "description": "Optional: Literal UTF-8 text to type into the serial console (never echoed or logged)",
           "maxLength": 4096,
@@ -3468,7 +3468,7 @@
         }
       },
       "required": [
-        "session_id"
+        "console_id"
       ],
       "type": "object"
     },

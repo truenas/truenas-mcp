@@ -328,12 +328,12 @@ func TestVMConsoleHandshakeBothBranches(t *testing.T) {
 			}
 			opened := openVMConsoleForTest(t, r, args)
 
-			sessionID, _ := opened["session_id"].(string)
-			if !strings.HasPrefix(sessionID, "vmcon_") {
-				t.Fatalf("session_id = %q, want opaque vmcon_ prefix", sessionID)
+			consoleID, _ := opened["console_id"].(string)
+			if !strings.HasPrefix(consoleID, "vmcon_") {
+				t.Fatalf("console_id = %q, want opaque vmcon_ prefix", consoleID)
 			}
-			if strings.Contains(sessionID, "mw-shell-uuid") || strings.Contains(sessionID, testVMConsoleToken) {
-				t.Fatalf("session_id leaked internal shell id or token: %q", sessionID)
+			if strings.Contains(consoleID, "mw-shell-uuid") || strings.Contains(consoleID, testVMConsoleToken) {
+				t.Fatalf("console_id leaked internal shell id or token: %q", consoleID)
 			}
 			if opened["libvirt_domain"] != tc.wantDomain {
 				t.Errorf("libvirt_domain = %v, want %q", opened["libvirt_domain"], tc.wantDomain)
@@ -372,7 +372,7 @@ func TestVMConsoleHandshakeBothBranches(t *testing.T) {
 
 			// Send keys and verify binary frame on wire.
 			sendOut, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
-				"session_id": sessionID,
+				"console_id": consoleID,
 				"text":       "root",
 				"keys":       []interface{}{"Enter"},
 			})
@@ -400,12 +400,12 @@ func TestVMConsoleHandshakeBothBranches(t *testing.T) {
 
 			// Close session.
 			if _, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{
-				"session_id": sessionID,
+				"console_id": consoleID,
 			}); err != nil {
 				t.Fatalf("close_vm_console: %v", err)
 			}
 			if _, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{
-				"session_id": sessionID,
+				"console_id": consoleID,
 			}); err == nil {
 				t.Errorf("expected read_vm_console to fail after close_vm_console")
 			}
@@ -421,7 +421,7 @@ func TestVMConsoleRefusals(t *testing.T) {
 		// already-opened session can still be read while write/destructive
 		// console tools are hidden and refused.
 		opened := openVMConsoleForTest(t, r, map[string]interface{}{"id": 2.0})
-		sessionID := opened["session_id"].(string)
+		consoleID := opened["console_id"].(string)
 
 		if err := r.SetPolicy(Policy{ReadOnly: true}); err != nil {
 			t.Fatal(err)
@@ -434,14 +434,14 @@ func TestVMConsoleRefusals(t *testing.T) {
 			if listed[hidden] {
 				t.Errorf("%s should be hidden under --read-only", hidden)
 			}
-			if _, err := r.CallTool(context.Background(), hidden, map[string]interface{}{"session_id": sessionID, "id": 2.0}); err == nil || !strings.Contains(err.Error(), "read-only") {
+			if _, err := r.CallTool(context.Background(), hidden, map[string]interface{}{"console_id": consoleID, "id": 2.0}); err == nil || !strings.Contains(err.Error(), "read-only") {
 				t.Errorf("%s under --read-only: got err=%v, want read-only refusal", hidden, err)
 			}
 		}
 		if !listed["read_vm_console"] {
 			t.Errorf("read_vm_console should remain visible under --read-only")
 		}
-		out, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"session_id": sessionID})
+		out, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"console_id": consoleID})
 		if err != nil || !strings.Contains(out, "login:") {
 			t.Errorf("read_vm_console under --read-only failed: out=%s err=%v", out, err)
 		}
@@ -560,7 +560,7 @@ func TestVMConsoleRefusals(t *testing.T) {
 		}
 
 		// Closing one frees a slot.
-		if _, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"session_id": s1["session_id"]}); err != nil {
+		if _, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"console_id": s1["console_id"]}); err != nil {
 			t.Fatalf("close_vm_console: %v", err)
 		}
 		_ = openVMConsoleForTest(t, r, map[string]interface{}{"id": 4.0})
@@ -628,12 +628,12 @@ func TestVMConsoleRefusals(t *testing.T) {
 		fs := newVMConsoleFakeServer(t, "25.10.0")
 		r := fs.newRegistry(t, []string{"debian"})
 		opened := openVMConsoleForTest(t, r, map[string]interface{}{"id": 2.0})
-		sid := opened["session_id"].(string)
+		sid := opened["console_id"].(string)
 
 		// > 4096 characters text (rejected by schema validation, never echoed)
 		bigSecret := "SECRET_" + strings.Repeat("A", vmConsoleMaxPayloadBytes)
 		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
-			"session_id": sid,
+			"console_id": sid,
 			"text":       bigSecret,
 		}); err == nil || !strings.Contains(err.Error(), "4096") {
 			t.Fatalf("expected payload size refusal, got: %v", err)
@@ -644,7 +644,7 @@ func TestVMConsoleRefusals(t *testing.T) {
 		// Combined text + keys > 4096 bytes (reaches encoder cap)
 		nearLimit := "SECRET_" + strings.Repeat("B", vmConsoleMaxPayloadBytes-10)
 		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
-			"session_id": sid,
+			"console_id": sid,
 			"text":       nearLimit,
 			"keys":       []interface{}{"F12", "F12"},
 		}); err == nil || !strings.Contains(err.Error(), "maximum payload size") {
@@ -659,7 +659,7 @@ func TestVMConsoleRefusals(t *testing.T) {
 			manyKeys[i] = "Enter"
 		}
 		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
-			"session_id": sid,
+			"console_id": sid,
 			"keys":       manyKeys,
 		}); err == nil || !strings.Contains(err.Error(), "256") {
 			t.Fatalf("expected too-many-keys refusal, got: %v", err)
@@ -667,7 +667,7 @@ func TestVMConsoleRefusals(t *testing.T) {
 
 		// Unknown key must not echo key value (in case caller put a secret there)
 		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
-			"session_id": sid,
+			"console_id": sid,
 			"keys":       []interface{}{"SecretPasswordNotAKey99"},
 		}); err == nil || !strings.Contains(err.Error(), "keys[0]: unsupported key name") {
 			t.Fatalf("expected unsupported key error, got: %v", err)
@@ -677,9 +677,29 @@ func TestVMConsoleRefusals(t *testing.T) {
 
 		// Empty input refused
 		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
-			"session_id": sid,
+			"console_id": sid,
 		}); err == nil || !strings.Contains(err.Error(), "provide text, keys, or both") {
 			t.Fatalf("expected empty input error, got: %v", err)
+		}
+
+		// Legacy session_id argument is rejected (no backward-compat alias)
+		// and whitespace-only console_id returns "console_id is required".
+		for _, tc := range []struct {
+			tool      string
+			blankArgs map[string]interface{}
+		}{
+			{"read_vm_console", map[string]interface{}{"console_id": "   "}},
+			{"send_vm_console_keys", map[string]interface{}{"console_id": "   ", "text": "x"}},
+			{"close_vm_console", map[string]interface{}{"console_id": "   "}},
+		} {
+			if _, err := r.CallTool(context.Background(), tc.tool, map[string]interface{}{
+				"session_id": sid,
+			}); err == nil || !strings.Contains(err.Error(), `unknown argument "session_id"`) {
+				t.Errorf("%s with session_id: got err=%v, want unknown argument error", tc.tool, err)
+			}
+			if _, err := r.CallTool(context.Background(), tc.tool, tc.blankArgs); err == nil || !strings.Contains(err.Error(), "console_id is required") {
+				t.Errorf("%s with blank console_id: got err=%v, want console_id is required", tc.tool, err)
+			}
 		}
 	})
 }
@@ -717,7 +737,7 @@ func TestVMConsoleVT100EmulationWaitAndDSR(t *testing.T) {
 
 	r := fs.newRegistry(t, []string{"debian"})
 	opened := openVMConsoleForTest(t, r, map[string]interface{}{"id": 2.0})
-	sid := opened["session_id"].(string)
+	sid := opened["console_id"].(string)
 
 	// Verify DSR query reply was forwarded back over WebSocket without deadlocking.
 	select {
@@ -730,7 +750,7 @@ func TestVMConsoleVT100EmulationWaitAndDSR(t *testing.T) {
 	}
 
 	// Verify rendered plain text stripped ANSI colors and cursor position is accurate.
-	readOut, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"session_id": sid})
+	readOut, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"console_id": sid})
 	if err != nil {
 		t.Fatalf("read_vm_console: %v", err)
 	}
@@ -757,7 +777,7 @@ func TestVMConsoleVT100EmulationWaitAndDSR(t *testing.T) {
 	}()
 	start := time.Now()
 	waitOut, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{
-		"session_id":      sid,
+		"console_id":      sid,
 		"wait_for":        "Partition disks [y/N]:",
 		"timeout_seconds": 3.0,
 	})
@@ -780,7 +800,7 @@ func TestVMConsoleVT100EmulationWaitAndDSR(t *testing.T) {
 		sendFromGuest <- []byte("\r\nroot@guest-01:~# ")
 	}()
 	regexOut, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{
-		"session_id":      sid,
+		"console_id":      sid,
 		"wait_for_regex":  `root@guest-\d+:~#`,
 		"timeout_seconds": 3.0,
 	})
@@ -795,7 +815,7 @@ func TestVMConsoleVT100EmulationWaitAndDSR(t *testing.T) {
 
 	// Test timeout when pattern never arrives.
 	toOut, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{
-		"session_id":      sid,
+		"console_id":      sid,
 		"wait_for":        "never-appears-xyz",
 		"timeout_seconds": 0.08,
 	})
@@ -813,7 +833,7 @@ func TestVMConsoleVT100EmulationWaitAndDSR(t *testing.T) {
 	// Wait briefly for the emulator to process DECCKM enable.
 	time.Sleep(40 * time.Millisecond)
 	if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
-		"session_id": sid,
+		"console_id": sid,
 		"keys":       []interface{}{"Up", "Home"},
 	}); err != nil {
 		t.Fatalf("send_vm_console_keys DECCKM: %v", err)
@@ -869,7 +889,7 @@ func TestVMConsoleIdleTimeoutAndNonCancellableCleanup(t *testing.T) {
 		r.vmConsoles.settleTimeout = 20 * time.Millisecond
 		r.vmConsoles.idleTimeout = 80 * time.Millisecond
 		opened := openVMConsoleForTest(t, r, map[string]interface{}{"id": 2.0})
-		sid := opened["session_id"].(string)
+		sid := opened["console_id"].(string)
 
 		select {
 		case <-wsClosed:
@@ -877,7 +897,7 @@ func TestVMConsoleIdleTimeoutAndNonCancellableCleanup(t *testing.T) {
 			t.Fatal("timed out waiting for idle sweeper to close console WebSocket")
 		}
 
-		if _, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"session_id": sid}); err == nil {
+		if _, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"console_id": sid}); err == nil {
 			t.Errorf("expected idle-expired session to be removed")
 		}
 	})
@@ -899,12 +919,12 @@ func TestVMConsoleIdleTimeoutAndNonCancellableCleanup(t *testing.T) {
 
 		r := fs.newRegistry(t, []string{"debian"})
 		opened := openVMConsoleForTest(t, r, map[string]interface{}{"id": 2.0})
-		sid := opened["session_id"].(string)
+		sid := opened["console_id"].(string)
 
 		cancelledCtx, cancel := context.WithCancel(context.Background())
 		cancel()
 		// Invoke handler directly to simulate request cancellation mid-cleanup.
-		if _, err := r.handleCloseVMConsole(cancelledCtx, nil, map[string]interface{}{"session_id": sid}); err != nil {
+		if _, err := r.handleCloseVMConsole(cancelledCtx, nil, map[string]interface{}{"console_id": sid}); err != nil {
 			t.Fatalf("handleCloseVMConsole with cancelled ctx failed: %v", err)
 		}
 		select {
@@ -955,14 +975,14 @@ func TestVMConsoleNoSecretLeakageInResultsOrLogs(t *testing.T) {
 	fs := newVMConsoleFakeServer(t, "25.10.0")
 	r := fs.newRegistry(t, []string{"debian"})
 	opened := openVMConsoleForTest(t, r, map[string]interface{}{"id": 2.0})
-	sid := opened["session_id"].(string)
+	sid := opened["console_id"].(string)
 
 	const secretPlain = "MyTopSecretRootPass!99"
 	const secretSens = "UltraSecretLuksPassphrase#77"
 
 	// Default (sensitive=false): never echoes or logs input.
 	out1, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
-		"session_id": sid,
+		"console_id": sid,
 		"text":       secretPlain,
 		"keys":       []interface{}{"Enter"},
 	})
@@ -978,7 +998,7 @@ func TestVMConsoleNoSecretLeakageInResultsOrLogs(t *testing.T) {
 
 	// sensitive=true: never echoes, never logs, and omits byte/key counts.
 	out2, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
-		"session_id": sid,
+		"console_id": sid,
 		"text":       secretSens,
 		"keys":       []interface{}{"Enter"},
 		"sensitive":  true,

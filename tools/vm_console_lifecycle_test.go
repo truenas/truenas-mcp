@@ -85,9 +85,9 @@ func openFakeVMConsole(t *testing.T, r *Registry, shell vmShellConn) string {
 	}
 	r.vmConsoles.settleTimeout = 10 * time.Millisecond
 	opened := openVMConsoleForTest(t, r, map[string]interface{}{"id": 2.0})
-	sid, _ := opened["session_id"].(string)
+	sid, _ := opened["console_id"].(string)
 	if sid == "" {
-		t.Fatalf("open_vm_console returned no session_id: %v", opened)
+		t.Fatalf("open_vm_console returned no console_id: %v", opened)
 	}
 	return sid
 }
@@ -118,7 +118,7 @@ func readEnded(t *testing.T, r *Registry, sid string) map[string]interface{} {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		out, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"session_id": sid})
+		out, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"console_id": sid})
 		if err != nil {
 			t.Fatalf("read_vm_console after the remote end: %v (want connected=false and a close_reason)", err)
 		}
@@ -176,14 +176,14 @@ func TestVMConsoleRemoteEndTearsDownSession(t *testing.T) {
 	if err := r.vmConsoles.checkCapacity(2, "debian"); err != nil {
 		t.Errorf("slot still held after the remote end: %v", err)
 	}
-	if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{"session_id": sid, "text": "x"}); err == nil || !strings.Contains(err.Error(), "is closed (console stream closed by remote)") {
+	if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{"console_id": sid, "text": "x"}); err == nil || !strings.Contains(err.Error(), "is closed (console stream closed by remote)") {
 		t.Errorf("send on an ended session: err = %v, want closed with the reason", err)
 	}
 
-	if _, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"session_id": sid}); err != nil {
+	if _, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"console_id": sid}); err != nil {
 		t.Fatalf("close_vm_console on an ended session: %v", err)
 	}
-	if _, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"session_id": sid}); err == nil {
+	if _, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"console_id": sid}); err == nil {
 		t.Error("closed session is still listed")
 	}
 	if n := shell.closeCalls.Load(); n < 1 {
@@ -217,7 +217,7 @@ func TestVMConsoleRemoteEndOverWebSocket(t *testing.T) {
 			r := fs.newRegistry(t, []string{"debian"})
 			r.vmConsoles.settleTimeout = 10 * time.Millisecond
 			opened := openVMConsoleForTest(t, r, map[string]interface{}{"id": 2.0})
-			sid := opened["session_id"].(string)
+			sid := opened["console_id"].(string)
 			s := managedSession(t, r, sid)
 
 			close(endShell)
@@ -247,11 +247,11 @@ func TestVMConsoleFailedReplyWriteDoesNotHang(t *testing.T) {
 	shell.frames <- []byte("\x1b[c")
 
 	callWithin(t, 2*time.Second, "read_vm_console", func() error {
-		_, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"session_id": sid})
+		_, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"console_id": sid})
 		return err
 	})
 	callWithin(t, 2*time.Second, "close_vm_console", func() error {
-		_, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"session_id": sid})
+		_, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"console_id": sid})
 		if err != nil && strings.Contains(err.Error(), "not found") {
 			return nil // already ended and dropped is fine; hanging is not
 		}
@@ -541,7 +541,7 @@ func TestVMConsoleSlowReplyWritesDoNotStallReads(t *testing.T) {
 	}()
 	callWithin(t, 3*time.Second, "read_vm_console wait_for", func() error {
 		out, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{
-			"session_id": sid, "wait_for": "ready>", "timeout_seconds": 2.0,
+			"console_id": sid, "wait_for": "ready>", "timeout_seconds": 2.0,
 		})
 		if err == nil && !strings.Contains(out, `"matched": true`) {
 			return fmt.Errorf("guest output after the queries never rendered: %s", out)
@@ -549,7 +549,7 @@ func TestVMConsoleSlowReplyWritesDoNotStallReads(t *testing.T) {
 		return err
 	})
 	callWithin(t, 3*time.Second, "close_vm_console", func() error {
-		_, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"session_id": sid})
+		_, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"console_id": sid})
 		return err
 	})
 }
@@ -620,7 +620,7 @@ func TestVMConsoleEmulatorPanicReleasesLock(t *testing.T) {
 	}
 	shell.waitClosed(t)
 	callWithin(t, 2*time.Second, "read_vm_console after the emulator panic", func() error {
-		out, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"session_id": sid})
+		out, err := r.CallTool(context.Background(), "read_vm_console", map[string]interface{}{"console_id": sid})
 		if err != nil {
 			return err
 		}
@@ -630,14 +630,14 @@ func TestVMConsoleEmulatorPanicReleasesLock(t *testing.T) {
 		return nil
 	})
 	callWithin(t, 2*time.Second, "send_vm_console_keys after the emulator panic", func() error {
-		_, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{"session_id": sid, "text": "x"})
+		_, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{"console_id": sid, "text": "x"})
 		if err == nil || !strings.Contains(err.Error(), "is closed (internal reader error)") {
 			return fmt.Errorf("err = %v, want closed with the reader error", err)
 		}
 		return nil
 	})
 	callWithin(t, 2*time.Second, "close_vm_console after the emulator panic", func() error {
-		_, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"session_id": sid})
+		_, err := r.CallTool(context.Background(), "close_vm_console", map[string]interface{}{"console_id": sid})
 		return err
 	})
 	callWithin(t, 2*time.Second, "registry shutdown", func() error { r.vmConsoles.Close(); return nil })

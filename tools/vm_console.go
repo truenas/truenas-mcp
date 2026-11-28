@@ -51,7 +51,7 @@ func (r *Registry) registerVMConsoleTools() {
 	r.tools["open_vm_console"] = Tool{
 		Definition: mcp.Tool{
 			Name: "open_vm_console",
-			Description: "Open an interactive serial console session to a RUNNING virtual machine over TrueNAS's /websocket/shell endpoint and return an opaque session_id plus the initial rendered terminal screen. " +
+			Description: "Open an interactive serial console session to a RUNNING virtual machine over TrueNAS's /websocket/shell endpoint and return an opaque console_id plus the initial rendered terminal screen. " +
 				"Only VMs explicitly listed in --allow-vm-console (or TRUENAS_MCP_ALLOW_VM_CONSOLE) are permitted; all VMs are refused when the allowlist is unset. " +
 				"Refuses VMs that are not RUNNING, refuses unknown or unsupported TrueNAS versions, enforces a cap on concurrent sessions, and closes idle sessions automatically after 10 minutes or on server shutdown. " +
 				"Requires web_shell privilege on TrueNAS 25.10 (and VM_WRITE on TrueNAS 26.0+). " +
@@ -74,10 +74,10 @@ func (r *Registry) registerVMConsoleTools() {
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"session_id": map[string]interface{}{
+					"console_id": map[string]interface{}{
 						"type":        "string",
 						"minLength":   1,
-						"description": "Opaque session_id returned by open_vm_console",
+						"description": "Opaque console_id returned by open_vm_console",
 					},
 					"wait_for": map[string]interface{}{
 						"type":        "string",
@@ -98,7 +98,7 @@ func (r *Registry) registerVMConsoleTools() {
 						"description": fmt.Sprintf("Optional: Maximum seconds to wait when wait_for or wait_for_regex is set (0-%d, default %d when waiting, 0 otherwise)", int(maxVMConsoleWaitTimeout/time.Second), int(defaultVMConsoleWaitTimeout/time.Second)),
 					},
 				},
-				"required": []string{"session_id"},
+				"required": []string{"console_id"},
 			},
 		},
 		Handler: r.handleReadVMConsole,
@@ -115,10 +115,10 @@ func (r *Registry) registerVMConsoleTools() {
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"session_id": map[string]interface{}{
+					"console_id": map[string]interface{}{
 						"type":        "string",
 						"minLength":   1,
-						"description": "Opaque session_id returned by open_vm_console",
+						"description": "Opaque console_id returned by open_vm_console",
 					},
 					"text": map[string]interface{}{
 						"type":        "string",
@@ -139,7 +139,7 @@ func (r *Registry) registerVMConsoleTools() {
 						"description": "Optional: Mark input as sensitive (e.g. passwords); input is never echoed or logged regardless, and sensitive=true also omits byte and key counts from the response",
 					},
 				},
-				"required": []string{"session_id"},
+				"required": []string{"console_id"},
 			},
 		},
 		Handler: r.handleSendVMConsoleKeys,
@@ -152,13 +152,13 @@ func (r *Registry) registerVMConsoleTools() {
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"session_id": map[string]interface{}{
+					"console_id": map[string]interface{}{
 						"type":        "string",
 						"minLength":   1,
-						"description": "Opaque session_id returned by open_vm_console",
+						"description": "Opaque console_id returned by open_vm_console",
 					},
 				},
-				"required": []string{"session_id"},
+				"required": []string{"console_id"},
 			},
 		},
 		Handler: r.handleCloseVMConsole,
@@ -455,7 +455,7 @@ func (r *Registry) executeOpenVMConsole(ctx context.Context, client *truenas.Cli
 
 	out := map[string]interface{}{
 		"status":               "opened",
-		"session_id":           snap.SessionID,
+		"console_id":           snap.ConsoleID,
 		"vm_id":                snap.VMID,
 		"vm_name":              snap.VMName,
 		"libvirt_domain":       domain,
@@ -489,7 +489,7 @@ func formatOpenVMShellError(ver truenas.Version, vmName string, vmID int, err er
 }
 
 func (r *Registry) handleReadVMConsole(ctx context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
-	sessionID, _ := args["session_id"].(string)
+	consoleID, _ := args["console_id"].(string)
 	waitFor, err := optionalStringArg(args, "wait_for")
 	if err != nil {
 		return "", err
@@ -540,7 +540,7 @@ func (r *Registry) handleReadVMConsole(ctx context.Context, _ *truenas.Client, a
 		timeout = time.Duration(f * float64(time.Second))
 	}
 
-	session, err := r.vmConsoles.getSession(sessionID)
+	session, err := r.vmConsoles.getSession(consoleID)
 	if err != nil {
 		return "", err
 	}
@@ -551,7 +551,7 @@ func (r *Registry) handleReadVMConsole(ctx context.Context, _ *truenas.Client, a
 	}
 
 	out := map[string]interface{}{
-		"session_id": snap.SessionID,
+		"console_id": snap.ConsoleID,
 		"vm_id":      snap.VMID,
 		"vm_name":    snap.VMName,
 		"cols":       snap.Cols,
@@ -578,7 +578,7 @@ func (r *Registry) handleReadVMConsole(ctx context.Context, _ *truenas.Client, a
 }
 
 func (r *Registry) handleSendVMConsoleKeys(_ context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
-	sessionID, _ := args["session_id"].(string)
+	consoleID, _ := args["console_id"].(string)
 	text, err := optionalStringArg(args, "text")
 	if err != nil {
 		return "", err
@@ -596,7 +596,7 @@ func (r *Registry) handleSendVMConsoleKeys(_ context.Context, _ *truenas.Client,
 		sensitive = b
 	}
 
-	session, err := r.vmConsoles.getSession(sessionID)
+	session, err := r.vmConsoles.getSession(consoleID)
 	if err != nil {
 		return "", err
 	}
@@ -608,7 +608,7 @@ func (r *Registry) handleSendVMConsoleKeys(_ context.Context, _ *truenas.Client,
 
 	out := map[string]interface{}{
 		"status":     "sent",
-		"session_id": session.id,
+		"console_id": session.id,
 		"vm_id":      session.vmID,
 		"vm_name":    session.vmName,
 		"sensitive":  sensitive,
@@ -629,14 +629,14 @@ func (r *Registry) handleSendVMConsoleKeys(_ context.Context, _ *truenas.Client,
 }
 
 func (r *Registry) handleCloseVMConsole(_ context.Context, _ *truenas.Client, args map[string]interface{}) (string, error) {
-	sessionID, _ := args["session_id"].(string)
-	session, err := r.vmConsoles.closeSession(sessionID, "closed by client")
+	consoleID, _ := args["console_id"].(string)
+	session, err := r.vmConsoles.closeSession(consoleID, "closed by client")
 	if err != nil {
 		return "", err
 	}
 	out := map[string]interface{}{
 		"status":     "closed",
-		"session_id": session.id,
+		"console_id": session.id,
 		"vm_id":      session.vmID,
 		"vm_name":    session.vmName,
 	}
