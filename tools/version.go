@@ -228,7 +228,11 @@ func (r *Registry) toolHiddenByVersion(name string) bool {
 func toolUnavailableError(name string, v truenas.Version) error {
 	rng := versionRangeOf(name)
 	min := rng.min()
-	if v.Less(min) {
+	// Development (-MASTER) builds serve the newest API on /api/current even
+	// when their numeric prefix lags the target release (for example
+	// 27.1.0-MASTER serving v28 methods); method-not-found errors remain the
+	// backstop if a build does not serve a method.
+	if !v.IsMaster() && v.Less(min) {
 		return fmt.Errorf("tool %s is not available on TrueNAS %s (requires %s or later); nothing was executed", name, v, min)
 	}
 	if !rng.Max.IsZero() && rng.Max.Less(v) {

@@ -13,7 +13,8 @@ import (
 var MinSupported = Version{Major: 25, Minor: 10, Patch: 0, Raw: "25.10"}
 
 // Version is a TrueNAS release number, year.month.patch (for example
-// 25.10.8 or 26.0.0). Suffixes such as -RC.1 are ignored.
+// 25.10.8 or 26.0.0). Suffixes such as -RC.1 are ignored when comparing
+// versions.
 type Version struct {
 	Major, Minor, Patch int
 	// Raw is the original system.info version string, when parsed from one.
@@ -54,6 +55,24 @@ func (v Version) AtLeast(o Version) bool {
 
 // versionNumberRe finds the first dotted version number in a string.
 var versionNumberRe = regexp.MustCompile(`(?i)v?(\d+)\.(\d+)(?:\.(\d+))?`)
+
+// masterSuffixRe matches a -MASTER suffix immediately after the numeric
+// version (allowing extra dotted numeric segments such as .1 and an optional
+// non-alphanumeric separator followed by a build stamp).
+var masterSuffixRe = regexp.MustCompile(`(?i)^(?:\.\d+)*-master(?:$|[^a-z0-9])`)
+
+// IsMaster reports whether v is a development MASTER build (its version
+// string carries a -MASTER suffix, matched case-insensitively).
+func (v Version) IsMaster() bool {
+	if v.Raw == "" {
+		return false
+	}
+	loc := versionNumberRe.FindStringIndex(v.Raw)
+	if loc == nil {
+		return false
+	}
+	return masterSuffixRe.MatchString(v.Raw[loc[1]:])
+}
 
 // ParseVersion reads a TrueNAS version string such as "25.10.8",
 // "26.0.0-RC.1", or "TrueNAS-SCALE-25.10.0".

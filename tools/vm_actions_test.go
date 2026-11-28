@@ -2088,8 +2088,8 @@ func TestVMPowerToolsAndJobTracking(t *testing.T) {
 }
 
 func TestResetVMVersionGatingAndTokenBinding(t *testing.T) {
-	// reset_vm must be hidden and refused on 25.10, 27.0, and 27.1 (vm.reset exists in v28_0_0 / master only).
-	for _, ver := range []string{"25.10.0", "25.10.8", "27.0.0", "27.1.0-MASTER"} {
+	// reset_vm must be hidden and refused on non-MASTER releases before 28.0 (vm.reset exists in v28_0_0 / master only).
+	for _, ver := range []string{"25.10.0", "25.10.8", "27.0.0", "27.1.0"} {
 		t.Run("refused on "+ver, func(t *testing.T) {
 			env := newVMFakeEnv(ver)
 			r, fake, _ := env.buildRegistry(t, false)
@@ -2102,6 +2102,28 @@ func TestResetVMVersionGatingAndTokenBinding(t *testing.T) {
 			}
 			if len(fake.called("vm.query")) != 0 || len(fake.called("vm.reset")) != 0 {
 				t.Errorf("reset_vm made middleware calls despite version gate")
+			}
+		})
+	}
+
+	for _, ver := range []string{"27.1.0-MASTER", "28.0.0"} {
+		t.Run("allowed on "+ver, func(t *testing.T) {
+			env := newVMFakeEnv(ver)
+			r, fake, _ := env.buildRegistry(t, false)
+			if !listed(r)["reset_vm"] {
+				t.Fatalf("reset_vm should be listed on TrueNAS %s", ver)
+			}
+			preview, err := r.CallTool(t.Context(), "reset_vm", map[string]interface{}{"id": 2.0})
+			if err != nil {
+				t.Fatalf("reset_vm preview on %s: %v", ver, err)
+			}
+			tok := confirmTokenFromPreview(t, preview)
+			out, err := r.CallTool(t.Context(), "reset_vm", map[string]interface{}{"id": 2.0, "confirmation_token": tok})
+			if err != nil {
+				t.Fatalf("reset_vm confirm on %s: %v", ver, err)
+			}
+			if !strings.Contains(out, `"status": "reset"`) || len(fake.called("vm.reset")) != 1 {
+				t.Errorf("unexpected reset_vm output on %s: %s", ver, out)
 			}
 		})
 	}

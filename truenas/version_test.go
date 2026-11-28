@@ -62,6 +62,82 @@ func TestVersionOrdering(t *testing.T) {
 	}
 }
 
+func TestVersionIsMaster(t *testing.T) {
+	tests := []struct {
+		in         string
+		major      int
+		minor      int
+		patch      int
+		wantMaster bool
+	}{
+		{"27.1.0-MASTER", 27, 1, 0, true},
+		{"27.1.0-master", 27, 1, 0, true},
+		{"27.1.0-Master", 27, 1, 0, true},
+		{"27.1-MASTER", 27, 1, 0, true},
+		{"27.1.0-MASTER-20260401-120000", 27, 1, 0, true},
+		{"27.1-MASTER-20260401-120000", 27, 1, 0, true},
+		{"TrueNAS-SCALE-27.1.0-MASTER", 27, 1, 0, true},
+		{"TrueNAS-SCALE-27.1.0-MASTER-20260401-120000", 27, 1, 0, true},
+		{"TrueNAS-27.1.0-MASTER-20260401-120000", 27, 1, 0, true},
+		{"v27.1.0-MASTER", 27, 1, 0, true},
+		{"27.1.0.1-MASTER", 27, 1, 0, true},
+		{"27.1.0.1-MASTER-20260401-120000", 27, 1, 0, true},
+		{"27.1.0-MASTER+git1234", 27, 1, 0, true},
+		{"27.1.0-MASTER.1", 27, 1, 0, true},
+		{"  27.1.0-MASTER  ", 27, 1, 0, true},
+		{"28.0.0-MASTER", 28, 0, 0, true},
+		{"25.10.0", 25, 10, 0, false},
+		{"25.10.8", 25, 10, 8, false},
+		{"27.1.0", 27, 1, 0, false},
+		{"28.0.0", 28, 0, 0, false},
+		{"26.0.0-RC.1", 26, 0, 0, false},
+		{"27.1.0-BETA.1", 27, 1, 0, false},
+		{"TrueNAS-SCALE-25.10.0", 25, 10, 0, false},
+		{"27.1.0-MASTERFUL", 27, 1, 0, false},
+		{"27.1.0-MASTER2", 27, 1, 0, false},
+		{"27.1.0-NOTMASTER", 27, 1, 0, false},
+		{"TrueNAS-MASTER-27.1.0", 27, 1, 0, false},
+	}
+	for _, tt := range tests {
+		v, err := ParseVersion(tt.in)
+		if err != nil {
+			t.Errorf("ParseVersion(%q): %v", tt.in, err)
+			continue
+		}
+		if v.Major != tt.major || v.Minor != tt.minor || v.Patch != tt.patch {
+			t.Errorf("ParseVersion(%q) = %d.%d.%d, want %d.%d.%d", tt.in, v.Major, v.Minor, v.Patch, tt.major, tt.minor, tt.patch)
+		}
+		if got := v.IsMaster(); got != tt.wantMaster {
+			t.Errorf("ParseVersion(%q).IsMaster() = %v, want %v", tt.in, got, tt.wantMaster)
+		}
+	}
+
+	if (Version{}).IsMaster() {
+		t.Error("zero Version should not be master")
+	}
+	if MinSupported.IsMaster() {
+		t.Error("MinSupported should not be master")
+	}
+	if (Version{Raw: "Master"}).IsMaster() {
+		t.Error("bare Master without numeric version should not be master")
+	}
+}
+
+func TestRequireSupportedVersionRejectsPre2510Master(t *testing.T) {
+	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) {
+		f.infoVersion = "24.10.0-MASTER-20241001-120000"
+	})
+	c := insecureClient(t, f, Options{})
+	if err := c.Authenticate(context.Background()); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	err := c.RequireSupportedVersion(context.Background())
+	var u *UnsupportedVersionError
+	if err == nil || !errors.As(err, &u) {
+		t.Fatalf("got %v, want UnsupportedVersionError", err)
+	}
+}
+
 func TestRequireSupportedVersionRejects2504(t *testing.T) {
 	f := newFakeTrueNAS(t, func(f *fakeTrueNAS) {
 		f.infoVersion = "25.04.2"
