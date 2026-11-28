@@ -53,6 +53,7 @@ func (r *Registry) registerVMTools() {
 
 	r.registerVMActionTools()
 	r.registerVMConsoleTools()
+	r.registerVMGuestIPTools()
 }
 
 var vmQuerySelect = []interface{}{

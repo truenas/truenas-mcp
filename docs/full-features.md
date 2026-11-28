@@ -89,6 +89,11 @@ The minimum supported TrueNAS release is 25.10, checked at startup. Tools that a
   - Memory: `memory_mib` (the API value, in MiB), `memory_gib` (e.g. `"4.0 GiB"`; two decimals below 1 GiB, e.g. `"0.50 GiB"`) and `min_memory_mib` when set. These replace `vcpus`/`cores`/`threads` and `memory_mb`/`memory_gb`
   - Automatically excludes sensitive data like display passwords for security
   - Perfect for questions like "what VMs are running?" or "show VMs with autostart enabled"
+- **get_vm_guest_ips** - Read a running virtual machine's guest network interfaces and IPv4/IPv6 addresses via the QEMU guest agent (read-only, TrueNAS 28.0+ / master only)
+  - Input: `id` (required numeric VM ID, `>= 1`)
+  - Calls `vm.get_guest_network_interfaces(id)` and returns each interface's name, MAC address (when present), and IPv4/IPv6 addresses with prefix lengths
+  - Hidden and refused on TrueNAS releases before 28.0 (including 25.10 and 27.x, where `vm.get_guest_network_interfaces` does not exist). Available in `--read-only` mode
+  - Refuses missing or non-running VMs with a clear message; when the interface list is empty, includes a note that the QEMU guest agent may not be installed or running, or the VM may still be booting
 - **create_vm** - Create a virtual machine and attach its devices (**destructive**)
   - **Requires a `confirmation_token`** to execute; the token is bound to the VM payload, every planned device (with any display password hashed, never stored in plaintext), host virtualization and CPU/RAM limits, device choices (`vm.device.disk_choices`, `vm.device.nic_attach_choices`, `vm.device.bind_choices`), the display ports other VMs use, the requested `autostart`, and the zvol/ISO dataset rows and file stats
   - Calls `vm.create` (always with `ensure_display_device: false` and `autostart: false`) followed by `vm.device.create` for each device (`DISK`, `CDROM`, `NIC`, `DISPLAY`). When `autostart: true` is requested, it is enabled with `vm.update` only after every device has attached, so a partly built VM never starts at the next boot. If a device attach fails, the new VM is deleted with `vm.delete` (`zvols: false`) and the error lists the zvols this call created, which are kept; if that rollback fails too, the error says the VM still exists (with its id), that autostart is off, and which zvols were created
