@@ -111,8 +111,13 @@ type Client struct {
 }
 
 type pendingCall struct {
-	conn *websocket.Conn
-	ch   chan *responseResult
+	conn            *websocket.Conn
+	ch              chan *responseResult
+	sensitiveResult bool
+}
+
+func isSensitiveResultMethod(method string) bool {
+	return method == "auth.generate_token" || method == "auth.generate_onetime_password"
 }
 
 const (
@@ -506,24 +511,30 @@ func (c *Client) readLoop(conn *websocket.Conn, done chan struct{}) {
 			continue
 		}
 
-		if debugLogging.Load() {
-			// Full bodies only in debug mode, and even then with known
-			// credential keys masked and any server echo of the API key
-			// scrubbed - responses can carry secrets (e.g. job arguments,
-			// app configs) that the server is not guaranteed to redact.
-			respJSON, _ := json.Marshal(resp)
-			log.Printf("Received response: %s", c.scrubSecrets(string(RedactJSONForLog(respJSON))))
-		} else {
-			log.Printf("Received response: id=%s result=%d bytes", key, len(resp.Result))
-		}
-
-		// Route response to the waiting caller
+		// Look up the waiting caller before debug logging so responses to
+		// token-minting methods (whose bare string result is not under a
+		// sensitive JSON key) are masked before they reach stderr.
 		c.pendingMu.Lock()
 		call, ok := c.pending[key]
 		if ok {
 			delete(c.pending, key)
 		}
 		c.pendingMu.Unlock()
+
+		if debugLogging.Load() {
+			// Full bodies only in debug mode, and even then with known
+			// credential keys masked and any server echo of the API key
+			// scrubbed - responses can carry secrets (e.g. job arguments,
+			// app configs) that the server is not guaranteed to redact.
+			logResp := resp
+			if ok && call.sensitiveResult && len(logResp.Result) > 0 {
+				logResp.Result = json.RawMessage(`"` + redact.Marker + `"`)
+			}
+			respJSON, _ := json.Marshal(logResp)
+			log.Printf("Received response: %s", c.scrubSecrets(string(RedactJSONForLog(respJSON))))
+		} else {
+			log.Printf("Received response: id=%s result=%d bytes", key, len(resp.Result))
+		}
 
 		if ok {
 			call.ch <- &responseResult{resp: &resp}
@@ -1056,7 +1067,7 @@ func (c *Client) roundTrip(ctx context.Context, conn *websocket.Conn, method str
 	// the response arrives before we add the channel to the pending map.
 	ch := make(chan *responseResult, 1)
 	c.pendingMu.Lock()
-	c.pending[key] = &pendingCall{conn: conn, ch: ch}
+	c.pending[key] = &pendingCall{conn: conn, ch: ch, sensitiveResult: isSensitiveResultMethod(method)}
 	c.pendingMu.Unlock()
 
 	if debugLogging.Load() {
