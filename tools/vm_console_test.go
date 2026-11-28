@@ -1333,6 +1333,18 @@ func TestVMConsoleCursorKeysOverrideAndModeReporting(t *testing.T) {
 		} else if strings.Contains(err.Error(), "SecretModeValue99") {
 			t.Fatalf("handler: invalid cursor_keys error echoed caller input: %v", err)
 		}
+
+		// The handler validates cursor_keys before looking up the session, so
+		// an invalid mode is reported even for an unknown console_id.
+		if _, err := r.CallTool(context.Background(), "send_vm_console_keys", map[string]interface{}{
+			"console_id":  "vmcon_does_not_exist",
+			"keys":        []interface{}{"Down"},
+			"cursor_keys": "SecretModeValue99",
+		}); err == nil || !strings.Contains(err.Error(), "cursor_keys") {
+			t.Fatalf("unknown console_id: expected invalid cursor_keys error, got: %v", err)
+		} else if strings.Contains(err.Error(), "SecretModeValue99") {
+			t.Fatalf("unknown console_id: invalid cursor_keys error echoed caller input: %v", err)
+		}
 	})
 }
 
