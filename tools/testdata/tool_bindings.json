@@ -24,6 +24,10 @@
     "plan": "planCloneSnapshot"
   },
   {
+    "name": "close_vm_console",
+    "handler": "(*Registry).handleCloseVMConsole"
+  },
+  {
     "name": "configure_directory_service",
     "handler": "(*Registry).handleConfigureDirectoryServiceWithDryRun",
     "plan": "planConfigureDirectoryService",
@@ -249,6 +253,12 @@
     "execute": "executeOnlineDisk"
   },
   {
+    "name": "open_vm_console",
+    "handler": "(*Registry).handleOpenVMConsole",
+    "plan": "(*Registry).planOpenVMConsole",
+    "execute": "(*Registry).executeOpenVMConsole"
+  },
+  {
     "name": "poweroff_vm",
     "handler": "(*Registry).handlePoweroffVM",
     "plan": "planPoweroffVM",
@@ -323,6 +333,10 @@
     "handler": "handleQueryVMs"
   },
   {
+    "name": "read_vm_console",
+    "handler": "(*Registry).handleReadVMConsole"
+  },
+  {
     "name": "refresh_directory_cache",
     "handler": "(*Registry).handleRefreshDirectoryCacheWithDryRun",
     "plan": "planRefreshDirectoryCache"
@@ -387,6 +401,10 @@
   {
     "name": "search_app_catalog",
     "handler": "handleSearchAppCatalog"
+  },
+  {
+    "name": "send_vm_console_keys",
+    "handler": "(*Registry).handleSendVMConsoleKeys"
   },
   {
     "name": "set_filesystem_acl",

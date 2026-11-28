@@ -135,6 +135,29 @@
     }
   },
   {
+    "name": "close_vm_console",
+    "description": "Close an open VM serial console session and release its underlying WebSocket connection and terminal buffer.",
+    "inputSchema": {
+      "properties": {
+        "session_id": {
+          "description": "Opaque session_id returned by open_vm_console",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "configure_directory_service",
     "description": "Configure and join a directory service (Active Directory, LDAP, or IPA) with TrueNAS directoryservices.update (TrueNAS 25.10 or later). Setting enable=true joins the domain automatically the first time. The arguments are the fields of that API call. Omitted optional fields keep their current value. A secret sent as [REDACTED] (as query_directory_services shows it) keeps its stored value only when its account, server and directory are unchanged; otherwise the call is refused.\n\n**To enable or change a service, service_type, credential, configuration and enable are all required, and configuration must match service_type. The old flat arguments (type, server, bindname, netbiosname, ssl, domain, ...) no longer exist: put them in credential and configuration as below.**\n\n**To disable the configured service, send only enable=false** (no service_type, credential or configuration): the settings are kept and domain authentication stops until it is enabled again. When service_type is sent with enable=false, a KERBEROS_USER credential is rejected for ACTIVEDIRECTORY and IPA (TrueNAS does not store it); use KERBEROS_PRINCIPAL.\n\n**Credential (credential_type and its fields):**\n\nActive Directory and IPA (Kerberos only; the first join needs KERBEROS_USER with domain admin rights):\n- KERBEROS_USER: {credential_type: \"KERBEROS_USER\", username: \"admin\", password: \"pass\"}\n- KERBEROS_PRINCIPAL: {credential_type: \"KERBEROS_PRINCIPAL\", principal: \"host/truenas@EXAMPLE.COM\"} (the principal must already be in a keytab on TrueNAS)\n\nLDAP (also accepts the Kerberos types above, which need kerberos_realm to be set):\n- LDAP_PLAIN: {credential_type: \"LDAP_PLAIN\", binddn: \"cn=admin,dc=example,dc=com\", bindpw: \"pass\"}\n- LDAP_ANONYMOUS: {credential_type: \"LDAP_ANONYMOUS\"}\n- LDAP_MTLS: {credential_type: \"LDAP_MTLS\", client_certificate: \"name of a certificate on TrueNAS\"}\n\n**Configuration (fields per service_type; * = required):**\n- ACTIVEDIRECTORY: hostname*, domain*, site, computer_account_ou, use_default_domain, enable_trusted_domains, trusted_domains, idmap\n  e.g. {hostname: \"truenas\", domain: \"corp.example.com\"}\n- IPA: target_server*, hostname*, domain*, basedn*, smb_domain, validate_certificates\n  e.g. {target_server: \"ipa.example.com\", hostname: \"truenas\", domain: \"example.com\", basedn: \"dc=example,dc=com\"}\n- LDAP: server_urls* (ldap:// or ldaps:// URIs), basedn*, starttls, validate_certificates, schema (RFC2307 or RFC2307BIS), search_bases, attribute_maps, auxiliary_parameters\n  e.g. {server_urls: [\"ldaps://ldap.example.com\"], basedn: \"dc=example,dc=com\"}\nidmap, trusted_domains, smb_domain, search_bases and attribute_maps are passed to TrueNAS unchanged; see the TrueNAS API docs for directoryservices.update for their fields.\n\n**Security:**\n- Credentials are stored in TrueNAS configuration\n- Use Kerberos principals with keytabs instead of passwords for production\n- Dry-run shows the exact payload that would be sent with every secret value masked (password, bindpw, ldap_user_dn_password in idmap and trusted_domains, ...); credential_type and username stay visible\n\n**Returns:** task_id for tracking the long-running domain join job (2-10 minutes typical) **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
@@ -2379,6 +2402,55 @@
     }
   },
   {
+    "name": "open_vm_console",
+    "description": "Open an interactive serial console session to a RUNNING virtual machine over TrueNAS's /websocket/shell endpoint and return an opaque session_id plus the initial rendered terminal screen. Only VMs explicitly listed in --allow-vm-console (or TRUENAS_MCP_ALLOW_VM_CONSOLE) are permitted; all VMs are refused when the allowlist is unset. Refuses VMs that are not RUNNING, refuses unknown or unsupported TrueNAS versions, enforces a cap on concurrent sessions, and closes idle sessions automatically after 10 minutes or on server shutdown. Requires web_shell privilege on TrueNAS 25.10 (and VM_WRITE on TrueNAS 26.0+). WARNING: Keystrokes sent to a serial console can execute arbitrary actions inside the guest. Use dry_run=true to preview first. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
+    "inputSchema": {
+      "properties": {
+        "cols": {
+          "default": 80,
+          "description": "Optional: Terminal width in columns (40-240, default 80)",
+          "maximum": 240,
+          "minimum": 40,
+          "type": "integer"
+        },
+        "confirmation_token": {
+          "description": "Required to execute. Omit it first: the server returns a preview and a confirmation_token and changes nothing. After the user has explicitly approved the preview, repeat the call with exactly the same arguments plus this token. Single use, valid for 5 minutes.",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Optional: Preview without making changes (default: false)",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Optional: Numeric VM ID (provide id or name; if both are given they must refer to the same VM)",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "description": "Optional: Exact VM name (provide id or name; if both are given they must refer to the same VM)",
+          "maxLength": 150,
+          "minLength": 1,
+          "type": "string"
+        },
+        "rows": {
+          "default": 24,
+          "description": "Optional: Terminal height in rows (10-100, default 24)",
+          "maximum": 100,
+          "minimum": 10,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "poweroff_vm",
     "description": "Forcibly power off a virtual machine immediately via vm.poweroff without guest OS shutdown (equivalent to pulling the power cord; unsaved guest data may be lost). Refuses if the VM is already STOPPED. Confirmation is bound to the VM's ID and current status. Use stop_vm for graceful shutdown or dry_run to preview. **DESTRUCTIVE: requires confirmation.** If the client supports MCP elicitation, the server asks the user to approve a short preview in the client and executes only if they accept. Otherwise it changes nothing and returns a preview plus a single-use confirmation_token, valid for 5 minutes and only for these exact arguments; after explicit approval, call again with the same arguments plus confirmation_token.",
     "inputSchema": {
@@ -2913,6 +2985,47 @@
     }
   },
   {
+    "name": "read_vm_console",
+    "description": "Read the current rendered VT100/xterm screen text and cursor position of an open VM serial console session. Optionally waits (without busy polling) until wait_for (substring) or wait_for_regex (RE2 regex) appears on the rendered screen, or until timeout_seconds elapses.",
+    "inputSchema": {
+      "properties": {
+        "session_id": {
+          "description": "Opaque session_id returned by open_vm_console",
+          "minLength": 1,
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "description": "Optional: Maximum seconds to wait when wait_for or wait_for_regex is set (0-60, default 10 when waiting, 0 otherwise)",
+          "maximum": 60,
+          "minimum": 0,
+          "type": "number"
+        },
+        "wait_for": {
+          "description": "Optional: Substring to wait for on the rendered screen (mutually exclusive with wait_for_regex)",
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "wait_for_regex": {
+          "description": "Optional: Go RE2 regular expression to wait for on the rendered screen (mutually exclusive with wait_for)",
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "refresh_directory_cache",
     "description": "Refresh cached user and group data from the directory service. Use after making changes in Active Directory, LDAP, or IPA that need to be reflected immediately in TrueNAS. Supports dry-run mode.",
     "inputSchema": {
@@ -3299,6 +3412,47 @@
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "send_vm_console_keys",
+    "description": "Send literal text and/or named keys to an open VM serial console session. Literal text is sent first as UTF-8 bytes, followed by any named keys (Enter, Tab, Shift+Tab, Backspace, Esc, Space, Up, Down, Left, Right, Home, End, Insert, Delete, PageUp, PageDown, F1-F12, Ctrl+\u003cA-Z|@|[|\\|]|^|_|?\u003e, Alt+\u003cchar|key\u003e). Payload is capped at 4096 bytes and 256 keys per call. Input is NEVER echoed in responses or written to server logs; set sensitive=true for passwords or passphrases to also omit byte and key counts from the response. Note: Ctrl+] detaches virsh console on TrueNAS; use close_vm_console to end a session cleanly.",
+    "inputSchema": {
+      "properties": {
+        "keys": {
+          "description": "Optional: Named keys to send after text (e.g. Enter, Tab, Shift+Tab, Backspace, Esc, Space, Up/Down/Left/Right, Home/End, Insert/Delete, PageUp/PageDown, F1-F12, Ctrl+C, Alt+F2)",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "sensitive": {
+          "default": false,
+          "description": "Optional: Mark input as sensitive (e.g. passwords); input is never echoed or logged regardless, and sensitive=true also omits byte and key counts from the response",
+          "type": "boolean"
+        },
+        "session_id": {
+          "description": "Opaque session_id returned by open_vm_console",
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "description": "Optional: Literal UTF-8 text to type into the serial console (never echoed or logged)",
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
       "openWorldHint": false
     }
   },

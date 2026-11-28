@@ -57,6 +57,10 @@ type Registry struct {
 	// localSources is where source_path may read (tools/upload_local.go),
 	// guarded by uploadMu; empty means local sources are off.
 	localSources localSources
+
+	// vmConsoles owns open VM serial console sessions and the allowlist
+	// (tools/vm_console_session.go).
+	vmConsoles *vmConsoleManager
 }
 
 type Tool struct {
@@ -82,10 +86,25 @@ func NewRegistry(client *truenas.Client, taskManager *tasks.Manager) *Registry {
 		oneTimeSecrets: newOneTimeSecrets(),
 		uploadCfg:      defaultUploadConfig(),
 		uploads:        map[string]bool{},
+		vmConsoles:     newVMConsoleManager(),
 	}
 	r.registerTools()
 	r.applySafety()
 	return r
+}
+
+// SetAllowedVMConsoles configures the explicit VM names or numeric IDs that
+// open_vm_console is permitted to attach to. When empty, all VMs are refused.
+func (r *Registry) SetAllowedVMConsoles(entries []string) {
+	r.vmConsoles.setAllowlist(entries)
+}
+
+// Close releases background resources held by the registry, including any
+// active VM serial console sessions.
+func (r *Registry) Close() {
+	if r != nil && r.vmConsoles != nil {
+		r.vmConsoles.Close()
+	}
 }
 
 func (r *Registry) registerTools() {
