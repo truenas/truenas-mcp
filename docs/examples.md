@@ -87,6 +87,9 @@ This document provides example natural language queries you can use with TrueNAS
 - "Swap the CDROM ISO on device 11 to /mnt/tank/isos/rescue.iso (preview first)"
 - "Delete the stopped lab01 VM while keeping its backing zvols (preview first)"
 - "Delete the stopped lab01 VM and permanently destroy its attached zvols (preview first)"
+- "Open a serial console to the running lab01 VM (requires `--allow-vm-console=lab01`), wait for the login prompt, and close the console when done"
+- "Read the current screen of the open VM serial console and wait up to 30 seconds for 'Select language' to appear"
+- "Send Down, Down, Enter on the open VM serial console to choose the third installer menu option"
 
 ## Performance
 

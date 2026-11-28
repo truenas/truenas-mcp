@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	runtimedebug "runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	// Embed IANA zoneinfo so time.LoadLocation works on Windows (and other
@@ -37,12 +39,14 @@ var (
 	requireHumanConfirm = flag.Bool("require-human-confirm", false, "Refuse destructive tools on clients that do not support MCP elicitation, instead of falling back to a confirmation token (env TRUENAS_MCP_REQUIRE_HUMAN_CONFIRM)")
 )
 
-// --allow-tools, --deny-tools and --upload-source-dirs are read through flag.Visit in main (a passed
-// flag wins over its environment variable), so they need no variable here.
+// --allow-tools, --deny-tools, --upload-source-dirs and --allow-vm-console are
+// read through flag.Visit in main (a passed flag wins over its environment
+// variable), so they need no variable here.
 func init() {
 	flag.String("allow-tools", "", "Comma-separated list of the only tools to expose (env TRUENAS_MCP_ALLOW_TOOLS)")
 	flag.String("deny-tools", "", "Comma-separated list of tools to hide and refuse (env TRUENAS_MCP_DENY_TOOLS)")
 	flag.String("upload-source-dirs", "", "Directories on this host that upload_file may read source_path files from, separated by "+string(os.PathListSeparator)+"; unset (the default) disables source_path (env TRUENAS_MCP_UPLOAD_SOURCE_DIRS)")
+	flag.String("allow-vm-console", "", "Comma-separated list of VM names or numeric IDs that open_vm_console may attach to; unset (the default) refuses all VMs (env TRUENAS_MCP_ALLOW_VM_CONSOLE)")
 }
 
 // Version is the release version reported by --version and in the MCP
@@ -143,6 +147,23 @@ func uploadSourceDirs(setFlags map[string]string, lookupEnv func(string) (string
 		}
 	}
 	return dirs
+}
+
+// allowedVMConsoles is the list of VM names or numeric IDs that
+// open_vm_console may attach to: --allow-vm-console, or else
+// TRUENAS_MCP_ALLOW_VM_CONSOLE, split on commas. Empty refuses all VMs.
+func allowedVMConsoles(setFlags map[string]string, lookupEnv func(string) (string, bool)) []string {
+	v, ok := setFlags["allow-vm-console"]
+	if !ok {
+		v, _ = lookupEnv("TRUENAS_MCP_ALLOW_VM_CONSOLE")
+	}
+	var allowed []string
+	for _, entry := range strings.Split(v, ",") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			allowed = append(allowed, entry)
+		}
+	}
+	return allowed
 }
 
 // protectedSourcePaths are this server's own secrets and configuration,
@@ -266,6 +287,7 @@ func main() {
 
 	// Create tool registry
 	registry := tools.NewRegistry(client, taskManager)
+	defer registry.Close()
 	setFlags := map[string]string{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = f.Value.String() })
 	policy, err := safetyPolicy(*readOnly, *requireHumanConfirm, setFlags, os.LookupEnv)
@@ -288,14 +310,22 @@ func main() {
 	if len(sourceDirs) > 0 {
 		log.Printf("upload_file may read local files below: %s", strings.Join(sourceDirs, ", "))
 	}
+	vmConsoles := allowedVMConsoles(setFlags, os.LookupEnv)
+	registry.SetAllowedVMConsoles(vmConsoles)
+	if len(vmConsoles) > 0 {
+		log.Printf("open_vm_console allowed for VM(s): %s", strings.Join(vmConsoles, ", "))
+	}
 	go func() {
 		if n := registry.SweepStaleUploadTemps(); n > 0 {
 			log.Printf("Removed %d stale upload_file temporary file(s) left by an earlier run", n)
 		}
 	}()
 
+	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
 	handler := NewStdioHandler(registry, *debug)
-	if err := handler.Run(context.Background()); err != nil {
+	if err := handler.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("Stdio handler error: %v", err)
 	}
 }

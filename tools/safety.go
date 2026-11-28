@@ -126,9 +126,17 @@ var toolSafety = map[string]Safety{
 	"update_vm_device": {Access: Destructive},
 	"delete_vm_device": {Access: Destructive},
 	"delete_vm":        {Access: Destructive},
-	"create_dataset":   {Access: Write},
-	"create_smb_share": {Access: Write},
-	"create_nfs_share": {Access: Write},
+	// Opening a VM serial console lets keystrokes execute arbitrary commands
+	// inside the guest, so opening is destructive and sending/closing are
+	// writes (all hidden and refused under --read-only). Reading the screen
+	// of an already-opened session is read-only.
+	"open_vm_console":      {Access: Destructive},
+	"read_vm_console":      {Access: Read},
+	"send_vm_console_keys": {Access: Write},
+	"close_vm_console":     {Access: Write},
+	"create_dataset":       {Access: Write},
+	"create_smb_share":     {Access: Write},
+	"create_nfs_share":     {Access: Write},
 	// Changing or deleting a share, or replacing its share ACL, can cut
 	// clients off or widen access in place, so these execute only after
 	// confirmation bound to the share's current settings.

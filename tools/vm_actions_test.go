@@ -30,6 +30,13 @@ func withVMActionResults(results map[string]interface{}) map[string]interface{} 
 		}
 	}
 	results["vm.virtualization_details"] = map[string]interface{}{"supported": true, "error": nil}
+	results["auth.me"] = map[string]interface{}{
+		"pw_name": "truenas_admin",
+		"privilege": map[string]interface{}{
+			"web_shell": true,
+			"roles":     []interface{}{"VM_WRITE", "FULL_ADMIN"},
+		},
+	}
 	results["vm.maximum_supported_vcpus"] = 255.0
 	results["vm.get_available_memory"] = 16 * gib
 	results["vm.device.disk_choices"] = map[string]interface{}{

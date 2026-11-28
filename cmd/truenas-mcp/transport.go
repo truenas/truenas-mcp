@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -107,7 +108,7 @@ func (c *lineConn) readLoop(lines *mcp.LineReader, maxLineBytes int) {
 // could not be written.
 func (c *lineConn) decode(line []byte) (jsonrpc.Message, error) {
 	if c.debug {
-		log.Printf("[STDIN] %s", truenas.RedactJSONForLog(line))
+		log.Printf("[STDIN] %s", redactStdinForLog(line))
 	}
 	if !json.Valid(line) {
 		var v interface{}
@@ -319,3 +320,80 @@ func (c *lineConn) Close() error {
 }
 
 func (c *lineConn) SessionID() string { return "" }
+
+// redactStdinForLog redacts standard secret fields and also masks console
+// keystroke payloads (text and keys) in send_vm_console_keys calls so terminal
+// input, which may contain passwords, never reaches debug logs. It handles a
+// single message, a batch array and several values on one line. A line that
+// cannot be parsed is masked whole when it names the tool or uses \u escapes
+// (which could spell the name).
+func redactStdinForLog(line []byte) []byte {
+	redacted := truenas.RedactJSONForLog(line)
+	dec := json.NewDecoder(bytes.NewReader(redacted))
+	dec.UseNumber()
+	var parts [][]byte
+	masked := false
+	for {
+		var v interface{}
+		err := dec.Decode(&v)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			if bytes.Contains(redacted, []byte("send_vm_console_keys")) || bytes.Contains(redacted, []byte(`\u`)) {
+				return []byte(redact.Marker + " (unparsable request line)")
+			}
+			return redacted
+		}
+		if maskConsoleKeysValue(v) {
+			masked = true
+		}
+		out, err := json.Marshal(v)
+		if err != nil {
+			return []byte(redact.Marker + " (unencodable request line)")
+		}
+		parts = append(parts, out)
+	}
+	if !masked {
+		return redacted
+	}
+	return bytes.Join(parts, []byte(" "))
+}
+
+// maskConsoleKeysValue masks the keystroke arguments of every
+// send_vm_console_keys call in v, which is one decoded JSON-RPC message or a
+// batch of them, and reports whether it masked anything.
+func maskConsoleKeysValue(v interface{}) bool {
+	switch msg := v.(type) {
+	case []interface{}:
+		masked := false
+		for _, item := range msg {
+			if maskConsoleKeysValue(item) {
+				masked = true
+			}
+		}
+		return masked
+	case map[string]interface{}:
+		params, _ := msg["params"].(map[string]interface{})
+		if name, _ := params["name"].(string); name != "send_vm_console_keys" {
+			return false
+		}
+		args, ok := params["arguments"].(map[string]interface{})
+		if !ok {
+			if params["arguments"] == nil {
+				return false
+			}
+			params["arguments"] = redact.Marker
+			return true
+		}
+		masked := false
+		for _, field := range []string{"text", "keys"} {
+			if _, ok := args[field]; ok {
+				args[field] = redact.Marker
+				masked = true
+			}
+		}
+		return masked
+	}
+	return false
+}

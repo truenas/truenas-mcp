@@ -15,6 +15,7 @@ import (
 	"os"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,6 +96,10 @@ type Client struct {
 	// a dying connection only fails its own requests.
 	pendingMu sync.Mutex
 	pending   map[string]*pendingCall
+	// lateSensitive holds the request IDs of token-minting calls whose
+	// caller stopped waiting, so a response that arrives later is still
+	// masked in debug logs. Guarded by pendingMu; at most maxLateSensitive.
+	lateSensitive []string
 
 	requestID atomic.Uint64
 
@@ -111,8 +116,16 @@ type Client struct {
 }
 
 type pendingCall struct {
-	conn *websocket.Conn
-	ch   chan *responseResult
+	conn            *websocket.Conn
+	ch              chan *responseResult
+	sensitiveResult bool
+}
+
+// maxLateSensitive bounds Client.lateSensitive.
+const maxLateSensitive = 64
+
+func isSensitiveResultMethod(method string) bool {
+	return method == "auth.generate_token" || method == "auth.generate_onetime_password"
 }
 
 const (
@@ -506,24 +519,35 @@ func (c *Client) readLoop(conn *websocket.Conn, done chan struct{}) {
 			continue
 		}
 
-		if debugLogging.Load() {
-			// Full bodies only in debug mode, and even then with known
-			// credential keys masked and any server echo of the API key
-			// scrubbed - responses can carry secrets (e.g. job arguments,
-			// app configs) that the server is not guaranteed to redact.
-			respJSON, _ := json.Marshal(resp)
-			log.Printf("Received response: %s", c.scrubSecrets(string(RedactJSONForLog(respJSON))))
-		} else {
-			log.Printf("Received response: id=%s result=%d bytes", key, len(resp.Result))
-		}
-
-		// Route response to the waiting caller
+		// Look up the waiting caller before debug logging so responses to
+		// token-minting methods (whose bare string result is not under a
+		// sensitive JSON key) are masked before they reach stderr.
 		c.pendingMu.Lock()
 		call, ok := c.pending[key]
 		if ok {
 			delete(c.pending, key)
 		}
+		sensitive := ok && call.sensitiveResult
+		if i := slices.Index(c.lateSensitive, key); i >= 0 {
+			c.lateSensitive = slices.Delete(c.lateSensitive, i, i+1)
+			sensitive = true
+		}
 		c.pendingMu.Unlock()
+
+		if debugLogging.Load() {
+			// Full bodies only in debug mode, and even then with known
+			// credential keys masked and any server echo of the API key
+			// scrubbed - responses can carry secrets (e.g. job arguments,
+			// app configs) that the server is not guaranteed to redact.
+			logResp := resp
+			if sensitive && len(logResp.Result) > 0 {
+				logResp.Result = json.RawMessage(`"` + redact.Marker + `"`)
+			}
+			respJSON, _ := json.Marshal(logResp)
+			log.Printf("Received response: %s", c.scrubSecrets(string(RedactJSONForLog(respJSON))))
+		} else {
+			log.Printf("Received response: id=%s result=%d bytes", key, len(resp.Result))
+		}
 
 		if ok {
 			call.ch <- &responseResult{resp: &resp}
@@ -531,6 +555,26 @@ func (c *Client) readLoop(conn *websocket.Conn, done chan struct{}) {
 			log.Printf("Warning: received response for unknown request ID %s (may have timed out)", key)
 		}
 	}
+}
+
+// abandonPending forgets the in-flight request key after its caller stopped
+// waiting. For a token-minting call it remembers key, so a late response is
+// still masked in debug logs.
+func (c *Client) abandonPending(key string) {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	call, ok := c.pending[key]
+	if !ok {
+		return
+	}
+	delete(c.pending, key)
+	if !call.sensitiveResult {
+		return
+	}
+	if len(c.lateSensitive) >= maxLateSensitive {
+		c.lateSensitive = slices.Delete(c.lateSensitive, 0, 1) // drop the oldest
+	}
+	c.lateSensitive = append(c.lateSensitive, key)
 }
 
 // dropConn forgets conn, closes it and fails the requests in flight on it
@@ -1056,7 +1100,7 @@ func (c *Client) roundTrip(ctx context.Context, conn *websocket.Conn, method str
 	// the response arrives before we add the channel to the pending map.
 	ch := make(chan *responseResult, 1)
 	c.pendingMu.Lock()
-	c.pending[key] = &pendingCall{conn: conn, ch: ch}
+	c.pending[key] = &pendingCall{conn: conn, ch: ch, sensitiveResult: isSensitiveResultMethod(method)}
 	c.pendingMu.Unlock()
 
 	if debugLogging.Load() {
@@ -1102,15 +1146,10 @@ func (c *Client) roundTrip(ctx context.Context, conn *websocket.Conn, method str
 		}
 		return result.resp, nil
 	case <-ctx.Done():
-		c.pendingMu.Lock()
-		delete(c.pending, key)
-		c.pendingMu.Unlock()
+		c.abandonPending(key)
 		return nil, fmt.Errorf("request cancelled (method: %s): %w", method, ctx.Err())
 	case <-timer.C:
-		// Timeout - clean up pending entry
-		c.pendingMu.Lock()
-		delete(c.pending, key)
-		c.pendingMu.Unlock()
+		c.abandonPending(key)
 		return nil, fmt.Errorf("request timed out after %s (method: %s)", timeout, method)
 	}
 }

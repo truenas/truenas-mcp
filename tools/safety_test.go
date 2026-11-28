@@ -257,6 +257,7 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 		"create_vm":   Destructive, "start_vm": Destructive, "stop_vm": Destructive,
 		"poweroff_vm": Destructive, "restart_vm": Destructive, "reset_vm": Destructive,
 		"update_vm_device": Destructive, "delete_vm_device": Destructive, "delete_vm": Destructive,
+		"open_vm_console": Destructive, "send_vm_console_keys": Write, "close_vm_console": Write,
 	}
 	for name, s := range toolSafety {
 		if got, exp := s.Access, want[name]; exp != 0 && got != exp || exp == 0 && got != Read {
@@ -269,8 +270,8 @@ func TestWriteToolsMatchExpectedList(t *testing.T) {
 			destructive++
 		}
 	}
-	if destructive != 43 {
-		t.Errorf("%d destructive tools, want 43; update docs/safety.md and docs/full-features.md too", destructive)
+	if destructive != 44 {
+		t.Errorf("%d destructive tools, want 44; update docs/safety.md and docs/full-features.md too", destructive)
 	}
 	for name, s := range toolSafety {
 		if s.Overwrites {
@@ -577,6 +578,7 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 			"credential":    map[string]interface{}{"credential_type": "KERBEROS_USER", "username": "admin", "password": "pw"},
 			"configuration": map[string]interface{}{"domain": "example.com", "hostname": "nas"},
 		},
+		"open_vm_console": {"id": 1.0},
 	}
 	modes := []struct {
 		name     string
@@ -611,7 +613,7 @@ func TestDestructiveDryRunsAgainstFakeTrueNAS(t *testing.T) {
 		}},
 	}
 	allowed := func(method string) bool {
-		for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".get_state", ".details", ".get_jobs"} {
+		for _, suffix := range []string{".query", ".info", ".status", ".config", ".list", ".login_ex", ".get_instance", "upgrade_summary", ".pool_choices", ".available", ".get_app_details", ".get_state", ".details", ".get_jobs", ".me"} {
 			if strings.HasSuffix(method, suffix) {
 				return true
 			}

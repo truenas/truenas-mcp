@@ -521,6 +521,7 @@ func TestRegisteredPlansParamNamesMatchCallParams(t *testing.T) {
 	t.Cleanup(mgr.Shutdown)
 	r := NewRegistry(client, mgr)
 	allowUploadTestSource(t, r)
+	r.SetAllowedVMConsoles([]string{"2"})
 
 	checked := 0
 	for name, tool := range r.tools {

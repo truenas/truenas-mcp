@@ -105,6 +105,7 @@ func issue156Registry(t *testing.T, appConfig map[string]interface{}, catalog ma
 	t.Cleanup(mgr.Shutdown)
 	r := NewRegistry(client, mgr)
 	allowUploadTestSource(t, r)
+	r.SetAllowedVMConsoles([]string{"2"})
 	return r, fake
 }
 
