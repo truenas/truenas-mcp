@@ -64,9 +64,6 @@ var masterSuffixRe = regexp.MustCompile(`(?i)^(?:\.\d+)*-master(?:$|[^a-z0-9])`)
 // IsMaster reports whether v is a development MASTER build (its version
 // string carries a -MASTER suffix, matched case-insensitively).
 func (v Version) IsMaster() bool {
-	if v.Raw == "" {
-		return false
-	}
 	loc := versionNumberRe.FindStringIndex(v.Raw)
 	if loc == nil {
 		return false

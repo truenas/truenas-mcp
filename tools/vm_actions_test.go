@@ -1716,6 +1716,18 @@ func TestCreateVMMiddlewareDeviceChecksUpFront(t *testing.T) {
 			devices: []interface{}{map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "physical_sectorsize": 4096.0}}},
 		{name: "valid sector sizes pass", version: "25.10.0",
 			devices: []interface{}{map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "logical_sectorsize": 512.0, "physical_sectorsize": 4096.0}}},
+		// An unknown version gets the stricter pre-27.0 rules.
+		{name: "unknown version missing display password", version: "",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISPLAY", "type": "SPICE"}},
+			wantSub: "requires a display password"},
+		{name: "unknown version physical without logical", version: "",
+			devices: []interface{}{map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "physical_sectorsize": 4096.0}},
+			wantSub: "physical_sectorsize requires logical_sectorsize"},
+		{name: "unknown version VNC web", version: "",
+			devices: []interface{}{disp(map[string]interface{}{"type": "VNC", "web": true})},
+			wantSub: "VNC does not support web=true"},
+		{name: "unknown version valid devices pass", version: "",
+			devices: []interface{}{disp(nil), map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "logical_sectorsize": 512.0, "physical_sectorsize": 4096.0}}},
 		{name: "disk serial refused", version: "25.10.0",
 			devices: []interface{}{map[string]interface{}{"dtype": "DISK", "path": "/dev/zvol/tank/vms/free0", "serial": "ABC123"}},
 			wantSub: "serial"},
@@ -2198,5 +2210,51 @@ func TestVMToolsHiddenAndRefusedUnderReadOnly(t *testing.T) {
 	assertNoWriteCalls(t, fake)
 	if len(fake.called("vm.query")) != 0 {
 		t.Errorf("read-only refusal should occur before any vm.query call")
+	}
+}
+
+// TestResetVMMethodNotFoundIsFriendly checks that a MASTER build that does
+// not serve vm.reset gets the same "needs a newer TrueNAS" message as
+// get_vm_guest_ips, while other vm.reset errors are passed through.
+func TestResetVMMethodNotFoundIsFriendly(t *testing.T) {
+	const want = "reset_vm requires TrueNAS 28.0 or later; vm.reset is not available on this TrueNAS release, so nothing was executed"
+	for _, tc := range []struct {
+		name   string
+		rpcErr map[string]interface{}
+		want   string // exact error; "" means wantSub applies
+		sub    string
+	}{
+		{"jsonrpc -32601", map[string]interface{}{"code": -32601, "message": "Method not found"}, want, ""},
+		{"-32601 code only", map[string]interface{}{"code": -32601, "message": "no such call"}, want, ""},
+		{"method does not exist", map[string]interface{}{"code": -32001, "message": "Method does not exist"}, want, ""},
+		{"other error", map[string]interface{}{"code": -32001, "message": "libvirt connection lost"}, "", `failed to reset VM "existing_running": `},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVMFakeEnv("27.1.0-MASTER")
+			r, fake, _ := env.buildRegistry(t, false)
+			next := fake.handle
+			fake.handle = func(method string, params json.RawMessage) (interface{}, map[string]interface{}, bool) {
+				if method == "vm.reset" {
+					return nil, tc.rpcErr, true
+				}
+				return next(method, params)
+			}
+			preview, err := r.CallTool(t.Context(), "reset_vm", map[string]interface{}{"id": 2.0})
+			if err != nil {
+				t.Fatalf("preview: %v", err)
+			}
+			_, err = r.CallTool(t.Context(), "reset_vm", map[string]interface{}{"id": 2.0, "confirmation_token": confirmTokenFromPreview(t, preview)})
+			switch {
+			case err == nil:
+				t.Fatal("expected an error")
+			case tc.want != "" && err.Error() != tc.want:
+				t.Errorf("err = %v\nwant %s", err, tc.want)
+			case tc.want == "" && (!strings.Contains(err.Error(), tc.sub) || !strings.Contains(err.Error(), "libvirt connection lost")):
+				t.Errorf("err = %v, want the wrapped middleware error", err)
+			}
+			if n := len(fake.called("vm.reset")); n != 1 {
+				t.Errorf("vm.reset calls = %d, want 1", n)
+			}
+		})
 	}
 }

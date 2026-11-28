@@ -901,3 +901,14 @@ func TestBelowBoundary(t *testing.T) {
 		}
 	}
 }
+
+// An unknown TrueNAS version is not taken to be 25.10: the preview says
+// the version could not be read instead of proceeding silently.
+func TestSetFilesystemACLWarnsOnUnknownVersion(t *testing.T) {
+	f := newFSACLFake()
+	r, fake := f.registry(t) // the version is never loaded
+	dry := dryRunOf(t, r, "set_filesystem_acl", docsACLArgs())
+	assertContainsAll(t, "warnings", previewText(t, dry["warnings"]),
+		"only checked against TrueNAS 25.10", "runs a version that could not be read", "get_filesystem_acl")
+	assertNoSetACL(t, fake)
+}

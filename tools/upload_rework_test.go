@@ -353,6 +353,14 @@ func TestUploadFileLocalSourceRefusals(t *testing.T) {
 	if err := os.Symlink(outsideFile, linkOut); err != nil {
 		t.Fatal(err)
 	}
+	// A directory whose name only starts with the allowed one is not
+	// below it.
+	sibling := writeSource(t, home, "isos2/installer.iso", body)
+	// A hard link to this server's key file has its own innocent path.
+	hardKey := filepath.Join(isos, "notes.iso")
+	if err := os.Link(keyFile, hardKey); err != nil {
+		t.Fatal(err)
+	}
 	// The allowed directory is home/isos; home itself (with .ssh) is not.
 	// An operator who lists the whole home directory still gets the
 	// hidden-path refusal, checked below with a second registry.
@@ -367,6 +375,8 @@ func TestUploadFileLocalSourceRefusals(t *testing.T) {
 		{filepath.Join(outside, "missing.iso"), "not below an allowed upload source directory"},
 		{linkOut, "not below an allowed upload source directory"},
 		{linkToKey, "not below an allowed upload source directory"},
+		{sibling, "not below an allowed upload source directory"},
+		{hardKey, "this server's own key, certificate or configuration file (another link to it)"},
 		{awsCreds, `hidden file or directory ".aws"`},
 		{dotFile, `hidden file or directory ".hidden.iso"`},
 		{configISO, `hidden file or directory ".config"`},
@@ -623,5 +633,49 @@ func TestUploadFileOverwriteCountsReplacedFile(t *testing.T) {
 	args := mergeArgs(urlUploadArgs(body), map[string]interface{}{"overwrite": true, "dry_run": true})
 	if _, err := r.CallTool(t.Context(), "upload_file", args); err != nil {
 		t.Errorf("overwrite of a larger file refused for space: %v", err)
+	}
+}
+
+// TestUploadFileLocalSourceChangedDuringUpload checks the SHA-256 of the
+// bytes actually sent: a local file rewritten in place after every check
+// before the upload (same inode, so the open descriptor reads the new
+// bytes) fails the transfer and says not to use the target.
+func TestUploadFileLocalSourceChangedDuringUpload(t *testing.T) {
+	body := testISO()
+	local := writeSource(t, t.TempDir(), "local.iso", body)
+	u := newUploadFake()
+	r, _, _ := u.registry(t, false)
+	args := map[string]interface{}{"path": uploadTestTarget, "source_path": local, "sha256": sha256Hex(body)}
+	plan, err := r.planUpload(t.Context(), r.client, args, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := append([]byte(nil), body...)
+	changed[len(changed)-1] ^= 0xff
+	rewritten := false
+	_, err = r.runUpload(t.Context(), r.client, args, plan, func(msg string) {
+		// The first upload progress message comes after the re-check and
+		// before any byte is read for the upload.
+		if !rewritten && strings.HasPrefix(msg, "Uploading to ") {
+			rewritten = true
+			f, err := os.OpenFile(local, os.O_WRONLY, 0)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer f.Close()
+			if _, err := f.WriteAt(changed, 0); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	if !rewritten {
+		t.Fatal("the upload never started")
+	}
+	if err == nil || !strings.Contains(err.Error(), "the source changed during the upload. Do not use "+uploadTestTarget) {
+		t.Errorf("err = %v, want the in-upload SHA-256 mismatch", err)
+	}
+	if n := len(u.uploads()); n != 1 {
+		t.Errorf("uploads = %d, want 1 (the mismatch is found after sending)", n)
 	}
 }

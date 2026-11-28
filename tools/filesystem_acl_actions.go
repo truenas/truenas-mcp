@@ -470,15 +470,18 @@ func currentACLTexts(acltype string, aces []interface{}) []map[string]interface{
 	return []map[string]interface{}{}
 }
 
-// uncheckedVersion returns the connected TrueNAS version when it is known
-// and not 25.10.x, the release the write tools' request shapes were
-// checked against.
+// uncheckedVersion describes the connected TrueNAS version when it is not
+// 25.10.x, the release the write tools' request shapes were checked
+// against: its version string, or that it could not be read.
 func uncheckedVersion(ctx context.Context, client *truenas.Client) (string, bool) {
 	if client == nil {
 		return "", false
 	}
 	v, err, ok := client.SessionVersion(ctx)
-	if !ok || err != nil || v.IsZero() || (v.Major == 25 && v.Minor == 10) {
+	if !ok || err != nil || v.IsZero() {
+		return "a version that could not be read", true
+	}
+	if v.Major == 25 && v.Minor == 10 {
 		return "", false
 	}
 	return v.String(), true

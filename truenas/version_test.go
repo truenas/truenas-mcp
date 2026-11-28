@@ -97,6 +97,9 @@ func TestVersionIsMaster(t *testing.T) {
 		{"27.1.0-MASTER2", 27, 1, 0, false},
 		{"27.1.0-NOTMASTER", 27, 1, 0, false},
 		{"TrueNAS-MASTER-27.1.0", 27, 1, 0, false},
+		// -MASTER must follow the version number directly.
+		{"27.1.0-RC.1-MASTER", 27, 1, 0, false},
+		{"27.1.0-BETA.1-MASTER-20260401-120000", 27, 1, 0, false},
 	}
 	for _, tt := range tests {
 		v, err := ParseVersion(tt.in)

@@ -1312,6 +1312,9 @@ func TestRestrictedAddr(t *testing.T) {
 		"192.0.0.8": true, "64:ff9b::a00:1": true, "64:ff9b:1::a00:1": true, "2002:a00:1::1": true,
 		"2001:0:a00:1::1": true, "::a00:1": true, "100::1": true, "ff02::1": true, "::": true,
 		"203.0.113.9": false, "2606:4700::1": false,
+		// IPv4-mapped forms of the reserved IPv4 ranges.
+		"::ffff:100.64.0.1": true, "::ffff:198.18.0.1": true, "::ffff:0.1.2.3": true,
+		"::ffff:240.0.0.1": true, "::ffff:192.0.0.8": true, "::ffff:192.0.2.10": false,
 	} {
 		if got := restrictedAddr(netip.MustParseAddr(addr)); got != want {
 			t.Errorf("restrictedAddr(%s) = %v, want %v", addr, got, want)
